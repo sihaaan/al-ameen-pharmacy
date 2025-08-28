@@ -1,7 +1,7 @@
 // frontend/src/components/Cart.js
 import React from "react";
 import { useCart } from "../context/CartContext";
-import "../styles/Cart.css"; // Assuming you have a CSS file for styling
+import "../styles/Cart.css";
 
 const Cart = ({ onClose }) => {
   const {
