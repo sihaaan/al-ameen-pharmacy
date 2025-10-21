@@ -6,18 +6,55 @@ npm-debug.log*
 /frontend/build
 /backend/dist
 
-# Environment variables
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment variables (SENSITIVE!)
 .env
 .env.local
+.env.production
+*.env
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Database
+*.sqlite3
+db.sqlite3
 
 # OS generated files
 .DS_Store
 Thumbs.db
+*.swp
+*~
 
 # IDE files
 .vscode/
 .idea/
+*.sublime-project
+*.sublime-workspace
 
 # Logs
 *.log
+logs/
 /generated/prisma
+
+# Django stuff
+*.pot
+local_settings.py
+staticfiles/
+media/
+
+# Test coverage
+htmlcov/
+.coverage
+.pytest_cache/

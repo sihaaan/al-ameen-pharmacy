@@ -1,0 +1,66 @@
+# ============================================
+# PHARMACY E-COMMERCE - BACKEND REQUIREMENTS
+# ============================================
+# Install: pip install -r requirements.txt
+# ============================================
+
+# Django - Web framework
+Django==5.2.6
+
+# Django REST Framework - Build REST APIs
+djangorestframework==3.16.1
+
+# JWT Authentication - Token-based auth for login
+djangorestframework-simplejwt==5.5.1
+PyJWT==2.10.1
+
+# CORS Headers - Allow React frontend to call API
+django-cors-headers==4.9.0
+
+# PostgreSQL Database Driver
+psycopg==3.2.10
+psycopg-binary==3.2.10
+
+# Database URL Parser - Read DATABASE_URL from .env
+dj-database-url==3.0.1
+
+# Environment Variables - Load .env file
+python-dotenv==1.1.1
+
+# ASGI Server - For async support
+asgiref==3.9.1
+
+# SQL Parsing - Query analysis
+sqlparse==0.5.3
+
+# Timezone Data - For Asia/Dubai timezone
+tzdata==2025.2
+
+# ============================================
+# PRODUCTION ADDITIONS (uncomment when deploying)
+# ============================================
+
+# Web Server
+# gunicorn==23.0.0
+
+# Static File Hosting
+# whitenoise==6.8.2
+
+# Image Processing (for product images)
+Pillow==11.3.0
+
+# Email Backend
+# django-anymail==13.0.2
+
+# Celery - Background Tasks (order processing)
+# celery==5.4.0
+# redis==5.2.1
+
+# Monitoring & Error Tracking
+# sentry-sdk==2.19.2
+
+# API Documentation
+# drf-spectacular==0.28.0
+
+# Django Debug Toolbar (development only)
+# django-debug-toolbar==4.4.6

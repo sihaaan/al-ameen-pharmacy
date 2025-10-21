@@ -1,8 +1,8 @@
 // frontend/src/api.js
 import axios from "axios";
 
-// Base URL for your backend API
-const API_URL = "http://localhost:5000/api";
+// Base URL for your Django backend API
+const API_URL = "http://localhost:8000/api";
 
 // Create axios instance with default settings
 const api = axios.create({
@@ -12,9 +12,10 @@ const api = axios.create({
 
 // Products API functions
 export const productsAPI = {
-  // GET all products from your backend
-  getAll: () => api.get("/products"),
-  // Later we'll add: create, update, delete
+  // GET all products from Django backend
+  getAll: () => api.get("/products/"),
+  // GET single product
+  getOne: (id) => api.get(`/products/${id}/`),
 };
 
 export default api;
