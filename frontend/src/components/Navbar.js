@@ -1,31 +1,64 @@
 // frontend/src/components/Navbar.js
 import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useCart } from "../context/CartContext";
+import { useAuth } from "../context/AuthContext";
 import Cart from "./Cart";
 import "../styles/Navbar.css";
 
 const Navbar = () => {
   const { totalItems, totalPrice } = useCart();
+  const { user, logout } = useAuth();
   const [showCart, setShowCart] = useState(false);
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/');
+  };
 
   return (
     <>
       <nav className="navbar">
         <div className="nav-brand">
-          <h2>Al Ameen Pharmacy</h2>
+          <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <h2>🏥 Al Ameen Pharmacy</h2>
+          </Link>
         </div>
 
         <div className="nav-links">
-          <span className="nav-link">Home</span>
-          <span className="nav-link">Products</span>
-          <span className="nav-link">About</span>
+          <Link to="/" className="nav-link">Home</Link>
 
-          <button
-            className="cart-button"
-            onClick={() => setShowCart(!showCart)}
-          >
-            🛒 Cart ({totalItems}) - AED {totalPrice.toFixed(2)}
-          </button>
+          {user ? (
+            <>
+              <span className="nav-link nav-username">
+                Hello, {user.username}!
+              </span>
+
+              <button
+                className="cart-button"
+                onClick={() => setShowCart(!showCart)}
+              >
+                🛒 Cart ({totalItems}) - AED {totalPrice.toFixed(2)}
+              </button>
+
+              <button
+                className="logout-button"
+                onClick={handleLogout}
+              >
+                Logout
+              </button>
+            </>
+          ) : (
+            <>
+              <Link to="/login" className="nav-link login-link">
+                Login
+              </Link>
+              <Link to="/register" className="nav-link register-link">
+                Register
+              </Link>
+            </>
+          )}
         </div>
       </nav>
 
