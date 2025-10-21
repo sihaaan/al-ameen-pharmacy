@@ -1,5 +1,7 @@
 // frontend/src/context/CartContext.js
-import React, { createContext, useContext, useReducer } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import axios from "axios";
+import { useAuth } from "./AuthContext";
 
 // Create the context
 const CartContext = createContext();
@@ -13,131 +15,172 @@ export const useCart = () => {
   return context;
 };
 
-// Action types for cart operations
-const CART_ACTIONS = {
-  ADD_ITEM: "ADD_ITEM",
-  REMOVE_ITEM: "REMOVE_ITEM",
-  UPDATE_QUANTITY: "UPDATE_QUANTITY",
-  CLEAR_CART: "CLEAR_CART",
-};
-
-// Reducer function - handles all cart state changes
-const cartReducer = (state, action) => {
-  switch (action.type) {
-    case CART_ACTIONS.ADD_ITEM: {
-      const { product, quantity = 1 } = action.payload;
-
-      // Check if item already exists in cart
-      const existingItem = state.items.find((item) => item.id === product.id);
-
-      if (existingItem) {
-        // Update quantity if item exists
-        return {
-          ...state,
-          items: state.items.map((item) =>
-            item.id === product.id
-              ? { ...item, quantity: item.quantity + quantity }
-              : item
-          ),
-        };
-      } else {
-        // Add new item to cart
-        return {
-          ...state,
-          items: [...state.items, { ...product, quantity }],
-        };
-      }
-    }
-
-    case CART_ACTIONS.REMOVE_ITEM: {
-      return {
-        ...state,
-        items: state.items.filter((item) => item.id !== action.payload.id),
-      };
-    }
-
-    case CART_ACTIONS.UPDATE_QUANTITY: {
-      const { id, quantity } = action.payload;
-
-      if (quantity <= 0) {
-        // Remove item if quantity is 0 or less
-        return {
-          ...state,
-          items: state.items.filter((item) => item.id !== id),
-        };
-      }
-
-      return {
-        ...state,
-        items: state.items.map((item) =>
-          item.id === id ? { ...item, quantity } : item
-        ),
-      };
-    }
-
-    case CART_ACTIONS.CLEAR_CART: {
-      return {
-        ...state,
-        items: [],
-      };
-    }
-
-    default:
-      return state;
-  }
-};
-
-// Initial cart state
-const initialState = {
-  items: [],
-  isOpen: false,
-};
-
 // Cart Provider Component
 export const CartProvider = ({ children }) => {
-  const [state, dispatch] = useReducer(cartReducer, initialState);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const { user } = useAuth();
 
-  // Helper functions for easier usage
-  const addToCart = (product, quantity = 1) => {
-    dispatch({
-      type: CART_ACTIONS.ADD_ITEM,
-      payload: { product, quantity },
-    });
+  // Fetch cart from backend when user logs in
+  const fetchCart = useCallback(async () => {
+    if (!user) {
+      setItems([]);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await axios.get('http://localhost:8000/api/cart/');
+      // The backend returns cart with items array
+      setItems(response.data.items || []);
+    } catch (err) {
+      console.error('Error fetching cart:', err);
+      setError('Failed to load cart');
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [user]);
+
+  // Load cart when user logs in
+  useEffect(() => {
+    fetchCart();
+  }, [fetchCart]);
+
+  // Add item to cart (calls Django API)
+  const addToCart = async (product, quantity = 1) => {
+    if (!user) {
+      setError('Please login to add items to cart');
+      return { success: false, error: 'Please login to add items to cart' };
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await axios.post('http://localhost:8000/api/cart/add_item/', {
+        product_id: product.id,
+        quantity: quantity
+      });
+
+      // Refresh cart after adding
+      await fetchCart();
+
+      return { success: true, data: response.data };
+    } catch (err) {
+      console.error('Error adding to cart:', err);
+      const errorMessage = err.response?.data?.error || 'Failed to add item to cart';
+      setError(errorMessage);
+      return { success: false, error: errorMessage };
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const removeFromCart = (productId) => {
-    dispatch({
-      type: CART_ACTIONS.REMOVE_ITEM,
-      payload: { id: productId },
-    });
+  // Remove item from cart (calls Django API)
+  const removeFromCart = async (cartItemId) => {
+    if (!user) {
+      setError('Please login first');
+      return { success: false, error: 'Please login first' };
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      await axios.delete('http://localhost:8000/api/cart/remove_item/', {
+        data: { cart_item_id: cartItemId }
+      });
+
+      // Refresh cart after removing
+      await fetchCart();
+
+      return { success: true };
+    } catch (err) {
+      console.error('Error removing from cart:', err);
+      const errorMessage = err.response?.data?.error || 'Failed to remove item';
+      setError(errorMessage);
+      return { success: false, error: errorMessage };
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const updateQuantity = (productId, quantity) => {
-    dispatch({
-      type: CART_ACTIONS.UPDATE_QUANTITY,
-      payload: { id: productId, quantity },
-    });
+  // Update quantity (calls Django API)
+  const updateQuantity = async (cartItemId, quantity) => {
+    if (!user) {
+      setError('Please login first');
+      return { success: false, error: 'Please login first' };
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      if (quantity <= 0) {
+        // If quantity is 0 or less, remove the item
+        return await removeFromCart(cartItemId);
+      }
+
+      await axios.patch('http://localhost:8000/api/cart/update_item/', {
+        cart_item_id: cartItemId,
+        quantity: quantity
+      });
+
+      // Refresh cart after updating
+      await fetchCart();
+
+      return { success: true };
+    } catch (err) {
+      console.error('Error updating quantity:', err);
+      const errorMessage = err.response?.data?.error || 'Failed to update quantity';
+      setError(errorMessage);
+      return { success: false, error: errorMessage };
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const clearCart = () => {
-    dispatch({ type: CART_ACTIONS.CLEAR_CART });
+  // Clear cart (calls Django API)
+  const clearCart = async () => {
+    if (!user) {
+      setItems([]);
+      return { success: true };
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      await axios.delete('http://localhost:8000/api/cart/clear/');
+      setItems([]);
+      return { success: true };
+    } catch (err) {
+      console.error('Error clearing cart:', err);
+      const errorMessage = err.response?.data?.error || 'Failed to clear cart';
+      setError(errorMessage);
+      return { success: false, error: errorMessage };
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // Calculate totals
-  const totalItems = state.items.reduce((sum, item) => sum + item.quantity, 0);
-  const totalPrice = state.items.reduce(
-    (sum, item) => sum + item.price * item.quantity,
+  // Calculate totals from items
+  const totalItems = items.reduce((sum, item) => sum + item.quantity, 0);
+  const totalPrice = items.reduce(
+    (sum, item) => sum + parseFloat(item.product.price) * item.quantity,
     0
   );
 
   const value = {
-    items: state.items,
+    items,
     totalItems,
     totalPrice,
+    loading,
+    error,
     addToCart,
     removeFromCart,
     updateQuantity,
     clearCart,
+    fetchCart,
   };
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;

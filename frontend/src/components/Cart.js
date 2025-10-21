@@ -13,13 +13,17 @@ const Cart = ({ onClose }) => {
     clearCart,
   } = useCart();
 
-  const handleQuantityChange = (productId, newQuantity) => {
+  const handleQuantityChange = async (cartItemId, newQuantity) => {
     if (newQuantity < 0) return;
-    updateQuantity(productId, newQuantity);
+    await updateQuantity(cartItemId, newQuantity);
   };
 
-  const handleRemoveItem = (productId) => {
-    removeFromCart(productId);
+  const handleRemoveItem = async (cartItemId) => {
+    await removeFromCart(cartItemId);
+  };
+
+  const handleClearCart = async () => {
+    await clearCart();
   };
 
   return (
@@ -41,8 +45,8 @@ const Cart = ({ onClose }) => {
                 {items.map((item) => (
                   <div key={item.id} className="cart-item">
                     <div className="item-info">
-                      <h4>{item.name}</h4>
-                      <p className="item-price">AED {item.price} each</p>
+                      <h4>{item.product.name}</h4>
+                      <p className="item-price">AED {item.product.price} each</p>
                     </div>
 
                     <div className="quantity-controls">
@@ -66,7 +70,7 @@ const Cart = ({ onClose }) => {
                     </div>
 
                     <div className="item-total">
-                      <p>AED {(item.price * item.quantity).toFixed(2)}</p>
+                      <p>AED {(item.product.price * item.quantity).toFixed(2)}</p>
                       <button
                         onClick={() => handleRemoveItem(item.id)}
                         className="remove-btn"
@@ -83,7 +87,7 @@ const Cart = ({ onClose }) => {
                   <h3>Total: AED {totalPrice.toFixed(2)}</h3>
                 </div>
                 <div className="cart-actions">
-                  <button onClick={clearCart} className="clear-cart-btn">
+                  <button onClick={handleClearCart} className="clear-cart-btn">
                     Clear Cart
                   </button>
                   <button className="checkout-btn">Proceed to Checkout</button>
