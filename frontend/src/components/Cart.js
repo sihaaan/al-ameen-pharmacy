@@ -50,14 +50,16 @@ const Cart = ({ onClose }) => {
                     </div>
 
                     <div className="quantity-controls">
-                      <button
-                        onClick={() =>
-                          handleQuantityChange(item.id, item.quantity - 1)
-                        }
-                        className="qty-btn"
-                      >
-                        -
-                      </button>
+                      {item.quantity > 1 && (
+                        <button
+                          onClick={() =>
+                            handleQuantityChange(item.id, item.quantity - 1)
+                          }
+                          className="qty-btn"
+                        >
+                          -
+                        </button>
+                      )}
                       <span className="quantity">{item.quantity}</span>
                       <button
                         onClick={() =>
