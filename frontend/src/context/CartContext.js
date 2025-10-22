@@ -56,25 +56,57 @@ export const CartProvider = ({ children }) => {
       return { success: false, error: 'Please login to add items to cart' };
     }
 
-    setLoading(true);
+    // Optimistic update - immediately update UI
+    const existingItemIndex = items.findIndex(
+      item => item.product.id === product.id
+    );
+
+    let optimisticItems;
+    if (existingItemIndex >= 0) {
+      // Item already exists, increase quantity
+      optimisticItems = [...items];
+      optimisticItems[existingItemIndex] = {
+        ...optimisticItems[existingItemIndex],
+        quantity: optimisticItems[existingItemIndex].quantity + quantity
+      };
+    } else {
+      // New item, add to cart
+      optimisticItems = [
+        ...items,
+        {
+          id: Date.now(), // temporary ID
+          product: product,
+          quantity: quantity
+        }
+      ];
+    }
+
+    // Update UI immediately
+    setItems(optimisticItems);
+
+    // Then make API call in background
     setError(null);
     try {
-      const response = await axiosInstance.post('/cart/add_item/', {
+      await axiosInstance.post('/cart/add_item/', {
         product_id: product.id,
         quantity: quantity
       });
 
-      // Refresh cart after adding
-      await fetchCart();
+      // Sync with backend to get correct cart state (including IDs)
+      // Do this without showing loading state
+      const response = await axiosInstance.get('/cart/');
+      setItems(response.data.items || []);
 
-      return { success: true, data: response.data };
+      return { success: true };
     } catch (err) {
       console.error('Error adding to cart:', err);
       const errorMessage = err.response?.data?.error || 'Failed to add item to cart';
       setError(errorMessage);
+
+      // Revert optimistic update on error
+      setItems(items);
+
       return { success: false, error: errorMessage };
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -85,24 +117,27 @@ export const CartProvider = ({ children }) => {
       return { success: false, error: 'Please login first' };
     }
 
-    setLoading(true);
+    // Optimistic update - immediately remove from UI
+    const previousItems = items;
+    const optimisticItems = items.filter(item => item.id !== cartItemId);
+    setItems(optimisticItems);
+
     setError(null);
     try {
       await axiosInstance.delete('/cart/remove_item/', {
         data: { cart_item_id: cartItemId }
       });
 
-      // Refresh cart after removing
-      await fetchCart();
-
       return { success: true };
     } catch (err) {
       console.error('Error removing from cart:', err);
       const errorMessage = err.response?.data?.error || 'Failed to remove item';
       setError(errorMessage);
+
+      // Revert optimistic update on error
+      setItems(previousItems);
+
       return { success: false, error: errorMessage };
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -113,30 +148,35 @@ export const CartProvider = ({ children }) => {
       return { success: false, error: 'Please login first' };
     }
 
-    setLoading(true);
+    if (quantity <= 0) {
+      // If quantity is 0 or less, remove the item
+      return await removeFromCart(cartItemId);
+    }
+
+    // Optimistic update - immediately update UI
+    const previousItems = items;
+    const optimisticItems = items.map(item =>
+      item.id === cartItemId ? { ...item, quantity } : item
+    );
+    setItems(optimisticItems);
+
     setError(null);
     try {
-      if (quantity <= 0) {
-        // If quantity is 0 or less, remove the item
-        return await removeFromCart(cartItemId);
-      }
-
       await axiosInstance.patch('/cart/update_item/', {
         cart_item_id: cartItemId,
         quantity: quantity
       });
-
-      // Refresh cart after updating
-      await fetchCart();
 
       return { success: true };
     } catch (err) {
       console.error('Error updating quantity:', err);
       const errorMessage = err.response?.data?.error || 'Failed to update quantity';
       setError(errorMessage);
+
+      // Revert optimistic update on error
+      setItems(previousItems);
+
       return { success: false, error: errorMessage };
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -147,19 +187,23 @@ export const CartProvider = ({ children }) => {
       return { success: true };
     }
 
-    setLoading(true);
+    // Optimistic update - immediately clear UI
+    const previousItems = items;
+    setItems([]);
+
     setError(null);
     try {
       await axiosInstance.delete('/cart/clear/');
-      setItems([]);
       return { success: true };
     } catch (err) {
       console.error('Error clearing cart:', err);
       const errorMessage = err.response?.data?.error || 'Failed to clear cart';
       setError(errorMessage);
+
+      // Revert optimistic update on error
+      setItems(previousItems);
+
       return { success: false, error: errorMessage };
-    } finally {
-      setLoading(false);
     }
   };
 
