@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html
 from .models import Category, Product, Cart, CartItem, Address, Order, OrderItem
 
 
@@ -53,12 +54,11 @@ class ProductAdmin(admin.ModelAdmin):
     # Custom method to display image preview in list view
     def image_preview(self, obj):
         if obj.image:
-            return f'<img src="{obj.image.url}" width="50" height="50" style="object-fit: cover; border-radius: 4px;" />'
+            return format_html('<img src="{}" width="50" height="50" style="object-fit: cover; border-radius: 4px;" />', obj.image.url)
         elif obj.image_url:
-            return f'<img src="{obj.image_url}" width="50" height="50" style="object-fit: cover; border-radius: 4px;" />'
+            return format_html('<img src="{}" width="50" height="50" style="object-fit: cover; border-radius: 4px;" />', obj.image_url)
         return '(No image)'
     image_preview.short_description = 'Image'
-    image_preview.allow_tags = True
 
 
 @admin.register(Cart)
