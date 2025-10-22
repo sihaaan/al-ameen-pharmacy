@@ -39,6 +39,12 @@ const Navbar = () => {
                 Hello, {user.username}!
               </span>
 
+              {user.is_staff && (
+                <Link to="/admin" className="nav-link admin-link">
+                  Admin
+                </Link>
+              )}
+
               <button
                 className="cart-button"
                 onClick={() => setShowCart(!showCart)}

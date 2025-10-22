@@ -47,8 +47,8 @@ class UserSerializer(serializers.ModelSerializer):
     """
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'date_joined']
-        read_only_fields = ['id', 'date_joined']
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_staff', 'date_joined']
+        read_only_fields = ['id', 'is_staff', 'date_joined']
 
 
 # ====================
@@ -77,13 +77,14 @@ class ProductListSerializer(serializers.ModelSerializer):
     For listing products (simpler, faster).
     Shows category name instead of just ID.
     """
-    category_name = serializers.CharField(source='category.name', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
 
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'price', 'stock_quantity',
-            'category', 'category_name', 'image_url',
+            'id', 'name', 'description', 'price', 'stock_quantity',
+            'category', 'category_name', 'image', 'image_url',
+            'manufacturer', 'dosage', 'pack_size',
             'requires_prescription', 'in_stock'
         ]
         read_only_fields = ['id', 'in_stock']
@@ -92,14 +93,16 @@ class ProductListSerializer(serializers.ModelSerializer):
 class ProductDetailSerializer(serializers.ModelSerializer):
     """
     For product details (includes full description, etc.)
+    Supports image upload and all new fields.
     """
-    category_name = serializers.CharField(source='category.name', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
 
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'price', 'stock_quantity',
-            'category', 'category_name', 'image_url',
+            'id', 'name', 'description', 'detailed_description',
+            'price', 'stock_quantity', 'category', 'category_name',
+            'image', 'image_url', 'manufacturer', 'dosage', 'pack_size',
             'requires_prescription', 'in_stock',
             'created_at', 'updated_at'
         ]

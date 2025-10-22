@@ -84,8 +84,8 @@ class ProductViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
 
     def get_serializer_class(self):
-        """Use detailed serializer for single product, simple for lists"""
-        if self.action == 'retrieve':
+        """Use detailed serializer for single product and create/update, simple for lists"""
+        if self.action in ['retrieve', 'create', 'update', 'partial_update']:
             return ProductDetailSerializer
         return ProductListSerializer
 
