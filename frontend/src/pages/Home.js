@@ -28,8 +28,10 @@ function Home() {
   if (loading) {
     return (
       <div className="App">
-        <h1>Al Ameen Pharmacy</h1>
-        <p>Loading products...</p>
+        <div className="loading-container">
+          <div className="loading-spinner"></div>
+          <p>Loading products...</p>
+        </div>
       </div>
     );
   }
@@ -37,9 +39,10 @@ function Home() {
   if (error) {
     return (
       <div className="App">
-        <h1>Al Ameen Pharmacy</h1>
-        <p style={{ color: "red" }}>{error}</p>
-        <p>Make sure your backend is running on port 8000!</p>
+        <div className="error-container">
+          <p style={{ color: "red" }}>{error}</p>
+          <p>Make sure your backend is running on port 8000!</p>
+        </div>
       </div>
     );
   }
@@ -47,12 +50,20 @@ function Home() {
   return (
     <>
       <header className="App-header">
-        <h1>🏥 Al Ameen Pharmacy</h1>
-        <p>Your trusted online pharmacy</p>
+        <div className="header-content">
+          <div className="brand-header">
+            <h2 className="brand-arabic-home">صيدلية الأمين</h2>
+            <h1 className="brand-english-home">AL AMEEN PHARMACY</h1>
+          </div>
+          <p className="header-tagline">Your Trusted Healthcare Partner in Dubai</p>
+        </div>
       </header>
 
       <main className="products-section">
-        <h2>Our Products ({products.length})</h2>
+        <div className="section-header-home">
+          <h2>Our Products</h2>
+          <p className="products-count">{products.length} Premium Products Available</p>
+        </div>
         <ProductGrid products={products} />
       </main>
     </>
