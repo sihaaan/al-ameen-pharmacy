@@ -1,6 +1,6 @@
 // frontend/src/context/CartContext.js
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
-import axios from "axios";
+import axiosInstance from "../utils/axios";
 import { useAuth } from "./AuthContext";
 
 // Create the context
@@ -32,7 +32,7 @@ export const CartProvider = ({ children }) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.get('http://localhost:8000/api/cart/');
+      const response = await axiosInstance.get('/cart/');
       // The backend returns cart with items array
       setItems(response.data.items || []);
     } catch (err) {
@@ -59,7 +59,7 @@ export const CartProvider = ({ children }) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.post('http://localhost:8000/api/cart/add_item/', {
+      const response = await axiosInstance.post('/cart/add_item/', {
         product_id: product.id,
         quantity: quantity
       });
@@ -88,7 +88,7 @@ export const CartProvider = ({ children }) => {
     setLoading(true);
     setError(null);
     try {
-      await axios.delete('http://localhost:8000/api/cart/remove_item/', {
+      await axiosInstance.delete('/cart/remove_item/', {
         data: { cart_item_id: cartItemId }
       });
 
@@ -121,7 +121,7 @@ export const CartProvider = ({ children }) => {
         return await removeFromCart(cartItemId);
       }
 
-      await axios.patch('http://localhost:8000/api/cart/update_item/', {
+      await axiosInstance.patch('/cart/update_item/', {
         cart_item_id: cartItemId,
         quantity: quantity
       });
@@ -150,7 +150,7 @@ export const CartProvider = ({ children }) => {
     setLoading(true);
     setError(null);
     try {
-      await axios.delete('http://localhost:8000/api/cart/clear/');
+      await axiosInstance.delete('/cart/clear/');
       setItems([]);
       return { success: true };
     } catch (err) {

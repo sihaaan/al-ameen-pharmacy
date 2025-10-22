@@ -1,5 +1,6 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import axios from 'axios';
+import axiosInstance from '../utils/axios';
 
 // Create the context
 const AuthContext = createContext();
@@ -53,7 +54,7 @@ export const AuthProvider = ({ children }) => {
       axios.defaults.headers.common['Authorization'] = `Bearer ${access}`;
 
       // Get user info
-      const userResponse = await axios.get('http://localhost:8000/api/me/');
+      const userResponse = await axiosInstance.get('/me/');
       const userData = userResponse.data;
 
       // Store user data
@@ -74,7 +75,7 @@ export const AuthProvider = ({ children }) => {
     setError(null);
     try {
       // Call Django register endpoint
-      await axios.post('http://localhost:8000/api/register/', userData);
+      await axiosInstance.post('/register/', userData);
 
       // After successful registration, log the user in
       const loginResult = await login(userData.username, userData.password);
