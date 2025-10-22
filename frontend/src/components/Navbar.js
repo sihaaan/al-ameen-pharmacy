@@ -22,7 +22,10 @@ const Navbar = () => {
       <nav className="navbar">
         <div className="nav-brand">
           <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }}>
-            <h2>🏥 Al Ameen Pharmacy</h2>
+            <div className="brand-container">
+              <div className="brand-arabic">صيدلية الأمين</div>
+              <div className="brand-english">AL AMEEN PHARMACY</div>
+            </div>
           </Link>
         </div>
 

@@ -4,15 +4,36 @@
   justify-content: space-between;
   align-items: center;
   padding: 1rem 2rem;
-  background: white;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  margin-bottom: 20px;
+  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  margin-bottom: 0;
 }
 
-.nav-brand h2 {
-  margin: 0;
-  color: #2c3e50;
-  font-size: 1.5rem;
+.nav-brand {
+  display: flex;
+  align-items: center;
+}
+
+.brand-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.brand-arabic {
+  font-size: 16px;
+  font-weight: 700;
+  color: white;
+  letter-spacing: 1px;
+  direction: rtl;
+  margin-bottom: 2px;
+}
+
+.brand-english {
+  font-size: 20px;
+  font-weight: 700;
+  color: white;
+  letter-spacing: 1.5px;
 }
 
 .nav-links {
@@ -22,77 +43,89 @@
 }
 
 .nav-link {
-  color: #333;
+  color: white;
   text-decoration: none;
   cursor: pointer;
-  padding: 0.5rem 0;
-  border-bottom: 2px solid transparent;
-  transition: border-color 0.2s;
-}
-
-.nav-link:hover {
-  border-bottom-color: #3498db;
-}
-
-.nav-username {
-  color: #667eea;
-  font-weight: 600;
-  cursor: default;
-}
-
-.nav-username:hover {
-  border-bottom-color: transparent;
-}
-
-.login-link {
-  color: #667eea;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  transition: all 0.2s;
   font-weight: 500;
 }
 
-.register-link {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+.nav-link:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.nav-username {
   color: white;
-  padding: 8px 20px;
+  font-weight: 600;
+  cursor: default;
+  padding: 0.5rem 1rem;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+}
+
+.nav-username:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.login-link {
+  color: white;
+  font-weight: 500;
+  border: 2px solid white;
+  padding: 6px 18px !important;
+}
+
+.login-link:hover {
+  background: white;
+  color: #1e3a8a;
+}
+
+.register-link {
+  background: white;
+  color: #1e3a8a;
+  padding: 8px 20px !important;
   border-radius: 6px;
   font-weight: 600;
-  border-bottom: none !important;
-  transition: transform 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .register-link:hover {
   transform: translateY(-2px);
-  border-bottom-color: transparent !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .cart-button {
-  background: #3498db;
-  color: white;
+  background: white;
+  color: #1e3a8a;
   border: none;
-  padding: 10px 15px;
-  border-radius: 5px;
+  padding: 10px 18px;
+  border-radius: 6px;
   cursor: pointer;
-  font-weight: bold;
-  transition: background 0.2s, transform 0.2s;
+  font-weight: 600;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .cart-button:hover {
-  background: #2980b9;
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .logout-button {
-  background: #e74c3c;
+  background: rgba(239, 68, 68, 0.9);
   color: white;
   border: none;
-  padding: 8px 16px;
-  border-radius: 5px;
+  padding: 8px 18px;
+  border-radius: 6px;
   cursor: pointer;
-  font-weight: 500;
-  transition: background 0.2s, transform 0.2s;
+  font-weight: 600;
+  transition: all 0.2s;
 }
 
 .logout-button:hover {
-  background: #c0392b;
+  background: rgba(220, 38, 38, 1);
   transform: translateY(-1px);
 }
 
