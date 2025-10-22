@@ -176,9 +176,9 @@ ALLOWED_HOSTS=127.0.0.1,localhost
 - [x] Shopping cart functionality
 - [x] User authentication (JWT)
 - [x] Order management
-- [ ] User authentication UI (React)
-- [ ] Cart integration with React
-- [ ] Checkout flow
+- [x] User authentication UI (React)
+- [x] Cart integration with React
+- [x] Checkout flow
 - [ ] Payment gateway (Stripe/Telr)
 - [ ] Product image uploads
 - [ ] Email notifications
