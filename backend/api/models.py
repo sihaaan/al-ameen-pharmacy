@@ -31,7 +31,11 @@ class Product(models.Model):
     Each product has name, price, stock, description, etc.
     """
     name = models.CharField(max_length=200)
-    description = models.TextField()
+    description = models.TextField(help_text="Short description shown in product grid")
+    detailed_description = models.TextField(
+        blank=True,
+        help_text="Full detailed description with usage, dosage, warnings, etc."
+    )
     price = models.DecimalField(
         max_digits=10,  # Total digits (including decimals)
         decimal_places=2,  # Digits after decimal: 12.50
@@ -48,8 +52,25 @@ class Product(models.Model):
         blank=True,
         related_name='products'  # Access category.products.all()
     )
-    image_url = models.URLField(blank=True, null=True)  # Product image
+    # Image upload field - files will be stored in media/products/
+    image = models.ImageField(
+        upload_to='products/',
+        blank=True,
+        null=True,
+        help_text="Product image (recommended size: 800x800px)"
+    )
+    # Keep old URL field for backward compatibility, but make it optional
+    image_url = models.URLField(
+        blank=True,
+        null=True,
+        help_text="External image URL (optional, use image upload instead)"
+    )
     requires_prescription = models.BooleanField(default=False)  # Some medicines need Rx
+
+    # Additional product information
+    manufacturer = models.CharField(max_length=200, blank=True)
+    dosage = models.CharField(max_length=100, blank=True, help_text="e.g., 500mg, 10ml")
+    pack_size = models.CharField(max_length=100, blank=True, help_text="e.g., 30 tablets, 100ml bottle")
 
     # Automatic timestamps
     created_at = models.DateTimeField(auto_now_add=True)

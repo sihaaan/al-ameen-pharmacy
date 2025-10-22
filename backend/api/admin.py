@@ -18,10 +18,47 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ['name', 'category', 'price', 'stock_quantity', 'in_stock', 'requires_prescription']
-    list_filter = ['category', 'requires_prescription', 'created_at']
-    search_fields = ['name', 'description']
+    # List view configuration
+    list_display = ['image_preview', 'name', 'category', 'price', 'stock_quantity', 'in_stock', 'manufacturer', 'requires_prescription']
+    list_filter = ['category', 'requires_prescription', 'manufacturer', 'created_at']
+    search_fields = ['name', 'description', 'detailed_description', 'manufacturer']
     list_editable = ['price', 'stock_quantity']
+    list_per_page = 25
+
+    # Form organization in detail/edit view
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'category', 'manufacturer', 'requires_prescription')
+        }),
+        ('Product Details', {
+            'fields': ('description', 'detailed_description', 'dosage', 'pack_size')
+        }),
+        ('Pricing & Stock', {
+            'fields': ('price', 'stock_quantity'),
+            'classes': ('wide',)
+        }),
+        ('Images', {
+            'fields': ('image', 'image_url'),
+            'description': 'Upload an image or provide an image URL. Uploaded images are preferred.'
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    # Make timestamp fields read-only
+    readonly_fields = ['created_at', 'updated_at', 'image_preview']
+
+    # Custom method to display image preview in list view
+    def image_preview(self, obj):
+        if obj.image:
+            return f'<img src="{obj.image.url}" width="50" height="50" style="object-fit: cover; border-radius: 4px;" />'
+        elif obj.image_url:
+            return f'<img src="{obj.image_url}" width="50" height="50" style="object-fit: cover; border-radius: 4px;" />'
+        return '(No image)'
+    image_preview.short_description = 'Image'
+    image_preview.allow_tags = True
 
 
 @admin.register(Cart)
