@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { useCart } from "../context/CartContext";
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
+import ProductModal from "./ProductModal";
 import "../styles/ProductGrid.css";
 
 const ProductGrid = ({ products }) => {
@@ -11,6 +12,7 @@ const ProductGrid = ({ products }) => {
   const navigate = useNavigate();
   const [addingToCart, setAddingToCart] = useState(null);
   const [feedback, setFeedback] = useState({});
+  const [selectedProductId, setSelectedProductId] = useState(null);
 
   const handleAddToCart = async (product) => {
     // Check if user is logged in
@@ -36,35 +38,62 @@ const ProductGrid = ({ products }) => {
     }
   };
 
+  const handleCardClick = (e, productId) => {
+    // Check if click was on the button
+    if (e.target.closest('button')) {
+      return;
+    }
+    // Open quick view modal
+    setSelectedProductId(productId);
+  };
+
+  const handleViewFullPage = (productId) => {
+    navigate(`/product/${productId}`);
+  };
+
   return (
-    <div className="products-grid">
-      {products.map((product) => (
-        <div key={product.id} className="product-card">
-          <h3>{product.name}</h3>
-          <p className="product-description">{product.description}</p>
-          <p className="product-category">Category: {product.category}</p>
-          <div className="product-details">
-            <span className="product-price">AED {product.price}</span>
-            <span className="product-stock">
-              Stock: {product.stock_quantity}
-            </span>
-          </div>
-          <button
-            className="add-to-cart-btn"
-            onClick={() => handleAddToCart(product)}
-            disabled={product.stock_quantity === 0 || addingToCart === product.id}
+    <>
+      <div className="products-grid">
+        {products.map((product) => (
+          <div
+            key={product.id}
+            className="product-card"
+            onClick={(e) => handleCardClick(e, product.id)}
           >
-            {addingToCart === product.id
-              ? "Adding..."
-              : feedback[product.id]
-              ? "✓ Added!"
-              : product.stock_quantity === 0
-              ? "Out of Stock"
-              : "Add to Cart"}
-          </button>
-        </div>
-      ))}
-    </div>
+            <div className="product-image">
+              {product.image ? (
+                <img src={product.image} alt={product.name} />
+              ) : product.image_url ? (
+                <img src={product.image_url} alt={product.name} />
+              ) : (
+                <div className="no-image">No Image</div>
+              )}
+            </div>
+            <div className="product-card-content">
+              <h3>{product.name}</h3>
+              <p className="product-description">{product.description}</p>
+              {product.category_name && (
+                <p className="product-category">Category: {product.category_name}</p>
+              )}
+              <div className="product-details">
+                <span className="product-price">AED {parseFloat(product.price).toFixed(2)}</span>
+                <span className="product-stock">
+                  Stock: {product.stock_quantity}
+                </span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {selectedProductId && (
+        <ProductModal
+          productId={selectedProductId}
+          onClose={() => setSelectedProductId(null)}
+          onViewFullPage={handleViewFullPage}
+        />
+      )}
+    </>
   );
 };
 
