@@ -42,40 +42,51 @@
   flex: 1;
   max-width: 500px;
   display: flex;
-  align-items: center;
-  background: white;
+  align-items: stretch;
+  background: rgba(255, 255, 255, 0.95);
   border-radius: 8px;
   overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  transition: all 0.2s ease;
+}
+
+.search-bar:focus-within {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  border-color: white;
 }
 
 .search-input {
   flex: 1;
   border: none;
-  padding: 12px 16px;
+  padding: 10px 16px;
   font-size: 14px;
   outline: none;
   color: #111827;
+  background: transparent;
+  font-weight: 500;
 }
 
 .search-input::placeholder {
-  color: #9ca3af;
+  color: #6b7280;
 }
 
 .search-button {
-  background: #3b82f6;
+  background: transparent;
   border: none;
-  padding: 12px 16px;
+  border-left: 1px solid #e5e7eb;
+  padding: 0 16px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
-  transition: background 0.2s;
+  font-size: 18px;
+  transition: all 0.2s ease;
+  min-width: 50px;
 }
 
 .search-button:hover {
-  background: #2563eb;
+  background: rgba(59, 130, 246, 0.1);
 }
 
 .nav-links {
