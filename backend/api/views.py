@@ -295,12 +295,18 @@ class OrderViewSet(viewsets.ModelViewSet):
     """
     Manage orders.
     Users can view their orders and create new ones.
+    Admins can view and manage all orders.
     """
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        """Users can only see their own orders"""
+        """
+        Regular users see only their orders.
+        Admins see all orders.
+        """
+        if self.request.user.is_staff:
+            return Order.objects.all()
         return Order.objects.filter(user=self.request.user)
 
     def get_serializer_class(self):
@@ -308,6 +314,45 @@ class OrderViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return OrderCreateSerializer
         return OrderSerializer
+
+    @action(detail=True, methods=['patch'], permission_classes=[permissions.IsAdminUser])
+    def update_status(self, request, pk=None):
+        """
+        PATCH /api/orders/{id}/update_status/
+        Admin-only endpoint to update order status.
+        Body: {"status": "processing"}
+        """
+        order = self.get_object()
+        new_status = request.data.get('status')
+
+        if not new_status:
+            return Response(
+                {'error': 'status field is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate status choice
+        valid_statuses = [choice[0] for choice in Order.STATUS_CHOICES]
+        if new_status not in valid_statuses:
+            return Response(
+                {'error': f'Invalid status. Valid options: {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        order.status = new_status
+
+        # If marking as delivered, set delivered_at timestamp
+        if new_status == 'delivered' and not order.delivered_at:
+            from django.utils import timezone
+            order.delivered_at = timezone.now()
+
+        # If marking as delivered or shipped, update payment status to paid for COD
+        if new_status in ['delivered', 'shipped'] and order.payment_method == 'cash_on_delivery':
+            order.payment_status = 'paid'
+
+        order.save()
+
+        return Response(OrderSerializer(order).data)
 
     def create(self, request):
         """
