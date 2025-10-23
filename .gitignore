@@ -42,6 +42,7 @@ Thumbs.db
 .idea/
 *.sublime-project
 *.sublime-workspace
+.claude/
 
 # Logs
 *.log

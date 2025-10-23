@@ -1,12 +1,21 @@
 import React, { useState, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { productsAPI } from "../api";
 import ProductGrid from "../components/ProductGrid";
 import "../styles/Home.css";
 
 function Home() {
+  const [searchParams] = useSearchParams();
   const [products, setProducts] = useState([]);
+  const [filteredProducts, setFilteredProducts] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Filter states
+  const [selectedCategory, setSelectedCategory] = useState('all');
+  const [sortBy, setSortBy] = useState('newest');
+  const [showInStockOnly, setShowInStockOnly] = useState(false);
 
   useEffect(() => {
     const fetchProducts = async () => {
@@ -15,6 +24,10 @@ function Home() {
         const response = await productsAPI.getAll();
         console.log("Products received:", response.data);
         setProducts(response.data);
+
+        // Extract unique categories
+        const uniqueCategories = [...new Set(response.data.map(p => p.category_name).filter(Boolean))];
+        setCategories(uniqueCategories);
       } catch (err) {
         console.error("Error fetching products:", err);
         setError("Failed to load products");
@@ -25,6 +38,51 @@ function Home() {
 
     fetchProducts();
   }, []);
+
+  // Apply filters and search whenever products or filters change
+  useEffect(() => {
+    let result = [...products];
+
+    // Search filter
+    const searchQuery = searchParams.get('search');
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      result = result.filter(product =>
+        product.name.toLowerCase().includes(query) ||
+        product.description?.toLowerCase().includes(query) ||
+        product.category_name?.toLowerCase().includes(query)
+      );
+    }
+
+    // Category filter
+    if (selectedCategory !== 'all') {
+      result = result.filter(product => product.category_name === selectedCategory);
+    }
+
+    // In stock filter
+    if (showInStockOnly) {
+      result = result.filter(product => product.stock_quantity > 0);
+    }
+
+    // Sorting
+    switch (sortBy) {
+      case 'price-low':
+        result.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
+        break;
+      case 'price-high':
+        result.sort((a, b) => parseFloat(b.price) - parseFloat(a.price));
+        break;
+      case 'name':
+        result.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case 'newest':
+      default:
+        result.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        break;
+    }
+
+    setFilteredProducts(result);
+  }, [products, searchParams, selectedCategory, sortBy, showInStockOnly]);
 
   if (loading) {
     return (
@@ -106,13 +164,82 @@ function Home() {
       {/* Products Section */}
       <section className="products-section">
         <div className="section-header">
-          <h2 className="section-title">Our Products</h2>
+          <h2 className="section-title">
+            {searchParams.get('search') ? `Search Results for "${searchParams.get('search')}"` : 'Our Products'}
+          </h2>
           <div className="products-count-badge">
-            {products.length} Products
+            {filteredProducts.length} {filteredProducts.length === 1 ? 'Product' : 'Products'}
           </div>
         </div>
 
-        <ProductGrid products={products} />
+        {/* Filters Bar */}
+        <div className="filters-bar">
+          <div className="filter-group">
+            <label>Category:</label>
+            <select
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+              className="filter-select"
+            >
+              <option value="all">All Categories</option>
+              {categories.map(cat => (
+                <option key={cat} value={cat}>{cat}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="filter-group">
+            <label>Sort By:</label>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="filter-select"
+            >
+              <option value="newest">Newest First</option>
+              <option value="name">Name (A-Z)</option>
+              <option value="price-low">Price (Low to High)</option>
+              <option value="price-high">Price (High to Low)</option>
+            </select>
+          </div>
+
+          <div className="filter-group checkbox-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={showInStockOnly}
+                onChange={(e) => setShowInStockOnly(e.target.checked)}
+              />
+              <span>In Stock Only</span>
+            </label>
+          </div>
+
+          {(selectedCategory !== 'all' || showInStockOnly || searchParams.get('search')) && (
+            <button
+              className="clear-filters-btn"
+              onClick={() => {
+                setSelectedCategory('all');
+                setSortBy('newest');
+                setShowInStockOnly(false);
+                window.history.pushState({}, '', '/');
+              }}
+            >
+              Clear Filters
+            </button>
+          )}
+        </div>
+
+        {filteredProducts.length === 0 ? (
+          <div className="no-results">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <path d="m21 21-4.35-4.35"></path>
+            </svg>
+            <h3>No products found</h3>
+            <p>Try adjusting your filters or search query</p>
+          </div>
+        ) : (
+          <ProductGrid products={filteredProducts} />
+        )}
       </section>
     </div>
   );
