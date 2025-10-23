@@ -100,6 +100,35 @@ MEDIA_ROOT = BASE_DIR / 'media'
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
 STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY', '')
 
+# ---- Email Configuration ----
+# For development: File backend (saves emails to files, avoids Unicode issues)
+# For production: Use SMTP backend with real email service
+
+EMAIL_BACKEND = os.environ.get(
+    'EMAIL_BACKEND',
+    'django.core.mail.backends.filebased.EmailBackend'  # Development default
+)
+
+# File-based email settings (for development)
+EMAIL_FILE_PATH = BASE_DIR / 'sent_emails'  # Emails will be saved here
+
+# SMTP Configuration (for production)
+EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = bool(int(os.environ.get('EMAIL_USE_TLS', '1')))
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@alameenpharmacy.com')
+
+# To use Gmail SMTP in production, add to .env:
+# EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+# EMAIL_HOST=smtp.gmail.com
+# EMAIL_PORT=587
+# EMAIL_USE_TLS=1
+# EMAIL_HOST_USER=your-email@gmail.com
+# EMAIL_HOST_PASSWORD=your-app-password
+# DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <noreply@alameenpharmacy.com>
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

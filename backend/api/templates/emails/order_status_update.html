@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order Status Update</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+        }
+        .container {
+            background-color: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 12px 12px 0 0;
+            text-align: center;
+            margin: -30px -30px 30px -30px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 16px;
+            margin: 20px 0;
+        }
+        .status-pending {
+            background-color: #fef3c7;
+            color: #92400e;
+        }
+        .status-processing {
+            background-color: #dbeafe;
+            color: #1e40af;
+        }
+        .status-shipped {
+            background-color: #e0e7ff;
+            color: #4338ca;
+        }
+        .status-delivered {
+            background-color: #d1fae5;
+            color: #065f46;
+        }
+        .status-cancelled {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+        .order-info {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: center;
+        }
+        .order-info strong {
+            font-size: 18px;
+            color: #667eea;
+        }
+        .message-box {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            margin: 20px 0;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 2px solid #e9ecef;
+            text-align: center;
+            color: #718096;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>صيدلية الأمين</h1>
+            <h1>AL AMEEN PHARMACY</h1>
+            <p>Order Status Update</p>
+        </div>
+
+        <p>Dear {{ customer_name }},</p>
+        <p>Your order status has been updated.</p>
+
+        <div class="order-info">
+            <p style="margin: 0; color: #718096;">Order Number</p>
+            <strong>{{ order_number }}</strong>
+        </div>
+
+        <div style="text-align: center;">
+            <p style="color: #718096; margin-bottom: 10px;">Status changed to:</p>
+            <span class="status-badge status-{{ status }}">{{ new_status }}</span>
+        </div>
+
+        {% if status == 'processing' %}
+        <div class="message-box">
+            <p><strong>Your order is being processed!</strong></p>
+            <p>Our team is carefully preparing your items for shipment. You'll receive another email once your order has been dispatched.</p>
+        </div>
+        {% elif status == 'shipped' %}
+        <div class="message-box">
+            <p><strong>Your order has been shipped!</strong></p>
+            <p>Your order is on its way. You should receive it within 2-3 business days.</p>
+        </div>
+        {% elif status == 'delivered' %}
+        <div class="message-box">
+            <p><strong>Your order has been delivered!</strong></p>
+            <p>We hope you're satisfied with your purchase. Thank you for choosing AL AMEEN PHARMACY!</p>
+        </div>
+        {% elif status == 'cancelled' %}
+        <div class="message-box">
+            <p><strong>Your order has been cancelled.</strong></p>
+            <p>If you have any questions about this cancellation, please contact our customer service team.</p>
+        </div>
+        {% endif %}
+
+        <div class="footer">
+            <p>If you have any questions, please don't hesitate to contact us.</p>
+            <p><strong>AL AMEEN PHARMACY</strong></p>
+            <p>Your trusted healthcare partner in Dubai</p>
+        </div>
+    </div>
+</body>
+</html>

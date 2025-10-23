@@ -99,12 +99,19 @@ function Login() {
           </button>
         </form>
 
-        <p className="auth-footer">
-          Don't have an account?{' '}
-          <Link to="/register" className="auth-link">
-            Register here
-          </Link>
-        </p>
+        <div className="auth-footer">
+          <p>
+            <Link to="/forgot-password" className="auth-link">
+              Forgot Password?
+            </Link>
+          </p>
+          <p>
+            Don't have an account?{' '}
+            <Link to="/register" className="auth-link">
+              Register here
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );

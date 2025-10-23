@@ -54,6 +54,7 @@ logs/
 local_settings.py
 staticfiles/
 media/
+sent_emails/
 
 # Test coverage
 htmlcov/

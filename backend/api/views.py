@@ -12,6 +12,13 @@ from .serializers import (
     CartSerializer, CartItemSerializer, AddressSerializer,
     OrderSerializer, OrderCreateSerializer
 )
+from .emails import (
+    send_order_confirmation_email,
+    send_order_status_update_email,
+    send_welcome_email,
+    send_password_reset_email
+)
+from .password_reset import PasswordResetToken
 
 
 # ====================
@@ -30,6 +37,14 @@ def register_user(request):
         user = serializer.save()
         # Automatically create a cart for the new user
         Cart.objects.create(user=user)
+
+        # Send welcome email
+        try:
+            send_welcome_email(user)
+        except Exception as email_error:
+            # Log email error but don't fail the registration
+            print(f"Email error: {email_error}")
+
         return Response({
             'message': 'User registered successfully!',
             'user': UserSerializer(user).data
@@ -46,6 +61,108 @@ def get_current_user(request):
     """
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def request_password_reset(request):
+    """
+    Request password reset - sends email with reset link
+    Body: {"email": "user@example.com"}
+    """
+    email = request.data.get('email', '').strip()
+
+    if not email:
+        return Response(
+            {'error': 'Email is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        # For security, don't reveal if email exists or not
+        return Response(
+            {'message': 'If an account with that email exists, a password reset link has been sent.'},
+            status=status.HTTP_200_OK
+        )
+
+    # Create reset token
+    reset_token = PasswordResetToken.create_token(user)
+
+    # Build reset URL (frontend URL)
+    frontend_url = 'http://localhost:3000'  # Change for production
+    reset_url = f"{frontend_url}/reset-password/{reset_token}"
+
+    # Send email
+    try:
+        send_password_reset_email(user, reset_token, reset_url)
+    except Exception as email_error:
+        print(f"Email error: {email_error}")
+        return Response(
+            {'error': 'Failed to send password reset email. Please try again later.'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    return Response(
+        {'message': 'If an account with that email exists, a password reset link has been sent.'},
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def reset_password_confirm(request):
+    """
+    Confirm password reset with token
+    Body: {
+        "token": "reset-token",
+        "password": "new-password",
+        "password_confirm": "new-password"
+    }
+    """
+    token = request.data.get('token', '').strip()
+    password = request.data.get('password', '')
+    password_confirm = request.data.get('password_confirm', '')
+
+    if not all([token, password, password_confirm]):
+        return Response(
+            {'error': 'Token, password, and password confirmation are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if password != password_confirm:
+        return Response(
+            {'error': 'Passwords do not match'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if len(password) < 8:
+        return Response(
+            {'error': 'Password must be at least 8 characters long'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Validate token
+    user = PasswordResetToken.validate_token(token)
+
+    if not user:
+        return Response(
+            {'error': 'Invalid or expired reset token'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Update password
+    user.set_password(password)
+    user.save()
+
+    # Mark token as used
+    PasswordResetToken.mark_used(token)
+
+    return Response(
+        {'message': 'Password has been reset successfully. You can now login with your new password.'},
+        status=status.HTTP_200_OK
+    )
 
 
 # ====================
@@ -374,6 +491,13 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         order.save()
 
+        # Send status update email
+        try:
+            send_order_status_update_email(order, old_status)
+        except Exception as email_error:
+            # Log email error but don't fail the status update
+            print(f"Email error: {email_error}")
+
         return Response(OrderSerializer(order).data)
 
     def create(self, request):
@@ -494,6 +618,13 @@ class OrderViewSet(viewsets.ModelViewSet):
 
             # Clear cart after successful order creation
             cart.items.all().delete()
+
+            # Send order confirmation email
+            try:
+                send_order_confirmation_email(order)
+            except Exception as email_error:
+                # Log email error but don't fail the order creation
+                print(f"Email error: {email_error}")
 
             # Return order data with context for serializer
             serializer = OrderSerializer(order, context={'request': request})

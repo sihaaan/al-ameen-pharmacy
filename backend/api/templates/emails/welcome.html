@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to AL AMEEN PHARMACY</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+        }
+        .container {
+            background-color: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 30px;
+            border-radius: 12px 12px 0 0;
+            text-align: center;
+            margin: -30px -30px 30px -30px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 32px;
+        }
+        .header p {
+            margin: 15px 0 0 0;
+            font-size: 18px;
+            opacity: 0.9;
+        }
+        .welcome-message {
+            text-align: center;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .welcome-message h2 {
+            color: #667eea;
+            margin: 0 0 10px 0;
+        }
+        .features {
+            margin: 30px 0;
+        }
+        .feature {
+            display: flex;
+            align-items: flex-start;
+            margin: 20px 0;
+            padding: 15px;
+            border-left: 4px solid #667eea;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+        }
+        .feature-icon {
+            font-size: 32px;
+            margin-right: 15px;
+        }
+        .feature-content h3 {
+            margin: 0 0 5px 0;
+            color: #2d3748;
+        }
+        .feature-content p {
+            margin: 0;
+            color: #718096;
+        }
+        .button {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white !important;
+            padding: 15px 40px;
+            text-decoration: none;
+            border-radius: 8px;
+            margin: 20px 0;
+            font-weight: 600;
+            font-size: 16px;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 2px solid #e9ecef;
+            text-align: center;
+            color: #718096;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>صيدلية الأمين</h1>
+            <h1>AL AMEEN PHARMACY</h1>
+            <p>Welcome to Your Healthcare Partner</p>
+        </div>
+
+        <div class="welcome-message">
+            <h2>Welcome, {{ username }}!</h2>
+            <p>Thank you for joining AL AMEEN PHARMACY</p>
+        </div>
+
+        <p>Dear {{ username }},</p>
+        <p>We're thrilled to have you as part of our community! Your account has been successfully created, and you now have access to our complete range of quality healthcare products and services.</p>
+
+        <div class="features">
+            <div class="feature">
+                <div class="feature-icon">✓</div>
+                <div class="feature-content">
+                    <h3>Quality Products</h3>
+                    <p>Access to certified medications and healthcare products from trusted manufacturers</p>
+                </div>
+            </div>
+
+            <div class="feature">
+                <div class="feature-icon">🚚</div>
+                <div class="feature-content">
+                    <h3>Fast Delivery</h3>
+                    <p>Quick and reliable delivery across Dubai and UAE within 2-3 business days</p>
+                </div>
+            </div>
+
+            <div class="feature">
+                <div class="feature-icon">🔒</div>
+                <div class="feature-content">
+                    <h3>Secure Shopping</h3>
+                    <p>Your personal information and orders are protected with industry-standard security</p>
+                </div>
+            </div>
+
+            <div class="feature">
+                <div class="feature-icon">💳</div>
+                <div class="feature-content">
+                    <h3>Flexible Payment</h3>
+                    <p>Multiple payment options including Cash on Delivery and online payment</p>
+                </div>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <p>Ready to start shopping?</p>
+            <a href="http://localhost:3000" class="button">Browse Our Products</a>
+        </div>
+
+        <div class="footer">
+            <p>If you have any questions, our customer service team is here to help.</p>
+            <p><strong>AL AMEEN PHARMACY</strong></p>
+            <p>Your trusted healthcare partner in Dubai</p>
+            <p style="margin-top: 15px; font-size: 12px; color: #a0aec0;">
+                This email was sent to {{ email }}. If you didn't create this account, please ignore this email.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

@@ -16,6 +16,10 @@ urlpatterns = [
     path('register/', views.register_user, name='register'),
     path('me/', views.get_current_user, name='current-user'),
 
+    # Password reset endpoints
+    path('password-reset/', views.request_password_reset, name='password-reset-request'),
+    path('password-reset/confirm/', views.reset_password_confirm, name='password-reset-confirm'),
+
     # Include router URLs
     path('', include(router.urls)),
 ]
