@@ -63,6 +63,10 @@ const Navbar = () => {
                 Hello, {user.username}!
               </span>
 
+              <Link to="/profile" className="nav-link">
+                Profile
+              </Link>
+
               {user.is_staff && (
                 <Link to="/admin" className="nav-link admin-link">
                   Admin

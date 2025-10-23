@@ -323,6 +323,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         Body: {"status": "processing"}
         """
         order = self.get_object()
+        old_status = order.status
         new_status = request.data.get('status')
 
         if not new_status:
@@ -338,6 +339,27 @@ class OrderViewSet(viewsets.ModelViewSet):
                 {'error': f'Invalid status. Valid options: {valid_statuses}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # If cancelling an order, restore stock quantities
+        if new_status == 'cancelled' and old_status != 'cancelled':
+            for item in order.items.all():
+                if item.product:  # Check product still exists
+                    item.product.stock_quantity += item.quantity
+                    item.product.save()
+
+        # If uncancelling an order (changing from cancelled to another status)
+        # Decrease stock again
+        elif old_status == 'cancelled' and new_status != 'cancelled':
+            for item in order.items.all():
+                if item.product:
+                    # Check if enough stock available
+                    if item.product.stock_quantity < item.quantity:
+                        return Response(
+                            {'error': f'Insufficient stock for {item.product_name}. Only {item.product.stock_quantity} available.'},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    item.product.stock_quantity -= item.quantity
+                    item.product.save()
 
         order.status = new_status
 
@@ -365,68 +387,126 @@ class OrderViewSet(viewsets.ModelViewSet):
             cart = Cart.objects.get(user=request.user)
         except Cart.DoesNotExist:
             return Response(
-                {'error': 'Cart not found'},
+                {'error': 'Your cart was not found. Please try adding items to your cart first.'},
                 status=status.HTTP_404_NOT_FOUND
             )
 
         if not cart.items.exists():
             return Response(
-                {'error': 'Cart is empty'},
+                {'error': 'Your cart is empty. Please add items before checking out.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate stock availability before creating order
+        out_of_stock_items = []
+        for cart_item in cart.items.all():
+            if cart_item.product.stock_quantity < cart_item.quantity:
+                out_of_stock_items.append({
+                    'name': cart_item.product.name,
+                    'requested': cart_item.quantity,
+                    'available': cart_item.product.stock_quantity
+                })
+
+        if out_of_stock_items:
+            error_message = 'Some items in your cart are out of stock: '
+            for item in out_of_stock_items:
+                error_message += f"{item['name']} (requested: {item['requested']}, available: {item['available']}), "
+            return Response(
+                {'error': error_message.rstrip(', ')},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         # Extract delivery information from request
-        full_name = request.data.get('full_name')
-        email = request.data.get('email')
-        phone = request.data.get('phone')
-        address = request.data.get('address')
-        city = request.data.get('city')
-        emirate = request.data.get('emirate')
-        delivery_notes = request.data.get('notes', '')
+        full_name = request.data.get('full_name', '').strip()
+        email = request.data.get('email', '').strip()
+        phone = request.data.get('phone', '').strip()
+        address = request.data.get('address', '').strip()
+        city = request.data.get('city', '').strip()
+        emirate = request.data.get('emirate', '').strip()
+        delivery_notes = request.data.get('notes', '').strip()
         payment_method = request.data.get('payment_method', 'cash_on_delivery')
 
         # Validate required fields
-        if not all([full_name, email, phone, address, city, emirate]):
+        missing_fields = []
+        if not full_name:
+            missing_fields.append('full name')
+        if not email:
+            missing_fields.append('email')
+        if not phone:
+            missing_fields.append('phone number')
+        if not address:
+            missing_fields.append('delivery address')
+        if not city:
+            missing_fields.append('city')
+        if not emirate:
+            missing_fields.append('emirate')
+
+        if missing_fields:
             return Response(
-                {'error': 'All delivery information fields are required'},
+                {'error': f'Please provide: {", ".join(missing_fields)}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Create order
-        order = Order.objects.create(
-            user=request.user,
-            full_name=full_name,
-            email=email,
-            phone=phone,
-            address=address,
-            city=city,
-            emirate=emirate,
-            delivery_notes=delivery_notes,
-            payment_method=payment_method,
-            total_amount=cart.total_price,
-            status='pending'
-        )
-
-        # Create order items from cart items
-        for cart_item in cart.items.all():
-            OrderItem.objects.create(
-                order=order,
-                product=cart_item.product,
-                product_name=cart_item.product.name,
-                quantity=cart_item.quantity,
-                price_at_purchase=cart_item.product.price
+        # Validate email format
+        if '@' not in email or '.' not in email:
+            return Response(
+                {'error': 'Please provide a valid email address'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-            # Decrease stock
-            product = cart_item.product
-            product.stock_quantity -= cart_item.quantity
-            product.save()
+        # Validate phone number
+        if len(phone.replace(' ', '').replace('-', '')) < 10:
+            return Response(
+                {'error': 'Please provide a valid phone number (at least 10 digits)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Clear cart after successful order creation
-        cart.items.all().delete()
+        try:
+            # Create order
+            order = Order.objects.create(
+                user=request.user,
+                full_name=full_name,
+                email=email,
+                phone=phone,
+                address=address,
+                city=city,
+                emirate=emirate,
+                delivery_notes=delivery_notes,
+                payment_method=payment_method,
+                total_amount=cart.total_price,
+                status='pending'
+            )
 
-        # Return order data
-        return Response(
-            OrderSerializer(order).data,
-            status=status.HTTP_201_CREATED
-        )
+            # Create order items from cart items
+            for cart_item in cart.items.all():
+                OrderItem.objects.create(
+                    order=order,
+                    product=cart_item.product,
+                    product_name=cart_item.product.name,
+                    quantity=cart_item.quantity,
+                    price_at_purchase=cart_item.product.price
+                )
+
+                # Decrease stock
+                product = cart_item.product
+                product.stock_quantity -= cart_item.quantity
+                product.save()
+
+            # Clear cart after successful order creation
+            cart.items.all().delete()
+
+            # Return order data with context for serializer
+            serializer = OrderSerializer(order, context={'request': request})
+            return Response(
+                serializer.data,
+                status=status.HTTP_201_CREATED
+            )
+
+        except Exception as e:
+            # If order creation fails, ensure we don't leave orphaned data
+            if 'order' in locals():
+                order.delete()
+            return Response(
+                {'error': f'Failed to create order: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

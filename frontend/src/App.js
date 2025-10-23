@@ -12,6 +12,7 @@ import AdminDashboard from "./pages/AdminDashboard";
 import ProductDetail from "./pages/ProductDetail";
 import Checkout from "./pages/Checkout";
 import OrderConfirmation from "./pages/OrderConfirmation";
+import Profile from "./pages/Profile";
 import "./App.css";
 
 function App() {
@@ -27,6 +28,7 @@ function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
               <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/profile" element={<Profile />} />
               <Route path="/product/:id" element={<ProductDetail />} />
               <Route path="/checkout" element={<Checkout />} />
               <Route path="/order-confirmation" element={<OrderConfirmation />} />

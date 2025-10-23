@@ -76,37 +76,59 @@ class ProductListSerializer(serializers.ModelSerializer):
     """
     For listing products (simpler, faster).
     Shows category name instead of just ID.
+    Provides image_display that prioritizes uploaded image over URL.
     """
     category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+    image_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
             'id', 'name', 'description', 'price', 'stock_quantity',
-            'category', 'category_name', 'image', 'image_url',
+            'category', 'category_name', 'image', 'image_url', 'image_display',
             'manufacturer', 'dosage', 'pack_size',
-            'requires_prescription', 'in_stock'
+            'requires_prescription', 'in_stock', 'created_at'
         ]
-        read_only_fields = ['id', 'in_stock']
+        read_only_fields = ['id', 'in_stock', 'image_display', 'created_at']
+
+    def get_image_display(self, obj):
+        """Return uploaded image URL if available, otherwise image_url"""
+        request = self.context.get('request')
+        if obj.image:
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return obj.image_url
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):
     """
     For product details (includes full description, etc.)
     Supports image upload and all new fields.
+    Provides image_display that prioritizes uploaded image over URL.
     """
     category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True)
+    image_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
             'id', 'name', 'description', 'detailed_description',
             'price', 'stock_quantity', 'category', 'category_name',
-            'image', 'image_url', 'manufacturer', 'dosage', 'pack_size',
+            'image', 'image_url', 'image_display', 'manufacturer', 'dosage', 'pack_size',
             'requires_prescription', 'in_stock',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'in_stock', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'in_stock', 'image_display', 'created_at', 'updated_at']
+
+    def get_image_display(self, obj):
+        """Return uploaded image URL if available, otherwise image_url"""
+        request = self.context.get('request')
+        if obj.image:
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return obj.image_url
 
 
 # ====================
@@ -195,7 +217,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     Items in a completed order.
     Price is frozen at time of purchase.
     """
-    product_image = serializers.URLField(source='product.image_url', read_only=True, allow_null=True)
+    product_image = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderItem
@@ -203,7 +225,18 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'id', 'product', 'product_name', 'product_image',
             'quantity', 'price_at_purchase', 'subtotal'
         ]
-        read_only_fields = ['id', 'subtotal']
+        read_only_fields = ['id', 'subtotal', 'product_image']
+
+    def get_product_image(self, obj):
+        """Return product image, prioritizing uploaded image over URL"""
+        if not obj.product:
+            return None
+        request = self.context.get('request')
+        if obj.product.image:
+            if request:
+                return request.build_absolute_uri(obj.product.image.url)
+            return obj.product.image.url
+        return obj.product.image_url
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -211,31 +244,51 @@ class OrderSerializer(serializers.ModelSerializer):
     Complete order with items and delivery info.
     """
     items = OrderItemSerializer(many=True, read_only=True)
-    delivery_address_details = AddressSerializer(source='delivery_address', read_only=True)
     user_email = serializers.EmailField(source='user.email', read_only=True)
+    username = serializers.CharField(source='user.username', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
+    payment_status_display = serializers.CharField(source='get_payment_status_display', read_only=True)
 
     class Meta:
         model = Order
         fields = [
-            'id', 'user', 'user_email', 'status', 'total_amount',
-            'delivery_address', 'delivery_address_details', 'items',
+            'id', 'user', 'username', 'user_email', 'order_number',
+            'full_name', 'email', 'phone', 'address', 'city', 'emirate', 'delivery_notes',
+            'status', 'status_display',
+            'payment_method', 'payment_method_display',
+            'payment_status', 'payment_status_display',
+            'stripe_payment_intent_id',
+            'total_amount', 'items',
             'created_at', 'updated_at', 'delivered_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'user', 'username', 'user_email', 'order_number',
+            'status_display', 'payment_method_display', 'payment_status_display',
+            'stripe_payment_intent_id', 'created_at', 'updated_at'
+        ]
 
 
 class OrderCreateSerializer(serializers.ModelSerializer):
     """
     For creating new orders from cart.
-    Simpler - just need delivery address.
+    Accepts delivery information directly.
     """
     class Meta:
         model = Order
-        fields = ['delivery_address']
+        fields = [
+            'full_name', 'email', 'phone', 'address',
+            'city', 'emirate', 'delivery_notes', 'payment_method'
+        ]
 
-    def create(self, validated_data):
-        """
-        Create order from user's cart.
-        This will be implemented in the view.
-        """
-        return super().create(validated_data)
+    def validate_phone(self, value):
+        """Validate phone number"""
+        if not value or len(value.strip()) < 10:
+            raise serializers.ValidationError("Please enter a valid phone number")
+        return value
+
+    def validate_email(self, value):
+        """Validate email format"""
+        if not value or '@' not in value:
+            raise serializers.ValidationError("Please enter a valid email address")
+        return value
