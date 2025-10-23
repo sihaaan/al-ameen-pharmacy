@@ -7,7 +7,9 @@
       "Bash(.venv/Scripts/python.exe manage.py migrate:*)",
       "Bash(.venv/Scripts/python.exe manage.py:*)",
       "Bash(npm start)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(.venv/Scripts/pip.exe install:*)",
+      "Bash(.venvScriptspip.exe install stripe)"
     ],
     "deny": [],
     "ask": []

@@ -1,0 +1,263 @@
+/* frontend/src/styles/OrderConfirmation.css */
+
+.order-confirmation-page {
+  min-height: 100vh;
+  background: #f9fafb;
+  padding: 80px 20px 40px;
+}
+
+.confirmation-container {
+  max-width: 800px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.confirmation-icon {
+  width: 80px;
+  height: 80px;
+  margin: 0 auto 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-radius: 50%;
+  color: white;
+}
+
+.confirmation-container h1 {
+  font-size: 32px;
+  color: #111827;
+  margin: 0 0 12px 0;
+  font-weight: 600;
+}
+
+.confirmation-message {
+  font-size: 16px;
+  color: #6b7280;
+  margin: 0 0 32px 0;
+  line-height: 1.6;
+}
+
+.order-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px 24px;
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 32px;
+  font-size: 16px;
+  color: #6b7280;
+}
+
+.order-number strong {
+  font-size: 18px;
+  color: #111827;
+  font-family: 'Courier New', monospace;
+}
+
+.order-details-card {
+  background: white;
+  border-radius: 12px;
+  padding: 32px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  text-align: left;
+  margin-bottom: 32px;
+}
+
+.order-details-card h2 {
+  font-size: 24px;
+  color: #111827;
+  margin: 0 0 24px 0;
+  font-weight: 600;
+  text-align: center;
+}
+
+.order-section {
+  padding: 24px 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.order-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.order-section:first-of-type {
+  padding-top: 0;
+}
+
+.order-section h3 {
+  font-size: 18px;
+  color: #111827;
+  margin: 0 0 16px 0;
+  font-weight: 600;
+}
+
+.order-items {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.order-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.order-item-info h4 {
+  font-size: 14px;
+  color: #111827;
+  margin: 0 0 4px 0;
+  font-weight: 500;
+}
+
+.order-item-info p {
+  font-size: 13px;
+  color: #6b7280;
+  margin: 0;
+}
+
+.order-item-price {
+  font-size: 14px;
+  color: #111827;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.order-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 16px;
+  border-top: 2px solid #e5e7eb;
+  font-size: 18px;
+  color: #111827;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-item.full-width {
+  grid-column: 1 / -1;
+}
+
+.info-label {
+  font-size: 13px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.info-item > span:not(.info-label) {
+  font-size: 14px;
+  color: #111827;
+}
+
+.payment-info {
+  font-size: 14px;
+  color: #111827;
+  margin: 0;
+  padding: 12px 16px;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.confirmation-actions {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 32px;
+}
+
+.btn-primary {
+  padding: 14px 32px;
+  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+}
+
+.confirmation-note {
+  background: #eff6ff;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+}
+
+.confirmation-note p {
+  font-size: 14px;
+  color: #1e40af;
+  margin: 8px 0;
+  line-height: 1.6;
+}
+
+.confirmation-note p:first-child {
+  margin-top: 0;
+}
+
+.confirmation-note p:last-child {
+  margin-bottom: 0;
+}
+
+/* Responsive Design */
+@media (max-width: 640px) {
+  .order-confirmation-page {
+    padding: 70px 16px 24px;
+  }
+
+  .confirmation-container h1 {
+    font-size: 24px;
+  }
+
+  .confirmation-message {
+    font-size: 14px;
+  }
+
+  .order-details-card {
+    padding: 24px 20px;
+  }
+
+  .info-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .info-item.full-width {
+    grid-column: 1;
+  }
+
+  .order-number {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .confirmation-note {
+    padding: 16px;
+  }
+}

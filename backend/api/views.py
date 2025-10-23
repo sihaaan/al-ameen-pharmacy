@@ -312,8 +312,9 @@ class OrderViewSet(viewsets.ModelViewSet):
     def create(self, request):
         """
         Create order from current cart.
-        Requires delivery_address_id in request.
+        Supports Cash on Delivery payment.
         """
+
         # Get user's cart
         try:
             cart = Cart.objects.get(user=request.user)
@@ -329,27 +330,36 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Get delivery address
-        address_id = request.data.get('delivery_address')
-        if not address_id:
-            return Response(
-                {'error': 'delivery_address is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Extract delivery information from request
+        full_name = request.data.get('full_name')
+        email = request.data.get('email')
+        phone = request.data.get('phone')
+        address = request.data.get('address')
+        city = request.data.get('city')
+        emirate = request.data.get('emirate')
+        delivery_notes = request.data.get('notes', '')
+        payment_method = request.data.get('payment_method', 'cash_on_delivery')
 
-        try:
-            address = Address.objects.get(id=address_id, user=request.user)
-        except Address.DoesNotExist:
+        # Validate required fields
+        if not all([full_name, email, phone, address, city, emirate]):
             return Response(
-                {'error': 'Address not found'},
-                status=status.HTTP_404_NOT_FOUND
+                {'error': 'All delivery information fields are required'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
         # Create order
         order = Order.objects.create(
             user=request.user,
-            delivery_address=address,
-            total_amount=cart.total_price
+            full_name=full_name,
+            email=email,
+            phone=phone,
+            address=address,
+            city=city,
+            emirate=emirate,
+            delivery_notes=delivery_notes,
+            payment_method=payment_method,
+            total_amount=cart.total_price,
+            status='pending'
         )
 
         # Create order items from cart items
@@ -367,9 +377,10 @@ class OrderViewSet(viewsets.ModelViewSet):
             product.stock_quantity -= cart_item.quantity
             product.save()
 
-        # Clear cart
+        # Clear cart after successful order creation
         cart.items.all().delete()
 
+        # Return order data
         return Response(
             OrderSerializer(order).data,
             status=status.HTTP_201_CREATED

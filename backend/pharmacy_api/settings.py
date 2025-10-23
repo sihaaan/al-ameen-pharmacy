@@ -96,6 +96,10 @@ STATIC_URL = 'static/'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# ---- Stripe Configuration ----
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
+STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY', '')
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

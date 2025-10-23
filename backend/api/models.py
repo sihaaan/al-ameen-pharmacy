@@ -188,21 +188,60 @@ class Order(models.Model):
         ('cancelled', 'Cancelled'),
     ]
 
+    PAYMENT_METHOD_CHOICES = [
+        ('cash_on_delivery', 'Cash on Delivery'),
+        ('stripe', 'Stripe (Card Payment)'),
+    ]
+
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
+    ]
+
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name='orders'
     )
-    delivery_address = models.ForeignKey(
-        Address,
-        on_delete=models.SET_NULL,
-        null=True
-    )
+
+    # Order number for customer reference
+    order_number = models.CharField(max_length=50, unique=True, blank=True)
+
+    # Delivery Information (stored directly instead of using Address model)
+    full_name = models.CharField(max_length=200, blank=True, default='')
+    email = models.EmailField(blank=True, default='')
+    phone = models.CharField(max_length=20, blank=True, default='')
+    address = models.CharField(max_length=255, blank=True, default='')
+    city = models.CharField(max_length=100, blank=True, default='')
+    emirate = models.CharField(max_length=50, blank=True, default='')
+    delivery_notes = models.TextField(blank=True, default='')
+
+    # Order status
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
         default='pending'
     )
+
+    # Payment information
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHOD_CHOICES,
+        default='cash_on_delivery'
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='pending'
+    )
+
+    # Stripe payment fields
+    stripe_payment_intent_id = models.CharField(max_length=255, blank=True, null=True)
+    stripe_client_secret = models.CharField(max_length=255, blank=True, null=True)
+
+    # Pricing
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
 
     # Timestamps
@@ -214,7 +253,18 @@ class Order(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Order #{self.id} - {self.user.username} - {self.status}"
+        return f"Order #{self.order_number} - {self.user.username} - {self.status}"
+
+    def save(self, *args, **kwargs):
+        # Auto-generate order number if not set
+        if not self.order_number:
+            import random
+            import string
+            from django.utils import timezone
+            timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
+            random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+            self.order_number = f"ORD-{timestamp}-{random_str}"
+        super().save(*args, **kwargs)
 
 
 class OrderItem(models.Model):

@@ -1,9 +1,11 @@
 // frontend/src/components/Cart.js
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import { useCart } from "../context/CartContext";
 import "../styles/Cart.css";
 
 const Cart = ({ onClose }) => {
+  const navigate = useNavigate();
   const {
     items,
     totalItems,
@@ -92,7 +94,15 @@ const Cart = ({ onClose }) => {
                   <button onClick={handleClearCart} className="clear-cart-btn">
                     Clear Cart
                   </button>
-                  <button className="checkout-btn">Proceed to Checkout</button>
+                  <button
+                    className="checkout-btn"
+                    onClick={() => {
+                      onClose();
+                      navigate('/checkout');
+                    }}
+                  >
+                    Proceed to Checkout
+                  </button>
                 </div>
               </div>
             </>
