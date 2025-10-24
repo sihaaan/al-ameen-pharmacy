@@ -168,6 +168,9 @@ const Checkout = () => {
 
       const response = await axiosInstance.post('/orders/', orderData);
 
+      // Clear cart immediately after successful order
+      clearCart();
+
       // Navigate to order confirmation
       navigate('/order-confirmation', {
         state: {

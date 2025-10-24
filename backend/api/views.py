@@ -586,6 +586,28 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
 
         try:
+            # Save address for future use (if it doesn't exist already)
+            # Check if similar address exists
+            existing_address = Address.objects.filter(
+                user=request.user,
+                street_address=address,
+                city=city,
+                emirate=emirate
+            ).first()
+
+            if not existing_address:
+                # Create new address
+                Address.objects.create(
+                    user=request.user,
+                    full_name=full_name,
+                    phone_number=phone,
+                    street_address=address,
+                    city=city,
+                    emirate=emirate,
+                    area=city,  # Default area to city if not provided
+                    is_default=Address.objects.filter(user=request.user).count() == 0  # First address is default
+                )
+
             # Create order
             order = Order.objects.create(
                 user=request.user,

@@ -9,9 +9,22 @@ const Profile = () => {
   const navigate = useNavigate();
 
   const [orders, setOrders] = useState([]);
+  const [addresses, setAddresses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('orders');
   const [orderFilter, setOrderFilter] = useState('all');
+  const [showAddressForm, setShowAddressForm] = useState(false);
+  const [editingAddress, setEditingAddress] = useState(null);
+  const [addressForm, setAddressForm] = useState({
+    full_name: '',
+    phone_number: '',
+    street_address: '',
+    building_number: '',
+    area: '',
+    city: '',
+    emirate: '',
+    is_default: false
+  });
 
   useEffect(() => {
     if (!user) {
@@ -19,6 +32,7 @@ const Profile = () => {
       return;
     }
     fetchOrders();
+    fetchAddresses();
   }, [user, navigate]);
 
   const fetchOrders = async () => {
@@ -29,6 +43,75 @@ const Profile = () => {
     } catch (error) {
       console.error('Error fetching orders:', error);
       setLoading(false);
+    }
+  };
+
+  const fetchAddresses = async () => {
+    try {
+      const response = await axiosInstance.get('/addresses/');
+      setAddresses(response.data);
+    } catch (error) {
+      console.error('Error fetching addresses:', error);
+    }
+  };
+
+  const handleAddressFormChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setAddressForm(prev => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
+  };
+
+  const handleAddAddress = () => {
+    setEditingAddress(null);
+    setAddressForm({
+      full_name: '',
+      phone_number: '',
+      street_address: '',
+      building_number: '',
+      area: '',
+      city: '',
+      emirate: '',
+      is_default: addresses.length === 0
+    });
+    setShowAddressForm(true);
+  };
+
+  const handleEditAddress = (address) => {
+    setEditingAddress(address);
+    setAddressForm(address);
+    setShowAddressForm(true);
+  };
+
+  const handleSaveAddress = async (e) => {
+    e.preventDefault();
+    try {
+      if (editingAddress) {
+        // Update existing address
+        await axiosInstance.put(`/addresses/${editingAddress.id}/`, addressForm);
+      } else {
+        // Create new address
+        await axiosInstance.post('/addresses/', addressForm);
+      }
+      fetchAddresses();
+      setShowAddressForm(false);
+      setEditingAddress(null);
+    } catch (error) {
+      console.error('Error saving address:', error);
+      alert('Failed to save address. Please try again.');
+    }
+  };
+
+  const handleDeleteAddress = async (addressId) => {
+    if (window.confirm('Are you sure you want to delete this address?')) {
+      try {
+        await axiosInstance.delete(`/addresses/${addressId}/`);
+        fetchAddresses();
+      } catch (error) {
+        console.error('Error deleting address:', error);
+        alert('Failed to delete address.');
+      }
     }
   };
 
@@ -92,6 +175,12 @@ const Profile = () => {
             onClick={() => setActiveTab('orders')}
           >
             📦 Order History ({orders.length})
+          </button>
+          <button
+            className={`tab-button ${activeTab === 'addresses' ? 'active' : ''}`}
+            onClick={() => setActiveTab('addresses')}
+          >
+            📍 Saved Addresses ({addresses.length})
           </button>
           <button
             className={`tab-button ${activeTab === 'account' ? 'active' : ''}`}
@@ -223,6 +312,195 @@ const Profile = () => {
                             <p className="total-amount">AED {parseFloat(order.total_amount).toFixed(2)}</p>
                           </div>
                         </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'addresses' && (
+            <div className="addresses-tab">
+              <div className="addresses-header">
+                <h2>Saved Addresses</h2>
+                <button className="btn-primary" onClick={handleAddAddress}>
+                  + Add New Address
+                </button>
+              </div>
+
+              {showAddressForm && (
+                <div className="address-form-overlay">
+                  <div className="address-form-modal">
+                    <h3>{editingAddress ? 'Edit Address' : 'Add New Address'}</h3>
+                    <form onSubmit={handleSaveAddress}>
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label htmlFor="full_name">Full Name *</label>
+                          <input
+                            type="text"
+                            id="full_name"
+                            name="full_name"
+                            value={addressForm.full_name}
+                            onChange={handleAddressFormChange}
+                            required
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label htmlFor="phone_number">Phone Number *</label>
+                          <input
+                            type="tel"
+                            id="phone_number"
+                            name="phone_number"
+                            value={addressForm.phone_number}
+                            onChange={handleAddressFormChange}
+                            placeholder="05XXXXXXXX"
+                            required
+                          />
+                        </div>
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor="street_address">Street Address *</label>
+                        <input
+                          type="text"
+                          id="street_address"
+                          name="street_address"
+                          value={addressForm.street_address}
+                          onChange={handleAddressFormChange}
+                          required
+                        />
+                      </div>
+
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label htmlFor="building_number">Building Number</label>
+                          <input
+                            type="text"
+                            id="building_number"
+                            name="building_number"
+                            value={addressForm.building_number}
+                            onChange={handleAddressFormChange}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label htmlFor="area">Area *</label>
+                          <input
+                            type="text"
+                            id="area"
+                            name="area"
+                            value={addressForm.area}
+                            onChange={handleAddressFormChange}
+                            required
+                          />
+                        </div>
+                      </div>
+
+                      <div className="form-row">
+                        <div className="form-group">
+                          <label htmlFor="city">City *</label>
+                          <input
+                            type="text"
+                            id="city"
+                            name="city"
+                            value={addressForm.city}
+                            onChange={handleAddressFormChange}
+                            required
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label htmlFor="emirate">Emirate *</label>
+                          <select
+                            id="emirate"
+                            name="emirate"
+                            value={addressForm.emirate}
+                            onChange={handleAddressFormChange}
+                            required
+                          >
+                            <option value="">Select Emirate</option>
+                            <option value="Abu Dhabi">Abu Dhabi</option>
+                            <option value="Dubai">Dubai</option>
+                            <option value="Sharjah">Sharjah</option>
+                            <option value="Ajman">Ajman</option>
+                            <option value="Umm Al Quwain">Umm Al Quwain</option>
+                            <option value="Ras Al Khaimah">Ras Al Khaimah</option>
+                            <option value="Fujairah">Fujairah</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="form-group">
+                        <label className="checkbox-label">
+                          <input
+                            type="checkbox"
+                            name="is_default"
+                            checked={addressForm.is_default}
+                            onChange={handleAddressFormChange}
+                          />
+                          Set as default address
+                        </label>
+                      </div>
+
+                      <div className="form-actions">
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => {
+                            setShowAddressForm(false);
+                            setEditingAddress(null);
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button type="submit" className="btn-primary">
+                          {editingAddress ? 'Update Address' : 'Save Address'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {addresses.length === 0 ? (
+                <div className="no-addresses">
+                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                    <circle cx="12" cy="10" r="3"></circle>
+                  </svg>
+                  <h3>No saved addresses</h3>
+                  <p>Add your first delivery address to make checkout faster.</p>
+                  <button className="btn-primary" onClick={handleAddAddress}>
+                    + Add Address
+                  </button>
+                </div>
+              ) : (
+                <div className="addresses-grid">
+                  {addresses.map(address => (
+                    <div key={address.id} className={`address-card ${address.is_default ? 'default' : ''}`}>
+                      {address.is_default && (
+                        <span className="default-badge">Default</span>
+                      )}
+                      <div className="address-card-content">
+                        <h4>{address.full_name}</h4>
+                        <p>{address.street_address}</p>
+                        {address.building_number && <p>Building: {address.building_number}</p>}
+                        <p>{address.area}, {address.city}</p>
+                        <p>{address.emirate}</p>
+                        <p className="address-phone">{address.phone_number}</p>
+                      </div>
+                      <div className="address-card-actions">
+                        <button
+                          className="btn-edit"
+                          onClick={() => handleEditAddress(address)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="btn-delete"
+                          onClick={() => handleDeleteAddress(address.id)}
+                        >
+                          Delete
+                        </button>
                       </div>
                     </div>
                   ))}
