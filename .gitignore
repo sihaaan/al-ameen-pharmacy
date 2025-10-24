@@ -22,6 +22,9 @@ build/
 .env.production
 *.env
 
+# Project status (contains sensitive info about current work)
+CURRENT_STATUS.md
+
 # Virtual environments
 .venv/
 venv/
