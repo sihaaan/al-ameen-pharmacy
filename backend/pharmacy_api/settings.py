@@ -36,13 +36,13 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Serve static files in production
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
 ]
 
 # CORS Configuration
@@ -95,8 +95,16 @@ DATABASES = {
 TIME_ZONE = "Asia/Dubai"
 USE_TZ = True
 
-# ---- static files ----
-STATIC_URL = 'static/'
+# ---- static files (production ready with Whitenoise) ----
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # Where collectstatic puts files
+
+# Whitenoise configuration for production static file serving
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # ---- media files (user uploads like product images) ----
 MEDIA_URL = '/media/'

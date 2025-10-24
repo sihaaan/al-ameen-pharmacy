@@ -37,14 +37,14 @@ sqlparse==0.5.3
 tzdata==2025.2
 
 # ============================================
-# PRODUCTION ADDITIONS (uncomment when deploying)
+# PRODUCTION REQUIREMENTS
 # ============================================
 
-# Web Server
-# gunicorn==23.0.0
+# Web Server (WSGI for production)
+gunicorn==23.0.0
 
-# Static File Hosting
-# whitenoise==6.8.2
+# Static File Hosting (serves static files in production)
+whitenoise==6.8.2
 
 # Image Processing (for product images)
 Pillow==11.3.0
