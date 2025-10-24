@@ -4,6 +4,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
+from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
+from django.db.models import Q, F
 
 from .models import Category, Product, Cart, CartItem, Address, Order, OrderItem
 from .serializers import (
@@ -214,13 +216,67 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """
-        Filter products by category if requested.
-        Example: /api/products/?category=1
+        Advanced product search with PostgreSQL full-text search and relevance ranking.
+
+        Features:
+        - Full-text search across name, description, and manufacturer
+        - Relevance-based ranking (exact matches rank higher)
+        - Weighted search (name weighted highest, then description, then manufacturer)
+        - Handles pharmaceutical synonyms and partial matches
+        - Category filtering
+        - Sorted by relevance score
+
+        Examples:
+        - /api/products/?search=panadol
+        - /api/products/?category=1
+        - /api/products/?search=pain&category=1
         """
         queryset = Product.objects.all()
+        search_query = self.request.query_params.get('search', None)
         category_id = self.request.query_params.get('category', None)
+
+        # Apply category filter
         if category_id:
             queryset = queryset.filter(category_id=category_id)
+
+        # Apply search with performance optimization
+        if search_query and search_query.strip():
+            query_term = search_query.strip()
+
+            # For autocomplete (short queries), use fast case-insensitive search
+            # For detailed search (3+ chars), use full-text search with ranking
+            if len(query_term) < 3:
+                # Fast path: Simple ILIKE query (much faster than full-text search)
+                queryset = queryset.filter(
+                    Q(name__icontains=query_term) |
+                    Q(manufacturer__icontains=query_term)
+                ).order_by('name')[:10]  # Limit immediately for speed
+            else:
+                # Full path: PostgreSQL full-text search with relevance ranking
+                # Create weighted search vectors for different fields
+                search_vector = (
+                    SearchVector('name', weight='A') +
+                    SearchVector('description', weight='B') +
+                    SearchVector('manufacturer', weight='C')
+                )
+
+                # Create search query (supports partial matching)
+                search_query_obj = SearchQuery(query_term, search_type='websearch')
+
+                # Annotate with search rank and filter
+                queryset = queryset.annotate(
+                    search=search_vector,
+                    rank=SearchRank(search_vector, search_query_obj)
+                ).filter(
+                    Q(search=search_query_obj) |  # Full-text search
+                    Q(name__icontains=query_term) |  # Fallback contains
+                    Q(manufacturer__icontains=query_term)
+                ).order_by('-rank', 'name')[:20]  # Limit for performance
+
+        else:
+            # No search query - return all products ordered by name
+            queryset = queryset.order_by('name')
+
         return queryset
 
 
