@@ -200,11 +200,19 @@ class AddressSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
     def validate_phone_number(self, value):
-        """Basic phone validation for UAE numbers"""
-        # Remove spaces and dashes
-        cleaned = value.replace(' ', '').replace('-', '')
-        if not cleaned.startswith('+971') and not cleaned.startswith('971') and not cleaned.startswith('0'):
-            raise serializers.ValidationError("Please enter a valid UAE phone number")
+        """Basic phone validation - accepts any reasonable phone number"""
+        # Remove spaces and dashes for validation
+        cleaned = value.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+
+        # Check if it contains at least some digits and has reasonable length
+        if not cleaned or len(cleaned) < 7:
+            raise serializers.ValidationError("Please enter a valid phone number")
+
+        # Check if it's mostly digits (allowing + at start for country code)
+        digits_only = cleaned.lstrip('+')
+        if not digits_only.isdigit():
+            raise serializers.ValidationError("Phone number should contain only digits and optional + prefix")
+
         return value
 
 

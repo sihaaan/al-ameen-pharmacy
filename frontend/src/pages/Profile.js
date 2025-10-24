@@ -19,10 +19,11 @@ const Profile = () => {
     full_name: '',
     phone_number: '',
     street_address: '',
-    building_number: '',
+    building: '',
     area: '',
     city: '',
     emirate: '',
+    postal_code: '',
     is_default: false
   });
 
@@ -69,10 +70,11 @@ const Profile = () => {
       full_name: '',
       phone_number: '',
       street_address: '',
-      building_number: '',
+      building: '',
       area: '',
       city: '',
       emirate: '',
+      postal_code: '',
       is_default: addresses.length === 0
     });
     setShowAddressForm(true);
@@ -86,6 +88,7 @@ const Profile = () => {
 
   const handleSaveAddress = async (e) => {
     e.preventDefault();
+    console.log('Submitting address form with data:', addressForm);
     try {
       if (editingAddress) {
         // Update existing address
@@ -99,7 +102,9 @@ const Profile = () => {
       setEditingAddress(null);
     } catch (error) {
       console.error('Error saving address:', error);
-      alert('Failed to save address. Please try again.');
+      console.error('Error response data:', error.response?.data);
+      console.error('Error response status:', error.response?.status);
+      alert(`Failed to save address: ${JSON.stringify(error.response?.data || error.message)}`);
     }
   };
 
@@ -374,12 +379,12 @@ const Profile = () => {
 
                       <div className="form-row">
                         <div className="form-group">
-                          <label htmlFor="building_number">Building Number</label>
+                          <label htmlFor="building">Building Number</label>
                           <input
                             type="text"
-                            id="building_number"
-                            name="building_number"
-                            value={addressForm.building_number}
+                            id="building"
+                            name="building"
+                            value={addressForm.building}
                             onChange={handleAddressFormChange}
                           />
                         </div>
@@ -483,7 +488,7 @@ const Profile = () => {
                       <div className="address-card-content">
                         <h4>{address.full_name}</h4>
                         <p>{address.street_address}</p>
-                        {address.building_number && <p>Building: {address.building_number}</p>}
+                        {address.building && <p>Building: {address.building}</p>}
                         <p>{address.area}, {address.city}</p>
                         <p>{address.emirate}</p>
                         <p className="address-phone">{address.phone_number}</p>
