@@ -92,6 +92,9 @@ ALLOWED_HOSTS=*.up.railway.app,localhost,127.0.0.1
 # CORS Origins (update after deploying frontend)
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 
+# Cloudinary (Cloud Image Storage)
+CLOUDINARY_URL=cloudinary://358126527472146:Ld4k5T5AvyC5W5aF5XADbc8qfOw@drtvgoidu
+
 # Email Settings (Gmail SMTP)
 EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
 EMAIL_HOST=smtp.gmail.com
@@ -101,6 +104,8 @@ EMAIL_HOST_USER=sihandx@gmail.com
 EMAIL_HOST_PASSWORD=gvgzpunstszvqsol
 DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <sihandx@gmail.com>
 ```
+
+**Important:** Images uploaded via admin panel will be stored on Cloudinary's CDN, so they persist across Railway deployments!
 
 ### Step 4: Deploy Backend
 

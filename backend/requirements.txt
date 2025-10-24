@@ -49,6 +49,10 @@ whitenoise==6.8.2
 # Image Processing (for product images)
 Pillow==11.3.0
 
+# Cloud Image Storage (Cloudinary)
+cloudinary==1.41.0
+django-cloudinary-storage==0.3.0
+
 # Email Backend
 # django-anymail==13.0.2
 

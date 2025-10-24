@@ -29,7 +29,10 @@ ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost").split(","
 INSTALLED_APPS = [
     'django.contrib.admin','django.contrib.auth','django.contrib.contenttypes',
     'django.contrib.sessions','django.contrib.messages','django.contrib.staticfiles',
-    'rest_framework','corsheaders', 'api'
+    'rest_framework','corsheaders',
+    'cloudinary_storage',  # Must be before django.contrib.staticfiles
+    'cloudinary',
+    'api'
 ]
 
 # ---- middleware (CORS FIRST) ----
@@ -106,9 +109,24 @@ STORAGES = {
     },
 }
 
-# ---- media files (user uploads like product images) ----
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# ---- Cloudinary Configuration (Cloud Image Storage) ----
+# Images will be stored on Cloudinary CDN instead of local filesystem
+CLOUDINARY_STORAGE = {
+    'CLOUDINARY_URL': os.environ.get('CLOUDINARY_URL', ''),
+}
+
+# Set Cloudinary as the default file storage for media files
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+
+# Fallback for local development if Cloudinary not configured
+if not os.environ.get('CLOUDINARY_URL'):
+    # Use local filesystem storage in development
+    MEDIA_URL = '/media/'
+    MEDIA_ROOT = BASE_DIR / 'media'
+    DEFAULT_FILE_STORAGE = 'django.core.files.storage.FileSystemStorage'
+else:
+    # Cloudinary media URL
+    MEDIA_URL = '/media/'  # Cloudinary will handle this
 
 # ---- Stripe Configuration ----
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
