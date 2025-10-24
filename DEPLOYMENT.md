@@ -81,10 +81,10 @@ Click on "Variables" tab and add these:
 ```bash
 # Django Core
 DEBUG=0
-DJANGO_SECRET_KEY=nm$ngi71btjpm(cgws62ly4dnz15gji3gzupm61=ht0pa)fye@
+DJANGO_SECRET_KEY=your-secret-key-from-env-file
 
 # Database (use your Neon PostgreSQL URL)
-DATABASE_URL=postgresql://neondb_owner:your-password@ep-little-bird-a1vg3if2-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL=postgresql://username:password@your-host.neon.tech/database?sslmode=require
 
 # Allowed Hosts (update after getting Railway domain)
 ALLOWED_HOSTS=*.up.railway.app,localhost,127.0.0.1
@@ -93,17 +93,19 @@ ALLOWED_HOSTS=*.up.railway.app,localhost,127.0.0.1
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 
 # Cloudinary (Cloud Image Storage)
-CLOUDINARY_URL=cloudinary://358126527472146:Ld4k5T5AvyC5W5aF5XADbc8qfOw@drtvgoidu
+CLOUDINARY_URL=cloudinary://your_api_key:your_api_secret@your_cloud_name
 
 # Email Settings (Gmail SMTP)
 EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
 EMAIL_HOST=smtp.gmail.com
 EMAIL_PORT=587
 EMAIL_USE_TLS=1
-EMAIL_HOST_USER=sihandx@gmail.com
-EMAIL_HOST_PASSWORD=gvgzpunstszvqsol
-DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <sihandx@gmail.com>
+EMAIL_HOST_USER=your-email@gmail.com
+EMAIL_HOST_PASSWORD=your-gmail-app-password
+DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <your-email@gmail.com>
 ```
+
+**SECURITY NOTE:** Never commit actual credentials to git! Use the values from your `.env` file.
 
 **Important:** Images uploaded via admin panel will be stored on Cloudinary's CDN, so they persist across Railway deployments!
 
