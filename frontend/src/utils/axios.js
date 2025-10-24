@@ -3,7 +3,7 @@ import axios from 'axios';
 
 // Create axios instance with base configuration
 const axiosInstance = axios.create({
-  baseURL: 'http://localhost:8000/api',
+  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000/api',
 });
 
 // Add request interceptor to include token in every request
@@ -35,7 +35,8 @@ axiosInstance.interceptors.response.use(
       try {
         const refreshToken = localStorage.getItem('refreshToken');
         if (refreshToken) {
-          const response = await axios.post('http://localhost:8000/api/token/refresh/', {
+          const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+          const response = await axios.post(`${API_URL}/token/refresh/`, {
             refresh: refreshToken,
           });
 

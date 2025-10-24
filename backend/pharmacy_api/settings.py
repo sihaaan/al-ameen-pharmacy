@@ -45,8 +45,14 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True  # OK for dev; restrict for prod
-CORS_ALLOWS_CREDENTIALS = True
+# CORS Configuration
+# For development, allow localhost. For production, set CORS_ALLOWED_ORIGINS in .env
+CORS_ALLOWED_ORIGINS = os.environ.get(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000'  # Development default
+).split(',')
+
+CORS_ALLOW_CREDENTIALS = True
 ROOT_URLCONF = 'pharmacy_api.urls'
 
 # ---- templates ----
@@ -170,6 +176,17 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ---- security settings (HTTPS enforcement for production) ----
+# These settings are only active when DEBUG=False (production)
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True  # Force HTTPS
+    SECURE_HSTS_SECONDS = 31536000  # Remember HTTPS for 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Apply to all subdomains
+    SECURE_HSTS_PRELOAD = True  # Allow browser preload list
+    SESSION_COOKIE_SECURE = True  # Only send session cookies over HTTPS
+    CSRF_COOKIE_SECURE = True  # Only send CSRF cookies over HTTPS
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # For reverse proxy
 
 # ---- rest framework ----
 REST_FRAMEWORK = {

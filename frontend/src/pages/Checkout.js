@@ -150,7 +150,7 @@ const Checkout = () => {
         <h1>Checkout</h1>
 
         <div className="checkout-content">
-          {/* Order Summary */}
+          {/* Order Summary - LEFT SIDE */}
           <div className="order-summary">
             <h2>Order Summary</h2>
             <div className="summary-items">
@@ -183,7 +183,7 @@ const Checkout = () => {
             </div>
           </div>
 
-          {/* Checkout Form */}
+          {/* Checkout Form - RIGHT SIDE */}
           <div className="checkout-form-container">
             <form onSubmit={handleSubmit} className="checkout-form">
               <div className="form-section">

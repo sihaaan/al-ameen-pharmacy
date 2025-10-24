@@ -39,7 +39,8 @@ export const AuthProvider = ({ children }) => {
     setError(null);
     try {
       // Call Django JWT token endpoint
-      const response = await axios.post('http://localhost:8000/api/token/', {
+      const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+      const response = await axios.post(`${API_URL}/token/`, {
         username,
         password,
       });
@@ -115,7 +116,8 @@ export const AuthProvider = ({ children }) => {
     }
 
     try {
-      const response = await axios.post('http://localhost:8000/api/token/refresh/', {
+      const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+      const response = await axios.post(`${API_URL}/token/refresh/`, {
         refresh,
       });
 
