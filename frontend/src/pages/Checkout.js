@@ -24,6 +24,24 @@ const Checkout = () => {
 
   const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [savedAddresses, setSavedAddresses] = useState([]);
+  const [selectedAddressId, setSelectedAddressId] = useState('new');
+
+  // Fetch saved addresses
+  useEffect(() => {
+    const fetchAddresses = async () => {
+      try {
+        const response = await axiosInstance.get('/addresses/');
+        setSavedAddresses(response.data);
+      } catch (error) {
+        console.error('Failed to fetch addresses:', error);
+      }
+    };
+
+    if (user) {
+      fetchAddresses();
+    }
+  }, [user]);
 
   // Redirect if cart is empty or user not logged in
   useEffect(() => {
@@ -45,6 +63,36 @@ const Checkout = () => {
     'Ras Al Khaimah',
     'Fujairah'
   ];
+
+  const handleAddressSelect = (e) => {
+    const addressId = e.target.value;
+    setSelectedAddressId(addressId);
+
+    if (addressId === 'new') {
+      // Clear form for new address
+      setFormData(prev => ({
+        ...prev,
+        fullName: '',
+        phone: '',
+        address: '',
+        city: '',
+        emirate: ''
+      }));
+    } else {
+      // Fill form with selected address
+      const selectedAddress = savedAddresses.find(addr => addr.id === parseInt(addressId));
+      if (selectedAddress) {
+        setFormData(prev => ({
+          ...prev,
+          fullName: selectedAddress.full_name,
+          phone: selectedAddress.phone_number,
+          address: selectedAddress.street_address,
+          city: selectedAddress.city,
+          emirate: selectedAddress.emirate
+        }));
+      }
+    }
+  };
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -234,6 +282,25 @@ const Checkout = () => {
 
               <div className="form-section">
                 <h3>Delivery Address</h3>
+
+                {savedAddresses.length > 0 && (
+                  <div className="form-group">
+                    <label htmlFor="addressSelect">Select Saved Address</label>
+                    <select
+                      id="addressSelect"
+                      value={selectedAddressId}
+                      onChange={handleAddressSelect}
+                      className="address-select"
+                    >
+                      <option value="new">+ Add New Address</option>
+                      {savedAddresses.map(address => (
+                        <option key={address.id} value={address.id}>
+                          {address.full_name} - {address.area}, {address.city}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
                 <div className="form-group">
                   <label htmlFor="address">Street Address *</label>
