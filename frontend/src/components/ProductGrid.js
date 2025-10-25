@@ -13,6 +13,7 @@ const ProductGrid = ({ products }) => {
   const [selectedProductId, setSelectedProductId] = useState(null);
   const [localQuantities, setLocalQuantities] = useState({});
   const debounceTimers = useRef({});
+  const pendingQuantities = useRef({}); // Track target quantities (not affected by closure)
 
   // Get current quantity - use local state if available, otherwise cart
   const getCartQuantity = (productId) => {
@@ -51,6 +52,9 @@ const ProductGrid = ({ products }) => {
       [product.id]: newQty
     }));
 
+    // Store target quantity in ref (survives closure)
+    pendingQuantities.current[product.id] = newQty;
+
     // Clear existing debounce timer
     if (debounceTimers.current[product.id]) {
       clearTimeout(debounceTimers.current[product.id]);
@@ -58,7 +62,8 @@ const ProductGrid = ({ products }) => {
 
     // Debounce the API call - batch rapid clicks
     debounceTimers.current[product.id] = setTimeout(async () => {
-      const finalQty = localQuantities[product.id] || newQty;
+      // Read from ref, not from state closure
+      const finalQty = pendingQuantities.current[product.id];
       const cartItemId = getCartItemId(product.id);
 
       if (!cartItemId) {
@@ -75,7 +80,7 @@ const ProductGrid = ({ products }) => {
         delete next[product.id];
         return next;
       });
-
+      delete pendingQuantities.current[product.id];
       delete debounceTimers.current[product.id];
     }, 500);
   };
@@ -99,6 +104,9 @@ const ProductGrid = ({ products }) => {
       [product.id]: newQty
     }));
 
+    // Store target quantity in ref
+    pendingQuantities.current[product.id] = newQty;
+
     // Clear existing debounce timer
     if (debounceTimers.current[product.id]) {
       clearTimeout(debounceTimers.current[product.id]);
@@ -106,7 +114,8 @@ const ProductGrid = ({ products }) => {
 
     // Debounce the API call
     debounceTimers.current[product.id] = setTimeout(async () => {
-      const finalQty = localQuantities[product.id] !== undefined ? localQuantities[product.id] : newQty;
+      // Read from ref, not from state closure
+      const finalQty = pendingQuantities.current[product.id];
       const cartItemId = getCartItemId(product.id);
 
       if (cartItemId) {
@@ -119,7 +128,7 @@ const ProductGrid = ({ products }) => {
         delete next[product.id];
         return next;
       });
-
+      delete pendingQuantities.current[product.id];
       delete debounceTimers.current[product.id];
     }, 500);
   };
