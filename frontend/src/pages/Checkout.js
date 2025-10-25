@@ -26,6 +26,7 @@ const Checkout = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [savedAddresses, setSavedAddresses] = useState([]);
   const [selectedAddressId, setSelectedAddressId] = useState('new');
+  const [orderPlaced, setOrderPlaced] = useState(false);
 
   // Fetch saved addresses
   useEffect(() => {
@@ -44,15 +45,16 @@ const Checkout = () => {
   }, [user]);
 
   // Redirect if cart is empty or user not logged in
+  // Don't redirect if order was just placed (cart cleared after successful order)
   useEffect(() => {
     if (!user) {
       navigate('/login');
       return;
     }
-    if (items.length === 0) {
+    if (items.length === 0 && !orderPlaced) {
       navigate('/');
     }
-  }, [user, items, navigate]);
+  }, [user, items, orderPlaced, navigate]);
 
   const emirates = [
     'Abu Dhabi',
@@ -167,6 +169,9 @@ const Checkout = () => {
       };
 
       const response = await axiosInstance.post('/orders/', orderData);
+
+      // Set flag to prevent redirect when cart is cleared
+      setOrderPlaced(true);
 
       // Clear cart immediately after successful order
       clearCart();
