@@ -1,0 +1,1 @@
+web: gunicorn pharmacy_api.wsgi --log-file -
