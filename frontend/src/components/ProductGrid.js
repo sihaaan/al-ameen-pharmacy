@@ -1,5 +1,5 @@
 // frontend/src/components/ProductGrid.js
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useCart } from "../context/CartContext";
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
@@ -11,7 +11,8 @@ const ProductGrid = ({ products }) => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [selectedProductId, setSelectedProductId] = useState(null);
-  const [updatingItems, setUpdatingItems] = useState(new Set());
+  const debounceTimers = useRef({});
+  const pendingQuantities = useRef({});
 
   // Get current quantity in cart for a product
   const getCartQuantity = (productId) => {
@@ -25,7 +26,7 @@ const ProductGrid = ({ products }) => {
     return cartItem?.id;
   };
 
-  const incrementQuantity = async (e, product) => {
+  const incrementQuantity = (e, product) => {
     e.stopPropagation();
 
     if (!user) {
@@ -34,36 +35,20 @@ const ProductGrid = ({ products }) => {
       return;
     }
 
-    // Prevent rapid clicks - check if this item is already updating
-    if (updatingItems.has(product.id)) return;
-
     const currentQty = getCartQuantity(product.id);
     const cartItemId = getCartItemId(product.id);
 
     // Check if we can increment
     if (currentQty >= product.stock_quantity) return;
 
-    // Mark as updating
-    setUpdatingItems(prev => new Set(prev).add(product.id));
-
-    try {
-      // Fire and forget - CartContext handles optimistic updates
-      if (currentQty === 0) {
-        // Not in cart yet, add it
-        await addToCart(product, 1);
-      } else {
-        // Already in cart, increment
-        await updateQuantity(cartItemId, currentQty + 1);
-      }
-    } finally {
-      // Remove from updating set after a short delay
-      setTimeout(() => {
-        setUpdatingItems(prev => {
-          const next = new Set(prev);
-          next.delete(product.id);
-          return next;
-        });
-      }, 300);
+    // CartContext handles optimistic updates - UI updates instantly
+    // Fire and forget - no await needed
+    if (currentQty === 0) {
+      // Not in cart yet, add it
+      addToCart(product, 1);
+    } else {
+      // Already in cart, increment
+      updateQuantity(cartItemId, currentQty + 1);
     }
   };
 
