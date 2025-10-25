@@ -11,11 +11,14 @@ const ProductGrid = ({ products }) => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [selectedProductId, setSelectedProductId] = useState(null);
+  const [localQuantities, setLocalQuantities] = useState({});
   const debounceTimers = useRef({});
-  const pendingQuantities = useRef({});
 
-  // Get current quantity in cart for a product
+  // Get current quantity - use local state if available, otherwise cart
   const getCartQuantity = (productId) => {
+    if (localQuantities[productId] !== undefined) {
+      return localQuantities[productId];
+    }
     const cartItem = items.find(item => item.product.id === productId);
     return cartItem ? cartItem.quantity : 0;
   };
@@ -36,20 +39,45 @@ const ProductGrid = ({ products }) => {
     }
 
     const currentQty = getCartQuantity(product.id);
-    const cartItemId = getCartItemId(product.id);
 
-    // Check if we can increment
+    // Check stock limit
     if (currentQty >= product.stock_quantity) return;
 
-    // CartContext handles optimistic updates - UI updates instantly
-    // Fire and forget - no await needed
-    if (currentQty === 0) {
-      // Not in cart yet, add it
-      addToCart(product, 1);
-    } else {
-      // Already in cart, increment
-      updateQuantity(cartItemId, currentQty + 1);
+    const newQty = currentQty + 1;
+
+    // Update UI immediately with local state
+    setLocalQuantities(prev => ({
+      ...prev,
+      [product.id]: newQty
+    }));
+
+    // Clear existing debounce timer
+    if (debounceTimers.current[product.id]) {
+      clearTimeout(debounceTimers.current[product.id]);
     }
+
+    // Debounce the API call - batch rapid clicks
+    debounceTimers.current[product.id] = setTimeout(async () => {
+      const finalQty = localQuantities[product.id] || newQty;
+      const cartItemId = getCartItemId(product.id);
+
+      if (!cartItemId) {
+        // Not in cart yet, add it
+        await addToCart(product, finalQty);
+      } else {
+        // Already in cart, update it
+        await updateQuantity(cartItemId, finalQty);
+      }
+
+      // Clear local state after API call completes
+      setLocalQuantities(prev => {
+        const next = { ...prev };
+        delete next[product.id];
+        return next;
+      });
+
+      delete debounceTimers.current[product.id];
+    }, 500);
   };
 
   const decrementQuantity = (e, product) => {
@@ -60,12 +88,40 @@ const ProductGrid = ({ products }) => {
     }
 
     const currentQty = getCartQuantity(product.id);
-    const cartItemId = getCartItemId(product.id);
 
     if (currentQty <= 0) return;
 
-    // Fire and forget - CartContext handles optimistic updates
-    updateQuantity(cartItemId, currentQty - 1);
+    const newQty = currentQty - 1;
+
+    // Update UI immediately with local state
+    setLocalQuantities(prev => ({
+      ...prev,
+      [product.id]: newQty
+    }));
+
+    // Clear existing debounce timer
+    if (debounceTimers.current[product.id]) {
+      clearTimeout(debounceTimers.current[product.id]);
+    }
+
+    // Debounce the API call
+    debounceTimers.current[product.id] = setTimeout(async () => {
+      const finalQty = localQuantities[product.id] !== undefined ? localQuantities[product.id] : newQty;
+      const cartItemId = getCartItemId(product.id);
+
+      if (cartItemId) {
+        await updateQuantity(cartItemId, finalQty);
+      }
+
+      // Clear local state after API call completes
+      setLocalQuantities(prev => {
+        const next = { ...prev };
+        delete next[product.id];
+        return next;
+      });
+
+      delete debounceTimers.current[product.id];
+    }, 500);
   };
 
   const handleCardClick = (e, productId) => {
