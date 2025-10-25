@@ -238,6 +238,12 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True  # Only send CSRF cookies over HTTPS
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # For reverse proxy
 
+    # CSRF trusted origins for Railway deployment
+    CSRF_TRUSTED_ORIGINS = [
+        'https://*.up.railway.app',
+        'https://*.railway.app',
+    ]
+
 # ---- rest framework ----
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (

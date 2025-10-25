@@ -1,0 +1,6 @@
+# Don't copy these to Railway
+*.pyc
+__pycache__/
+.env
+*.sqlite3
+sent_emails/
