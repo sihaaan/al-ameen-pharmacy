@@ -12,8 +12,10 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+import re
 import dj_database_url
 from dotenv import load_dotenv
+import cloudinary
 
 # ---- load env file ----
 load_dotenv()  # reads .env at project root
@@ -102,31 +104,53 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'  # Where collectstatic puts files
 
-# Whitenoise configuration for production static file serving
-STORAGES = {
-    "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
-    },
-}
-
 # ---- Cloudinary Configuration (Cloud Image Storage) ----
 # Images will be stored on Cloudinary CDN instead of local filesystem
+
+# Parse and configure Cloudinary from CLOUDINARY_URL environment variable
+cloudinary_url = os.environ.get('CLOUDINARY_URL', '')
+if cloudinary_url:
+    # Extract credentials from CLOUDINARY_URL format: cloudinary://api_key:api_secret@cloud_name
+    match = re.match(r'cloudinary://(\d+):([^@]+)@(.+)', cloudinary_url)
+    if match:
+        api_key, api_secret, cloud_name = match.groups()
+        cloudinary.config(
+            cloud_name=cloud_name,
+            api_key=api_key,
+            api_secret=api_secret,
+            secure=True
+        )
+
 CLOUDINARY_STORAGE = {
-    'CLOUDINARY_URL': os.environ.get('CLOUDINARY_URL', ''),
+    'CLOUDINARY_URL': cloudinary_url,
 }
 
-# Set Cloudinary as the default file storage for media files
-DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+# Media files URL
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
-# Fallback for local development if Cloudinary not configured
-if not os.environ.get('CLOUDINARY_URL'):
-    # Use local filesystem storage in development
-    MEDIA_URL = '/media/'
-    MEDIA_ROOT = BASE_DIR / 'media'
-    DEFAULT_FILE_STORAGE = 'django.core.files.storage.FileSystemStorage'
+# Django 5.x STORAGES configuration
+# Configure both static files and media files storage
+if cloudinary_url:
+    # Production: Use Cloudinary for media files, Whitenoise for static files
+    STORAGES = {
+        "default": {
+            "BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
 else:
-    # Cloudinary media URL
-    MEDIA_URL = '/media/'  # Cloudinary will handle this
+    # Development: Use local filesystem for both
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
 
 # ---- Stripe Configuration ----
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
