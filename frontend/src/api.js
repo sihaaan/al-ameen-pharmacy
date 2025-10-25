@@ -2,7 +2,8 @@
 import axios from "axios";
 
 // Base URL for your Django backend API
-const API_URL = "http://localhost:8000/api";
+// Use environment variable or fallback to localhost for development
+const API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000/api";
 
 // Create axios instance with default settings
 const api = axios.create({
