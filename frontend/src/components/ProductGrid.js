@@ -14,6 +14,7 @@ const ProductGrid = ({ products }) => {
   const [localQuantities, setLocalQuantities] = useState({});
   const debounceTimers = useRef({});
   const pendingQuantities = useRef({}); // Track target quantities (not affected by closure)
+  const pendingCartItemIds = useRef({}); // Store cart item IDs at click time
 
   // Get current quantity - use local state if available, otherwise cart
   const getCartQuantity = (productId) => {
@@ -55,6 +56,11 @@ const ProductGrid = ({ products }) => {
     // Store target quantity in ref (survives closure)
     pendingQuantities.current[product.id] = newQty;
 
+    // Store cart item ID NOW (before CartContext optimistic updates remove it)
+    if (!pendingCartItemIds.current[product.id]) {
+      pendingCartItemIds.current[product.id] = getCartItemId(product.id);
+    }
+
     // Clear existing debounce timer
     if (debounceTimers.current[product.id]) {
       clearTimeout(debounceTimers.current[product.id]);
@@ -64,7 +70,7 @@ const ProductGrid = ({ products }) => {
     debounceTimers.current[product.id] = setTimeout(async () => {
       // Read from ref, not from state closure
       const finalQty = pendingQuantities.current[product.id];
-      const cartItemId = getCartItemId(product.id);
+      const cartItemId = pendingCartItemIds.current[product.id];
 
       if (!cartItemId) {
         // Not in cart yet, add it
@@ -81,6 +87,7 @@ const ProductGrid = ({ products }) => {
         return next;
       });
       delete pendingQuantities.current[product.id];
+      delete pendingCartItemIds.current[product.id];
       delete debounceTimers.current[product.id];
     }, 500);
   };
@@ -107,6 +114,11 @@ const ProductGrid = ({ products }) => {
     // Store target quantity in ref
     pendingQuantities.current[product.id] = newQty;
 
+    // Store cart item ID NOW (before CartContext optimistic updates remove it)
+    if (!pendingCartItemIds.current[product.id]) {
+      pendingCartItemIds.current[product.id] = getCartItemId(product.id);
+    }
+
     // Clear existing debounce timer
     if (debounceTimers.current[product.id]) {
       clearTimeout(debounceTimers.current[product.id]);
@@ -116,7 +128,7 @@ const ProductGrid = ({ products }) => {
     debounceTimers.current[product.id] = setTimeout(async () => {
       // Read from ref, not from state closure
       const finalQty = pendingQuantities.current[product.id];
-      const cartItemId = getCartItemId(product.id);
+      const cartItemId = pendingCartItemIds.current[product.id];
 
       if (cartItemId) {
         await updateQuantity(cartItemId, finalQty);
@@ -129,6 +141,7 @@ const ProductGrid = ({ products }) => {
         return next;
       });
       delete pendingQuantities.current[product.id];
+      delete pendingCartItemIds.current[product.id];
       delete debounceTimers.current[product.id];
     }, 500);
   };
