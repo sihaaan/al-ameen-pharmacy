@@ -15,6 +15,7 @@ const Navbar = () => {
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const searchRef = useRef(null);
@@ -69,6 +70,11 @@ const Navbar = () => {
   const handleLogout = () => {
     logout();
     navigate('/');
+    setMobileMenuOpen(false);
+  };
+
+  const closeMobileMenu = () => {
+    setMobileMenuOpen(false);
   };
 
   const handleSearch = (e) => {
@@ -113,7 +119,7 @@ const Navbar = () => {
     <>
       <nav className="navbar">
         <div className="nav-brand">
-          <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }} onClick={closeMobileMenu}>
             <div className="brand-container">
               <div className="brand-arabic">صيدلية الأمين</div>
               <div className="brand-english">AL AMEEN PHARMACY</div>
@@ -169,9 +175,20 @@ const Navbar = () => {
           </div>
         )}
 
-        <div className="nav-links">
-          <Link to="/" className="nav-link">Home</Link>
-          <Link to="/about" className="nav-link">About</Link>
+        {/* Hamburger Menu Button (Mobile Only) */}
+        <button
+          className="hamburger-menu"
+          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+          aria-label="Toggle menu"
+        >
+          <span className={mobileMenuOpen ? "hamburger-line open" : "hamburger-line"}></span>
+          <span className={mobileMenuOpen ? "hamburger-line open" : "hamburger-line"}></span>
+          <span className={mobileMenuOpen ? "hamburger-line open" : "hamburger-line"}></span>
+        </button>
+
+        <div className={`nav-links ${mobileMenuOpen ? 'mobile-open' : ''}`}>
+          <Link to="/" className="nav-link" onClick={closeMobileMenu}>Home</Link>
+          <Link to="/about" className="nav-link" onClick={closeMobileMenu}>About</Link>
 
           {user ? (
             <>
@@ -179,19 +196,19 @@ const Navbar = () => {
                 Hello, {user.username}!
               </span>
 
-              <Link to="/profile" className="nav-link">
+              <Link to="/profile" className="nav-link" onClick={closeMobileMenu}>
                 Profile
               </Link>
 
               {user.is_staff && (
-                <Link to="/admin" className="nav-link admin-link">
+                <Link to="/admin" className="nav-link admin-link" onClick={closeMobileMenu}>
                   Admin
                 </Link>
               )}
 
               <button
                 className="cart-button"
-                onClick={() => setShowCart(!showCart)}
+                onClick={() => { setShowCart(!showCart); closeMobileMenu(); }}
               >
                 🛒 Cart ({totalItems}) - AED {totalPrice.toFixed(2)}
               </button>
@@ -205,10 +222,10 @@ const Navbar = () => {
             </>
           ) : (
             <>
-              <Link to="/login" className="nav-link login-link">
+              <Link to="/login" className="nav-link login-link" onClick={closeMobileMenu}>
                 Login
               </Link>
-              <Link to="/register" className="nav-link register-link">
+              <Link to="/register" className="nav-link register-link" onClick={closeMobileMenu}>
                 Register
               </Link>
             </>
