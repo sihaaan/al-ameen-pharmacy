@@ -112,25 +112,25 @@
 
 @media (max-width: 640px) {
   .products-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
   }
 
   .product-card h3 {
-    font-size: 12px;
+    font-size: 10px;
     min-height: auto;
-    -webkit-line-clamp: 3;
-    line-height: 1.3;
+    -webkit-line-clamp: 2;
+    line-height: 1.2;
   }
 
   .product-category {
-    font-size: 10px;
-    padding: 3px 6px;
+    font-size: 8px;
+    padding: 2px 4px;
     max-width: 100%;
   }
 
   .product-price {
-    font-size: 14px;
+    font-size: 11px;
   }
 
   .product-image {
@@ -138,31 +138,32 @@
   }
 
   .product-image img {
-    padding: 8px;
+    padding: 6px;
   }
 
   .product-card-content {
-    padding: 8px;
-    gap: 6px;
+    padding: 6px;
+    gap: 4px;
   }
 
-  /* Larger touch targets for mobile */
+  /* Compact buttons for 3 columns */
   .card-qty-btn {
-    width: 36px;
-    height: 36px;
-    font-size: 16px;
+    width: 28px;
+    height: 28px;
+    font-size: 14px;
   }
 
   .card-qty-display {
-    min-width: 36px;
-    font-size: 13px;
+    min-width: 30px;
+    font-size: 11px;
     font-weight: 700;
+    padding: 0 4px;
   }
 
   .price-and-quantity {
     flex-direction: column;
     align-items: flex-start;
-    gap: 6px;
+    gap: 4px;
   }
 
   .card-quantity-controls {
@@ -171,7 +172,7 @@
   }
 
   .card-cart-controls {
-    padding-top: 8px;
+    padding-top: 6px;
   }
 }
 
