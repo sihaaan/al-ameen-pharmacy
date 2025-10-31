@@ -175,8 +175,8 @@
   }
 }
 
-/* Very small phones - single column for better readability */
-@media (max-width: 400px) {
+/* Extra small phones only - single column for better readability */
+@media (max-width: 360px) {
   .products-grid {
     grid-template-columns: 1fr;
     gap: 16px;

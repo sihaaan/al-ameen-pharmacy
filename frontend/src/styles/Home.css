@@ -450,31 +450,37 @@
 
 @media (max-width: 640px) {
   .hero-section {
-    padding: 60px 20px 80px 20px;
+    padding: 40px 20px 50px 20px;
+  }
+
+  .hero-badge {
+    margin-bottom: 20px;
+    font-size: 12px;
+    padding: 6px 12px;
   }
 
   .hero-english {
-    font-size: 28px;
+    font-size: 24px;
     letter-spacing: 1px;
   }
 
   .hero-arabic {
-    font-size: 20px;
+    font-size: 18px;
   }
 
   .hero-description {
-    font-size: 15px;
+    font-size: 14px;
+    margin-bottom: 24px;
+    line-height: 1.6;
   }
 
   .hero-features {
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
+    display: none; /* Hide features on mobile to save space */
   }
 
   .feature-item {
-    padding: 10px 20px;
-    font-size: 14px;
+    padding: 8px 16px;
+    font-size: 13px;
   }
 
   .section-header {
