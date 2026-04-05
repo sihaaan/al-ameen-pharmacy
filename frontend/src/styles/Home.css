@@ -1,8 +1,8 @@
-/* frontend/src/styles/Home.css */
+/* Al Ameen Pharmacy - Modern Healthcare Home Page */
 
 .home-container {
   min-height: 100vh;
-  background: #f9fafb;
+  background: var(--gray-50, #F8FAFC);
 }
 
 /* Loading State */
@@ -16,10 +16,10 @@
 }
 
 .loading-spinner-home {
-  width: 60px;
-  height: 60px;
-  border: 4px solid #e5e7eb;
-  border-top-color: #3b82f6;
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--gray-200, #E2E8F0);
+  border-top-color: var(--primary, #0D9488);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -31,8 +31,8 @@
 }
 
 .home-loading p {
-  font-size: 18px;
-  color: #6b7280;
+  font-size: 16px;
+  color: var(--gray-500, #64748B);
   font-weight: 500;
 }
 
@@ -49,26 +49,29 @@
 }
 
 .home-error svg {
-  color: #ef4444;
+  color: var(--danger, #EF4444);
 }
 
 .home-error h2 {
   font-size: 24px;
-  color: #1f2937;
+  color: var(--gray-900, #0F172A);
   margin: 0;
 }
 
 .home-error p {
   font-size: 16px;
-  color: #6b7280;
+  color: var(--gray-500, #64748B);
   margin: 0;
 }
 
-/* Hero Section */
+/* Hero Section - Clean Healthcare Design */
 .hero-section {
   position: relative;
-  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 50%, #60a5fa 100%);
-  padding: 100px 20px 120px 20px;
+  background: linear-gradient(135deg,
+    var(--primary-700, #0F766E) 0%,
+    var(--primary, #0D9488) 50%,
+    var(--primary-light, #14B8A6) 100%);
+  padding: 80px 20px 100px 20px;
   overflow: hidden;
 }
 
@@ -84,15 +87,15 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
+  padding: 8px 18px;
   background: rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 50px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-full, 9999px);
   color: white;
-  font-size: 14px;
-  font-weight: 500;
-  margin-bottom: 32px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 28px;
   animation: fadeInDown 0.6s ease-out;
 }
 
@@ -114,8 +117,8 @@
 .hero-title {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 0 0 24px 0;
+  gap: 8px;
+  margin: 0 0 20px 0;
   animation: fadeInUp 0.6s ease-out 0.2s both;
 }
 
@@ -131,35 +134,34 @@
 }
 
 .hero-arabic {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 700;
-  color: white;
-  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.9);
+  letter-spacing: 1px;
   font-family: 'Arial', sans-serif;
 }
 
 .hero-english {
-  font-size: 48px;
+  font-size: 44px;
   font-weight: 800;
   color: white;
-  letter-spacing: 4px;
+  letter-spacing: 2px;
   text-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
 }
 
 .hero-description {
-  max-width: 700px;
-  margin: 0 auto 48px auto;
-  font-size: 18px;
-  line-height: 1.8;
-  color: rgba(255, 255, 255, 0.95);
+  max-width: 640px;
+  margin: 0 auto 40px auto;
+  font-size: 17px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.9);
   animation: fadeInUp 0.6s ease-out 0.4s both;
-  padding-bottom: 8px;
 }
 
 .hero-features {
   display: flex;
   justify-content: center;
-  gap: 40px;
+  gap: 16px;
   flex-wrap: wrap;
   animation: fadeInUp 0.6s ease-out 0.6s both;
 }
@@ -167,16 +169,16 @@
 .feature-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 24px;
-  background: rgba(255, 255, 255, 0.1);
+  gap: 8px;
+  padding: 10px 20px;
+  background: rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 50px;
+  border-radius: var(--radius-full, 9999px);
   color: white;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
 }
 
 .feature-item:hover {
@@ -204,31 +206,30 @@
   position: absolute;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(20px);
   animation: float 20s ease-in-out infinite;
 }
 
 .decoration-1 {
-  width: 400px;
-  height: 400px;
-  top: -200px;
-  right: -100px;
+  width: 350px;
+  height: 350px;
+  top: -180px;
+  right: -80px;
   animation-delay: 0s;
 }
 
 .decoration-2 {
-  width: 300px;
-  height: 300px;
-  bottom: -150px;
-  left: -80px;
+  width: 280px;
+  height: 280px;
+  bottom: -140px;
+  left: -60px;
   animation-delay: -7s;
 }
 
 .decoration-3 {
-  width: 250px;
-  height: 250px;
-  top: 50%;
-  left: -50px;
+  width: 200px;
+  height: 200px;
+  top: 40%;
+  left: -30px;
   animation-delay: -14s;
 }
 
@@ -237,17 +238,47 @@
     transform: translate(0, 0) scale(1);
   }
   33% {
-    transform: translate(30px, -30px) scale(1.1);
+    transform: translate(20px, -20px) scale(1.05);
   }
   66% {
-    transform: translate(-20px, 20px) scale(0.9);
+    transform: translate(-15px, 15px) scale(0.95);
   }
+}
+
+/* Trust Banner */
+.trust-banner {
+  background: white;
+  border-bottom: 1px solid var(--gray-100, #F1F5F9);
+  padding: 12px 20px;
+}
+
+.trust-banner-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: center;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+
+.trust-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--gray-600, #475569);
+}
+
+.trust-item svg,
+.trust-item .icon {
+  color: var(--success, #22C55E);
 }
 
 /* Products Section */
 .products-section {
   max-width: 1400px;
-  margin: -60px auto 0 auto;
+  margin: -50px auto 0 auto;
   padding: 0 20px 80px 20px;
   position: relative;
   z-index: 3;
@@ -258,80 +289,80 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 40px;
-  padding: 32px;
+  margin-bottom: 32px;
+  padding: 28px 32px;
   background: white;
-  border-radius: 16px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-xl, 16px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
   flex-wrap: wrap;
-  gap: 20px;
+  gap: 16px;
 }
 
 .section-title {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 700;
-  color: #111827;
+  color: var(--gray-900, #0F172A);
   margin: 0;
   flex: 1;
 }
 
 .products-count-badge {
-  padding: 12px 24px;
-  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
-  color: #1e40af;
-  font-size: 15px;
+  padding: 10px 20px;
+  background: var(--primary-50, #F0FDFA);
+  color: var(--primary-700, #0F766E);
+  font-size: 14px;
   font-weight: 600;
-  border-radius: 50px;
-  border: 2px solid #3b82f6;
+  border-radius: var(--radius-full, 9999px);
+  border: 1.5px solid var(--primary, #0D9488);
 }
 
 /* Filters Bar */
 .filters-bar {
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 24px 32px;
+  gap: 20px;
+  padding: 20px 28px;
   background: white;
-  border-radius: 16px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-  margin-bottom: 32px;
+  border-radius: var(--radius-xl, 16px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+  margin-bottom: 28px;
   flex-wrap: wrap;
 }
 
 .filter-group {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .filter-group label {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: #374151;
+  color: var(--gray-600, #475569);
   white-space: nowrap;
 }
 
 .filter-select {
-  padding: 10px 16px;
-  border: 2px solid #e5e7eb;
-  border-radius: 8px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--gray-200, #E2E8F0);
+  border-radius: var(--radius-md, 8px);
   font-size: 14px;
   font-weight: 500;
-  color: #111827;
+  color: var(--gray-900, #0F172A);
   background: white;
   cursor: pointer;
   transition: all 0.2s ease;
   outline: none;
-  min-width: 160px;
+  min-width: 150px;
 }
 
 .filter-select:hover {
-  border-color: #3b82f6;
+  border-color: var(--primary, #0D9488);
 }
 
 .filter-select:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: var(--primary, #0D9488);
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
 }
 
 .checkbox-group {
@@ -348,39 +379,66 @@
 }
 
 .checkbox-label input[type="checkbox"] {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   cursor: pointer;
-  accent-color: #3b82f6;
+  accent-color: var(--primary, #0D9488);
 }
 
 .checkbox-label span {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: #374151;
+  color: var(--gray-600, #475569);
 }
 
 .clear-filters-btn {
   margin-left: auto;
-  padding: 10px 20px;
-  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: 14px;
+  padding: 10px 18px;
+  background: transparent;
+  color: var(--danger, #EF4444);
+  border: 1.5px solid var(--danger, #EF4444);
+  border-radius: var(--radius-md, 8px);
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
-  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.2);
 }
 
 .clear-filters-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+  background: var(--danger, #EF4444);
+  color: white;
 }
 
-.clear-filters-btn:active {
-  transform: translateY(0);
+/* Category Pills */
+.category-pills {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+  padding: 0 4px;
+}
+
+.category-pill {
+  padding: 8px 16px;
+  background: white;
+  border: 1.5px solid var(--gray-200, #E2E8F0);
+  border-radius: var(--radius-full, 9999px);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--gray-600, #475569);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.category-pill:hover {
+  border-color: var(--primary, #0D9488);
+  color: var(--primary, #0D9488);
+}
+
+.category-pill.active {
+  background: var(--primary, #0D9488);
+  border-color: var(--primary, #0D9488);
+  color: white;
 }
 
 /* No Results Message */
@@ -391,54 +449,57 @@
   justify-content: center;
   padding: 80px 20px;
   background: white;
-  border-radius: 16px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-xl, 16px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
   text-align: center;
 }
 
 .no-results svg {
-  color: #9ca3af;
-  margin-bottom: 24px;
+  color: var(--gray-400, #94A3B8);
+  margin-bottom: 20px;
 }
 
 .no-results h3 {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
-  color: #111827;
-  margin: 0 0 12px 0;
+  color: var(--gray-900, #0F172A);
+  margin: 0 0 10px 0;
 }
 
 .no-results p {
-  font-size: 16px;
-  color: #6b7280;
+  font-size: 15px;
+  color: var(--gray-500, #64748B);
   margin: 0;
 }
 
-/* Responsive Design */
+/* ========================
+   RESPONSIVE DESIGN
+   ======================== */
+
 @media (max-width: 968px) {
   .hero-section {
-    padding: 80px 20px 100px 20px;
+    padding: 60px 20px 80px 20px;
   }
 
   .hero-english {
-    font-size: 36px;
-    letter-spacing: 2px;
+    font-size: 34px;
+    letter-spacing: 1px;
   }
 
   .hero-arabic {
-    font-size: 24px;
+    font-size: 22px;
   }
 
   .hero-description {
-    font-size: 16px;
+    font-size: 15px;
   }
 
   .hero-features {
-    gap: 20px;
+    gap: 12px;
   }
 
   .section-title {
-    font-size: 28px;
+    font-size: 24px;
   }
 
   .decoration-1,
@@ -446,22 +507,29 @@
   .decoration-3 {
     display: none;
   }
+
+  .trust-banner-content {
+    gap: 20px;
+  }
+
+  .trust-item {
+    font-size: 12px;
+  }
 }
 
 @media (max-width: 640px) {
   .hero-section {
-    padding: 40px 20px 50px 20px;
+    padding: 40px 16px 50px 16px;
   }
 
   .hero-badge {
-    margin-bottom: 20px;
-    font-size: 12px;
+    margin-bottom: 16px;
+    font-size: 11px;
     padding: 6px 12px;
   }
 
   .hero-english {
-    font-size: 24px;
-    letter-spacing: 1px;
+    font-size: 26px;
   }
 
   .hero-arabic {
@@ -475,43 +543,47 @@
   }
 
   .hero-features {
-    display: none; /* Hide features on mobile to save space */
+    display: none;
   }
 
-  .feature-item {
-    padding: 8px 16px;
-    font-size: 13px;
+  .trust-banner {
+    padding: 10px 16px;
+  }
+
+  .trust-banner-content {
+    gap: 16px;
+  }
+
+  .trust-item {
+    font-size: 11px;
   }
 
   .section-header {
     flex-direction: column;
     align-items: flex-start;
-    padding: 24px;
+    padding: 20px;
+    margin-bottom: 20px;
   }
 
   .section-title {
-    font-size: 24px;
-  }
-
-  .section-subtitle {
-    font-size: 14px;
+    font-size: 22px;
   }
 
   .products-section {
-    margin-top: -40px;
-    padding-bottom: 60px;
+    margin-top: -30px;
+    padding: 0 16px 60px 16px;
   }
 
   .filters-bar {
-    padding: 20px;
-    gap: 16px;
+    padding: 16px;
+    gap: 12px;
   }
 
   .filter-group {
     flex-direction: column;
     align-items: flex-start;
     width: 100%;
-    gap: 8px;
+    gap: 6px;
   }
 
   .filter-select {
@@ -523,15 +595,24 @@
     margin-left: 0;
   }
 
+  .category-pills {
+    gap: 8px;
+  }
+
+  .category-pill {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+
   .no-results {
     padding: 60px 20px;
   }
 
   .no-results h3 {
-    font-size: 20px;
+    font-size: 18px;
   }
 
   .no-results p {
-    font-size: 14px;
+    font-size: 13px;
   }
 }

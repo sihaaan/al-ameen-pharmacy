@@ -1,5 +1,5 @@
-/* Ultra-Sleek Corporate Design with Modern UI Tricks */
-/* Inspired by Apple, Stripe, Linear, and top SaaS companies */
+/* Al Ameen Pharmacy - Modern Healthcare E-Commerce Design System */
+/* Psychology-optimized colors for trust, healing, and conversion */
 
 * {
   margin: 0;
@@ -8,29 +8,154 @@
 }
 
 :root {
-  --primary: #1e3a8a;
-  --primary-light: #3b82f6;
-  --primary-dark: #1e40af;
-  --secondary: #06b6d4;
-  --accent: #8b5cf6;
-  --success: #10b981;
-  --danger: #ef4444;
-  --warning: #f59e0b;
+  /* ===========================================
+     PRIMARY: Healthcare Teal
+     Psychology: Combines blue's trust with green's healing
+     =========================================== */
+  --primary: #0D9488;
+  --primary-light: #14B8A6;
+  --primary-dark: #0F766E;
+  --primary-50: #F0FDFA;
+  --primary-100: #CCFBF1;
+  --primary-200: #99F6E4;
+  --primary-500: #14B8A6;
+  --primary-600: #0D9488;
+  --primary-700: #0F766E;
+
+  /* ===========================================
+     SECONDARY: Trust Blue
+     Psychology: #1 color for reliability and professionalism
+     =========================================== */
+  --secondary: #0EA5E9;
+  --secondary-light: #38BDF8;
+  --secondary-dark: #0284C7;
+  --secondary-50: #F0F9FF;
+  --secondary-100: #E0F2FE;
+
+  /* ===========================================
+     ACCENT: Warm Amber
+     Psychology: Creates urgency without anxiety
+     =========================================== */
+  --accent: #F59E0B;
+  --accent-light: #FBBF24;
+  --accent-dark: #D97706;
+  --accent-50: #FFFBEB;
+
+  /* ===========================================
+     SEMANTIC COLORS
+     =========================================== */
+  --success: #22C55E;
+  --success-light: #4ADE80;
+  --success-50: #F0FDF4;
+  --success-100: #DCFCE7;
+
+  --danger: #EF4444;
+  --danger-light: #F87171;
+  --danger-50: #FEF2F2;
+
+  --warning: #EAB308;
+  --warning-light: #FACC15;
+  --warning-50: #FEFCE8;
+
+  /* Prescription/Medical Purple */
+  --rx-purple: #7C3AED;
+  --rx-purple-light: #A78BFA;
+  --rx-purple-50: #EDE9FE;
+
+  /* ===========================================
+     NEUTRAL PALETTE
+     =========================================== */
+  --gray-50: #F8FAFC;
+  --gray-100: #F1F5F9;
+  --gray-200: #E2E8F0;
+  --gray-300: #CBD5E1;
+  --gray-400: #94A3B8;
+  --gray-500: #64748B;
+  --gray-600: #475569;
+  --gray-700: #334155;
+  --gray-800: #1E293B;
+  --gray-900: #0F172A;
+
+  /* Legacy aliases for compatibility */
   --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --bg-tertiary: #f1f5f9;
-  --text-primary: #0f172a;
+  --bg-secondary: #F8FAFC;
+  --bg-tertiary: #F1F5F9;
+  --text-primary: #0F172A;
   --text-secondary: #475569;
-  --text-tertiary: #94a3b8;
-  --border-light: #e2e8f0;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
-  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1);
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 24px;
+  --text-tertiary: #94A3B8;
+  --border-light: #E2E8F0;
+
+  /* ===========================================
+     SHADOWS
+     =========================================== */
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --shadow-2xl: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+  --shadow-primary: 0 4px 14px rgb(13 148 136 / 0.25);
+  --shadow-primary-lg: 0 8px 25px rgb(13 148 136 / 0.3);
+
+  /* ===========================================
+     BORDER RADIUS
+     =========================================== */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 24px;
+  --radius-full: 9999px;
+
+  /* ===========================================
+     SPACING SCALE (4px base)
+     =========================================== */
+  --space-1: 0.25rem;   /* 4px */
+  --space-2: 0.5rem;    /* 8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.25rem;   /* 20px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-8: 2rem;      /* 32px */
+  --space-10: 2.5rem;   /* 40px */
+  --space-12: 3rem;     /* 48px */
+  --space-16: 4rem;     /* 64px */
+  --space-20: 5rem;     /* 80px */
+
+  /* ===========================================
+     TYPOGRAPHY
+     =========================================== */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  --font-display: 'Plus Jakarta Sans', var(--font-sans);
+
+  --text-xs: 0.75rem;     /* 12px */
+  --text-sm: 0.875rem;    /* 14px */
+  --text-base: 1rem;      /* 16px */
+  --text-lg: 1.125rem;    /* 18px */
+  --text-xl: 1.25rem;     /* 20px */
+  --text-2xl: 1.5rem;     /* 24px */
+  --text-3xl: 1.875rem;   /* 30px */
+  --text-4xl: 2.25rem;    /* 36px */
+  --text-5xl: 3rem;       /* 48px */
+
+  /* ===========================================
+     TRANSITIONS
+     =========================================== */
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+  --transition-bounce: 300ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+
+  /* ===========================================
+     Z-INDEX SCALE
+     =========================================== */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-fixed: 300;
+  --z-modal-backdrop: 400;
+  --z-modal: 500;
+  --z-popover: 600;
+  --z-tooltip: 700;
 }
 
 body {
@@ -90,19 +215,19 @@ body {
   text-align: center;
 }
 
-/* Header - Ultra Sleek with Glassmorphism */
+/* Header - Healthcare Teal Theme */
 .App-header {
   background: linear-gradient(135deg,
-    rgba(30, 58, 138, 0.95) 0%,
-    rgba(59, 130, 246, 0.95) 50%,
-    rgba(139, 92, 246, 0.95) 100%);
+    rgba(13, 148, 136, 0.95) 0%,
+    rgba(20, 184, 166, 0.95) 50%,
+    rgba(14, 165, 233, 0.95) 100%);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   padding: 80px 24px;
   text-align: center;
   position: relative;
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 32px rgba(13, 148, 136, 0.15);
 }
 
 /* Animated Background Pattern */
@@ -116,7 +241,7 @@ body {
   background-image:
     radial-gradient(circle at 20% 50%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
     radial-gradient(circle at 80% 80%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
-    radial-gradient(circle at 40% 20%, rgba(139, 92, 246, 0.2) 0%, transparent 50%);
+    radial-gradient(circle at 40% 20%, rgba(14, 165, 233, 0.2) 0%, transparent 50%);
   animation: float 20s ease-in-out infinite;
 }
 
@@ -200,7 +325,7 @@ body {
   color: var(--text-primary);
   margin-bottom: 12px;
   letter-spacing: -0.5px;
-  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  background: linear-gradient(135deg, var(--primary-700) 0%, var(--primary) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -246,8 +371,8 @@ body {
   right: 0;
   bottom: 0;
   background: linear-gradient(135deg,
-    rgba(59, 130, 246, 0.05) 0%,
-    rgba(139, 92, 246, 0.05) 100%);
+    rgba(13, 148, 136, 0.04) 0%,
+    rgba(14, 165, 233, 0.04) 100%);
   opacity: 0;
   transition: opacity 0.4s ease;
   z-index: 0;
@@ -258,10 +383,10 @@ body {
 }
 
 .product-card:hover {
-  transform: translateY(-12px) scale(1.02);
+  transform: translateY(-8px);
   box-shadow:
-    0 20px 40px rgba(59, 130, 246, 0.12),
-    0 0 0 1px rgba(59, 130, 246, 0.1);
+    0 20px 40px rgba(13, 148, 136, 0.12),
+    0 0 0 1px rgba(13, 148, 136, 0.1);
 }
 
 .product-card > * {
@@ -289,7 +414,7 @@ body {
   font-weight: 800;
   color: var(--primary);
   margin-bottom: 16px;
-  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  background: linear-gradient(135deg, var(--primary-700) 0%, var(--primary) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -306,8 +431,8 @@ body {
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.25);
+  transition: all var(--transition-bounce);
+  box-shadow: var(--shadow-primary);
   position: relative;
   overflow: hidden;
 }
@@ -332,7 +457,7 @@ body {
 
 .add-to-cart-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(59, 130, 246, 0.35);
+  box-shadow: var(--shadow-primary-lg);
 }
 
 .add-to-cart-btn:active {
@@ -368,9 +493,9 @@ body {
   border-radius: 20px;
   font-size: 13px;
   font-weight: 600;
-  background: rgba(139, 92, 246, 0.1);
-  color: var(--accent);
-  border: 1px solid rgba(139, 92, 246, 0.2);
+  background: var(--rx-purple-50);
+  color: var(--rx-purple);
+  border: 1px solid rgba(124, 58, 237, 0.2);
   margin-left: 8px;
 }
 
@@ -430,24 +555,122 @@ html {
 
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
-  width: 12px;
+  width: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
+  background: var(--gray-100);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
-  border-radius: 6px;
+  background: var(--gray-300);
+  border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--primary-dark);
+  background: var(--gray-400);
 }
 
 /* Selection Color */
 ::selection {
-  background: rgba(59, 130, 246, 0.2);
-  color: var(--primary-dark);
+  background: rgba(13, 148, 136, 0.2);
+  color: var(--primary-700);
+}
+
+/* ===========================================
+   UTILITY CLASSES
+   =========================================== */
+
+/* Trust Badge Base Styles */
+.trust-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.trust-badge--success {
+  background: var(--success-50);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+}
+
+.trust-badge--info {
+  background: var(--secondary-50);
+  color: var(--secondary);
+  border: 1px solid rgba(14, 165, 233, 0.2);
+}
+
+.trust-badge--warning {
+  background: var(--warning-50);
+  color: var(--warning);
+  border: 1px solid rgba(234, 179, 8, 0.2);
+}
+
+/* Button Variants */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-base);
+}
+
+.btn--primary {
+  background: var(--primary);
+  color: white;
+  box-shadow: var(--shadow-primary);
+}
+
+.btn--primary:hover {
+  background: var(--primary-dark);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-primary-lg);
+}
+
+.btn--secondary {
+  background: white;
+  color: var(--gray-700);
+  border: 1px solid var(--gray-300);
+}
+
+.btn--secondary:hover {
+  background: var(--gray-50);
+  border-color: var(--gray-400);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--primary);
+}
+
+.btn--ghost:hover {
+  background: var(--primary-50);
+}
+
+/* Card Base */
+.card {
+  background: white;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--gray-200);
+  transition: all var(--transition-base);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* Focus States for Accessibility */
+*:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }

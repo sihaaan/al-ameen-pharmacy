@@ -1,2 +1,2 @@
 release: python manage.py collectstatic --noinput
-web: gunicorn pharmacy_api.wsgi --log-file -
+web: gunicorn pharmacy_api.wsgi --timeout 120 --log-file -

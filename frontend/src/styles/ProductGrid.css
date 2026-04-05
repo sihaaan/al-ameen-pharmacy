@@ -21,8 +21,8 @@
 }
 
 .product-card:hover {
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  border-color: #3b82f6;
+  box-shadow: 0 8px 24px rgba(13, 148, 136, 0.12);
+  border-color: #0D9488;
   transform: translateY(-4px);
 }
 
@@ -35,6 +35,7 @@
   align-items: center;
   justify-content: center;
   border-radius: 8px 8px 0 0;
+  position: relative;
 }
 
 .product-image img {
@@ -48,6 +49,51 @@
   color: #9ca3af;
   font-size: 13px;
   font-weight: 500;
+}
+
+/* Stock Badge on Image */
+.stock-badge-overlay {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  z-index: 1;
+}
+
+.stock-badge-overlay.in-stock {
+  background: #F0FDF4;
+  color: #22C55E;
+  border: 1px solid rgba(34, 197, 94, 0.2);
+}
+
+.stock-badge-overlay.low-stock {
+  background: #FEFCE8;
+  color: #EAB308;
+  border: 1px solid rgba(234, 179, 8, 0.2);
+}
+
+.stock-badge-overlay.out-of-stock {
+  background: #FEF2F2;
+  color: #EF4444;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+/* Prescription Badge */
+.rx-badge-overlay {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #EDE9FE;
+  color: #7C3AED;
+  border: 1px solid rgba(124, 58, 237, 0.2);
+  z-index: 1;
 }
 
 .product-card-content {
@@ -77,14 +123,14 @@
 }
 
 .product-category {
-  color: #3b82f6;
+  color: #0D9488;
   font-weight: 500;
   margin: 0;
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  background: #eff6ff;
+  background: #F0FDFA;
   padding: 4px 8px;
   border-radius: 4px;
   width: fit-content;
@@ -93,8 +139,111 @@
 .product-price {
   font-size: 18px;
   font-weight: 700;
-  color: #059669;
+  color: #0F766E;
 }
+
+/* Card Cart Controls */
+.card-cart-controls {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 2px solid #f3f4f6;
+}
+
+.price-and-quantity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-quantity-controls {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: white;
+  width: fit-content;
+}
+
+.card-qty-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: #374151;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.card-qty-btn:hover:not(:disabled) {
+  background: #F0FDFA;
+  color: #0D9488;
+}
+
+.card-qty-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.card-qty-btn:first-child {
+  border-radius: 5px 0 0 5px;
+}
+
+.card-qty-btn:last-child {
+  border-radius: 0 5px 5px 0;
+}
+
+.card-qty-display {
+  min-width: 40px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  padding: 0 8px;
+  border-left: 1px solid #e5e7eb;
+  border-right: 1px solid #e5e7eb;
+}
+
+/* Add to Cart Button */
+.add-to-cart-card-btn {
+  width: 100%;
+  padding: 10px 16px;
+  background: #0D9488;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.add-to-cart-card-btn:hover {
+  background: #0F766E;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(13, 148, 136, 0.25);
+}
+
+.add-to-cart-card-btn:disabled {
+  background: #CBD5E1;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ========================
+   RESPONSIVE DESIGN
+   ======================== */
 
 @media (max-width: 1200px) {
   .products-grid {
@@ -177,6 +326,21 @@
   .card-cart-controls {
     padding-top: 8px;
   }
+
+  .stock-badge-overlay,
+  .rx-badge-overlay {
+    font-size: 10px;
+    padding: 3px 8px;
+    top: 8px;
+  }
+
+  .stock-badge-overlay {
+    left: 8px;
+  }
+
+  .rx-badge-overlay {
+    right: 8px;
+  }
 }
 
 /* Extra small phones only - single column for better readability */
@@ -215,72 +379,4 @@
     min-width: 44px;
     font-size: 15px;
   }
-}
-
-/* Card Cart Controls */
-.card-cart-controls {
-  margin-top: auto;
-  padding-top: 12px;
-  border-top: 2px solid #f3f4f6;
-}
-
-.price-and-quantity {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.card-quantity-controls {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: white;
-  width: fit-content;
-}
-
-.card-qty-btn {
-  width: 32px;
-  height: 32px;
-  border: none;
-  background: transparent;
-  color: #374151;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  font-weight: 600;
-  transition: all 0.2s;
-}
-
-.card-qty-btn:hover:not(:disabled) {
-  background: #f3f4f6;
-  color: #3b82f6;
-}
-
-.card-qty-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.card-qty-btn:first-child {
-  border-radius: 5px 0 0 5px;
-}
-
-.card-qty-btn:last-child {
-  border-radius: 0 5px 5px 0;
-}
-
-.card-qty-display {
-  min-width: 40px;
-  text-align: center;
-  font-size: 14px;
-  font-weight: 600;
-  color: #111827;
-  padding: 0 8px;
-  border-left: 1px solid #e5e7eb;
-  border-right: 1px solid #e5e7eb;
 }

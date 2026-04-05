@@ -6,16 +6,19 @@
 ============================================================================== */
 
 .checkout-page {
-  /* Unique CSS Variables for Checkout Page */
-  --checkout-bg-color: #f8f9fa;
+  /* Unique CSS Variables for Checkout Page - Healthcare Teal Theme */
+  --checkout-bg-color: #F8FAFC;
   --checkout-white: #ffffff;
-  --checkout-border-color: #e0e0e0;
-  --checkout-text-primary: #1a1a1a;
-  --checkout-text-secondary: #666666;
-  --checkout-blue-primary: #0066cc;
-  --checkout-blue-light: #f0f8ff;
+  --checkout-border-color: #E2E8F0;
+  --checkout-text-primary: #0F172A;
+  --checkout-text-secondary: #64748B;
+  --checkout-primary: #0D9488;
+  --checkout-primary-dark: #0F766E;
+  --checkout-primary-light: #F0FDFA;
+  --checkout-blue-primary: #0D9488;
+  --checkout-blue-light: #F0FDFA;
   --checkout-radius: 12px;
-  --checkout-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --checkout-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
 
   /* Reset any inherited properties */
   all: initial;
@@ -173,8 +176,8 @@
 /* Totals Section */
 .checkout-page .summary-totals {
   display: block;
-  background: linear-gradient(135deg, var(--checkout-blue-light) 0%, #e6f2ff 100%);
-  border: 1px solid #b3d9ff;
+  background: linear-gradient(135deg, var(--checkout-primary-light) 0%, #CCFBF1 100%);
+  border: 1px solid rgba(13, 148, 136, 0.2);
   border-radius: 10px;
   padding: 20px;
   width: 100%;
@@ -205,10 +208,10 @@
 .checkout-page .summary-total {
   margin-top: 8px;
   padding-top: 16px;
-  border-top: 2px solid #66b3ff;
+  border-top: 2px solid rgba(13, 148, 136, 0.3);
   font-size: 20px;
   font-weight: 700;
-  color: #0052a3;
+  color: var(--checkout-primary-dark);
 }
 
 .checkout-page .summary-total > strong {
@@ -439,14 +442,14 @@
 }
 
 .checkout-page .btn-primary {
-  background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);
+  background: linear-gradient(135deg, var(--checkout-primary-dark) 0%, var(--checkout-primary) 100%);
   color: #ffffff;
-  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 4px 16px rgba(13, 148, 136, 0.3);
 }
 
 .checkout-page .btn-primary:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 6px 24px rgba(59, 130, 246, 0.4);
+  box-shadow: 0 6px 24px rgba(13, 148, 136, 0.4);
 }
 
 .checkout-page .btn-primary:disabled {
