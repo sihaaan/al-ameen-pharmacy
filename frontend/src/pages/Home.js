@@ -23,35 +23,12 @@ const CheckIcon = ({ size = 20 }) => (
   </svg>
 );
 
-const LocationIcon = ({ size = 20 }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-    <circle cx="12" cy="10" r="3"/>
-  </svg>
-);
-
-// Category icons mapping
-const categoryIcons = {
-  'Pain Relief': '💊',
-  'Vitamins': '💪',
-  'Baby Care': '👶',
-  'Medical Supplies': '🏥',
-  'Skin Care': '🧴',
-  'First Aid': '🩹',
-  'Supplements': '💪',
-  'Personal Care': '🧴',
-};
-
 function Home() {
   const [searchParams] = useSearchParams();
   const [products, setProducts] = useState([]);
   const [filteredProducts, setFilteredProducts] = useState([]);
-  const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-
-  // Filter states
-  const [selectedCategory, setSelectedCategory] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
 
   useEffect(() => {
@@ -59,8 +36,6 @@ function Home() {
       try {
         const response = await productsAPI.getAll();
         setProducts(response.data);
-        const uniqueCategories = [...new Set(response.data.map(p => p.category_name).filter(Boolean))];
-        setCategories(uniqueCategories);
       } catch (err) {
         console.error("Error fetching products:", err);
         setError("Failed to load products");
@@ -85,10 +60,6 @@ function Home() {
       );
     }
 
-    if (selectedCategory !== 'all') {
-      result = result.filter(product => product.category_name === selectedCategory);
-    }
-
     switch (sortBy) {
       case 'price-low':
         result.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
@@ -104,22 +75,13 @@ function Home() {
     }
 
     setFilteredProducts(result);
-  }, [products, searchParams, selectedCategory, sortBy]);
-
-  const scrollToProducts = () => {
-    document.getElementById('products')?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  const handleCategoryClick = (categoryName) => {
-    setSelectedCategory(categoryName);
-    scrollToProducts();
-  };
+  }, [products, searchParams, sortBy]);
 
   if (loading) {
     return (
       <div className="home-loading">
         <div className="loading-spinner-home"></div>
-        <p>Loading products...</p>
+        <p>Loading...</p>
       </div>
     );
   }
@@ -127,11 +89,6 @@ function Home() {
   if (error) {
     return (
       <div className="home-error">
-        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <circle cx="12" cy="12" r="10"></circle>
-          <line x1="12" y1="8" x2="12" y2="12"></line>
-          <line x1="12" y1="16" x2="12.01" y2="16"></line>
-        </svg>
         <h2>{error}</h2>
         <p>Please try refreshing the page</p>
       </div>
@@ -141,259 +98,133 @@ function Home() {
   return (
     <div className="home-container">
       {/* ===== HERO SECTION ===== */}
-      <section className="hero-section-premium">
-        <div className="hero-grid">
-          {/* Left Content */}
-          <div className="hero-content-left">
-            <span className="hero-arabic-badge">صيدلية الأمين</span>
+      <section className="hero-section">
+        <div className="hero-inner">
+          <span className="hero-arabic">صيدلية الأمين</span>
 
-            <h1 className="hero-headline-premium">
-              YOUR TRUSTED<br />
-              <span className="hero-headline-accent">PHARMACY</span> IN DUBAI
-            </h1>
+          <h1 className="hero-headline">
+            Your Trusted<br />
+            <span className="hero-accent">Pharmacy</span> in Dubai
+          </h1>
 
-            <p className="hero-subtext">
-              Licensed pharmacy with 4 branches across Dubai. Quality medications
-              available 7 days a week, open until 2AM.
-            </p>
+          <p className="hero-subtext">
+            Serving Dubai with 4 branches, offering fast access to medicines
+            for both retail customers and bulk orders.
+          </p>
 
-            {/* Primary CTA - WhatsApp */}
-            <a
-              href="https://wa.me/971505456388"
-              className="hero-whatsapp-btn"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <WhatsAppIcon size={28} />
-              <span>WhatsApp Us Now</span>
-            </a>
+          {/* Primary CTA - WhatsApp */}
+          <a
+            href="https://wa.me/971505456388"
+            className="hero-cta-primary"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <WhatsAppIcon size={24} />
+            <span>WhatsApp Us</span>
+          </a>
 
-            {/* Secondary Contact */}
-            <div className="hero-contact-row">
-              <a href="tel:+97142713695" className="hero-contact-link">
-                <PhoneIcon size={18} />
-                <span>+971-4-271-3695</span>
-              </a>
-              <span className="hero-contact-divider">•</span>
-              <span className="hero-contact-text">
-                <LocationIcon size={18} />
-                Deira, Dubai
-              </span>
-            </div>
-          </div>
-
-          {/* Right Visual */}
-          <div className="hero-visual">
-            <div className="hero-visual-blob"></div>
-            <div className="hero-trust-badges">
-              <div className="hero-badge-item">Licensed</div>
-              <div className="hero-badge-item">4 Branches</div>
-              <div className="hero-badge-item">Open Late</div>
-            </div>
-          </div>
+          {/* Secondary - Call */}
+          <a href="tel:+97142713695" className="hero-cta-secondary">
+            <PhoneIcon size={18} />
+            <span>+971-4-271-3695</span>
+          </a>
         </div>
-      </section>
 
-      {/* ===== TRUST SECTION ===== */}
-      <section className="trust-section-premium">
-        <div className="trust-grid-premium">
-          <div className="trust-headline-area">
-            <h2 className="trust-headline-large">
-              WHY UAE TRUSTS<br />
-              <span className="trust-headline-accent">AL AMEEN</span>
-            </h2>
-          </div>
-
-          <div className="trust-points-area">
-            <div className="trust-point">
-              <div className="trust-point-icon">
-                <CheckIcon size={24} />
-              </div>
-              <div className="trust-point-content">
-                <h3>Licensed by Dubai Health Authority</h3>
-                <p>Fully registered and regulated pharmacy serving Dubai since establishment</p>
-              </div>
-            </div>
-
-            <div className="trust-point">
-              <div className="trust-point-icon">
-                <CheckIcon size={24} />
-              </div>
-              <div className="trust-point-content">
-                <h3>4 Convenient Locations Across Dubai</h3>
-                <p>Multiple branches in Deira and surrounding areas for easy pickup</p>
-              </div>
-            </div>
-
-            <div className="trust-point">
-              <div className="trust-point-icon">
-                <CheckIcon size={24} />
-              </div>
-              <div className="trust-point-content">
-                <h3>Fast Availability of Medicines</h3>
-                <p>Thousands of products in stock from trusted international brands</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ===== WHOLESALE SECTION ===== */}
-      <section className="wholesale-section-premium">
-        <div className="wholesale-grid">
-          <div className="wholesale-content">
-            <span className="wholesale-badge">For Clinics, Hospitals & Pharmacies</span>
-
-            <h2 className="wholesale-headline">
-              WHOLESALE &<br />
-              <span className="wholesale-headline-accent">BULK SUPPLY</span>
-            </h2>
-
-            <p className="wholesale-description">
-              Partner with Al Ameen Pharmacy for reliable pharmaceutical supply.
-              We serve clinics, hospitals, and pharmacies across the UAE with
-              competitive pricing and consistent stock availability.
-            </p>
-
-            <ul className="wholesale-benefits">
-              <li>
-                <CheckIcon size={20} />
-                <span>Competitive bulk pricing</span>
-              </li>
-              <li>
-                <CheckIcon size={20} />
-                <span>Reliable stock levels</span>
-              </li>
-              <li>
-                <CheckIcon size={20} />
-                <span>Fast delivery across UAE</span>
-              </li>
-              <li>
-                <CheckIcon size={20} />
-                <span>Dedicated account support</span>
-              </li>
-            </ul>
-
-            <a
-              href="https://wa.me/971505456388?text=Hi,%20I'm%20interested%20in%20wholesale%20pricing%20for%20my%20business."
-              className="wholesale-cta"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <WhatsAppIcon size={24} />
-              <span>WhatsApp for Wholesale Inquiry</span>
-            </a>
-
-            <p className="wholesale-phone">
-              Or call: <a href="tel:+97142713695">+971-4-271-3695</a>
-            </p>
-          </div>
-
-          <div className="wholesale-visual">
-            <div className="wholesale-icon-container">
-              <span className="wholesale-icon">📦</span>
-              <span className="wholesale-icon-sub">🏥</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ===== CATEGORY NAVIGATION ===== */}
-      <section className="categories-section-minimal">
-        <div className="categories-container">
-          <h2 className="categories-title">Shop by Category</h2>
-
-          <div className="category-pills-row">
-            <button
-              className={`category-pill-premium ${selectedCategory === 'all' ? 'active' : ''}`}
-              onClick={() => handleCategoryClick('all')}
-            >
-              All Products
-            </button>
-            {categories.slice(0, 6).map(cat => (
-              <button
-                key={cat}
-                className={`category-pill-premium ${selectedCategory === cat ? 'active' : ''}`}
-                onClick={() => handleCategoryClick(cat)}
-              >
-                <span className="category-pill-icon">{categoryIcons[cat] || '💊'}</span>
-                <span>{cat}</span>
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* Trust Line */}
+        <p className="hero-trust-line">
+          4 branches across Dubai • Licensed DHA pharmacy • Open late daily
+        </p>
       </section>
 
       {/* ===== PRODUCTS SECTION ===== */}
-      <section className="products-section-premium" id="products">
-        <div className="products-header-premium">
-          <div className="products-header-left">
-            <h2 className="products-title-premium">
-              {searchParams.get('search')
-                ? `Results for "${searchParams.get('search')}"`
-                : 'Our Products'}
-            </h2>
-            <span className="products-count-premium">
-              {filteredProducts.length} {filteredProducts.length === 1 ? 'product' : 'products'}
-            </span>
-          </div>
+      <section className="products-section" id="products">
+        <div className="products-header">
+          <h2 className="products-title">
+            {searchParams.get('search')
+              ? `Results for "${searchParams.get('search')}"`
+              : 'Our Products'}
+          </h2>
 
-          <div className="products-filters-minimal">
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="sort-select-premium"
-            >
-              <option value="newest">Newest</option>
-              <option value="name">Name A-Z</option>
-              <option value="price-low">Price: Low to High</option>
-              <option value="price-high">Price: High to Low</option>
-            </select>
-          </div>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="sort-select"
+          >
+            <option value="newest">Newest</option>
+            <option value="name">Name A-Z</option>
+            <option value="price-low">Price: Low to High</option>
+            <option value="price-high">Price: High to Low</option>
+          </select>
         </div>
 
         {filteredProducts.length === 0 ? (
-          <div className="no-results-premium">
-            <span className="no-results-icon">🔍</span>
-            <h3>No products found</h3>
-            <p>Try adjusting your filters or search query</p>
-            <button
-              className="reset-filters-btn"
-              onClick={() => {
-                setSelectedCategory('all');
-                setSortBy('newest');
-                window.history.pushState({}, '', '/');
-              }}
-            >
-              Reset Filters
-            </button>
+          <div className="no-results">
+            <p>No products found</p>
           </div>
         ) : (
           <ProductGrid products={filteredProducts} />
         )}
       </section>
 
-      {/* ===== STICKY CONTACT BAR ===== */}
-      <div className="sticky-contact-bar">
-        <div className="sticky-contact-content">
-          <span className="sticky-contact-text">Need help finding something?</span>
-          <div className="sticky-contact-buttons">
-            <a
-              href="https://wa.me/971505456388"
-              className="sticky-whatsapp-btn"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <WhatsAppIcon size={18} />
-              <span>WhatsApp</span>
-            </a>
-            <a href="tel:+97142713695" className="sticky-call-btn">
-              <PhoneIcon size={18} />
-              <span>+971-4-271-3695</span>
-            </a>
-          </div>
+      {/* ===== WHOLESALE SECTION ===== */}
+      <section className="wholesale-section">
+        <div className="wholesale-inner">
+          <span className="wholesale-label">For Businesses</span>
+
+          <h2 className="wholesale-headline">
+            Wholesale & Bulk Supply
+          </h2>
+
+          <p className="wholesale-text">
+            Get wholesale pricing instantly via WhatsApp for clinics,
+            pharmacies, and hospitals. Competitive rates, reliable stock,
+            fast delivery across UAE.
+          </p>
+
+          <ul className="wholesale-list">
+            <li><CheckIcon size={18} /> Competitive bulk pricing</li>
+            <li><CheckIcon size={18} /> Reliable stock availability</li>
+            <li><CheckIcon size={18} /> Fast delivery across UAE</li>
+          </ul>
+
+          <a
+            href="https://wa.me/971505456388?text=Hi,%20I'm%20interested%20in%20wholesale%20pricing."
+            className="wholesale-cta"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <WhatsAppIcon size={22} />
+            <span>Get Wholesale Pricing</span>
+          </a>
         </div>
-      </div>
+      </section>
+
+      {/* ===== FOOTER ===== */}
+      <footer className="site-footer">
+        <div className="footer-inner">
+          <div className="footer-brand">
+            <span className="footer-arabic">صيدلية الأمين</span>
+            <span className="footer-name">Al Ameen Pharmacy</span>
+          </div>
+
+          <div className="footer-contact">
+            <p>Frij Murar, 8th Street, Deira, Dubai</p>
+            <p>P.O. Box: 39547</p>
+            <p>
+              <a href="tel:+97142713695">+971-4-271-3695</a>
+              {' '}&nbsp;•&nbsp;{' '}
+              <a href="https://wa.me/971505456388" target="_blank" rel="noopener noreferrer">
+                WhatsApp: +971-50-545-6388
+              </a>
+            </p>
+            <p className="footer-hours">Saturday – Thursday, 9AM – 2AM</p>
+          </div>
+
+          <p className="footer-copy">
+            © {new Date().getFullYear()} Al Ameen Pharmacy. All rights reserved.
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }

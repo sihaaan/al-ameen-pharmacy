@@ -1,4 +1,4 @@
-/* Al Ameen Pharmacy - Premium Homepage Redesign */
+/* Al Ameen Pharmacy - Premium Minimal Homepage */
 
 .home-container {
   min-height: 100vh;
@@ -6,7 +6,7 @@
 }
 
 /* ========================================
-   LOADING & ERROR STATES
+   LOADING & ERROR
    ======================================== */
 
 .home-loading {
@@ -14,29 +14,26 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 60vh;
-  gap: 20px;
+  min-height: 80vh;
+  gap: 16px;
 }
 
 .loading-spinner-home {
-  width: 48px;
-  height: 48px;
-  border: 3px solid #E2E8F0;
+  width: 40px;
+  height: 40px;
+  border: 3px solid #E5E7EB;
   border-top-color: #0D9488;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }
 
 .home-loading p {
-  font-size: 16px;
-  color: #64748B;
-  font-weight: 500;
+  font-size: 15px;
+  color: #6B7280;
 }
 
 .home-error {
@@ -45,384 +42,237 @@
   align-items: center;
   justify-content: center;
   min-height: 60vh;
-  gap: 16px;
-  padding: 40px 20px;
+  gap: 12px;
   text-align: center;
-}
-
-.home-error svg {
-  color: #EF4444;
+  padding: 40px 20px;
 }
 
 .home-error h2 {
-  font-size: 24px;
-  color: #0F172A;
+  font-size: 20px;
+  color: #1F2937;
   margin: 0;
 }
 
 .home-error p {
-  font-size: 16px;
-  color: #64748B;
-  margin: 0;
-}
-
-/* ========================================
-   HERO SECTION - PREMIUM
-   ======================================== */
-
-.hero-section-premium {
-  min-height: 90vh;
-  display: flex;
-  align-items: center;
-  background: linear-gradient(135deg, #F8FAFC 0%, #F1F5F9 100%);
-  padding: 100px 40px 80px;
-  position: relative;
-  overflow: hidden;
-}
-
-.hero-grid {
-  max-width: 1300px;
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: 1.1fr 0.9fr;
-  gap: 80px;
-  align-items: center;
-  width: 100%;
-}
-
-.hero-content-left {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
-
-.hero-arabic-badge {
-  display: inline-block;
-  font-size: 18px;
-  font-weight: 600;
-  color: #0D9488;
-  margin-bottom: 20px;
-  padding: 8px 16px;
-  background: rgba(13, 148, 136, 0.08);
-  border-radius: 6px;
-  font-family: 'Arial', sans-serif;
-  letter-spacing: 1px;
-}
-
-.hero-headline-premium {
-  font-size: 56px;
-  font-weight: 800;
-  color: #0F172A;
-  line-height: 1.1;
-  margin: 0 0 28px 0;
-  letter-spacing: -1.5px;
-}
-
-.hero-headline-accent {
-  color: #0D9488;
-}
-
-.hero-subtext {
-  font-size: 19px;
-  line-height: 1.7;
-  color: #475569;
-  margin: 0 0 40px 0;
-  max-width: 500px;
-}
-
-/* WhatsApp Button - THE Primary CTA */
-.hero-whatsapp-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  padding: 22px 48px;
-  background: #25D366;
-  color: white;
-  border: none;
-  border-radius: 16px;
-  font-size: 20px;
-  font-weight: 700;
-  text-decoration: none;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  box-shadow: 0 8px 30px rgba(37, 211, 102, 0.35);
-  margin-bottom: 32px;
-}
-
-.hero-whatsapp-btn:hover {
-  background: #128C7E;
-  transform: translateY(-3px);
-  box-shadow: 0 12px 40px rgba(37, 211, 102, 0.45);
-}
-
-.hero-whatsapp-btn svg {
-  flex-shrink: 0;
-}
-
-/* Secondary Contact Row */
-.hero-contact-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.hero-contact-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: #374151;
-  text-decoration: none;
   font-size: 15px;
-  font-weight: 500;
-  transition: color 0.2s;
-}
-
-.hero-contact-link:hover {
-  color: #0D9488;
-}
-
-.hero-contact-divider {
-  color: #D1D5DB;
-}
-
-.hero-contact-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
   color: #6B7280;
-  font-size: 15px;
-}
-
-/* Hero Right Visual */
-.hero-visual {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 400px;
-}
-
-.hero-visual-blob {
-  position: absolute;
-  width: 380px;
-  height: 380px;
-  background: linear-gradient(135deg, #0D9488 0%, #14B8A6 50%, #5EEAD4 100%);
-  border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
-  opacity: 0.15;
-  animation: blobFloat 12s ease-in-out infinite;
-}
-
-@keyframes blobFloat {
-  0%, 100% {
-    border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
-    transform: translate(0, 0) scale(1);
-  }
-  50% {
-    border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%;
-    transform: translate(10px, -10px) scale(1.05);
-  }
-}
-
-.hero-trust-badges {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.hero-badge-item {
-  padding: 16px 32px;
-  background: white;
-  border: 2px solid #E5E7EB;
-  border-radius: 12px;
-  font-size: 16px;
-  font-weight: 600;
-  color: #374151;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
-  transition: all 0.2s ease;
-}
-
-.hero-badge-item:hover {
-  border-color: #0D9488;
-  transform: translateX(8px);
+  margin: 0;
 }
 
 /* ========================================
-   TRUST SECTION - PREMIUM
+   HERO SECTION
    ======================================== */
 
-.trust-section-premium {
-  padding: 120px 40px;
-  background: #ffffff;
+.hero-section {
+  min-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 120px 24px 60px;
+  background: #FAFAFA;
 }
 
-.trust-grid-premium {
-  max-width: 1200px;
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: 1fr 1.2fr;
-  gap: 80px;
-  align-items: start;
+.hero-inner {
+  max-width: 600px;
 }
 
-.trust-headline-area {
-  position: sticky;
-  top: 120px;
-}
-
-.trust-headline-large {
-  font-size: 52px;
-  font-weight: 800;
-  color: #0F172A;
-  line-height: 1.1;
-  margin: 0;
-  letter-spacing: -1px;
-}
-
-.trust-headline-accent {
+.hero-arabic {
+  display: block;
+  font-size: 20px;
   color: #0D9488;
+  margin-bottom: 16px;
+  font-weight: 500;
+  letter-spacing: 2px;
 }
 
-.trust-points-area {
-  display: flex;
-  flex-direction: column;
-  gap: 40px;
-}
-
-.trust-point {
-  display: flex;
-  gap: 20px;
-  padding: 32px;
-  background: #F9FAFB;
-  border-radius: 16px;
-  border: 1px solid #E5E7EB;
-  transition: all 0.2s ease;
-}
-
-.trust-point:hover {
-  background: #F0FDFA;
-  border-color: #99F6E4;
-  transform: translateX(8px);
-}
-
-.trust-point-icon {
-  flex-shrink: 0;
-  width: 48px;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #0D9488;
-  color: white;
-  border-radius: 12px;
-}
-
-.trust-point-content h3 {
-  font-size: 18px;
+.hero-headline {
+  font-size: 52px;
   font-weight: 700;
-  color: #0F172A;
-  margin: 0 0 8px 0;
-}
-
-.trust-point-content p {
-  font-size: 15px;
-  color: #64748B;
-  margin: 0;
-  line-height: 1.6;
-}
-
-/* ========================================
-   WHOLESALE SECTION - DARK PREMIUM
-   ======================================== */
-
-.wholesale-section-premium {
-  background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
-  padding: 120px 40px;
-  position: relative;
-  overflow: hidden;
-}
-
-.wholesale-section-premium::before {
-  content: '';
-  position: absolute;
-  top: -50%;
-  right: -20%;
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, rgba(13, 148, 136, 0.15) 0%, transparent 70%);
-  pointer-events: none;
-}
-
-.wholesale-grid {
-  max-width: 1200px;
-  margin: 0 auto;
-  display: grid;
-  grid-template-columns: 1.3fr 0.7fr;
-  gap: 80px;
-  align-items: center;
-  position: relative;
-  z-index: 1;
-}
-
-.wholesale-content {
-  color: white;
-}
-
-.wholesale-badge {
-  display: inline-block;
-  padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #94A3B8;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 24px;
-}
-
-.wholesale-headline {
-  font-size: 48px;
-  font-weight: 800;
+  color: #111827;
   line-height: 1.1;
   margin: 0 0 24px 0;
   letter-spacing: -1px;
 }
 
-.wholesale-headline-accent {
-  color: #5EEAD4;
+.hero-accent {
+  color: #0D9488;
 }
 
-.wholesale-description {
+.hero-subtext {
+  font-size: 18px;
+  line-height: 1.7;
+  color: #4B5563;
+  margin: 0 0 40px 0;
+}
+
+/* Primary CTA - WhatsApp */
+.hero-cta-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 18px 40px;
+  background: #25D366;
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 18px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 20px rgba(37, 211, 102, 0.3);
+}
+
+.hero-cta-primary:hover {
+  background: #1FAF59;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(37, 211, 102, 0.4);
+}
+
+/* Secondary CTA - Call */
+.hero-cta-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 24px;
+  background: transparent;
+  color: #374151;
+  border: none;
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.hero-cta-secondary:hover {
+  color: #0D9488;
+}
+
+/* Trust Line */
+.hero-trust-line {
+  margin-top: 60px;
+  font-size: 14px;
+  color: #9CA3AF;
+  letter-spacing: 0.5px;
+}
+
+/* ========================================
+   PRODUCTS SECTION
+   ======================================== */
+
+.products-section {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 80px 24px 100px;
+}
+
+.products-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 48px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.products-title {
+  font-size: 28px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0;
+}
+
+.sort-select {
+  padding: 10px 16px;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #374151;
+  background: white;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.sort-select:hover,
+.sort-select:focus {
+  border-color: #0D9488;
+}
+
+.no-results {
+  text-align: center;
+  padding: 80px 20px;
+  color: #6B7280;
+}
+
+.no-results p {
+  margin: 0;
+  font-size: 16px;
+}
+
+/* ========================================
+   WHOLESALE SECTION
+   ======================================== */
+
+.wholesale-section {
+  background: #111827;
+  padding: 100px 24px;
+}
+
+.wholesale-inner {
+  max-width: 700px;
+  margin: 0 auto;
+  text-align: center;
+  color: white;
+}
+
+.wholesale-label {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9CA3AF;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  margin-bottom: 20px;
+}
+
+.wholesale-headline {
+  font-size: 36px;
+  font-weight: 700;
+  margin: 0 0 24px 0;
+  line-height: 1.2;
+}
+
+.wholesale-text {
   font-size: 17px;
   line-height: 1.7;
-  color: rgba(255, 255, 255, 0.75);
-  margin: 0 0 36px 0;
-  max-width: 540px;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0 0 32px 0;
 }
 
-.wholesale-benefits {
+.wholesale-list {
   list-style: none;
   padding: 0;
   margin: 0 0 40px 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  align-items: center;
 }
 
-.wholesale-benefits li {
+.wholesale-list li {
   display: flex;
   align-items: center;
-  gap: 14px;
-  font-size: 16px;
-  color: rgba(255, 255, 255, 0.9);
+  gap: 10px;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.85);
 }
 
-.wholesale-benefits li svg {
+.wholesale-list li svg {
   color: #5EEAD4;
   flex-shrink: 0;
 }
@@ -432,501 +282,182 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  padding: 20px 40px;
+  padding: 18px 36px;
   background: #25D366;
   color: white;
   border: none;
-  border-radius: 14px;
-  font-size: 18px;
-  font-weight: 700;
+  border-radius: 12px;
+  font-size: 17px;
+  font-weight: 600;
   text-decoration: none;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  box-shadow: 0 8px 30px rgba(37, 211, 102, 0.3);
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 20px rgba(37, 211, 102, 0.25);
 }
 
 .wholesale-cta:hover {
-  background: #128C7E;
-  transform: translateY(-3px);
-  box-shadow: 0 12px 40px rgba(37, 211, 102, 0.4);
-}
-
-.wholesale-phone {
-  margin-top: 20px;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.wholesale-phone a {
-  color: #5EEAD4;
-  text-decoration: none;
-  font-weight: 600;
-}
-
-.wholesale-phone a:hover {
-  text-decoration: underline;
-}
-
-/* Wholesale Visual */
-.wholesale-visual {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.wholesale-icon-container {
-  position: relative;
-  width: 200px;
-  height: 200px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.wholesale-icon {
-  font-size: 100px;
-  opacity: 0.9;
-}
-
-.wholesale-icon-sub {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  font-size: 50px;
-  opacity: 0.8;
+  background: #1FAF59;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(37, 211, 102, 0.35);
 }
 
 /* ========================================
-   CATEGORIES SECTION - MINIMAL
+   FOOTER
    ======================================== */
 
-.categories-section-minimal {
-  padding: 80px 40px;
-  background: #F9FAFB;
+.site-footer {
+  background: #FAFAFA;
+  border-top: 1px solid #E5E7EB;
+  padding: 60px 24px 40px;
 }
 
-.categories-container {
-  max-width: 1200px;
+.footer-inner {
+  max-width: 600px;
   margin: 0 auto;
-}
-
-.categories-title {
-  font-size: 28px;
-  font-weight: 700;
-  color: #0F172A;
-  margin: 0 0 32px 0;
   text-align: center;
 }
 
-.category-pills-row {
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.category-pill-premium {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 24px;
-  background: white;
-  border: 2px solid #E5E7EB;
-  border-radius: 50px;
-  font-size: 15px;
-  font-weight: 600;
-  color: #374151;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.category-pill-premium:hover {
-  border-color: #0D9488;
-  color: #0D9488;
-}
-
-.category-pill-premium.active {
-  background: #0D9488;
-  border-color: #0D9488;
-  color: white;
-}
-
-.category-pill-icon {
-  font-size: 18px;
-}
-
-/* ========================================
-   PRODUCTS SECTION - PREMIUM
-   ======================================== */
-
-.products-section-premium {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 80px 40px 120px;
-}
-
-.products-header-premium {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 40px;
-  flex-wrap: wrap;
-  gap: 20px;
-}
-
-.products-header-left {
-  display: flex;
-  align-items: baseline;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.products-title-premium {
-  font-size: 32px;
-  font-weight: 700;
-  color: #0F172A;
-  margin: 0;
-}
-
-.products-count-premium {
-  font-size: 15px;
-  color: #64748B;
-  font-weight: 500;
-}
-
-.products-filters-minimal {
-  display: flex;
-  gap: 12px;
-}
-
-.sort-select-premium {
-  padding: 12px 20px;
-  border: 2px solid #E5E7EB;
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #374151;
-  background: white;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  outline: none;
-}
-
-.sort-select-premium:hover,
-.sort-select-premium:focus {
-  border-color: #0D9488;
-}
-
-/* No Results */
-.no-results-premium {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 100px 20px;
-  text-align: center;
-}
-
-.no-results-icon {
-  font-size: 64px;
+.footer-brand {
   margin-bottom: 24px;
 }
 
-.no-results-premium h3 {
-  font-size: 24px;
-  font-weight: 700;
-  color: #0F172A;
-  margin: 0 0 12px 0;
+.footer-arabic {
+  display: block;
+  font-size: 18px;
+  color: #0D9488;
+  margin-bottom: 4px;
 }
 
-.no-results-premium p {
-  font-size: 16px;
-  color: #64748B;
-  margin: 0 0 32px 0;
-}
-
-.reset-filters-btn {
-  padding: 14px 28px;
-  background: #0D9488;
-  color: white;
-  border: none;
-  border-radius: 10px;
-  font-size: 15px;
+.footer-name {
+  display: block;
+  font-size: 20px;
   font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  color: #111827;
 }
 
-.reset-filters-btn:hover {
-  background: #0F766E;
-  transform: translateY(-2px);
+.footer-contact {
+  margin-bottom: 32px;
 }
 
-/* ========================================
-   STICKY CONTACT BAR
-   ======================================== */
-
-.sticky-contact-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: white;
-  border-top: 1px solid #E5E7EB;
-  padding: 16px 24px;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
-  z-index: 100;
+.footer-contact p {
+  margin: 8px 0;
+  font-size: 14px;
+  color: #6B7280;
+  line-height: 1.6;
 }
 
-.sticky-contact-content {
-  max-width: 1200px;
-  margin: 0 auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 20px;
+.footer-contact a {
+  color: #0D9488;
+  text-decoration: none;
+  transition: color 0.2s;
 }
 
-.sticky-contact-text {
-  font-size: 15px;
-  color: #64748B;
+.footer-contact a:hover {
+  color: #0F766E;
+}
+
+.footer-hours {
+  margin-top: 16px !important;
   font-weight: 500;
+  color: #374151 !important;
 }
 
-.sticky-contact-buttons {
-  display: flex;
-  gap: 12px;
-}
-
-.sticky-whatsapp-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 24px;
-  background: #25D366;
-  color: white;
-  border: none;
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-  transition: all 0.2s ease;
-}
-
-.sticky-whatsapp-btn:hover {
-  background: #128C7E;
-}
-
-.sticky-call-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 24px;
-  background: #F1F5F9;
-  color: #374151;
-  border: none;
-  border-radius: 10px;
-  font-size: 14px;
-  font-weight: 600;
-  text-decoration: none;
-  transition: all 0.2s ease;
-}
-
-.sticky-call-btn:hover {
-  background: #E2E8F0;
+.footer-copy {
+  font-size: 13px;
+  color: #9CA3AF;
+  margin: 0;
 }
 
 /* ========================================
-   RESPONSIVE DESIGN
+   RESPONSIVE
    ======================================== */
-
-@media (max-width: 1100px) {
-  .hero-grid {
-    grid-template-columns: 1fr;
-    gap: 60px;
-    text-align: center;
-  }
-
-  .hero-content-left {
-    align-items: center;
-  }
-
-  .hero-subtext {
-    max-width: 100%;
-  }
-
-  .hero-visual {
-    min-height: 300px;
-  }
-
-  .hero-trust-badges {
-    flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: center;
-  }
-
-  .trust-grid-premium {
-    grid-template-columns: 1fr;
-    gap: 48px;
-    text-align: center;
-  }
-
-  .trust-headline-area {
-    position: static;
-  }
-
-  .trust-headline-large {
-    font-size: 40px;
-  }
-
-  .trust-point {
-    text-align: left;
-  }
-
-  .wholesale-grid {
-    grid-template-columns: 1fr;
-    gap: 48px;
-    text-align: center;
-  }
-
-  .wholesale-description {
-    max-width: 100%;
-  }
-
-  .wholesale-benefits {
-    align-items: center;
-  }
-
-  .wholesale-visual {
-    display: none;
-  }
-}
 
 @media (max-width: 768px) {
-  .hero-section-premium {
+  .hero-section {
     min-height: auto;
-    padding: 80px 24px 60px;
+    padding: 100px 20px 50px;
   }
 
-  .hero-headline-premium {
-    font-size: 38px;
+  .hero-headline {
+    font-size: 36px;
   }
 
   .hero-subtext {
     font-size: 16px;
   }
 
-  .hero-whatsapp-btn {
+  .hero-cta-primary {
     width: 100%;
-    padding: 18px 32px;
-    font-size: 18px;
+    padding: 16px 32px;
   }
 
-  .hero-contact-row {
-    justify-content: center;
+  .hero-cta-secondary {
+    width: 100%;
   }
 
-  .hero-visual {
-    display: none;
+  .hero-trust-line {
+    margin-top: 40px;
+    font-size: 13px;
+    line-height: 1.6;
   }
 
-  .trust-section-premium {
-    padding: 80px 24px;
+  .products-section {
+    padding: 60px 16px 80px;
   }
 
-  .trust-headline-large {
-    font-size: 32px;
-  }
-
-  .trust-point {
+  .products-header {
     flex-direction: column;
-    text-align: center;
-    align-items: center;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 32px;
   }
 
-  .wholesale-section-premium {
-    padding: 80px 24px;
+  .products-title {
+    font-size: 22px;
+  }
+
+  .sort-select {
+    width: 100%;
+  }
+
+  .wholesale-section {
+    padding: 70px 20px;
   }
 
   .wholesale-headline {
-    font-size: 32px;
+    font-size: 28px;
+  }
+
+  .wholesale-text {
+    font-size: 15px;
   }
 
   .wholesale-cta {
     width: 100%;
-    justify-content: center;
   }
 
-  .categories-section-minimal {
-    padding: 60px 24px;
+  .site-footer {
+    padding: 50px 20px 32px;
   }
 
-  .category-pills-row {
-    gap: 10px;
-  }
-
-  .category-pill-premium {
-    padding: 12px 18px;
-    font-size: 14px;
-  }
-
-  .products-section-premium {
-    padding: 60px 20px 120px;
-  }
-
-  .products-header-premium {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .products-title-premium {
-    font-size: 24px;
-  }
-
-  .sticky-contact-content {
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .sticky-contact-buttons {
-    width: 100%;
-  }
-
-  .sticky-whatsapp-btn,
-  .sticky-call-btn {
-    flex: 1;
-    justify-content: center;
+  .footer-contact p {
+    font-size: 13px;
   }
 }
 
 @media (max-width: 480px) {
-  .hero-headline-premium {
+  .hero-headline {
     font-size: 32px;
   }
 
-  .hero-arabic-badge {
-    font-size: 14px;
-  }
-
-  .trust-headline-large {
-    font-size: 28px;
-  }
-
-  .wholesale-headline {
-    font-size: 28px;
-  }
-
-  .category-pill-premium {
-    padding: 10px 14px;
-    font-size: 13px;
-  }
-
-  .category-pill-icon {
+  .hero-arabic {
     font-size: 16px;
   }
 
-  .sticky-contact-text {
-    text-align: center;
+  .wholesale-headline {
+    font-size: 24px;
+  }
+
+  .wholesale-list li {
     font-size: 14px;
   }
 }
