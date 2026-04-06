@@ -1,11 +1,14 @@
-/* Al Ameen Pharmacy - Modern Healthcare Home Page */
+/* Al Ameen Pharmacy - Premium Homepage Redesign */
 
 .home-container {
   min-height: 100vh;
-  background: var(--gray-50, #F8FAFC);
+  background: #ffffff;
 }
 
-/* Loading State */
+/* ========================================
+   LOADING & ERROR STATES
+   ======================================== */
+
 .home-loading {
   display: flex;
   flex-direction: column;
@@ -18,8 +21,8 @@
 .loading-spinner-home {
   width: 48px;
   height: 48px;
-  border: 3px solid var(--gray-200, #E2E8F0);
-  border-top-color: var(--primary, #0D9488);
+  border: 3px solid #E2E8F0;
+  border-top-color: #0D9488;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -32,11 +35,10 @@
 
 .home-loading p {
   font-size: 16px;
-  color: var(--gray-500, #64748B);
+  color: #64748B;
   font-weight: 500;
 }
 
-/* Error State */
 .home-error {
   display: flex;
   flex-direction: column;
@@ -49,570 +51,882 @@
 }
 
 .home-error svg {
-  color: var(--danger, #EF4444);
+  color: #EF4444;
 }
 
 .home-error h2 {
   font-size: 24px;
-  color: var(--gray-900, #0F172A);
+  color: #0F172A;
   margin: 0;
 }
 
 .home-error p {
   font-size: 16px;
-  color: var(--gray-500, #64748B);
+  color: #64748B;
   margin: 0;
 }
 
-/* Hero Section - Clean Healthcare Design */
-.hero-section {
+/* ========================================
+   HERO SECTION - PREMIUM
+   ======================================== */
+
+.hero-section-premium {
+  min-height: 90vh;
+  display: flex;
+  align-items: center;
+  background: linear-gradient(135deg, #F8FAFC 0%, #F1F5F9 100%);
+  padding: 100px 40px 80px;
   position: relative;
-  background: linear-gradient(135deg,
-    var(--primary-700, #0F766E) 0%,
-    var(--primary, #0D9488) 50%,
-    var(--primary-light, #14B8A6) 100%);
-  padding: 80px 20px 100px 20px;
   overflow: hidden;
 }
 
-.hero-content {
-  max-width: 1200px;
+.hero-grid {
+  max-width: 1300px;
   margin: 0 auto;
-  position: relative;
-  z-index: 2;
-  text-align: center;
-}
-
-.hero-badge {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 80px;
   align-items: center;
-  gap: 8px;
-  padding: 8px 18px;
-  background: rgba(255, 255, 255, 0.15);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: var(--radius-full, 9999px);
-  color: white;
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 28px;
-  animation: fadeInDown 0.6s ease-out;
-}
-
-@keyframes fadeInDown {
-  from {
-    opacity: 0;
-    transform: translateY(-20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.hero-badge svg {
-  flex-shrink: 0;
-}
-
-.hero-title {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0 0 20px 0;
-  animation: fadeInUp 0.6s ease-out 0.2s both;
-}
-
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.hero-arabic {
-  font-size: 28px;
-  font-weight: 700;
-  color: rgba(255, 255, 255, 0.9);
-  letter-spacing: 1px;
-  font-family: 'Arial', sans-serif;
-}
-
-.hero-english {
-  font-size: 44px;
-  font-weight: 800;
-  color: white;
-  letter-spacing: 2px;
-  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
-}
-
-.hero-description {
-  max-width: 640px;
-  margin: 0 auto 40px auto;
-  font-size: 17px;
-  line-height: 1.7;
-  color: rgba(255, 255, 255, 0.9);
-  animation: fadeInUp 0.6s ease-out 0.4s both;
-}
-
-.hero-features {
-  display: flex;
-  justify-content: center;
-  gap: 16px;
-  flex-wrap: wrap;
-  animation: fadeInUp 0.6s ease-out 0.6s both;
-}
-
-.feature-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: var(--radius-full, 9999px);
-  color: white;
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.2s ease;
-}
-
-.feature-item:hover {
-  background: rgba(255, 255, 255, 0.2);
-  transform: translateY(-2px);
-}
-
-.feature-item svg {
-  flex-shrink: 0;
-}
-
-/* Hero Decorations */
-.hero-decoration {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  overflow: hidden;
-  z-index: 1;
-  pointer-events: none;
-}
-
-.decoration-circle {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.05);
-  animation: float 20s ease-in-out infinite;
-}
-
-.decoration-1 {
-  width: 350px;
-  height: 350px;
-  top: -180px;
-  right: -80px;
-  animation-delay: 0s;
-}
-
-.decoration-2 {
-  width: 280px;
-  height: 280px;
-  bottom: -140px;
-  left: -60px;
-  animation-delay: -7s;
-}
-
-.decoration-3 {
-  width: 200px;
-  height: 200px;
-  top: 40%;
-  left: -30px;
-  animation-delay: -14s;
-}
-
-@keyframes float {
-  0%, 100% {
-    transform: translate(0, 0) scale(1);
-  }
-  33% {
-    transform: translate(20px, -20px) scale(1.05);
-  }
-  66% {
-    transform: translate(-15px, 15px) scale(0.95);
-  }
-}
-
-/* Trust Banner */
-.trust-banner {
-  background: white;
-  border-bottom: 1px solid var(--gray-100, #F1F5F9);
-  padding: 12px 20px;
-}
-
-.trust-banner-content {
-  max-width: 1200px;
-  margin: 0 auto;
-  display: flex;
-  justify-content: center;
-  gap: 32px;
-  flex-wrap: wrap;
-}
-
-.trust-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--gray-600, #475569);
-}
-
-.trust-item svg,
-.trust-item .icon {
-  color: var(--success, #22C55E);
-}
-
-/* Products Section */
-.products-section {
-  max-width: 1400px;
-  margin: -50px auto 0 auto;
-  padding: 0 20px 80px 20px;
-  position: relative;
-  z-index: 3;
   width: 100%;
 }
 
-.section-header {
+.hero-content-left {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.hero-arabic-badge {
+  display: inline-block;
+  font-size: 18px;
+  font-weight: 600;
+  color: #0D9488;
+  margin-bottom: 20px;
+  padding: 8px 16px;
+  background: rgba(13, 148, 136, 0.08);
+  border-radius: 6px;
+  font-family: 'Arial', sans-serif;
+  letter-spacing: 1px;
+}
+
+.hero-headline-premium {
+  font-size: 56px;
+  font-weight: 800;
+  color: #0F172A;
+  line-height: 1.1;
+  margin: 0 0 28px 0;
+  letter-spacing: -1.5px;
+}
+
+.hero-headline-accent {
+  color: #0D9488;
+}
+
+.hero-subtext {
+  font-size: 19px;
+  line-height: 1.7;
+  color: #475569;
+  margin: 0 0 40px 0;
+  max-width: 500px;
+}
+
+/* WhatsApp Button - THE Primary CTA */
+.hero-whatsapp-btn {
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 22px 48px;
+  background: #25D366;
+  color: white;
+  border: none;
+  border-radius: 16px;
+  font-size: 20px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 8px 30px rgba(37, 211, 102, 0.35);
   margin-bottom: 32px;
-  padding: 28px 32px;
-  background: white;
-  border-radius: var(--radius-xl, 16px);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+}
+
+.hero-whatsapp-btn:hover {
+  background: #128C7E;
+  transform: translateY(-3px);
+  box-shadow: 0 12px 40px rgba(37, 211, 102, 0.45);
+}
+
+.hero-whatsapp-btn svg {
+  flex-shrink: 0;
+}
+
+/* Secondary Contact Row */
+.hero-contact-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
   flex-wrap: wrap;
+}
+
+.hero-contact-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #374151;
+  text-decoration: none;
+  font-size: 15px;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.hero-contact-link:hover {
+  color: #0D9488;
+}
+
+.hero-contact-divider {
+  color: #D1D5DB;
+}
+
+.hero-contact-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #6B7280;
+  font-size: 15px;
+}
+
+/* Hero Right Visual */
+.hero-visual {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+}
+
+.hero-visual-blob {
+  position: absolute;
+  width: 380px;
+  height: 380px;
+  background: linear-gradient(135deg, #0D9488 0%, #14B8A6 50%, #5EEAD4 100%);
+  border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
+  opacity: 0.15;
+  animation: blobFloat 12s ease-in-out infinite;
+}
+
+@keyframes blobFloat {
+  0%, 100% {
+    border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%;
+    transform: translate(10px, -10px) scale(1.05);
+  }
+}
+
+.hero-trust-badges {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
 }
 
-.section-title {
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--gray-900, #0F172A);
-  margin: 0;
-  flex: 1;
-}
-
-.products-count-badge {
-  padding: 10px 20px;
-  background: var(--primary-50, #F0FDFA);
-  color: var(--primary-700, #0F766E);
-  font-size: 14px;
+.hero-badge-item {
+  padding: 16px 32px;
+  background: white;
+  border: 2px solid #E5E7EB;
+  border-radius: 12px;
+  font-size: 16px;
   font-weight: 600;
-  border-radius: var(--radius-full, 9999px);
-  border: 1.5px solid var(--primary, #0D9488);
+  color: #374151;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+  transition: all 0.2s ease;
 }
 
-/* Filters Bar */
-.filters-bar {
+.hero-badge-item:hover {
+  border-color: #0D9488;
+  transform: translateX(8px);
+}
+
+/* ========================================
+   TRUST SECTION - PREMIUM
+   ======================================== */
+
+.trust-section-premium {
+  padding: 120px 40px;
+  background: #ffffff;
+}
+
+.trust-grid-premium {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 80px;
+  align-items: start;
+}
+
+.trust-headline-area {
+  position: sticky;
+  top: 120px;
+}
+
+.trust-headline-large {
+  font-size: 52px;
+  font-weight: 800;
+  color: #0F172A;
+  line-height: 1.1;
+  margin: 0;
+  letter-spacing: -1px;
+}
+
+.trust-headline-accent {
+  color: #0D9488;
+}
+
+.trust-points-area {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+.trust-point {
+  display: flex;
+  gap: 20px;
+  padding: 32px;
+  background: #F9FAFB;
+  border-radius: 16px;
+  border: 1px solid #E5E7EB;
+  transition: all 0.2s ease;
+}
+
+.trust-point:hover {
+  background: #F0FDFA;
+  border-color: #99F6E4;
+  transform: translateX(8px);
+}
+
+.trust-point-icon {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 20px 28px;
-  background: white;
-  border-radius: var(--radius-xl, 16px);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
-  margin-bottom: 28px;
+  justify-content: center;
+  background: #0D9488;
+  color: white;
+  border-radius: 12px;
+}
+
+.trust-point-content h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0F172A;
+  margin: 0 0 8px 0;
+}
+
+.trust-point-content p {
+  font-size: 15px;
+  color: #64748B;
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ========================================
+   WHOLESALE SECTION - DARK PREMIUM
+   ======================================== */
+
+.wholesale-section-premium {
+  background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
+  padding: 120px 40px;
+  position: relative;
+  overflow: hidden;
+}
+
+.wholesale-section-premium::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -20%;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.15) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.wholesale-grid {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1.3fr 0.7fr;
+  gap: 80px;
+  align-items: center;
+  position: relative;
+  z-index: 1;
+}
+
+.wholesale-content {
+  color: white;
+}
+
+.wholesale-badge {
+  display: inline-block;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #94A3B8;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 24px;
+}
+
+.wholesale-headline {
+  font-size: 48px;
+  font-weight: 800;
+  line-height: 1.1;
+  margin: 0 0 24px 0;
+  letter-spacing: -1px;
+}
+
+.wholesale-headline-accent {
+  color: #5EEAD4;
+}
+
+.wholesale-description {
+  font-size: 17px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.75);
+  margin: 0 0 36px 0;
+  max-width: 540px;
+}
+
+.wholesale-benefits {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 40px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.wholesale-benefits li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.wholesale-benefits li svg {
+  color: #5EEAD4;
+  flex-shrink: 0;
+}
+
+.wholesale-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px 40px;
+  background: #25D366;
+  color: white;
+  border: none;
+  border-radius: 14px;
+  font-size: 18px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 8px 30px rgba(37, 211, 102, 0.3);
+}
+
+.wholesale-cta:hover {
+  background: #128C7E;
+  transform: translateY(-3px);
+  box-shadow: 0 12px 40px rgba(37, 211, 102, 0.4);
+}
+
+.wholesale-phone {
+  margin-top: 20px;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.wholesale-phone a {
+  color: #5EEAD4;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.wholesale-phone a:hover {
+  text-decoration: underline;
+}
+
+/* Wholesale Visual */
+.wholesale-visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wholesale-icon-container {
+  position: relative;
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wholesale-icon {
+  font-size: 100px;
+  opacity: 0.9;
+}
+
+.wholesale-icon-sub {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  font-size: 50px;
+  opacity: 0.8;
+}
+
+/* ========================================
+   CATEGORIES SECTION - MINIMAL
+   ======================================== */
+
+.categories-section-minimal {
+  padding: 80px 40px;
+  background: #F9FAFB;
+}
+
+.categories-container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.categories-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #0F172A;
+  margin: 0 0 32px 0;
+  text-align: center;
+}
+
+.category-pills-row {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
-.filter-group {
-  display: flex;
+.category-pill-premium {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-}
-
-.filter-group label {
-  font-size: 13px;
+  gap: 8px;
+  padding: 14px 24px;
+  background: white;
+  border: 2px solid #E5E7EB;
+  border-radius: 50px;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--gray-600, #475569);
-  white-space: nowrap;
+  color: #374151;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.filter-select {
-  padding: 10px 14px;
-  border: 1.5px solid var(--gray-200, #E2E8F0);
-  border-radius: var(--radius-md, 8px);
+.category-pill-premium:hover {
+  border-color: #0D9488;
+  color: #0D9488;
+}
+
+.category-pill-premium.active {
+  background: #0D9488;
+  border-color: #0D9488;
+  color: white;
+}
+
+.category-pill-icon {
+  font-size: 18px;
+}
+
+/* ========================================
+   PRODUCTS SECTION - PREMIUM
+   ======================================== */
+
+.products-section-premium {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 80px 40px 120px;
+}
+
+.products-header-premium {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 40px;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.products-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.products-title-premium {
+  font-size: 32px;
+  font-weight: 700;
+  color: #0F172A;
+  margin: 0;
+}
+
+.products-count-premium {
+  font-size: 15px;
+  color: #64748B;
+  font-weight: 500;
+}
+
+.products-filters-minimal {
+  display: flex;
+  gap: 12px;
+}
+
+.sort-select-premium {
+  padding: 12px 20px;
+  border: 2px solid #E5E7EB;
+  border-radius: 10px;
   font-size: 14px;
   font-weight: 500;
-  color: var(--gray-900, #0F172A);
+  color: #374151;
   background: white;
   cursor: pointer;
   transition: all 0.2s ease;
   outline: none;
-  min-width: 150px;
 }
 
-.filter-select:hover {
-  border-color: var(--primary, #0D9488);
+.sort-select-premium:hover,
+.sort-select-premium:focus {
+  border-color: #0D9488;
 }
 
-.filter-select:focus {
-  border-color: var(--primary, #0D9488);
-  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
-}
-
-.checkbox-group {
-  display: flex;
-  align-items: center;
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.checkbox-label input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-  accent-color: var(--primary, #0D9488);
-}
-
-.checkbox-label span {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--gray-600, #475569);
-}
-
-.clear-filters-btn {
-  margin-left: auto;
-  padding: 10px 18px;
-  background: transparent;
-  color: var(--danger, #EF4444);
-  border: 1.5px solid var(--danger, #EF4444);
-  border-radius: var(--radius-md, 8px);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.clear-filters-btn:hover {
-  background: var(--danger, #EF4444);
-  color: white;
-}
-
-/* Category Pills */
-.category-pills {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 24px;
-  padding: 0 4px;
-}
-
-.category-pill {
-  padding: 8px 16px;
-  background: white;
-  border: 1.5px solid var(--gray-200, #E2E8F0);
-  border-radius: var(--radius-full, 9999px);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--gray-600, #475569);
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.category-pill:hover {
-  border-color: var(--primary, #0D9488);
-  color: var(--primary, #0D9488);
-}
-
-.category-pill.active {
-  background: var(--primary, #0D9488);
-  border-color: var(--primary, #0D9488);
-  color: white;
-}
-
-/* No Results Message */
-.no-results {
+/* No Results */
+.no-results-premium {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 80px 20px;
-  background: white;
-  border-radius: var(--radius-xl, 16px);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+  padding: 100px 20px;
   text-align: center;
 }
 
-.no-results svg {
-  color: var(--gray-400, #94A3B8);
-  margin-bottom: 20px;
+.no-results-icon {
+  font-size: 64px;
+  margin-bottom: 24px;
 }
 
-.no-results h3 {
-  font-size: 22px;
+.no-results-premium h3 {
+  font-size: 24px;
   font-weight: 700;
-  color: var(--gray-900, #0F172A);
-  margin: 0 0 10px 0;
+  color: #0F172A;
+  margin: 0 0 12px 0;
 }
 
-.no-results p {
+.no-results-premium p {
+  font-size: 16px;
+  color: #64748B;
+  margin: 0 0 32px 0;
+}
+
+.reset-filters-btn {
+  padding: 14px 28px;
+  background: #0D9488;
+  color: white;
+  border: none;
+  border-radius: 10px;
   font-size: 15px;
-  color: var(--gray-500, #64748B);
-  margin: 0;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-/* ========================
+.reset-filters-btn:hover {
+  background: #0F766E;
+  transform: translateY(-2px);
+}
+
+/* ========================================
+   STICKY CONTACT BAR
+   ======================================== */
+
+.sticky-contact-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-top: 1px solid #E5E7EB;
+  padding: 16px 24px;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+  z-index: 100;
+}
+
+.sticky-contact-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+}
+
+.sticky-contact-text {
+  font-size: 15px;
+  color: #64748B;
+  font-weight: 500;
+}
+
+.sticky-contact-buttons {
+  display: flex;
+  gap: 12px;
+}
+
+.sticky-whatsapp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  background: #25D366;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.sticky-whatsapp-btn:hover {
+  background: #128C7E;
+}
+
+.sticky-call-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  background: #F1F5F9;
+  color: #374151;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.sticky-call-btn:hover {
+  background: #E2E8F0;
+}
+
+/* ========================================
    RESPONSIVE DESIGN
-   ======================== */
+   ======================================== */
 
-@media (max-width: 968px) {
-  .hero-section {
-    padding: 60px 20px 80px 20px;
+@media (max-width: 1100px) {
+  .hero-grid {
+    grid-template-columns: 1fr;
+    gap: 60px;
+    text-align: center;
   }
 
-  .hero-english {
-    font-size: 34px;
-    letter-spacing: 1px;
+  .hero-content-left {
+    align-items: center;
   }
 
-  .hero-arabic {
-    font-size: 22px;
+  .hero-subtext {
+    max-width: 100%;
   }
 
-  .hero-description {
-    font-size: 15px;
+  .hero-visual {
+    min-height: 300px;
   }
 
-  .hero-features {
-    gap: 12px;
+  .hero-trust-badges {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
   }
 
-  .section-title {
+  .trust-grid-premium {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    text-align: center;
+  }
+
+  .trust-headline-area {
+    position: static;
+  }
+
+  .trust-headline-large {
+    font-size: 40px;
+  }
+
+  .trust-point {
+    text-align: left;
+  }
+
+  .wholesale-grid {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    text-align: center;
+  }
+
+  .wholesale-description {
+    max-width: 100%;
+  }
+
+  .wholesale-benefits {
+    align-items: center;
+  }
+
+  .wholesale-visual {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .hero-section-premium {
+    min-height: auto;
+    padding: 80px 24px 60px;
+  }
+
+  .hero-headline-premium {
+    font-size: 38px;
+  }
+
+  .hero-subtext {
+    font-size: 16px;
+  }
+
+  .hero-whatsapp-btn {
+    width: 100%;
+    padding: 18px 32px;
+    font-size: 18px;
+  }
+
+  .hero-contact-row {
+    justify-content: center;
+  }
+
+  .hero-visual {
+    display: none;
+  }
+
+  .trust-section-premium {
+    padding: 80px 24px;
+  }
+
+  .trust-headline-large {
+    font-size: 32px;
+  }
+
+  .trust-point {
+    flex-direction: column;
+    text-align: center;
+    align-items: center;
+  }
+
+  .wholesale-section-premium {
+    padding: 80px 24px;
+  }
+
+  .wholesale-headline {
+    font-size: 32px;
+  }
+
+  .wholesale-cta {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .categories-section-minimal {
+    padding: 60px 24px;
+  }
+
+  .category-pills-row {
+    gap: 10px;
+  }
+
+  .category-pill-premium {
+    padding: 12px 18px;
+    font-size: 14px;
+  }
+
+  .products-section-premium {
+    padding: 60px 20px 120px;
+  }
+
+  .products-header-premium {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .products-title-premium {
     font-size: 24px;
   }
 
-  .decoration-1,
-  .decoration-2,
-  .decoration-3 {
-    display: none;
-  }
-
-  .trust-banner-content {
-    gap: 20px;
-  }
-
-  .trust-item {
-    font-size: 12px;
-  }
-}
-
-@media (max-width: 640px) {
-  .hero-section {
-    padding: 40px 16px 50px 16px;
-  }
-
-  .hero-badge {
-    margin-bottom: 16px;
-    font-size: 11px;
-    padding: 6px 12px;
-  }
-
-  .hero-english {
-    font-size: 26px;
-  }
-
-  .hero-arabic {
-    font-size: 18px;
-  }
-
-  .hero-description {
-    font-size: 14px;
-    margin-bottom: 24px;
-    line-height: 1.6;
-  }
-
-  .hero-features {
-    display: none;
-  }
-
-  .trust-banner {
-    padding: 10px 16px;
-  }
-
-  .trust-banner-content {
-    gap: 16px;
-  }
-
-  .trust-item {
-    font-size: 11px;
-  }
-
-  .section-header {
+  .sticky-contact-content {
     flex-direction: column;
-    align-items: flex-start;
-    padding: 20px;
-    margin-bottom: 20px;
-  }
-
-  .section-title {
-    font-size: 22px;
-  }
-
-  .products-section {
-    margin-top: -30px;
-    padding: 0 16px 60px 16px;
-  }
-
-  .filters-bar {
-    padding: 16px;
     gap: 12px;
   }
 
-  .filter-group {
-    flex-direction: column;
-    align-items: flex-start;
-    width: 100%;
-    gap: 6px;
-  }
-
-  .filter-select {
+  .sticky-contact-buttons {
     width: 100%;
   }
 
-  .clear-filters-btn {
-    width: 100%;
-    margin-left: 0;
+  .sticky-whatsapp-btn,
+  .sticky-call-btn {
+    flex: 1;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 480px) {
+  .hero-headline-premium {
+    font-size: 32px;
   }
 
-  .category-pills {
-    gap: 8px;
+  .hero-arabic-badge {
+    font-size: 14px;
   }
 
-  .category-pill {
-    padding: 6px 12px;
-    font-size: 12px;
+  .trust-headline-large {
+    font-size: 28px;
   }
 
-  .no-results {
-    padding: 60px 20px;
+  .wholesale-headline {
+    font-size: 28px;
   }
 
-  .no-results h3 {
-    font-size: 18px;
-  }
-
-  .no-results p {
+  .category-pill-premium {
+    padding: 10px 14px;
     font-size: 13px;
+  }
+
+  .category-pill-icon {
+    font-size: 16px;
+  }
+
+  .sticky-contact-text {
+    text-align: center;
+    font-size: 14px;
   }
 }
