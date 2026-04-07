@@ -137,23 +137,22 @@
 }
 
 .product-price {
-  font-size: 18px;
-  font-weight: 700;
-  color: #0F766E;
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
 }
 
 /* Card Cart Controls */
 .card-cart-controls {
   margin-top: auto;
-  padding-top: 12px;
-  border-top: 2px solid #f3f4f6;
+  padding-top: 8px;
 }
 
 .price-and-quantity {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
 }
 
 .card-quantity-controls {
@@ -161,14 +160,14 @@
   align-items: center;
   gap: 0;
   border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: white;
+  border-radius: 4px;
+  background: #f9fafb;
   width: fit-content;
 }
 
 .card-qty-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: none;
   background: transparent;
   color: #374151;
@@ -176,14 +175,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   transition: all 0.2s;
 }
 
 .card-qty-btn:hover:not(:disabled) {
-  background: #F0FDFA;
-  color: #0D9488;
+  background: #0D9488;
+  color: white;
 }
 
 .card-qty-btn:disabled {
@@ -192,20 +191,20 @@
 }
 
 .card-qty-btn:first-child {
-  border-radius: 5px 0 0 5px;
+  border-radius: 3px 0 0 3px;
 }
 
 .card-qty-btn:last-child {
-  border-radius: 0 5px 5px 0;
+  border-radius: 0 3px 3px 0;
 }
 
 .card-qty-display {
-  min-width: 40px;
+  min-width: 28px;
   text-align: center;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: #111827;
-  padding: 0 8px;
+  padding: 0 4px;
   border-left: 1px solid #e5e7eb;
   border-right: 1px solid #e5e7eb;
 }
@@ -281,8 +280,8 @@
   }
 
   .product-price {
-    font-size: 15px;
-    font-weight: 700;
+    font-size: 14px;
+    font-weight: 600;
   }
 
   .product-image {
@@ -300,27 +299,20 @@
 
   /* Better touch targets */
   .card-qty-btn {
-    width: 36px;
-    height: 36px;
-    font-size: 16px;
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
   }
 
   .card-qty-display {
-    min-width: 36px;
-    font-size: 13px;
-    font-weight: 700;
-    padding: 0 6px;
-  }
-
-  .price-and-quantity {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+    min-width: 32px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0 4px;
   }
 
   .card-quantity-controls {
-    width: 100%;
-    justify-content: center;
+    width: auto;
   }
 
   .card-cart-controls {
@@ -361,7 +353,7 @@
   }
 
   .product-price {
-    font-size: 16px;
+    font-size: 15px;
   }
 
   .product-card-content {
@@ -370,13 +362,13 @@
   }
 
   .card-qty-btn {
-    width: 40px;
-    height: 40px;
-    font-size: 18px;
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
   }
 
   .card-qty-display {
-    min-width: 44px;
-    font-size: 15px;
+    min-width: 36px;
+    font-size: 14px;
   }
 }

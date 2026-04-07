@@ -103,8 +103,8 @@ function Home() {
           <span className="hero-arabic">صيدلية الأمين</span>
 
           <h1 className="hero-headline">
-            Your Trusted<br />
-            <span className="hero-accent">Pharmacy</span> in Dubai
+            Fast Access to<br />
+            <span className="hero-accent">Medicines</span> Across Dubai
           </h1>
 
           <p className="hero-subtext">
@@ -120,7 +120,7 @@ function Home() {
             rel="noopener noreferrer"
           >
             <WhatsAppIcon size={24} />
-            <span>WhatsApp Us</span>
+            <span>Order on WhatsApp</span>
           </a>
 
           {/* Secondary - Call */}
