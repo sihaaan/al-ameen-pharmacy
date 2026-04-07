@@ -74,8 +74,64 @@
   background: #f8fbfa;
 }
 
+.hero-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 60px;
+  max-width: 1000px;
+  width: 100%;
+}
+
 .hero-inner {
-  max-width: 600px;
+  max-width: 560px;
+  text-align: left;
+}
+
+/* Hero Visual - Subtle icons on the right */
+.hero-visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hero-icon-group {
+  position: relative;
+  width: 180px;
+  height: 180px;
+}
+
+.hero-icon {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 4px 20px rgba(13, 148, 136, 0.1);
+  color: #0D9488;
+}
+
+.hero-icon-1 {
+  width: 80px;
+  height: 80px;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.hero-icon-2 {
+  width: 70px;
+  height: 70px;
+  bottom: 10px;
+  left: 10px;
+}
+
+.hero-icon-3 {
+  width: 60px;
+  height: 60px;
+  bottom: 20px;
+  right: 10px;
 }
 
 .hero-arabic {
@@ -300,6 +356,13 @@
   box-shadow: 0 8px 30px rgba(37, 211, 102, 0.35);
 }
 
+.wholesale-response {
+  margin-top: 16px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  font-style: italic;
+}
+
 /* ========================================
    FOOTER
    ======================================== */
@@ -307,42 +370,47 @@
 .site-footer {
   background: #FAFAFA;
   border-top: 1px solid #E5E7EB;
-  padding: 60px 24px 40px;
+  padding: 48px 24px 32px;
 }
 
 .footer-inner {
-  max-width: 600px;
+  max-width: 1200px;
   margin: 0 auto;
-  text-align: center;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 32px;
 }
 
 .footer-brand {
-  margin-bottom: 24px;
+  margin-bottom: 0;
 }
 
 .footer-arabic {
   display: block;
-  font-size: 18px;
+  font-size: 16px;
   color: #0D9488;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .footer-name {
   display: block;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   color: #111827;
 }
 
 .footer-contact {
-  margin-bottom: 32px;
+  margin-bottom: 0;
+  text-align: left;
 }
 
 .footer-contact p {
-  margin: 8px 0;
-  font-size: 14px;
+  margin: 4px 0;
+  font-size: 13px;
   color: #6B7280;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 .footer-contact a {
@@ -356,15 +424,16 @@
 }
 
 .footer-hours {
-  margin-top: 16px !important;
+  margin-top: 8px !important;
   font-weight: 500;
   color: #374151 !important;
 }
 
 .footer-copy {
-  font-size: 13px;
+  font-size: 12px;
   color: #9CA3AF;
   margin: 0;
+  align-self: center;
 }
 
 /* ========================================
@@ -375,6 +444,19 @@
   .hero-section {
     min-height: auto;
     padding: 100px 20px 50px;
+  }
+
+  .hero-content {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .hero-inner {
+    text-align: center;
+  }
+
+  .hero-visual {
+    display: none;
   }
 
   .hero-headline {
@@ -436,11 +518,26 @@
   }
 
   .site-footer {
-    padding: 50px 20px 32px;
+    padding: 40px 20px 24px;
+  }
+
+  .footer-inner {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 20px;
+  }
+
+  .footer-brand {
+    text-align: center;
+  }
+
+  .footer-contact {
+    text-align: center;
   }
 
   .footer-contact p {
-    font-size: 13px;
+    font-size: 12px;
   }
 }
 

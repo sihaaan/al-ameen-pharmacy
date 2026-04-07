@@ -23,6 +23,28 @@ const CheckIcon = ({ size = 20 }) => (
   </svg>
 );
 
+// Pill/Capsule icon for hero visual
+const PillIcon = ({ size = 48 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10.5 20.5L3.5 13.5C1.5 11.5 1.5 8.5 3.5 6.5C5.5 4.5 8.5 4.5 10.5 6.5L17.5 13.5C19.5 15.5 19.5 18.5 17.5 20.5C15.5 22.5 12.5 22.5 10.5 20.5Z"/>
+    <path d="M7 10L14 17"/>
+  </svg>
+);
+
+const HeartPulseIcon = ({ size = 48 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M19 14C20.49 12.54 22 10.79 22 8.5C22 7.04 21.47 5.64 20.5 4.64C19.53 3.65 18.21 3.1 16.8 3.1C15.03 3.1 13.64 3.99 12.75 5C12.38 5.43 12.13 5.8 12 6C11.87 5.8 11.62 5.43 11.25 5C10.36 3.99 8.97 3.1 7.2 3.1C5.79 3.1 4.47 3.65 3.5 4.64C2.53 5.64 2 7.04 2 8.5C2 10.79 3.51 12.54 5 14"/>
+    <path d="M3 15H7L9 12L12 18L15 15H21"/>
+  </svg>
+);
+
+const ShieldIcon = ({ size = 48 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22S20 18 20 12V5L12 2L4 5V12C4 18 12 22 12 22Z"/>
+    <path d="M9 12L11 14L15 10"/>
+  </svg>
+);
+
 function Home() {
   const [searchParams] = useSearchParams();
   const [products, setProducts] = useState([]);
@@ -99,35 +121,52 @@ function Home() {
     <div className="home-container">
       {/* ===== HERO SECTION ===== */}
       <section className="hero-section">
-        <div className="hero-inner">
-          <span className="hero-arabic">صيدلية الأمين</span>
+        <div className="hero-content">
+          <div className="hero-inner">
+            <span className="hero-arabic">صيدلية الأمين</span>
 
-          <h1 className="hero-headline">
-            Fast Access to<br />
-            <span className="hero-accent">Medicines</span> Across Dubai
-          </h1>
+            <h1 className="hero-headline">
+              Fast Access to<br />
+              <span className="hero-accent">Medicines</span> Across Dubai
+            </h1>
 
-          <p className="hero-subtext">
-            Serving Dubai with 4 branches, offering fast access to medicines
-            for both retail customers and bulk orders.
-          </p>
+            <p className="hero-subtext">
+              Serving Dubai with 4 branches, offering fast access to medicines
+              for both retail customers and bulk orders.
+            </p>
 
-          {/* Primary CTA - WhatsApp */}
-          <a
-            href="https://wa.me/971505456388"
-            className="hero-cta-primary"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <WhatsAppIcon size={24} />
-            <span>Order on WhatsApp</span>
-          </a>
+            {/* Primary CTA - WhatsApp */}
+            <a
+              href="https://wa.me/971505456388"
+              className="hero-cta-primary"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <WhatsAppIcon size={24} />
+              <span>Order Medicines on WhatsApp</span>
+            </a>
 
-          {/* Secondary - Call */}
-          <a href="tel:+97142713695" className="hero-cta-secondary">
-            <PhoneIcon size={18} />
-            <span>+971-4-271-3695</span>
-          </a>
+            {/* Secondary - Call */}
+            <a href="tel:+97142713695" className="hero-cta-secondary">
+              <PhoneIcon size={18} />
+              <span>+971-4-271-3695</span>
+            </a>
+          </div>
+
+          {/* Hero Visual - Subtle icons */}
+          <div className="hero-visual">
+            <div className="hero-icon-group">
+              <div className="hero-icon hero-icon-1">
+                <PillIcon size={40} />
+              </div>
+              <div className="hero-icon hero-icon-2">
+                <HeartPulseIcon size={36} />
+              </div>
+              <div className="hero-icon hero-icon-3">
+                <ShieldIcon size={32} />
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Trust Line */}
@@ -142,7 +181,7 @@ function Home() {
           <h2 className="products-title">
             {searchParams.get('search')
               ? `Results for "${searchParams.get('search')}"`
-              : 'Our Products'}
+              : 'Popular Medicines'}
           </h2>
 
           <select
@@ -196,6 +235,7 @@ function Home() {
             <WhatsAppIcon size={22} />
             <span>Get Wholesale Pricing</span>
           </a>
+          <p className="wholesale-response">Quick response on WhatsApp for bulk pricing</p>
         </div>
       </section>
 
