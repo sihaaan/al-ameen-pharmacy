@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 import { productsAPI } from "../api";
 import ProductGrid from "../components/ProductGrid";
 import "../styles/Home.css";
@@ -20,6 +20,67 @@ const PhoneIcon = ({ size = 24 }) => (
 const CheckIcon = ({ size = 20 }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
     <polyline points="20 6 9 17 4 12"/>
+  </svg>
+);
+
+const ClockIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <polyline points="12 6 12 12 16 14"/>
+  </svg>
+);
+
+const MapPinIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+    <circle cx="12" cy="10" r="3"/>
+  </svg>
+);
+
+const ShieldIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+  </svg>
+);
+
+const TruckIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="3" width="15" height="13"/>
+    <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/>
+    <circle cx="5.5" cy="18.5" r="2.5"/>
+    <circle cx="18.5" cy="18.5" r="2.5"/>
+  </svg>
+);
+
+const BuildingIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4" y="2" width="16" height="20" rx="2" ry="2"/>
+    <path d="M9 22v-4h6v4"/>
+    <path d="M8 6h.01"/>
+    <path d="M16 6h.01"/>
+    <path d="M12 6h.01"/>
+    <path d="M12 10h.01"/>
+    <path d="M12 14h.01"/>
+    <path d="M16 10h.01"/>
+    <path d="M16 14h.01"/>
+    <path d="M8 10h.01"/>
+    <path d="M8 14h.01"/>
+  </svg>
+);
+
+const PillIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m10.5 20.5 10-10a4.95 4.95 0 1 0-7-7l-10 10a4.95 4.95 0 1 0 7 7Z"/>
+    <path d="m8.5 8.5 7 7"/>
+  </svg>
+);
+
+const UsersIcon = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+    <circle cx="9" cy="7" r="4"/>
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
   </svg>
 );
 
@@ -99,41 +160,140 @@ function Home() {
     <div className="home-container">
       {/* ===== HERO SECTION ===== */}
       <section className="hero-section">
-        <div className="hero-inner">
-          <span className="hero-arabic">صيدلية الأمين</span>
+        <div className="hero-background"></div>
+        <div className="hero-content">
+          <div className="hero-inner">
+            <span className="hero-arabic">صيدلية الأمين</span>
 
-          <h1 className="hero-headline">
-            Fast Access to<br />
-            <span className="hero-accent">Medicines</span> Across Dubai
-          </h1>
+            <div className="hero-badge">
+              <ClockIcon size={20} />
+              <span>Open Late Until 2AM</span>
+            </div>
 
-          <p className="hero-subtext">
-            Serving Dubai with 4 branches, offering fast access to medicines
-            for both retail customers and bulk orders.
-          </p>
+            <h1 className="hero-headline">
+              Your Trusted<br />
+              <span className="hero-accent">Pharmacy</span> in Dubai
+            </h1>
 
-          {/* Primary CTA - WhatsApp */}
-          <a
-            href="https://wa.me/971505456388"
-            className="hero-cta-primary"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <WhatsAppIcon size={24} />
-            <span>Order Medicines on WhatsApp</span>
-          </a>
+            <p className="hero-subtext">
+              DHA licensed pharmacy with 4 branches across Dubai.
+              Quality medicines, competitive prices, and late-night service when you need it most.
+            </p>
 
-          {/* Secondary - Call */}
-          <a href="tel:+97142713695" className="hero-cta-secondary">
-            <PhoneIcon size={18} />
-            <span>+971-4-271-3695</span>
-          </a>
+            <div className="hero-ctas">
+              <a
+                href="https://wa.me/971505456388"
+                className="hero-cta-primary"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <WhatsAppIcon size={22} />
+                <span>Order on WhatsApp</span>
+              </a>
+
+              <a href="tel:+97142713695" className="hero-cta-secondary">
+                <PhoneIcon size={18} />
+                <span>Call Now</span>
+              </a>
+            </div>
+          </div>
         </div>
+      </section>
 
-        {/* Trust Line */}
-        <p className="hero-trust-line">
-          4 branches across Dubai • Licensed DHA pharmacy • Open late daily
-        </p>
+      {/* ===== TRUST SIGNALS BANNER ===== */}
+      <section className="trust-banner">
+        <div className="trust-banner-inner">
+          <div className="trust-item">
+            <ShieldIcon size={22} />
+            <span>DHA Licensed</span>
+          </div>
+          <div className="trust-item">
+            <BuildingIcon size={22} />
+            <span>4 Branches</span>
+          </div>
+          <div className="trust-item">
+            <ClockIcon size={22} />
+            <span>Open Until 2AM</span>
+          </div>
+          <div className="trust-item">
+            <TruckIcon size={22} />
+            <span>Fast Delivery UAE</span>
+          </div>
+        </div>
+      </section>
+
+      {/* ===== BRANCH LOCATIONS ===== */}
+      <section className="branches-section">
+        <div className="branches-inner">
+          <h2 className="section-title">Our Locations</h2>
+          <p className="section-subtitle">Find your nearest Al Ameen Pharmacy branch</p>
+
+          <div className="branches-grid">
+            <div className="branch-card">
+              <div className="branch-icon">
+                <MapPinIcon size={24} />
+              </div>
+              <h3>Frij Murar</h3>
+              <p className="branch-address">Frij Murar, Deira, Dubai</p>
+              <p className="branch-hours">
+                <ClockIcon size={14} />
+                <span>Sat-Thu: 9AM - 2AM</span>
+              </p>
+              <a href="tel:+97142713695" className="branch-phone">
+                <PhoneIcon size={14} />
+                +971-4-271-3695
+              </a>
+            </div>
+
+            <div className="branch-card">
+              <div className="branch-icon">
+                <MapPinIcon size={24} />
+              </div>
+              <h3>Al Muteena</h3>
+              <p className="branch-address">Al Muteena Street, Deira, Dubai</p>
+              <p className="branch-hours">
+                <ClockIcon size={14} />
+                <span>Sat-Thu: 9AM - 2AM</span>
+              </p>
+              <a href="tel:+97142713695" className="branch-phone">
+                <PhoneIcon size={14} />
+                +971-4-271-3695
+              </a>
+            </div>
+
+            <div className="branch-card">
+              <div className="branch-icon">
+                <MapPinIcon size={24} />
+              </div>
+              <h3>Naif Road</h3>
+              <p className="branch-address">Naif Road, Deira, Dubai</p>
+              <p className="branch-hours">
+                <ClockIcon size={14} />
+                <span>Sat-Thu: 9AM - 2AM</span>
+              </p>
+              <a href="tel:+97142713695" className="branch-phone">
+                <PhoneIcon size={14} />
+                +971-4-271-3695
+              </a>
+            </div>
+
+            <div className="branch-card">
+              <div className="branch-icon">
+                <MapPinIcon size={24} />
+              </div>
+              <h3>Abu Hail</h3>
+              <p className="branch-address">Abu Hail, Deira, Dubai</p>
+              <p className="branch-hours">
+                <ClockIcon size={14} />
+                <span>Sat-Thu: 9AM - 2AM</span>
+              </p>
+              <a href="tel:+97142713695" className="branch-phone">
+                <PhoneIcon size={14} />
+                +971-4-271-3695
+              </a>
+            </div>
+          </div>
+        </div>
       </section>
 
       {/* ===== PRODUCTS SECTION ===== */}
@@ -164,6 +324,48 @@ function Home() {
         ) : (
           <ProductGrid products={filteredProducts} />
         )}
+      </section>
+
+      {/* ===== WHY CHOOSE US / STATS ===== */}
+      <section className="stats-section">
+        <div className="stats-inner">
+          <h2 className="section-title">Why Choose Al Ameen?</h2>
+          <p className="section-subtitle">Trusted by thousands of customers across Dubai</p>
+
+          <div className="stats-grid">
+            <div className="stat-card">
+              <div className="stat-icon">
+                <PillIcon size={32} />
+              </div>
+              <div className="stat-number">500+</div>
+              <div className="stat-label">Medicines in Stock</div>
+            </div>
+
+            <div className="stat-card">
+              <div className="stat-icon">
+                <BuildingIcon size={32} />
+              </div>
+              <div className="stat-number">4</div>
+              <div className="stat-label">Branches in Dubai</div>
+            </div>
+
+            <div className="stat-card">
+              <div className="stat-icon">
+                <UsersIcon size={32} />
+              </div>
+              <div className="stat-number">10K+</div>
+              <div className="stat-label">Happy Customers</div>
+            </div>
+
+            <div className="stat-card">
+              <div className="stat-icon">
+                <TruckIcon size={32} />
+              </div>
+              <div className="stat-number">Same Day</div>
+              <div className="stat-label">Delivery Available</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       {/* ===== WHOLESALE SECTION ===== */}
@@ -203,25 +405,80 @@ function Home() {
       {/* ===== FOOTER ===== */}
       <footer className="site-footer">
         <div className="footer-inner">
-          <div className="footer-brand">
-            <span className="footer-arabic">صيدلية الأمين</span>
-            <span className="footer-name">Al Ameen Pharmacy</span>
-          </div>
-
-          <div className="footer-contact">
-            <p>Frij Murar, Deira, Dubai</p>
-            <p>
-              <a href="tel:+97142713695">+971-4-271-3695</a>
-              {' • '}
-              <a href="https://wa.me/971505456388" target="_blank" rel="noopener noreferrer">
-                WhatsApp: +971-50-545-6388
-              </a>
+          {/* Brand & About */}
+          <div className="footer-section footer-brand-section">
+            <div className="footer-brand">
+              <span className="footer-arabic">صيدلية الأمين</span>
+              <span className="footer-name">Al Ameen Pharmacy</span>
+            </div>
+            <p className="footer-about">
+              DHA licensed pharmacy serving Dubai with quality medicines,
+              competitive prices, and late-night service across 4 branches.
             </p>
-            <p className="footer-hours">Saturday – Thursday, 9AM – 2AM</p>
+            <div className="footer-contact-main">
+              <a href="https://wa.me/971505456388" className="footer-whatsapp" target="_blank" rel="noopener noreferrer">
+                <WhatsAppIcon size={20} />
+                <span>+971-50-545-6388</span>
+              </a>
+              <a href="tel:+97142713695" className="footer-phone">
+                <PhoneIcon size={18} />
+                <span>+971-4-271-3695</span>
+              </a>
+            </div>
           </div>
 
+          {/* Quick Links */}
+          <div className="footer-section">
+            <h4>Quick Links</h4>
+            <ul className="footer-links">
+              <li><Link to="/">Home</Link></li>
+              <li><Link to="/about">About Us</Link></li>
+              <li><a href="#products">Popular Medicines</a></li>
+              <li><a href="https://wa.me/971505456388?text=Hi,%20I'm%20interested%20in%20wholesale%20pricing." target="_blank" rel="noopener noreferrer">Wholesale</a></li>
+            </ul>
+          </div>
+
+          {/* Branch Locations */}
+          <div className="footer-section">
+            <h4>Our Branches</h4>
+            <ul className="footer-branches">
+              <li>
+                <MapPinIcon size={14} />
+                <span>Frij Murar, Deira</span>
+              </li>
+              <li>
+                <MapPinIcon size={14} />
+                <span>Al Muteena, Deira</span>
+              </li>
+              <li>
+                <MapPinIcon size={14} />
+                <span>Naif Road, Deira</span>
+              </li>
+              <li>
+                <MapPinIcon size={14} />
+                <span>Abu Hail, Deira</span>
+              </li>
+            </ul>
+          </div>
+
+          {/* Hours */}
+          <div className="footer-section">
+            <h4>Opening Hours</h4>
+            <div className="footer-hours-info">
+              <p><strong>Saturday - Thursday</strong></p>
+              <p className="hours-time">9:00 AM - 2:00 AM</p>
+              <p className="hours-note">Open late for your convenience!</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="footer-bottom">
           <p className="footer-copy">
             © {new Date().getFullYear()} Al Ameen Pharmacy. All rights reserved.
+          </p>
+          <p className="footer-dha">
+            <ShieldIcon size={14} />
+            <span>Licensed by Dubai Health Authority</span>
           </p>
         </div>
       </footer>

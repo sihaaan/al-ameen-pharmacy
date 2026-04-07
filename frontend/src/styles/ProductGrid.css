@@ -137,9 +137,9 @@
 }
 
 .product-price {
-  font-size: 16px;
-  font-weight: 600;
-  color: #111827;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0D9488;
 }
 
 /* Card Cart Controls */
@@ -280,8 +280,8 @@
   }
 
   .product-price {
-    font-size: 14px;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 700;
   }
 
   .product-image {
@@ -353,7 +353,7 @@
   }
 
   .product-price {
-    font-size: 15px;
+    font-size: 16px;
   }
 
   .product-card-content {

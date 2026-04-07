@@ -1,4 +1,4 @@
-/* Al Ameen Pharmacy - Premium Minimal Homepage */
+/* Al Ameen Pharmacy - Professional Healthcare Homepage */
 
 .home-container {
   min-height: 100vh;
@@ -64,36 +64,96 @@
    ======================================== */
 
 .hero-section {
-  min-height: 85vh;
+  position: relative;
+  min-height: 70vh;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
+  padding: 100px 24px 60px;
+  overflow: hidden;
+}
+
+.hero-background {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(135deg, #F0FDFA 0%, #CCFBF1 50%, #99F6E4 100%);
+  z-index: 0;
+}
+
+.hero-background::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -20%;
+  width: 80%;
+  height: 150%;
+  background: radial-gradient(ellipse, rgba(13, 148, 136, 0.08) 0%, transparent 70%);
+  z-index: 1;
+}
+
+.hero-background::after {
+  content: '';
+  position: absolute;
+  bottom: -30%;
+  left: -10%;
+  width: 60%;
+  height: 100%;
+  background: radial-gradient(ellipse, rgba(20, 184, 166, 0.06) 0%, transparent 70%);
+  z-index: 1;
+}
+
+.hero-content {
+  position: relative;
+  z-index: 2;
+  max-width: 700px;
   text-align: center;
-  padding: 120px 24px 60px;
-  background: #ffffff;
 }
 
 .hero-inner {
-  max-width: 600px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .hero-arabic {
   display: block;
-  font-size: 20px;
-  color: #0D9488;
+  font-size: 18px;
+  color: #0F766E;
   margin-bottom: 16px;
   font-weight: 500;
   letter-spacing: 2px;
 }
 
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #0D9488;
+  color: white;
+  border-radius: 50px;
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 24px;
+  box-shadow: 0 4px 14px rgba(13, 148, 136, 0.3);
+  animation: pulse-badge 2s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
 .hero-headline {
   font-size: 52px;
-  font-weight: 700;
+  font-weight: 800;
   color: #111827;
   line-height: 1.1;
-  margin: 0 0 24px 0;
-  letter-spacing: -1px;
+  margin: 0 0 20px 0;
+  letter-spacing: -1.5px;
 }
 
 .hero-accent {
@@ -104,21 +164,28 @@
   font-size: 18px;
   line-height: 1.7;
   color: #4B5563;
-  margin: 0 0 40px 0;
+  margin: 0 0 32px 0;
+  max-width: 520px;
 }
 
-/* Primary CTA - WhatsApp */
+.hero-ctas {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
 .hero-cta-primary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 18px 40px;
+  gap: 10px;
+  padding: 16px 32px;
   background: #25D366;
   color: white;
   border: none;
   border-radius: 12px;
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 600;
   text-decoration: none;
   transition: all 0.2s ease;
@@ -131,33 +198,169 @@
   box-shadow: 0 8px 30px rgba(37, 211, 102, 0.4);
 }
 
-/* Secondary CTA - Call */
 .hero-cta-secondary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: 16px;
-  padding: 12px 24px;
-  background: transparent;
-  color: #374151;
-  border: none;
-  font-size: 15px;
-  font-weight: 500;
+  padding: 16px 28px;
+  background: white;
+  color: #0D9488;
+  border: 2px solid #0D9488;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 600;
   text-decoration: none;
-  transition: color 0.2s ease;
+  transition: all 0.2s ease;
 }
 
 .hero-cta-secondary:hover {
+  background: #0D9488;
+  color: white;
+}
+
+/* ========================================
+   TRUST SIGNALS BANNER
+   ======================================== */
+
+.trust-banner {
+  background: #111827;
+  padding: 20px 24px;
+}
+
+.trust-banner-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  flex-wrap: wrap;
+}
+
+.trust-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.trust-item svg {
+  color: #5EEAD4;
+  flex-shrink: 0;
+}
+
+/* ========================================
+   SECTION TITLES (Shared)
+   ======================================== */
+
+.section-title {
+  font-size: 32px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 12px 0;
+  text-align: center;
+}
+
+.section-subtitle {
+  font-size: 16px;
+  color: #6B7280;
+  margin: 0 0 40px 0;
+  text-align: center;
+}
+
+/* ========================================
+   BRANCHES SECTION
+   ======================================== */
+
+.branches-section {
+  padding: 80px 24px;
+  background: #F9FAFB;
+}
+
+.branches-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.branches-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+}
+
+.branch-card {
+  background: white;
+  border-radius: 16px;
+  padding: 28px 24px;
+  text-align: center;
+  border: 1px solid #E5E7EB;
+  transition: all 0.3s ease;
+}
+
+.branch-card:hover {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+  border-color: #0D9488;
+  transform: translateY(-4px);
+}
+
+.branch-icon {
+  width: 56px;
+  height: 56px;
+  background: #F0FDFA;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 16px;
+}
+
+.branch-icon svg {
   color: #0D9488;
 }
 
-/* Trust Line */
-.hero-trust-line {
-  margin-top: 60px;
+.branch-card h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 8px 0;
+}
+
+.branch-address {
   font-size: 14px;
-  color: #9CA3AF;
-  letter-spacing: 0.5px;
+  color: #6B7280;
+  margin: 0 0 12px 0;
+}
+
+.branch-hours {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #0D9488;
+  margin: 0 0 12px 0;
+  font-weight: 500;
+}
+
+.branch-hours svg {
+  flex-shrink: 0;
+}
+
+.branch-phone {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: #0D9488;
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.branch-phone:hover {
+  color: #0F766E;
 }
 
 /* ========================================
@@ -165,23 +368,23 @@
    ======================================== */
 
 .products-section {
-  max-width: 1400px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 80px 24px 100px;
+  padding: 80px 24px;
 }
 
 .products-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 48px;
+  margin-bottom: 32px;
   flex-wrap: wrap;
   gap: 16px;
 }
 
 .products-title {
   font-size: 28px;
-  font-weight: 600;
+  font-weight: 700;
   color: #111827;
   margin: 0;
 }
@@ -215,12 +418,74 @@
 }
 
 /* ========================================
+   STATS / WHY CHOOSE US SECTION
+   ======================================== */
+
+.stats-section {
+  padding: 80px 24px;
+  background: #F9FAFB;
+}
+
+.stats-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+}
+
+.stat-card {
+  background: white;
+  border-radius: 16px;
+  padding: 32px 24px;
+  text-align: center;
+  border: 1px solid #E5E7EB;
+  transition: all 0.3s ease;
+}
+
+.stat-card:hover {
+  box-shadow: 0 8px 30px rgba(13, 148, 136, 0.1);
+  border-color: #0D9488;
+}
+
+.stat-icon {
+  width: 64px;
+  height: 64px;
+  background: linear-gradient(135deg, #F0FDFA 0%, #CCFBF1 100%);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 16px;
+}
+
+.stat-icon svg {
+  color: #0D9488;
+}
+
+.stat-number {
+  font-size: 36px;
+  font-weight: 800;
+  color: #0D9488;
+  margin-bottom: 4px;
+}
+
+.stat-label {
+  font-size: 14px;
+  color: #6B7280;
+  font-weight: 500;
+}
+
+/* ========================================
    WHOLESALE SECTION
    ======================================== */
 
 .wholesale-section {
   background: #111827;
-  padding: 100px 24px;
+  padding: 80px 24px;
 }
 
 .wholesale-inner {
@@ -237,13 +502,13 @@
   color: #9CA3AF;
   text-transform: uppercase;
   letter-spacing: 2px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .wholesale-headline {
   font-size: 36px;
   font-weight: 700;
-  margin: 0 0 24px 0;
+  margin: 0 0 20px 0;
   line-height: 1.2;
 }
 
@@ -251,13 +516,13 @@
   font-size: 17px;
   line-height: 1.7;
   color: rgba(255, 255, 255, 0.7);
-  margin: 0 0 32px 0;
+  margin: 0 0 28px 0;
 }
 
 .wholesale-list {
   list-style: none;
   padding: 0;
-  margin: 0 0 40px 0;
+  margin: 0 0 32px 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -282,7 +547,7 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  padding: 18px 36px;
+  padding: 16px 32px;
   background: #25D366;
   color: white;
   border: none;
@@ -312,25 +577,41 @@
    ======================================== */
 
 .site-footer {
-  background: #FAFAFA;
-  border-top: 1px solid #E5E7EB;
-  padding: 48px 24px 32px;
+  background: #1F2937;
+  padding: 60px 24px 0;
 }
 
 .footer-inner {
-  max-width: 600px;
+  max-width: 1200px;
   margin: 0 auto;
-  text-align: center;
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr 1fr;
+  gap: 48px;
+  padding-bottom: 40px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.footer-section h4 {
+  font-size: 14px;
+  font-weight: 700;
+  color: white;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 0 0 20px 0;
+}
+
+.footer-brand-section {
+  padding-right: 40px;
 }
 
 .footer-brand {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .footer-arabic {
   display: block;
   font-size: 18px;
-  color: #0D9488;
+  color: #5EEAD4;
   margin-bottom: 4px;
 }
 
@@ -338,89 +619,228 @@
   display: block;
   font-size: 20px;
   font-weight: 700;
-  color: #111827;
+  color: white;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
 }
 
-.footer-contact {
-  margin-bottom: 20px;
-}
-
-.footer-contact p {
-  margin: 6px 0;
+.footer-about {
   font-size: 14px;
-  color: #6B7280;
-  line-height: 1.5;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0 0 20px 0;
 }
 
-.footer-contact a {
-  color: #0D9488;
+.footer-contact-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.footer-whatsapp,
+.footer-phone {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
   text-decoration: none;
   transition: color 0.2s;
 }
 
-.footer-contact a:hover {
-  color: #0F766E;
-  text-decoration: underline;
+.footer-whatsapp {
+  color: #25D366;
 }
 
-.footer-hours {
-  margin-top: 12px !important;
-  font-weight: 600;
-  color: #374151 !important;
+.footer-whatsapp:hover {
+  color: #1FAF59;
+}
+
+.footer-phone {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.footer-phone:hover {
+  color: white;
+}
+
+.footer-links {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.footer-links li {
+  margin-bottom: 12px;
+}
+
+.footer-links a {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.footer-links a:hover {
+  color: #5EEAD4;
+}
+
+.footer-branches {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.footer-branches li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.footer-branches li svg {
+  color: #5EEAD4;
+  flex-shrink: 0;
+}
+
+.footer-hours-info p {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.footer-hours-info strong {
+  color: white;
+}
+
+.hours-time {
+  font-size: 18px !important;
+  font-weight: 700;
+  color: #5EEAD4 !important;
+}
+
+.hours-note {
+  font-size: 13px !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+  font-style: italic;
+}
+
+.footer-bottom {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
 }
 
 .footer-copy {
-  font-size: 12px;
-  color: #9CA3AF;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
   margin: 0;
-  padding-top: 16px;
-  border-top: 1px solid #E5E7EB;
+}
+
+.footer-dha {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0;
+}
+
+.footer-dha svg {
+  color: #5EEAD4;
 }
 
 /* ========================================
    RESPONSIVE
    ======================================== */
 
+@media (max-width: 1024px) {
+  .branches-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .footer-inner {
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+  }
+
+  .footer-brand-section {
+    grid-column: span 2;
+    padding-right: 0;
+  }
+}
+
 @media (max-width: 768px) {
   .hero-section {
     min-height: auto;
-    padding: 100px 20px 50px;
+    padding: 80px 20px 50px;
   }
 
   .hero-headline {
-    font-size: 36px;
+    font-size: 38px;
   }
 
   .hero-subtext {
     font-size: 16px;
   }
 
-  .hero-cta-primary {
+  .hero-ctas {
+    flex-direction: column;
     width: 100%;
-    padding: 16px 32px;
+    max-width: 300px;
   }
 
+  .hero-cta-primary,
   .hero-cta-secondary {
     width: 100%;
+    justify-content: center;
   }
 
-  .hero-trust-line {
-    margin-top: 40px;
-    font-size: 13px;
-    line-height: 1.6;
+  .trust-banner-inner {
+    gap: 20px;
+  }
+
+  .trust-item {
+    font-size: 12px;
+  }
+
+  .trust-item svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .branches-section {
+    padding: 60px 20px;
+  }
+
+  .branches-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .section-title {
+    font-size: 26px;
   }
 
   .products-section {
-    padding: 60px 16px 80px;
+    padding: 60px 16px;
   }
 
   .products-header {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
-    margin-bottom: 32px;
   }
 
   .products-title {
@@ -431,38 +851,93 @@
     width: 100%;
   }
 
+  .stats-section {
+    padding: 60px 20px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+
+  .stat-card {
+    padding: 24px 16px;
+  }
+
+  .stat-number {
+    font-size: 28px;
+  }
+
   .wholesale-section {
-    padding: 70px 20px;
+    padding: 60px 20px;
   }
 
   .wholesale-headline {
     font-size: 28px;
   }
 
-  .wholesale-text {
-    font-size: 15px;
-  }
-
   .wholesale-cta {
     width: 100%;
   }
 
-  .site-footer {
-    padding: 40px 20px 24px;
+  .footer-inner {
+    grid-template-columns: 1fr;
+    gap: 32px;
   }
 
-  .footer-contact p {
-    font-size: 13px;
+  .footer-brand-section {
+    grid-column: span 1;
+  }
+
+  .footer-bottom {
+    flex-direction: column;
+    text-align: center;
   }
 }
 
 @media (max-width: 480px) {
+  .hero-section {
+    padding: 70px 16px 40px;
+  }
+
   .hero-headline {
     font-size: 32px;
   }
 
+  .hero-badge {
+    font-size: 14px;
+    padding: 8px 16px;
+  }
+
   .hero-arabic {
     font-size: 16px;
+  }
+
+  .trust-banner-inner {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .stat-icon {
+    width: 48px;
+    height: 48px;
+  }
+
+  .stat-icon svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .stat-number {
+    font-size: 24px;
+  }
+
+  .stat-label {
+    font-size: 12px;
   }
 
   .wholesale-headline {
