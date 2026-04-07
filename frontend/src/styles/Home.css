@@ -64,13 +64,13 @@
    ======================================== */
 
 .hero-section {
-  min-height: 85vh;
+  min-height: auto;
   display: flex;
   flex-direction: column;
   justify-content: center;
   align-items: center;
   text-align: center;
-  padding: 120px 24px 60px;
+  padding: 80px 24px 48px;
   background: #ffffff;
 }
 
@@ -88,11 +88,11 @@
 }
 
 .hero-headline {
-  font-size: 52px;
+  font-size: 48px;
   font-weight: 700;
   color: #111827;
   line-height: 1.1;
-  margin: 0 0 24px 0;
+  margin: 0 0 16px 0;
   letter-spacing: -1px;
 }
 
@@ -101,10 +101,10 @@
 }
 
 .hero-subtext {
-  font-size: 18px;
-  line-height: 1.7;
+  font-size: 17px;
+  line-height: 1.6;
   color: #4B5563;
-  margin: 0 0 40px 0;
+  margin: 0 0 28px 0;
 }
 
 /* Primary CTA - WhatsApp */
@@ -154,10 +154,50 @@
 
 /* Trust Line */
 .hero-trust-line {
-  margin-top: 60px;
-  font-size: 14px;
-  color: #9CA3AF;
-  letter-spacing: 0.5px;
+  margin-top: 32px;
+  font-size: 13px;
+  color: #6B7280;
+  letter-spacing: 0.3px;
+  font-weight: 500;
+}
+
+/* Dual CTA Container */
+.hero-cta-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 360px;
+}
+
+.hero-cta-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+/* Wholesale CTA (secondary) */
+.hero-cta-wholesale {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 24px;
+  background: #111827;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  flex: 1;
+}
+
+.hero-cta-wholesale:hover {
+  background: #1F2937;
+  transform: translateY(-1px);
 }
 
 /* ========================================
@@ -165,23 +205,23 @@
    ======================================== */
 
 .products-section {
-  max-width: 1400px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 80px 24px 100px;
+  padding: 48px 24px 80px;
 }
 
 .products-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 48px;
+  margin-bottom: 32px;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 12px;
 }
 
 .products-title {
-  font-size: 28px;
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
   color: #111827;
   margin: 0;
 }
@@ -220,7 +260,7 @@
 
 .wholesale-section {
   background: #111827;
-  padding: 100px 24px;
+  padding: 64px 24px;
 }
 
 .wholesale-inner {
@@ -241,26 +281,26 @@
 }
 
 .wholesale-headline {
-  font-size: 36px;
+  font-size: 32px;
   font-weight: 700;
-  margin: 0 0 24px 0;
+  margin: 0 0 16px 0;
   line-height: 1.2;
 }
 
 .wholesale-text {
-  font-size: 17px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.6;
   color: rgba(255, 255, 255, 0.7);
-  margin: 0 0 32px 0;
+  margin: 0 0 24px 0;
 }
 
 .wholesale-list {
   list-style: none;
   padding: 0;
-  margin: 0 0 40px 0;
+  margin: 0 0 28px 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
 }
 
@@ -281,17 +321,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 18px 36px;
+  gap: 10px;
+  padding: 14px 28px;
   background: #25D366;
   color: white;
   border: none;
-  border-radius: 12px;
-  font-size: 17px;
+  border-radius: 10px;
+  font-size: 15px;
   font-weight: 600;
   text-decoration: none;
   transition: all 0.2s ease;
-  box-shadow: 0 4px 20px rgba(37, 211, 102, 0.25);
+  box-shadow: 0 4px 16px rgba(37, 211, 102, 0.25);
 }
 
 .wholesale-cta:hover {
@@ -314,7 +354,7 @@
 .site-footer {
   background: #FAFAFA;
   border-top: 1px solid #E5E7EB;
-  padding: 48px 24px 32px;
+  padding: 32px 24px 24px;
 }
 
 .footer-inner {
@@ -324,32 +364,32 @@
 }
 
 .footer-brand {
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 
 .footer-arabic {
   display: block;
-  font-size: 18px;
+  font-size: 16px;
   color: #0D9488;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .footer-name {
   display: block;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   color: #111827;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
 }
 
 .footer-contact {
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 
 .footer-contact p {
-  margin: 6px 0;
-  font-size: 14px;
+  margin: 4px 0;
+  font-size: 13px;
   color: #6B7280;
   line-height: 1.5;
 }
@@ -366,16 +406,16 @@
 }
 
 .footer-hours {
-  margin-top: 12px !important;
+  margin-top: 8px !important;
   font-weight: 600;
   color: #374151 !important;
 }
 
 .footer-copy {
-  font-size: 12px;
+  font-size: 11px;
   color: #9CA3AF;
   margin: 0;
-  padding-top: 16px;
+  padding-top: 12px;
   border-top: 1px solid #E5E7EB;
 }
 
@@ -386,20 +426,32 @@
 @media (max-width: 768px) {
   .hero-section {
     min-height: auto;
-    padding: 100px 20px 50px;
+    padding: 60px 20px 40px;
   }
 
   .hero-headline {
-    font-size: 36px;
+    font-size: 32px;
   }
 
   .hero-subtext {
-    font-size: 16px;
+    font-size: 15px;
+    margin-bottom: 24px;
+  }
+
+  .hero-cta-group {
+    max-width: 100%;
   }
 
   .hero-cta-primary {
     width: 100%;
-    padding: 16px 32px;
+    padding: 14px 24px;
+    font-size: 16px;
+  }
+
+  .hero-cta-wholesale {
+    width: 100%;
+    padding: 12px 20px;
+    font-size: 14px;
   }
 
   .hero-cta-secondary {
@@ -407,24 +459,24 @@
   }
 
   .hero-trust-line {
-    margin-top: 40px;
-    font-size: 13px;
-    line-height: 1.6;
+    margin-top: 28px;
+    font-size: 12px;
+    line-height: 1.5;
   }
 
   .products-section {
-    padding: 60px 16px 80px;
+    padding: 40px 16px 60px;
   }
 
   .products-header {
     flex-direction: column;
     align-items: flex-start;
-    gap: 12px;
-    margin-bottom: 32px;
+    gap: 10px;
+    margin-bottom: 24px;
   }
 
   .products-title {
-    font-size: 22px;
+    font-size: 20px;
   }
 
   .sort-select {
@@ -432,15 +484,15 @@
   }
 
   .wholesale-section {
-    padding: 70px 20px;
+    padding: 60px 20px;
   }
 
   .wholesale-headline {
-    font-size: 28px;
+    font-size: 26px;
   }
 
   .wholesale-text {
-    font-size: 15px;
+    font-size: 14px;
   }
 
   .wholesale-cta {
@@ -448,28 +500,55 @@
   }
 
   .site-footer {
-    padding: 40px 20px 24px;
+    padding: 28px 20px 20px;
   }
 
   .footer-contact p {
-    font-size: 13px;
+    font-size: 12px;
   }
 }
 
 @media (max-width: 480px) {
+  .hero-section {
+    padding: 48px 16px 36px;
+  }
+
   .hero-headline {
-    font-size: 32px;
+    font-size: 28px;
   }
 
   .hero-arabic {
-    font-size: 16px;
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+
+  .hero-subtext {
+    font-size: 14px;
+  }
+
+  .hero-cta-primary {
+    padding: 12px 20px;
+    font-size: 15px;
+  }
+
+  .hero-cta-wholesale {
+    padding: 10px 16px;
+    font-size: 13px;
   }
 
   .wholesale-headline {
-    font-size: 24px;
+    font-size: 22px;
   }
 
   .wholesale-list li {
+    font-size: 13px;
+  }
+
+  .footer-arabic {
     font-size: 14px;
+  }
+
+  .footer-name {
+    font-size: 16px;
   }
 }

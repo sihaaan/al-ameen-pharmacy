@@ -112,27 +112,37 @@ function Home() {
             for both retail customers and bulk orders.
           </p>
 
-          {/* Primary CTA - WhatsApp */}
-          <a
-            href="https://wa.me/971505456388"
-            className="hero-cta-primary"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <WhatsAppIcon size={24} />
-            <span>Order Medicines on WhatsApp</span>
-          </a>
+          {/* Dual CTAs */}
+          <div className="hero-cta-group">
+            <a
+              href="https://wa.me/971505456388"
+              className="hero-cta-primary"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <WhatsAppIcon size={22} />
+              <span>Order Medicines on WhatsApp</span>
+            </a>
 
-          {/* Secondary - Call */}
-          <a href="tel:+97142713695" className="hero-cta-secondary">
-            <PhoneIcon size={18} />
-            <span>+971-4-271-3695</span>
-          </a>
+            <a
+              href="https://wa.me/971505456388?text=Hi,%20I'm%20interested%20in%20wholesale%20pricing."
+              className="hero-cta-wholesale"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span>Wholesale Inquiry</span>
+            </a>
+
+            <a href="tel:+97142713695" className="hero-cta-secondary">
+              <PhoneIcon size={16} />
+              <span>+971-4-271-3695</span>
+            </a>
+          </div>
         </div>
 
         {/* Trust Line */}
         <p className="hero-trust-line">
-          4 branches across Dubai • Licensed DHA pharmacy • Open late daily
+          DHA Licensed • 4 Branches Across Dubai • Open Until 2AM Daily
         </p>
       </section>
 
