@@ -337,87 +337,14 @@ body {
   font-weight: 500;
 }
 
-/* Product Grid Enhancements */
-.product-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 32px;
-  animation: fadeIn 1s ease-out 0.6s both;
-}
+/*
+ * Note: Product Grid and Product Card styles are defined in
+ * ProductGrid.css - do not duplicate here to avoid conflicts
+ */
 
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
-}
-
-/* Product Card - Ultra Sleek with Hover Effects */
-.product-card {
-  background: white;
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  border: 1px solid var(--border-light);
-  cursor: pointer;
-  position: relative;
-  overflow: hidden;
-}
-
-/* Hover gradient overlay effect */
-.product-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(135deg,
-    rgba(13, 148, 136, 0.04) 0%,
-    rgba(14, 165, 233, 0.04) 100%);
-  opacity: 0;
-  transition: opacity 0.4s ease;
-  z-index: 0;
-}
-
-.product-card:hover::before {
-  opacity: 1;
-}
-
-.product-card:hover {
-  transform: translateY(-8px);
-  box-shadow:
-    0 20px 40px rgba(13, 148, 136, 0.12),
-    0 0 0 1px rgba(13, 148, 136, 0.1);
-}
-
-.product-card > * {
-  position: relative;
-  z-index: 1;
-}
-
-.product-card h3 {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 8px;
-  letter-spacing: -0.3px;
-}
-
-.product-card p {
-  font-size: 15px;
-  color: var(--text-secondary);
-  margin-bottom: 16px;
-  line-height: 1.6;
-}
-
-.product-price {
-  font-size: 28px;
-  font-weight: 800;
-  color: var(--primary);
-  margin-bottom: 16px;
-  background: linear-gradient(135deg, var(--primary-700) 0%, var(--primary) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
 }
 
 /* Button - Modern with Micro-interactions */

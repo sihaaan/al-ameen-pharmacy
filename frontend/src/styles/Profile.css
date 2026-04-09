@@ -827,8 +827,4 @@
   }
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
+/* Note: @keyframes spin is defined in App.css */

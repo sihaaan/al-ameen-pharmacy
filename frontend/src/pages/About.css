@@ -153,7 +153,7 @@
   margin-bottom: 70px;
 }
 
-.section-title {
+.about-container .section-title {
   font-size: 48px;
   font-weight: 900;
   color: #0f172a;
@@ -168,7 +168,7 @@
 }
 
 /* Animated underline */
-.section-title::after {
+.about-container .section-title::after {
   content: '';
   position: absolute;
   bottom: -12px;
@@ -181,7 +181,7 @@
   box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
 }
 
-.section-subtitle {
+.about-container .section-subtitle {
   font-size: 20px;
   color: #64748b;
   max-width: 700px;
@@ -248,10 +248,7 @@
   animation: spin 20s linear infinite;
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
+/* Note: @keyframes spin is defined in App.css */
 
 .about-image:hover {
   transform: translateY(-10px) scale(1.02);
@@ -626,41 +623,41 @@
 }
 
 @media (max-width: 768px) {
-  .hero-section {
+  .about-container .hero-section {
     padding: 80px 20px 70px;
   }
 
-  .company-name-arabic {
+  .about-container .company-name-arabic {
     font-size: 26px;
   }
 
-  .company-name-english {
+  .about-container .company-name-english {
     font-size: 42px;
   }
 
-  .section-title {
+  .about-container .section-title {
     font-size: 36px;
   }
 
-  .services-grid {
+  .about-container .services-grid {
     grid-template-columns: 1fr;
   }
 
-  .content-section {
+  .about-container .content-section {
     padding: 70px 20px;
   }
 
-  .cta-content h2 {
+  .about-container .cta-content h2 {
     font-size: 36px;
   }
 }
 
 @media (max-width: 480px) {
-  .company-name-english {
+  .about-container .company-name-english {
     font-size: 32px;
   }
 
-  .section-title {
+  .about-container .section-title {
     font-size: 28px;
   }
 }
