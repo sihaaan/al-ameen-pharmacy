@@ -210,6 +210,64 @@ class ProductViewSet(viewsets.ModelViewSet):
             return [permissions.IsAdminUser()]
         return [AllowAny()]
 
+    def _handle_product_image(self, product, image_file):
+        """
+        Handle image upload for a product.
+        Creates a new ProductImage and sets it as primary.
+        """
+        if not image_file:
+            return
+
+        # Unset any existing primary images for this product
+        ProductImage.objects.filter(product=product, is_primary=True).update(is_primary=False)
+
+        # Create new primary image
+        ProductImage.objects.create(
+            product=product,
+            image=image_file,
+            is_primary=True,
+            source_type='manual_upload',
+            alt_text=product.name
+        )
+
+    def create(self, request, *args, **kwargs):
+        """Create product with optional image upload."""
+        # Extract image from request before serializer validation
+        image_file = request.FILES.get('image')
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        product = serializer.save()
+
+        # Handle image upload
+        self._handle_product_image(product, image_file)
+
+        # Return full product details
+        return Response(
+            ProductDetailSerializer(product, context={'request': request}).data,
+            status=status.HTTP_201_CREATED
+        )
+
+    def update(self, request, *args, **kwargs):
+        """Update product with optional image upload."""
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        # Extract image from request before serializer validation
+        image_file = request.FILES.get('image')
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        product = serializer.save()
+
+        # Handle image upload (only if new image provided)
+        self._handle_product_image(product, image_file)
+
+        # Return full product details
+        return Response(
+            ProductDetailSerializer(product, context={'request': request}).data
+        )
+
     def get_queryset(self):
         """
         Advanced product filtering and search.

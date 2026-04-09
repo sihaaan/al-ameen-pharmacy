@@ -12,7 +12,7 @@ const ProductManagement = ({ onUpdate }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
 
-  // Form state - updated for v2 schema
+  // Form state - v2 schema aligned
   const [formData, setFormData] = useState({
     name: '',
     short_description: '',
@@ -29,6 +29,11 @@ const ProductManagement = ({ onUpdate }) => {
     is_featured: false,
     image: null,
   });
+
+  // New brand creation state
+  const [newBrandName, setNewBrandName] = useState('');
+  const [isCreatingBrand, setIsCreatingBrand] = useState(false);
+  const [brandError, setBrandError] = useState('');
 
   useEffect(() => {
     fetchData();
@@ -63,6 +68,15 @@ const ProductManagement = ({ onUpdate }) => {
     }
   };
 
+  const fetchBrands = async () => {
+    try {
+      const response = await axiosInstance.get('/brands/');
+      setBrands(response.data);
+    } catch (error) {
+      console.error('Error fetching brands:', error);
+    }
+  };
+
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
     setFormData({
@@ -80,15 +94,71 @@ const ProductManagement = ({ onUpdate }) => {
     }
   };
 
+  const handleCreateBrand = async () => {
+    const trimmedName = newBrandName.trim();
+    if (!trimmedName) {
+      setBrandError('Brand name is required');
+      return;
+    }
+
+    // Check for duplicate (case-insensitive)
+    const exists = brands.some(
+      b => b.name.toLowerCase() === trimmedName.toLowerCase()
+    );
+    if (exists) {
+      setBrandError('This brand already exists');
+      return;
+    }
+
+    setIsCreatingBrand(true);
+    setBrandError('');
+
+    try {
+      const response = await axiosInstance.post('/brands/', { name: trimmedName });
+      const newBrand = response.data;
+
+      // Refresh brands list and select the new brand
+      await fetchBrands();
+      setFormData(prev => ({ ...prev, brand: newBrand.id }));
+      setNewBrandName('');
+    } catch (error) {
+      console.error('Error creating brand:', error);
+      const errorMsg = error.response?.data?.name?.[0] || 'Failed to create brand';
+      setBrandError(errorMsg);
+    } finally {
+      setIsCreatingBrand(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
     const data = new FormData();
-    Object.keys(formData).forEach((key) => {
-      if (formData[key] !== null && formData[key] !== '') {
-        data.append(key, formData[key]);
+
+    // Append all form fields that match backend expectations
+    const fieldsToSend = [
+      'name', 'short_description', 'detailed_description',
+      'price', 'stock_quantity', 'category', 'brand',
+      'dosage', 'pack_size', 'active_ingredient',
+      'requires_prescription', 'status', 'is_featured'
+    ];
+
+    fieldsToSend.forEach((key) => {
+      const value = formData[key];
+      if (value !== null && value !== '' && value !== undefined) {
+        // Convert booleans to proper format
+        if (typeof value === 'boolean') {
+          data.append(key, value.toString());
+        } else {
+          data.append(key, value);
+        }
       }
     });
+
+    // Append image file if present
+    if (formData.image) {
+      data.append('image', formData.image);
+    }
 
     try {
       if (editingProduct) {
@@ -129,11 +199,13 @@ const ProductManagement = ({ onUpdate }) => {
       dosage: product.dosage || '',
       pack_size: product.pack_size || '',
       active_ingredient: product.active_ingredient || '',
-      requires_prescription: product.requires_prescription,
+      requires_prescription: product.requires_prescription || false,
       status: product.status || 'draft',
       is_featured: product.is_featured || false,
-      image: null,
+      image: null, // Don't pre-fill image (user must re-upload if changing)
     });
+    setNewBrandName('');
+    setBrandError('');
     setShowAddModal(true);
   };
 
@@ -169,6 +241,8 @@ const ProductManagement = ({ onUpdate }) => {
       image: null,
     });
     setEditingProduct(null);
+    setNewBrandName('');
+    setBrandError('');
   };
 
   const filteredProducts = products.filter((product) => {
@@ -358,6 +432,32 @@ const ProductManagement = ({ onUpdate }) => {
                     </div>
                   </div>
 
+                  {/* New Brand Creation */}
+                  <div className="form-group">
+                    <label>Or Add New Brand</label>
+                    <div className="new-brand-row">
+                      <input
+                        type="text"
+                        value={newBrandName}
+                        onChange={(e) => {
+                          setNewBrandName(e.target.value);
+                          setBrandError('');
+                        }}
+                        placeholder="Enter new brand name"
+                        className="new-brand-input"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleCreateBrand}
+                        disabled={isCreatingBrand || !newBrandName.trim()}
+                        className="btn-create-brand"
+                      >
+                        {isCreatingBrand ? 'Creating...' : 'Add Brand'}
+                      </button>
+                    </div>
+                    {brandError && <small className="error-text">{brandError}</small>}
+                  </div>
+
                   <div className="form-row">
                     <div className="form-group">
                       <label>Price (AED) *</label>
@@ -420,17 +520,18 @@ const ProductManagement = ({ onUpdate }) => {
 
                   <div className="form-row">
                     <div className="form-group">
-                      <label>Status</label>
-                      <select name="status" value={formData.status} onChange={handleInputChange}>
+                      <label>Status *</label>
+                      <select name="status" value={formData.status} onChange={handleInputChange} required>
                         <option value="draft">Draft</option>
                         <option value="active">Active</option>
                         <option value="archived">Archived</option>
                       </select>
+                      <small>Only "Active" products are visible to customers</small>
                     </div>
                   </div>
 
                   <div className="form-group">
-                    <label>Product Image</label>
+                    <label>Primary Image (optional)</label>
                     <input
                       type="file"
                       accept="image/*"
@@ -438,6 +539,16 @@ const ProductManagement = ({ onUpdate }) => {
                       className="file-input"
                     />
                     <small>Recommended: 800x800px, JPG or PNG</small>
+                    {editingProduct && editingProduct.primary_image_url && (
+                      <div className="current-image-preview">
+                        <p>Current image:</p>
+                        <img
+                          src={editingProduct.primary_image_url}
+                          alt="Current"
+                          style={{ maxWidth: '100px', maxHeight: '100px' }}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="form-group">
