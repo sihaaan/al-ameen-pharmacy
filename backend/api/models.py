@@ -1,92 +1,407 @@
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator
+from django.utils.text import slugify
 from decimal import Decimal
+import random
+import string
+
 
 # ====================
-# PHARMACY E-COMMERCE MODELS
+# CATALOG MODELS
 # ====================
+
+class Brand(models.Model):
+    """
+    Product brands/manufacturers.
+    Examples: Pfizer, Johnson & Johnson, Panadol, etc.
+    """
+    name = models.CharField(max_length=200, unique=True)
+    slug = models.SlugField(max_length=220, unique=True, blank=True)
+    logo = models.ImageField(upload_to='brands/', blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['name']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+            # Ensure unique slug
+            original_slug = self.slug
+            counter = 1
+            while Brand.objects.filter(slug=self.slug).exclude(pk=self.pk).exists():
+                self.slug = f"{original_slug}-{counter}"
+                counter += 1
+        super().save(*args, **kwargs)
+
 
 class Category(models.Model):
     """
-    Product categories like 'Pain Relief', 'Vitamins', 'First Aid', etc.
-    Think of this like folders organizing your medicines.
+    Hierarchical product categories.
+    Supports parent-child relationships for nested categories.
+    Examples: Medications > Pain Relief > Headache
     """
-    name = models.CharField(max_length=100, unique=True)
-    description = models.TextField(blank=True)  # blank=True means optional
-    created_at = models.DateTimeField(auto_now_add=True)  # Auto-set on creation
+    name = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=120, unique=True, blank=True)
+    description = models.TextField(blank=True)
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='children'
+    )
+    is_active = models.BooleanField(default=True)
+    display_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name_plural = "Categories"  # Proper plural in admin panel
-        ordering = ['name']  # Order alphabetically
+        verbose_name_plural = "Categories"
+        ordering = ['display_order', 'name']
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['parent']),
+            models.Index(fields=['is_active']),
+            models.Index(fields=['display_order']),
+        ]
 
     def __str__(self):
-        # This makes it display nicely in admin panel
+        if self.parent:
+            return f"{self.parent.name} > {self.name}"
         return self.name
+
+    @property
+    def full_path(self):
+        """Returns full category path: 'Medications > Pain Relief > Headache'"""
+        if self.parent:
+            return f"{self.parent.full_path} > {self.name}"
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+            # Ensure unique slug
+            original_slug = self.slug
+            counter = 1
+            while Category.objects.filter(slug=self.slug).exclude(pk=self.pk).exists():
+                self.slug = f"{original_slug}-{counter}"
+                counter += 1
+        super().save(*args, **kwargs)
 
 
 class Product(models.Model):
     """
-    Individual medicines/health products your pharmacy sells.
-    Each product has name, price, stock, description, etc.
+    Core product model for pharmacy e-commerce.
+    Supports pharmacy-specific fields, SEO, and multi-image via ProductImage.
     """
-    name = models.CharField(max_length=200)
-    description = models.TextField(help_text="Short description shown in product grid")
-    detailed_description = models.TextField(
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('active', 'Active'),
+        ('archived', 'Archived'),
+    ]
+
+    # Basic info
+    name = models.CharField(max_length=200, db_index=True)
+    slug = models.SlugField(max_length=220, unique=True, blank=True)
+    brand = models.ForeignKey(
+        Brand,
+        on_delete=models.SET_NULL,
+        null=True,
         blank=True,
-        help_text="Full detailed description with usage, dosage, warnings, etc."
-    )
-    price = models.DecimalField(
-        max_digits=10,  # Total digits (including decimals)
-        decimal_places=2,  # Digits after decimal: 12.50
-        validators=[MinValueValidator(Decimal('0.01'))]  # Must be positive
-    )
-    stock_quantity = models.IntegerField(
-        default=0,
-        validators=[MinValueValidator(0)]  # Can't be negative
+        related_name='products'
     )
     category = models.ForeignKey(
         Category,
-        on_delete=models.SET_NULL,  # If category deleted, product stays but category=NULL
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='products'  # Access category.products.all()
+        related_name='products'
     )
-    # Image upload field - files will be stored in media/products/
-    image = models.ImageField(
-        upload_to='products/',
-        blank=True,
-        null=True,
-        help_text="Product image (recommended size: 800x800px)"
-    )
-    # Keep old URL field for backward compatibility, but make it optional
-    image_url = models.URLField(
-        blank=True,
-        null=True,
-        help_text="External image URL (optional, use image upload instead)"
-    )
-    requires_prescription = models.BooleanField(default=False)  # Some medicines need Rx
 
-    # Additional product information
-    manufacturer = models.CharField(max_length=200, blank=True)
-    dosage = models.CharField(max_length=100, blank=True, help_text="e.g., 500mg, 10ml")
-    pack_size = models.CharField(max_length=100, blank=True, help_text="e.g., 30 tablets, 100ml bottle")
+    # Descriptions
+    short_description = models.TextField(
+        help_text="Brief description shown in product cards/grid"
+    )
+    detailed_description = models.TextField(
+        blank=True,
+        help_text="Full description with usage, dosage, warnings, etc."
+    )
 
-    # Automatic timestamps
+    # Pricing & Inventory
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    stock_quantity = models.PositiveIntegerField(default=0)
+    sku = models.CharField(
+        max_length=100,
+        unique=True,
+        blank=True,
+        null=True,
+        help_text="Stock Keeping Unit - unique product identifier"
+    )
+    barcode = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="UPC, EAN, or other barcode"
+    )
+
+    # Pharmacy-specific
+    requires_prescription = models.BooleanField(
+        default=False,
+        help_text="Requires prescription to purchase"
+    )
+    dosage = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="e.g., 500mg, 10ml"
+    )
+    pack_size = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="e.g., 30 tablets, 100ml bottle"
+    )
+    active_ingredient = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="e.g., Paracetamol, Ibuprofen"
+    )
+
+    # Status & Visibility
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='draft',
+        db_index=True
+    )
+    requires_manual_review = models.BooleanField(
+        default=True,
+        help_text="Requires admin review before publishing"
+    )
+    is_featured = models.BooleanField(
+        default=False,
+        help_text="Show on homepage featured section"
+    )
+
+    # SEO
+    meta_title = models.CharField(
+        max_length=70,
+        blank=True,
+        help_text="SEO title (max 70 chars)"
+    )
+    meta_description = models.CharField(
+        max_length=160,
+        blank=True,
+        help_text="SEO description (max 160 chars)"
+    )
+
+    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)  # Auto-update on save
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['-created_at']  # Newest first (- means descending)
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['status']),
+            models.Index(fields=['is_featured']),
+            models.Index(fields=['requires_prescription']),
+            models.Index(fields=['created_at']),
+            models.Index(fields=['brand']),
+            models.Index(fields=['category']),
+        ]
 
     def __str__(self):
         return self.name
 
     @property
     def in_stock(self):
-        """Helper property to check if product is available"""
+        """Check if product is available"""
         return self.stock_quantity > 0
 
+    @property
+    def primary_image(self):
+        """Get primary product image"""
+        return self.images.filter(is_primary=True).first() or self.images.first()
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+            # Ensure unique slug
+            original_slug = self.slug
+            counter = 1
+            while Product.objects.filter(slug=self.slug).exclude(pk=self.pk).exists():
+                self.slug = f"{original_slug}-{counter}"
+                counter += 1
+        super().save(*args, **kwargs)
+
+
+class ProductImage(models.Model):
+    """
+    Multiple images per product with ordering and source tracking.
+    Supports images from manufacturers, suppliers, or manual uploads.
+    """
+    SOURCE_TYPE_CHOICES = [
+        ('manual_upload', 'Manual Upload'),
+        ('manufacturer', 'Manufacturer'),
+        ('supplier', 'Supplier'),
+        ('placeholder', 'Placeholder'),
+    ]
+
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='images'
+    )
+    image = models.ImageField(
+        upload_to='products/',
+        help_text="Product image (recommended: 800x800px)"
+    )
+    alt_text = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text="Image alt text for accessibility and SEO"
+    )
+    is_primary = models.BooleanField(
+        default=False,
+        help_text="Primary image shown in listings"
+    )
+    display_order = models.PositiveIntegerField(default=0)
+    source_type = models.CharField(
+        max_length=20,
+        choices=SOURCE_TYPE_CHOICES,
+        default='manual_upload'
+    )
+    source_url = models.URLField(
+        blank=True,
+        help_text="Original source URL if imported"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['display_order', '-is_primary', 'created_at']
+        indexes = [
+            models.Index(fields=['product', 'is_primary']),
+            models.Index(fields=['display_order']),
+        ]
+
+    def __str__(self):
+        return f"Image for {self.product.name} ({self.display_order})"
+
+    def save(self, *args, **kwargs):
+        # If this is marked as primary, unmark others
+        if self.is_primary:
+            ProductImage.objects.filter(
+                product=self.product,
+                is_primary=True
+            ).exclude(pk=self.pk).update(is_primary=False)
+        super().save(*args, **kwargs)
+
+
+# ====================
+# SUPPLIER MODELS
+# ====================
+
+class Supplier(models.Model):
+    """
+    Supplier/vendor information for wholesale and inventory management.
+    """
+    name = models.CharField(max_length=200, unique=True)
+    slug = models.SlugField(max_length=220, unique=True, blank=True)
+    contact_name = models.CharField(max_length=200, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    email = models.EmailField(blank=True)
+    website = models.URLField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['name']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+            original_slug = self.slug
+            counter = 1
+            while Supplier.objects.filter(slug=self.slug).exclude(pk=self.pk).exists():
+                self.slug = f"{original_slug}-{counter}"
+                counter += 1
+        super().save(*args, **kwargs)
+
+
+class ProductSupplier(models.Model):
+    """
+    Many-to-many relationship between Products and Suppliers.
+    Tracks supplier-specific SKUs and pricing.
+    """
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='suppliers'
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name='products'
+    )
+    supplier_sku = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Supplier's product code"
+    )
+    last_purchase_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Last price paid to supplier"
+    )
+    is_preferred = models.BooleanField(
+        default=False,
+        help_text="Preferred supplier for this product"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['product', 'supplier']
+        ordering = ['-is_preferred', 'supplier__name']
+
+    def __str__(self):
+        return f"{self.product.name} - {self.supplier.name}"
+
+    def save(self, *args, **kwargs):
+        # If marking as preferred, unmark others for this product
+        if self.is_preferred:
+            ProductSupplier.objects.filter(
+                product=self.product,
+                is_preferred=True
+            ).exclude(pk=self.pk).update(is_preferred=False)
+        super().save(*args, **kwargs)
+
+
+# ====================
+# CART MODELS
+# ====================
 
 class Cart(models.Model):
     """
@@ -95,7 +410,7 @@ class Cart(models.Model):
     """
     user = models.OneToOneField(
         User,
-        on_delete=models.CASCADE,  # If user deleted, delete their cart too
+        on_delete=models.CASCADE,
         related_name='cart'
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -118,25 +433,23 @@ class Cart(models.Model):
 class CartItem(models.Model):
     """
     Individual items inside a cart.
-    Example: 3x Paracetamol, 1x Vitamin D
     """
     cart = models.ForeignKey(
         Cart,
         on_delete=models.CASCADE,
-        related_name='items'  # Access cart.items.all()
+        related_name='items'
     )
     product = models.ForeignKey(
         Product,
         on_delete=models.CASCADE
     )
-    quantity = models.IntegerField(
+    quantity = models.PositiveIntegerField(
         default=1,
         validators=[MinValueValidator(1)]
     )
     added_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        # A product can only appear once in a cart (just increase quantity)
         unique_together = ['cart', 'product']
 
     def __str__(self):
@@ -144,14 +457,17 @@ class CartItem(models.Model):
 
     @property
     def subtotal(self):
-        """Price for this cart item (quantity * unit price)"""
+        """Price for this cart item"""
         return self.product.price * self.quantity
 
 
+# ====================
+# ADDRESS MODELS
+# ====================
+
 class Address(models.Model):
     """
-    Delivery addresses for users (important for pharmacy delivery in Dubai!)
-    Users can have multiple addresses (home, work, etc.)
+    Delivery addresses for users (Dubai-focused).
     """
     user = models.ForeignKey(
         User,
@@ -161,8 +477,8 @@ class Address(models.Model):
     full_name = models.CharField(max_length=200)
     phone_number = models.CharField(max_length=20)
     street_address = models.CharField(max_length=255)
-    building = models.CharField(max_length=100, blank=True)  # Villa/Building number
-    area = models.CharField(max_length=100)  # Dubai Marina, JBR, etc.
+    building = models.CharField(max_length=100, blank=True)
+    area = models.CharField(max_length=100)
     city = models.CharField(max_length=100, default='Dubai')
     emirate = models.CharField(max_length=50, default='Dubai')
     postal_code = models.CharField(max_length=10, blank=True)
@@ -175,10 +491,13 @@ class Address(models.Model):
         return f"{self.full_name} - {self.area}, {self.city}"
 
 
+# ====================
+# ORDER MODELS
+# ====================
+
 class Order(models.Model):
     """
-    When customer completes checkout, Cart becomes an Order.
-    Orders are permanent records of purchases.
+    Completed orders with denormalized delivery info.
     """
     STATUS_CHOICES = [
         ('pending', 'Pending Payment'),
@@ -205,11 +524,9 @@ class Order(models.Model):
         on_delete=models.CASCADE,
         related_name='orders'
     )
-
-    # Order number for customer reference
     order_number = models.CharField(max_length=50, unique=True, blank=True)
 
-    # Delivery Information (stored directly instead of using Address model)
+    # Denormalized delivery info
     full_name = models.CharField(max_length=200, blank=True, default='')
     email = models.EmailField(blank=True, default='')
     phone = models.CharField(max_length=20, blank=True, default='')
@@ -218,14 +535,14 @@ class Order(models.Model):
     emirate = models.CharField(max_length=50, blank=True, default='')
     delivery_notes = models.TextField(blank=True, default='')
 
-    # Order status
+    # Status
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
         default='pending'
     )
 
-    # Payment information
+    # Payment
     payment_method = models.CharField(
         max_length=20,
         choices=PAYMENT_METHOD_CHOICES,
@@ -236,8 +553,6 @@ class Order(models.Model):
         choices=PAYMENT_STATUS_CHOICES,
         default='pending'
     )
-
-    # Stripe payment fields
     stripe_payment_intent_id = models.CharField(max_length=255, blank=True, null=True)
     stripe_client_secret = models.CharField(max_length=255, blank=True, null=True)
 
@@ -251,15 +566,17 @@ class Order(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['created_at']),
+            models.Index(fields=['order_number']),
+        ]
 
     def __str__(self):
-        return f"Order #{self.order_number} - {self.user.username} - {self.status}"
+        return f"Order #{self.order_number} - {self.user.username}"
 
     def save(self, *args, **kwargs):
-        # Auto-generate order number if not set
         if not self.order_number:
-            import random
-            import string
             from django.utils import timezone
             timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
             random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
@@ -269,8 +586,7 @@ class Order(models.Model):
 
 class OrderItem(models.Model):
     """
-    Individual products in an order.
-    We store price at time of purchase (in case product price changes later).
+    Items in a completed order with price snapshot.
     """
     order = models.ForeignKey(
         Order,
@@ -279,11 +595,11 @@ class OrderItem(models.Model):
     )
     product = models.ForeignKey(
         Product,
-        on_delete=models.SET_NULL,  # Keep order even if product deleted
+        on_delete=models.SET_NULL,
         null=True
     )
-    product_name = models.CharField(max_length=200)  # Store name in case product deleted
-    quantity = models.IntegerField(validators=[MinValueValidator(1)])
+    product_name = models.CharField(max_length=200)
+    quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     price_at_purchase = models.DecimalField(max_digits=10, decimal_places=2)
 
     def __str__(self):

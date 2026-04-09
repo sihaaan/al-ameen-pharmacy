@@ -23,7 +23,7 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
         setLoading(true);
         const response = await axiosInstance.get(`/products/${productId}/`);
         setProduct(response.data);
-        setSelectedImage(response.data.image || response.data.image_url);
+        setSelectedImage(response.data.primary_image_url);
       } catch (error) {
         console.error("Error fetching product:", error);
       } finally {
@@ -216,9 +216,9 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
                     </span>
                   )}
                   <h2 className="modal-title">{product.name}</h2>
-                  {product.manufacturer && (
+                  {product.brand_name && (
                     <p className="modal-manufacturer">
-                      by {product.manufacturer}
+                      by {product.brand_name}
                     </p>
                   )}
                 </div>
@@ -290,9 +290,9 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
                 )}
 
                 {/* Description */}
-                {product.description && (
+                {product.short_description && (
                   <div className="modal-description">
-                    <p>{product.description}</p>
+                    <p>{product.short_description}</p>
                   </div>
                 )}
 

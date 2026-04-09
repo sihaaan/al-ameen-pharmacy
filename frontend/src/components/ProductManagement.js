@@ -5,24 +5,28 @@ import axiosInstance from '../utils/axios';
 const ProductManagement = ({ onUpdate }) => {
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [brands, setBrands] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
 
-  // Form state
+  // Form state - updated for v2 schema
   const [formData, setFormData] = useState({
     name: '',
-    description: '',
+    short_description: '',
     detailed_description: '',
     price: '',
     stock_quantity: '',
     category: '',
-    manufacturer: '',
+    brand: '',
     dosage: '',
     pack_size: '',
+    active_ingredient: '',
     requires_prescription: false,
+    status: 'draft',
+    is_featured: false,
     image: null,
   });
 
@@ -33,12 +37,14 @@ const ProductManagement = ({ onUpdate }) => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [productsRes, categoriesRes] = await Promise.all([
+      const [productsRes, categoriesRes, brandsRes] = await Promise.all([
         axiosInstance.get('/products/'),
-        axiosInstance.get('/categories/')
+        axiosInstance.get('/categories/?flat=true'),
+        axiosInstance.get('/brands/')
       ]);
       setProducts(productsRes.data);
       setCategories(categoriesRes.data);
+      setBrands(brandsRes.data);
       if (onUpdate) onUpdate();
     } catch (error) {
       console.error('Error fetching data:', error);
@@ -86,7 +92,8 @@ const ProductManagement = ({ onUpdate }) => {
 
     try {
       if (editingProduct) {
-        await axiosInstance.put(`/products/${editingProduct.id}/`, data, {
+        // Use slug for update (v2 uses slug-based lookup)
+        await axiosInstance.put(`/products/${editingProduct.slug}/`, data, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
         alert('Product updated successfully!');
@@ -102,7 +109,10 @@ const ProductManagement = ({ onUpdate }) => {
       setShowAddModal(false);
     } catch (error) {
       console.error('Error saving product:', error);
-      alert('Error saving product: ' + (error.response?.data?.message || error.message));
+      const errorMsg = error.response?.data
+        ? JSON.stringify(error.response.data)
+        : error.message;
+      alert('Error saving product: ' + errorMsg);
     }
   };
 
@@ -110,24 +120,28 @@ const ProductManagement = ({ onUpdate }) => {
     setEditingProduct(product);
     setFormData({
       name: product.name,
-      description: product.description,
+      short_description: product.short_description || '',
       detailed_description: product.detailed_description || '',
       price: product.price,
       stock_quantity: product.stock_quantity,
       category: product.category || '',
-      manufacturer: product.manufacturer || '',
+      brand: product.brand || '',
       dosage: product.dosage || '',
       pack_size: product.pack_size || '',
+      active_ingredient: product.active_ingredient || '',
       requires_prescription: product.requires_prescription,
+      status: product.status || 'draft',
+      is_featured: product.is_featured || false,
       image: null,
     });
     setShowAddModal(true);
   };
 
-  const handleDelete = async (productId) => {
+  const handleDelete = async (product) => {
     if (window.confirm('Are you sure you want to delete this product?')) {
       try {
-        await axiosInstance.delete(`/products/${productId}/`);
+        // Use slug for delete (v2 uses slug-based lookup)
+        await axiosInstance.delete(`/products/${product.slug}/`);
         alert('Product deleted successfully!');
         fetchProducts();
       } catch (error) {
@@ -140,15 +154,18 @@ const ProductManagement = ({ onUpdate }) => {
   const resetForm = () => {
     setFormData({
       name: '',
-      description: '',
+      short_description: '',
       detailed_description: '',
       price: '',
       stock_quantity: '',
       category: '',
-      manufacturer: '',
+      brand: '',
       dosage: '',
       pack_size: '',
+      active_ingredient: '',
       requires_prescription: false,
+      status: 'draft',
+      is_featured: false,
       image: null,
     });
     setEditingProduct(null);
@@ -156,7 +173,7 @@ const ProductManagement = ({ onUpdate }) => {
 
   const filteredProducts = products.filter((product) => {
     const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          product.description.toLowerCase().includes(searchTerm.toLowerCase());
+                          (product.short_description || '').toLowerCase().includes(searchTerm.toLowerCase());
     const matchesCategory = filterCategory === '' || product.category === parseInt(filterCategory);
     return matchesSearch && matchesCategory;
   });
@@ -175,7 +192,7 @@ const ProductManagement = ({ onUpdate }) => {
       <div className="management-header">
         <h2>Product Management</h2>
         <button className="btn-add-product" onClick={() => setShowAddModal(true)}>
-          ➕ Add New Product
+          + Add New Product
         </button>
       </div>
 
@@ -196,7 +213,7 @@ const ProductManagement = ({ onUpdate }) => {
           <option value="">All Categories</option>
           {categories.map((cat) => (
             <option key={cat.id} value={cat.id}>
-              {cat.name}
+              {cat.full_path || cat.name}
             </option>
           ))}
         </select>
@@ -209,9 +226,11 @@ const ProductManagement = ({ onUpdate }) => {
             <tr>
               <th>Image</th>
               <th>Name</th>
+              <th>Brand</th>
               <th>Category</th>
               <th>Price</th>
               <th>Stock</th>
+              <th>Status</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -219,9 +238,9 @@ const ProductManagement = ({ onUpdate }) => {
             {filteredProducts.map((product) => (
               <tr key={product.id}>
                 <td>
-                  {product.image || product.image_url ? (
+                  {product.primary_image_url ? (
                     <img
-                      src={product.image || product.image_url}
+                      src={product.primary_image_url}
                       alt={product.name}
                       className="product-thumb"
                     />
@@ -232,8 +251,9 @@ const ProductManagement = ({ onUpdate }) => {
                 <td>
                   <strong>{product.name}</strong>
                   <br />
-                  <small>{product.description.substring(0, 50)}...</small>
+                  <small>{(product.short_description || '').substring(0, 50)}...</small>
                 </td>
+                <td>{product.brand_name || 'N/A'}</td>
                 <td>{product.category_name || 'N/A'}</td>
                 <td>AED {product.price}</td>
                 <td>
@@ -242,11 +262,16 @@ const ProductManagement = ({ onUpdate }) => {
                   </span>
                 </td>
                 <td>
+                  <span className={`status-badge status-${product.status}`}>
+                    {product.status}
+                  </span>
+                </td>
+                <td>
                   <div className="table-actions">
                     <button onClick={() => handleEdit(product)} className="btn-edit-sm">
                       Edit
                     </button>
-                    <button onClick={() => handleDelete(product.id)} className="btn-delete-sm">
+                    <button onClick={() => handleDelete(product)} className="btn-delete-sm">
                       Delete
                     </button>
                   </div>
@@ -264,7 +289,7 @@ const ProductManagement = ({ onUpdate }) => {
             <div className="modal-header">
               <h2>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
               <button className="modal-close" onClick={() => { setShowAddModal(false); resetForm(); }}>
-                ✕
+                X
               </button>
             </div>
 
@@ -288,8 +313,8 @@ const ProductManagement = ({ onUpdate }) => {
                   <div className="form-group">
                     <label>Short Description *</label>
                     <textarea
-                      name="description"
-                      value={formData.description}
+                      name="short_description"
+                      value={formData.short_description}
                       onChange={handleInputChange}
                       rows="3"
                       required
@@ -314,20 +339,22 @@ const ProductManagement = ({ onUpdate }) => {
                         <option value="">Select Category</option>
                         {categories.map((cat) => (
                           <option key={cat.id} value={cat.id}>
-                            {cat.name}
+                            {cat.full_path || cat.name}
                           </option>
                         ))}
                       </select>
                     </div>
 
                     <div className="form-group">
-                      <label>Manufacturer</label>
-                      <input
-                        type="text"
-                        name="manufacturer"
-                        value={formData.manufacturer}
-                        onChange={handleInputChange}
-                      />
+                      <label>Brand</label>
+                      <select name="brand" value={formData.brand} onChange={handleInputChange}>
+                        <option value="">Select Brand</option>
+                        {brands.map((brand) => (
+                          <option key={brand.id} value={brand.id}>
+                            {brand.name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 
@@ -381,6 +408,28 @@ const ProductManagement = ({ onUpdate }) => {
                   </div>
 
                   <div className="form-group">
+                    <label>Active Ingredient</label>
+                    <input
+                      type="text"
+                      name="active_ingredient"
+                      value={formData.active_ingredient}
+                      onChange={handleInputChange}
+                      placeholder="e.g., Paracetamol, Ibuprofen"
+                    />
+                  </div>
+
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label>Status</label>
+                      <select name="status" value={formData.status} onChange={handleInputChange}>
+                        <option value="draft">Draft</option>
+                        <option value="active">Active</option>
+                        <option value="archived">Archived</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="form-group">
                     <label>Product Image</label>
                     <input
                       type="file"
@@ -400,6 +449,18 @@ const ProductManagement = ({ onUpdate }) => {
                         onChange={handleInputChange}
                       />
                       Requires Prescription
+                    </label>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        name="is_featured"
+                        checked={formData.is_featured}
+                        onChange={handleInputChange}
+                      />
+                      Featured Product
                     </label>
                   </div>
                 </div>

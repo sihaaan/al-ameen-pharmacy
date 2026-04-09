@@ -158,8 +158,8 @@ const Navbar = () => {
                     onMouseEnter={() => setSelectedIndex(index)}
                   >
                     <div className="suggestion-image">
-                      {product.image_display ? (
-                        <img src={product.image_display} alt={product.name} />
+                      {product.primary_image_url ? (
+                        <img src={product.primary_image_url} alt={product.name} />
                       ) : (
                         <div className="no-image">💊</div>
                       )}

@@ -5,13 +5,22 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
-from django.db.models import Q, F
+from django.db.models import Q, Prefetch
 
-from .models import Category, Product, Cart, CartItem, Address, Order, OrderItem
+from .models import (
+    Brand, Category, Product, ProductImage,
+    Supplier, ProductSupplier,
+    Cart, CartItem, Address, Order, OrderItem
+)
 from .serializers import (
     UserRegistrationSerializer, UserSerializer,
-    CategorySerializer, ProductListSerializer, ProductDetailSerializer,
-    CartSerializer, CartItemSerializer, AddressSerializer,
+    BrandSerializer,
+    CategorySerializer, CategoryListSerializer,
+    ProductListSerializer, ProductDetailSerializer, ProductCreateUpdateSerializer,
+    ProductImageSerializer,
+    SupplierSerializer, ProductSupplierSerializer,
+    CartSerializer, CartItemSerializer,
+    AddressSerializer,
     OrderSerializer, OrderCreateSerializer
 )
 from .emails import (
@@ -30,23 +39,15 @@ from .password_reset import PasswordResetToken
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_user(request):
-    """
-    Register a new user account.
-    Anyone can access (no login required).
-    """
+    """Register a new user account."""
     serializer = UserRegistrationSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.save()
-        # Automatically create a cart for the new user
         Cart.objects.create(user=user)
-
-        # Send welcome email
         try:
             send_welcome_email(user)
         except Exception as email_error:
-            # Log email error but don't fail the registration
             print(f"Email error: {email_error}")
-
         return Response({
             'message': 'User registered successfully!',
             'user': UserSerializer(user).data
@@ -57,10 +58,7 @@ def register_user(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_current_user(request):
-    """
-    Get details of currently logged-in user.
-    Requires authentication token.
-    """
+    """Get details of currently logged-in user."""
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
 
@@ -68,35 +66,23 @@ def get_current_user(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def request_password_reset(request):
-    """
-    Request password reset - sends email with reset link
-    Body: {"email": "user@example.com"}
-    """
+    """Request password reset - sends email with reset link."""
     email = request.data.get('email', '').strip()
-
     if not email:
-        return Response(
-            {'error': 'Email is required'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'error': 'Email is required'}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         user = User.objects.get(email=email)
     except User.DoesNotExist:
-        # For security, don't reveal if email exists or not
         return Response(
             {'message': 'If an account with that email exists, a password reset link has been sent.'},
             status=status.HTTP_200_OK
         )
 
-    # Create reset token
     reset_token = PasswordResetToken.create_token(user)
-
-    # Build reset URL (frontend URL)
-    frontend_url = 'http://localhost:3000'  # Change for production
+    frontend_url = 'http://localhost:3000'
     reset_url = f"{frontend_url}/reset-password/{reset_token}"
 
-    # Send email
     try:
         send_password_reset_email(user, reset_token, reset_url)
     except Exception as email_error:
@@ -115,14 +101,7 @@ def request_password_reset(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def reset_password_confirm(request):
-    """
-    Confirm password reset with token
-    Body: {
-        "token": "reset-token",
-        "password": "new-password",
-        "password_confirm": "new-password"
-    }
-    """
+    """Confirm password reset with token."""
     token = request.data.get('token', '').strip()
     password = request.data.get('password', '')
     password_confirm = request.data.get('password_confirm', '')
@@ -134,10 +113,7 @@ def reset_password_confirm(request):
         )
 
     if password != password_confirm:
-        return Response(
-            {'error': 'Passwords do not match'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'error': 'Passwords do not match'}, status=status.HTTP_400_BAD_REQUEST)
 
     if len(password) < 8:
         return Response(
@@ -145,20 +121,12 @@ def reset_password_confirm(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Validate token
     user = PasswordResetToken.validate_token(token)
-
     if not user:
-        return Response(
-            {'error': 'Invalid or expired reset token'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'error': 'Invalid or expired reset token'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Update password
     user.set_password(password)
     user.save()
-
-    # Mark token as used
     PasswordResetToken.mark_used(token)
 
     return Response(
@@ -168,23 +136,53 @@ def reset_password_confirm(request):
 
 
 # ====================
+# BRAND VIEWS
+# ====================
+
+class BrandViewSet(viewsets.ModelViewSet):
+    """ViewSet for Brands."""
+    queryset = Brand.objects.all()
+    serializer_class = BrandSerializer
+    permission_classes = [AllowAny]
+    lookup_field = 'slug'
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [permissions.IsAdminUser()]
+        return [AllowAny()]
+
+
+# ====================
 # CATEGORY VIEWS
 # ====================
 
 class CategoryViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for Categories.
-    Provides: list, retrieve, create, update, delete
-    """
+    """ViewSet for Categories with hierarchy support."""
     queryset = Category.objects.all()
-    serializer_class = CategorySerializer
-    permission_classes = [AllowAny]  # Anyone can view categories
+    permission_classes = [AllowAny]
+    lookup_field = 'slug'
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            # Check if flat list requested
+            if self.request.query_params.get('flat') == 'true':
+                return CategoryListSerializer
+        return CategorySerializer
+
+    def get_queryset(self):
+        queryset = Category.objects.all()
+
+        # Filter active only for non-admin users
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(is_active=True)
+
+        # Option to get only root categories (no parent)
+        if self.request.query_params.get('root') == 'true':
+            queryset = queryset.filter(parent__isnull=True)
+
+        return queryset.order_by('display_order', 'name')
 
     def get_permissions(self):
-        """
-        Only allow admins to create/update/delete categories.
-        Everyone can view (list/retrieve).
-        """
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [permissions.IsAdminUser()]
         return [AllowAny()]
@@ -195,88 +193,157 @@ class CategoryViewSet(viewsets.ModelViewSet):
 # ====================
 
 class ProductViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for Products.
-    Uses different serializers for list vs detail views.
-    """
+    """ViewSet for Products with advanced search and filtering."""
     queryset = Product.objects.all()
     permission_classes = [AllowAny]
+    lookup_field = 'slug'
 
     def get_serializer_class(self):
-        """Use detailed serializer for single product and create/update, simple for lists"""
-        if self.action in ['retrieve', 'create', 'update', 'partial_update']:
+        if self.action in ['retrieve']:
             return ProductDetailSerializer
+        if self.action in ['create', 'update', 'partial_update']:
+            return ProductCreateUpdateSerializer
         return ProductListSerializer
 
     def get_permissions(self):
-        """Only admins can modify products"""
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [permissions.IsAdminUser()]
         return [AllowAny()]
 
     def get_queryset(self):
         """
-        Advanced product search with PostgreSQL full-text search and relevance ranking.
-
-        Features:
-        - Full-text search across name, description, and manufacturer
-        - Relevance-based ranking (exact matches rank higher)
-        - Weighted search (name weighted highest, then description, then manufacturer)
-        - Handles pharmaceutical synonyms and partial matches
-        - Category filtering
-        - Sorted by relevance score
-
-        Examples:
-        - /api/products/?search=panadol
-        - /api/products/?category=1
-        - /api/products/?search=pain&category=1
+        Advanced product filtering and search.
+        Supports: search, category, brand, featured, status
         """
-        queryset = Product.objects.all()
-        search_query = self.request.query_params.get('search', None)
-        category_id = self.request.query_params.get('category', None)
+        queryset = Product.objects.select_related('brand', 'category').prefetch_related(
+            Prefetch('images', queryset=ProductImage.objects.order_by('-is_primary', 'display_order'))
+        )
 
-        # Apply category filter
-        if category_id:
+        # Non-admin users only see active products
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(status='active')
+
+        # Filter by category (including children)
+        category_slug = self.request.query_params.get('category')
+        category_id = self.request.query_params.get('category_id')
+        if category_slug:
+            try:
+                category = Category.objects.get(slug=category_slug)
+                # Include child categories
+                category_ids = [category.id] + list(category.children.values_list('id', flat=True))
+                queryset = queryset.filter(category_id__in=category_ids)
+            except Category.DoesNotExist:
+                pass
+        elif category_id:
             queryset = queryset.filter(category_id=category_id)
 
-        # Apply search with performance optimization
-        if search_query and search_query.strip():
-            query_term = search_query.strip()
+        # Filter by brand
+        brand_slug = self.request.query_params.get('brand')
+        brand_id = self.request.query_params.get('brand_id')
+        if brand_slug:
+            queryset = queryset.filter(brand__slug=brand_slug)
+        elif brand_id:
+            queryset = queryset.filter(brand_id=brand_id)
 
-            # For autocomplete (short queries), use fast case-insensitive search
-            # For detailed search (3+ chars), use full-text search with ranking
-            if len(query_term) < 3:
-                # Fast path: Simple ILIKE query (much faster than full-text search)
+        # Filter by featured
+        if self.request.query_params.get('featured') == 'true':
+            queryset = queryset.filter(is_featured=True)
+
+        # Filter by prescription requirement
+        prescription = self.request.query_params.get('prescription')
+        if prescription == 'true':
+            queryset = queryset.filter(requires_prescription=True)
+        elif prescription == 'false':
+            queryset = queryset.filter(requires_prescription=False)
+
+        # Filter by in_stock
+        if self.request.query_params.get('in_stock') == 'true':
+            queryset = queryset.filter(stock_quantity__gt=0)
+
+        # Search
+        search_query = self.request.query_params.get('search', '').strip()
+        if search_query:
+            if len(search_query) < 3:
+                # Fast autocomplete search
                 queryset = queryset.filter(
-                    Q(name__icontains=query_term) |
-                    Q(manufacturer__icontains=query_term)
-                ).order_by('name')[:10]  # Limit immediately for speed
+                    Q(name__icontains=search_query) |
+                    Q(brand__name__icontains=search_query) |
+                    Q(sku__icontains=search_query)
+                ).order_by('name')[:10]
             else:
-                # Full path: PostgreSQL full-text search with relevance ranking
-                # Create weighted search vectors for different fields
+                # Full-text search with ranking
                 search_vector = (
                     SearchVector('name', weight='A') +
-                    SearchVector('description', weight='B') +
-                    SearchVector('manufacturer', weight='C')
+                    SearchVector('short_description', weight='B') +
+                    SearchVector('brand__name', weight='C') +
+                    SearchVector('active_ingredient', weight='C')
                 )
+                search_query_obj = SearchQuery(search_query, search_type='websearch')
 
-                # Create search query (supports partial matching)
-                search_query_obj = SearchQuery(query_term, search_type='websearch')
-
-                # Annotate with search rank and filter
                 queryset = queryset.annotate(
                     search=search_vector,
                     rank=SearchRank(search_vector, search_query_obj)
                 ).filter(
-                    Q(search=search_query_obj) |  # Full-text search
-                    Q(name__icontains=query_term) |  # Fallback contains
-                    Q(manufacturer__icontains=query_term)
-                ).order_by('-rank', 'name')[:20]  # Limit for performance
-
+                    Q(search=search_query_obj) |
+                    Q(name__icontains=search_query) |
+                    Q(brand__name__icontains=search_query) |
+                    Q(active_ingredient__icontains=search_query)
+                ).order_by('-rank', 'name')[:20]
         else:
-            # No search query - return all products ordered by name
-            queryset = queryset.order_by('name')
+            queryset = queryset.order_by('-is_featured', 'name')
 
+        return queryset
+
+
+# ====================
+# PRODUCT IMAGE VIEWS
+# ====================
+
+class ProductImageViewSet(viewsets.ModelViewSet):
+    """ViewSet for Product Images (admin only for modifications)."""
+    queryset = ProductImage.objects.all()
+    serializer_class = ProductImageSerializer
+    permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        queryset = ProductImage.objects.all()
+        product_id = self.request.query_params.get('product')
+        if product_id:
+            queryset = queryset.filter(product_id=product_id)
+        return queryset.order_by('-is_primary', 'display_order')
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [permissions.IsAdminUser()]
+        return [AllowAny()]
+
+
+# ====================
+# SUPPLIER VIEWS
+# ====================
+
+class SupplierViewSet(viewsets.ModelViewSet):
+    """ViewSet for Suppliers (admin only)."""
+    queryset = Supplier.objects.all()
+    serializer_class = SupplierSerializer
+    permission_classes = [permissions.IsAdminUser]
+    lookup_field = 'slug'
+
+
+class ProductSupplierViewSet(viewsets.ModelViewSet):
+    """ViewSet for Product-Supplier relationships (admin only)."""
+    queryset = ProductSupplier.objects.all()
+    serializer_class = ProductSupplierSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    def get_queryset(self):
+        queryset = ProductSupplier.objects.select_related('product', 'supplier')
+        product_id = self.request.query_params.get('product')
+        supplier_id = self.request.query_params.get('supplier')
+        if product_id:
+            queryset = queryset.filter(product_id=product_id)
+        if supplier_id:
+            queryset = queryset.filter(supplier_id=supplier_id)
         return queryset
 
 
@@ -285,65 +352,42 @@ class ProductViewSet(viewsets.ModelViewSet):
 # ====================
 
 class CartViewSet(viewsets.ViewSet):
-    """
-    Custom ViewSet for Cart operations.
-    Each user has one cart.
-    """
+    """Custom ViewSet for Cart operations."""
     permission_classes = [IsAuthenticated]
 
     def list(self, request):
-        """
-        GET /api/cart/
-        Get current user's cart with all items.
-        """
+        """GET /api/cart/ - Get current user's cart."""
         cart, created = Cart.objects.get_or_create(user=request.user)
-        serializer = CartSerializer(cart)
+        serializer = CartSerializer(cart, context={'request': request})
         return Response(serializer.data)
 
     @action(detail=False, methods=['post'])
     def add_item(self, request):
-        """
-        POST /api/cart/add_item/
-        Add product to cart or increase quantity.
-        Body: {"product_id": 1, "quantity": 2}
-        """
+        """POST /api/cart/add_item/ - Add product to cart."""
         product_id = request.data.get('product_id')
         quantity = request.data.get('quantity', 1)
 
         if not product_id:
-            return Response(
-                {'error': 'product_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'product_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Get or create cart
         cart, _ = Cart.objects.get_or_create(user=request.user)
 
-        # Get product
         try:
-            product = Product.objects.get(id=product_id)
+            product = Product.objects.get(id=product_id, status='active')
         except Product.DoesNotExist:
-            return Response(
-                {'error': 'Product not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Check stock
         if product.stock_quantity < quantity:
             return Response(
                 {'error': f'Only {product.stock_quantity} items in stock'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Add to cart or update quantity
         cart_item, created = CartItem.objects.get_or_create(
-            cart=cart,
-            product=product,
-            defaults={'quantity': quantity}
+            cart=cart, product=product, defaults={'quantity': quantity}
         )
 
         if not created:
-            # Item already in cart, increase quantity
             cart_item.quantity += quantity
             if cart_item.quantity > product.stock_quantity:
                 return Response(
@@ -353,17 +397,13 @@ class CartViewSet(viewsets.ViewSet):
             cart_item.save()
 
         return Response(
-            CartItemSerializer(cart_item).data,
+            CartItemSerializer(cart_item, context={'request': request}).data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK
         )
 
     @action(detail=False, methods=['patch'])
     def update_item(self, request):
-        """
-        PATCH /api/cart/update_item/
-        Update quantity of cart item.
-        Body: {"cart_item_id": 1, "quantity": 3}
-        """
+        """PATCH /api/cart/update_item/ - Update cart item quantity."""
         cart_item_id = request.data.get('cart_item_id')
         quantity = request.data.get('quantity')
 
@@ -374,17 +414,10 @@ class CartViewSet(viewsets.ViewSet):
             )
 
         try:
-            cart_item = CartItem.objects.get(
-                id=cart_item_id,
-                cart__user=request.user
-            )
+            cart_item = CartItem.objects.get(id=cart_item_id, cart__user=request.user)
         except CartItem.DoesNotExist:
-            return Response(
-                {'error': 'Cart item not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Cart item not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Check stock
         if quantity > cart_item.product.stock_quantity:
             return Response(
                 {'error': f'Only {cart_item.product.stock_quantity} items in stock'},
@@ -397,43 +430,26 @@ class CartViewSet(viewsets.ViewSet):
 
         cart_item.quantity = quantity
         cart_item.save()
-
-        return Response(CartItemSerializer(cart_item).data)
+        return Response(CartItemSerializer(cart_item, context={'request': request}).data)
 
     @action(detail=False, methods=['delete'])
     def remove_item(self, request):
-        """
-        DELETE /api/cart/remove_item/
-        Remove item from cart.
-        Body: {"cart_item_id": 1}
-        """
+        """DELETE /api/cart/remove_item/ - Remove item from cart."""
         cart_item_id = request.data.get('cart_item_id')
 
         if not cart_item_id:
-            return Response(
-                {'error': 'cart_item_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'cart_item_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            cart_item = CartItem.objects.get(
-                id=cart_item_id,
-                cart__user=request.user
-            )
+            cart_item = CartItem.objects.get(id=cart_item_id, cart__user=request.user)
             cart_item.delete()
             return Response({'message': 'Item removed from cart'})
         except CartItem.DoesNotExist:
-            return Response(
-                {'error': 'Cart item not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            return Response({'error': 'Cart item not found'}, status=status.HTTP_404_NOT_FOUND)
 
     @action(detail=False, methods=['delete'])
     def clear(self, request):
-        """
-        DELETE /api/cart/clear/
-        Remove all items from cart.
-        """
+        """DELETE /api/cart/clear/ - Clear entire cart."""
         cart = get_object_or_404(Cart, user=request.user)
         cart.items.all().delete()
         return Response({'message': 'Cart cleared'})
@@ -444,19 +460,14 @@ class CartViewSet(viewsets.ViewSet):
 # ====================
 
 class AddressViewSet(viewsets.ModelViewSet):
-    """
-    Manage user delivery addresses.
-    Users can only see/edit their own addresses.
-    """
+    """Manage user delivery addresses."""
     serializer_class = AddressSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        """Users can only see their own addresses"""
         return Address.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
-        """Automatically set user when creating address"""
         serializer.save(user=self.request.user)
 
 
@@ -465,47 +476,30 @@ class AddressViewSet(viewsets.ModelViewSet):
 # ====================
 
 class OrderViewSet(viewsets.ModelViewSet):
-    """
-    Manage orders.
-    Users can view their orders and create new ones.
-    Admins can view and manage all orders.
-    """
+    """Manage orders."""
     serializer_class = OrderSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        """
-        Regular users see only their orders.
-        Admins see all orders.
-        """
         if self.request.user.is_staff:
-            return Order.objects.all()
-        return Order.objects.filter(user=self.request.user)
+            return Order.objects.all().prefetch_related('items', 'items__product')
+        return Order.objects.filter(user=self.request.user).prefetch_related('items', 'items__product')
 
     def get_serializer_class(self):
-        """Use different serializer for creating orders"""
         if self.action == 'create':
             return OrderCreateSerializer
         return OrderSerializer
 
     @action(detail=True, methods=['patch'], permission_classes=[permissions.IsAdminUser])
     def update_status(self, request, pk=None):
-        """
-        PATCH /api/orders/{id}/update_status/
-        Admin-only endpoint to update order status.
-        Body: {"status": "processing"}
-        """
+        """PATCH /api/orders/{id}/update_status/ - Admin update order status."""
         order = self.get_object()
         old_status = order.status
         new_status = request.data.get('status')
 
         if not new_status:
-            return Response(
-                {'error': 'status field is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'status field is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate status choice
         valid_statuses = [choice[0] for choice in Order.STATUS_CHOICES]
         if new_status not in valid_statuses:
             return Response(
@@ -513,19 +507,17 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # If cancelling an order, restore stock quantities
+        # Handle stock restoration for cancellation
         if new_status == 'cancelled' and old_status != 'cancelled':
             for item in order.items.all():
-                if item.product:  # Check product still exists
+                if item.product:
                     item.product.stock_quantity += item.quantity
                     item.product.save()
 
-        # If uncancelling an order (changing from cancelled to another status)
-        # Decrease stock again
+        # Handle stock deduction for uncancellation
         elif old_status == 'cancelled' and new_status != 'cancelled':
             for item in order.items.all():
                 if item.product:
-                    # Check if enough stock available
                     if item.product.stock_quantity < item.quantity:
                         return Response(
                             {'error': f'Insufficient stock for {item.product_name}. Only {item.product.stock_quantity} available.'},
@@ -536,33 +528,24 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         order.status = new_status
 
-        # If marking as delivered, set delivered_at timestamp
         if new_status == 'delivered' and not order.delivered_at:
             from django.utils import timezone
             order.delivered_at = timezone.now()
 
-        # If marking as delivered or shipped, update payment status to paid for COD
         if new_status in ['delivered', 'shipped'] and order.payment_method == 'cash_on_delivery':
             order.payment_status = 'paid'
 
         order.save()
 
-        # Send status update email
         try:
             send_order_status_update_email(order, old_status)
         except Exception as email_error:
-            # Log email error but don't fail the status update
             print(f"Email error: {email_error}")
 
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(order, context={'request': request}).data)
 
     def create(self, request):
-        """
-        Create order from current cart.
-        Supports Cash on Delivery payment.
-        """
-
-        # Get user's cart
+        """Create order from current cart."""
         try:
             cart = Cart.objects.get(user=request.user)
         except Cart.DoesNotExist:
@@ -577,9 +560,9 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Validate stock availability before creating order
+        # Validate stock
         out_of_stock_items = []
-        for cart_item in cart.items.all():
+        for cart_item in cart.items.select_related('product'):
             if cart_item.product.stock_quantity < cart_item.quantity:
                 out_of_stock_items.append({
                     'name': cart_item.product.name,
@@ -591,12 +574,9 @@ class OrderViewSet(viewsets.ModelViewSet):
             error_message = 'Some items in your cart are out of stock: '
             for item in out_of_stock_items:
                 error_message += f"{item['name']} (requested: {item['requested']}, available: {item['available']}), "
-            return Response(
-                {'error': error_message.rstrip(', ')},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': error_message.rstrip(', ')}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Extract delivery information from request
+        # Extract delivery info
         full_name = request.data.get('full_name', '').strip()
         email = request.data.get('email', '').strip()
         phone = request.data.get('phone', '').strip()
@@ -608,18 +588,12 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         # Validate required fields
         missing_fields = []
-        if not full_name:
-            missing_fields.append('full name')
-        if not email:
-            missing_fields.append('email')
-        if not phone:
-            missing_fields.append('phone number')
-        if not address:
-            missing_fields.append('delivery address')
-        if not city:
-            missing_fields.append('city')
-        if not emirate:
-            missing_fields.append('emirate')
+        if not full_name: missing_fields.append('full name')
+        if not email: missing_fields.append('email')
+        if not phone: missing_fields.append('phone number')
+        if not address: missing_fields.append('delivery address')
+        if not city: missing_fields.append('city')
+        if not emirate: missing_fields.append('emirate')
 
         if missing_fields:
             return Response(
@@ -627,14 +601,9 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Validate email format
         if '@' not in email or '.' not in email:
-            return Response(
-                {'error': 'Please provide a valid email address'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Please provide a valid email address'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate phone number
         if len(phone.replace(' ', '').replace('-', '')) < 10:
             return Response(
                 {'error': 'Please provide a valid phone number (at least 10 digits)'},
@@ -642,17 +611,12 @@ class OrderViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            # Save address for future use (if it doesn't exist already)
-            # Check if similar address exists
+            # Save address for future use
             existing_address = Address.objects.filter(
-                user=request.user,
-                street_address=address,
-                city=city,
-                emirate=emirate
+                user=request.user, street_address=address, city=city, emirate=emirate
             ).first()
 
             if not existing_address:
-                # Create new address
                 Address.objects.create(
                     user=request.user,
                     full_name=full_name,
@@ -660,8 +624,8 @@ class OrderViewSet(viewsets.ModelViewSet):
                     street_address=address,
                     city=city,
                     emirate=emirate,
-                    area=city,  # Default area to city if not provided
-                    is_default=Address.objects.filter(user=request.user).count() == 0  # First address is default
+                    area=city,
+                    is_default=Address.objects.filter(user=request.user).count() == 0
                 )
 
             # Create order
@@ -679,8 +643,8 @@ class OrderViewSet(viewsets.ModelViewSet):
                 status='pending'
             )
 
-            # Create order items from cart items
-            for cart_item in cart.items.all():
+            # Create order items and update stock
+            for cart_item in cart.items.select_related('product'):
                 OrderItem.objects.create(
                     order=order,
                     product=cart_item.product,
@@ -688,31 +652,24 @@ class OrderViewSet(viewsets.ModelViewSet):
                     quantity=cart_item.quantity,
                     price_at_purchase=cart_item.product.price
                 )
+                cart_item.product.stock_quantity -= cart_item.quantity
+                cart_item.product.save()
 
-                # Decrease stock
-                product = cart_item.product
-                product.stock_quantity -= cart_item.quantity
-                product.save()
-
-            # Clear cart after successful order creation
+            # Clear cart
             cart.items.all().delete()
 
-            # Send order confirmation email
+            # Send confirmation email
             try:
                 send_order_confirmation_email(order)
             except Exception as email_error:
-                # Log email error but don't fail the order creation
                 print(f"Email error: {email_error}")
 
-            # Return order data with context for serializer
-            serializer = OrderSerializer(order, context={'request': request})
             return Response(
-                serializer.data,
+                OrderSerializer(order, context={'request': request}).data,
                 status=status.HTTP_201_CREATED
             )
 
         except Exception as e:
-            # If order creation fails, ensure we don't leave orphaned data
             if 'order' in locals():
                 order.delete()
             return Response(

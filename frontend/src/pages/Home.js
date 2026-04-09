@@ -116,8 +116,9 @@ function Home() {
       const query = searchQuery.toLowerCase();
       result = result.filter(product =>
         product.name.toLowerCase().includes(query) ||
-        product.description?.toLowerCase().includes(query) ||
-        product.category_name?.toLowerCase().includes(query)
+        product.short_description?.toLowerCase().includes(query) ||
+        product.category_name?.toLowerCase().includes(query) ||
+        product.brand_name?.toLowerCase().includes(query)
       );
     }
 

@@ -146,17 +146,17 @@ const ProductGrid = ({ products }) => {
     }, 500);
   };
 
-  const handleCardClick = (e, productId) => {
+  const handleCardClick = (e, product) => {
     // Check if click was on the button
     if (e.target.closest('button')) {
       return;
     }
-    // Open quick view modal
-    setSelectedProductId(productId);
+    // Open quick view modal - pass slug for API, id for cart
+    setSelectedProductId(product.slug || product.id);
   };
 
-  const handleViewFullPage = (productId) => {
-    navigate(`/product/${productId}`);
+  const handleViewFullPage = (slugOrId) => {
+    navigate(`/product/${slugOrId}`);
   };
 
   return (
@@ -166,20 +166,18 @@ const ProductGrid = ({ products }) => {
           <div
             key={product.id}
             className="product-card"
-            onClick={(e) => handleCardClick(e, product.id)}
+            onClick={(e) => handleCardClick(e, product)}
           >
             <div className="product-image">
-              {product.image ? (
-                <img src={product.image} alt={product.name} />
-              ) : product.image_url ? (
-                <img src={product.image_url} alt={product.name} />
+              {product.primary_image_url ? (
+                <img src={product.primary_image_url} alt={product.name} />
               ) : (
                 <div className="no-image">No Image</div>
               )}
             </div>
             <div className="product-card-content">
               <h3>{product.name}</h3>
-              <p className="product-description">{product.description}</p>
+              <p className="product-description">{product.short_description}</p>
               {product.category_name && (
                 <p className="product-category">Category: {product.category_name}</p>
               )}

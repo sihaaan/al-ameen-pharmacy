@@ -99,10 +99,8 @@ const ProductDetail = () => {
         {/* Product Image */}
         <div className="product-image-section">
           <div className="product-image-container">
-            {product.image ? (
-              <img src={product.image} alt={product.name} />
-            ) : product.image_url ? (
-              <img src={product.image_url} alt={product.name} />
+            {product.primary_image_url ? (
+              <img src={product.primary_image_url} alt={product.name} />
             ) : (
               <div className="no-image-placeholder">
                 <span>No Image Available</span>
@@ -120,8 +118,8 @@ const ProductDetail = () => {
         <div className="product-info-section">
           <h1 className="product-title">{product.name}</h1>
 
-          {product.manufacturer && (
-            <p className="product-manufacturer">by {product.manufacturer}</p>
+          {product.brand_name && (
+            <p className="product-manufacturer">by {product.brand_name}</p>
           )}
 
           <div className="product-meta">
@@ -199,7 +197,7 @@ const ProductDetail = () => {
           {/* Short Description */}
           <div className="product-description">
             <h3>Description</h3>
-            <p>{product.description}</p>
+            <p>{product.short_description}</p>
           </div>
         </div>
       </div>

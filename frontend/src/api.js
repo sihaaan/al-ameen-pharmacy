@@ -16,8 +16,31 @@ const api = axios.create({
 export const productsAPI = {
   // GET all products from Django backend
   getAll: () => api.get("/products/"),
-  // GET single product
-  getOne: (id) => api.get(`/products/${id}/`),
+  // GET single product by slug or ID
+  // Backend uses slug-based lookup, but ID still works via redirect
+  getOne: (slugOrId) => api.get(`/products/${slugOrId}/`),
+  // GET featured products
+  getFeatured: () => api.get("/products/?featured=true"),
+  // Search products
+  search: (query) => api.get(`/products/?search=${encodeURIComponent(query)}`),
+  // Filter by category slug
+  getByCategory: (categorySlug) => api.get(`/products/?category=${categorySlug}`),
+  // Filter by brand slug
+  getByBrand: (brandSlug) => api.get(`/products/?brand=${brandSlug}`),
+};
+
+// Categories API
+export const categoriesAPI = {
+  getAll: () => api.get("/categories/"),
+  getRootOnly: () => api.get("/categories/?root=true"),
+  getFlat: () => api.get("/categories/?flat=true"),
+  getOne: (slug) => api.get(`/categories/${slug}/`),
+};
+
+// Brands API
+export const brandsAPI = {
+  getAll: () => api.get("/brands/"),
+  getOne: (slug) => api.get(`/brands/${slug}/`),
 };
 
 export default api;
