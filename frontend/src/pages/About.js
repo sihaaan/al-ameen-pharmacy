@@ -12,7 +12,7 @@ const About = () => {
           <div className="logo-container">
             <div className="company-branding">
               <h1 className="company-name-arabic">صيدلية الأمين</h1>
-              <h1 className="company-name-english">AL AMEEN PHARMACY LLC</h1>
+              <h1 className="company-name-english">AL AMEEN PHARMACY</h1>
               <p className="company-tagline">Pharmaceutical & Medical Equipment Trading</p>
             </div>
           </div>
@@ -34,7 +34,7 @@ const About = () => {
         <div className="about-content">
           <div className="about-text">
             <p>
-              <strong>Al Ameen Pharmacy LLC</strong> is a leading pharmaceutical and medical equipment
+              <strong>Al Ameen Pharmacy</strong> is a leading pharmaceutical and medical equipment
               trading company based in the heart of <strong>Deira, Dubai</strong>. We are dedicated to
               providing our community with access to high-quality medications, healthcare products,
               and professional pharmaceutical services.

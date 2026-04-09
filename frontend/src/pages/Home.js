@@ -163,11 +163,14 @@ function Home() {
         <div className="hero-background"></div>
         <div className="hero-content">
           <div className="hero-inner">
-            <span className="hero-arabic">صيدلية الأمين</span>
-
             <div className="hero-badge">
-              <ClockIcon size={20} />
+              <ClockIcon size={16} />
               <span>Open Late Until 2AM</span>
+            </div>
+
+            <div className="hero-brand">
+              <span className="hero-brand-arabic">صيدلية الأمين</span>
+              <span className="hero-brand-english">Al Ameen Pharmacy</span>
             </div>
 
             <h1 className="hero-headline">
@@ -474,7 +477,7 @@ function Home() {
 
         <div className="footer-bottom">
           <p className="footer-copy">
-            © {new Date().getFullYear()} Al Ameen Pharmacy. All rights reserved.
+            © {new Date().getFullYear()} Al Ameen Pharmacy LLC. All rights reserved.
           </p>
           <p className="footer-dha">
             <ShieldIcon size={14} />
