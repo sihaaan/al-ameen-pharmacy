@@ -57,9 +57,15 @@ def check_migration_state():
         print(f"Has legacy tables (api_category): {has_legacy_tables}")
         print(f"Has v2 tables (api_brand): {has_v2_tables}")
 
+        # Check for our new migration structure
         if '0001_initial_legacy' in api_migrations:
             print("Migration state looks correct - running normal migrations")
             return "normal"
+
+        # If we have old migrations but not our new ones, we need to reset
+        if api_migrations and '0001_initial_legacy' not in api_migrations:
+            print("Old migration structure detected - need to reset state")
+            return "fix_state"
 
         if has_legacy_tables and not has_v2_tables:
             print("Legacy tables exist but migrations not recorded - need to fix state")
