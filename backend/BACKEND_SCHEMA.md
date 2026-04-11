@@ -1,8 +1,8 @@
 # Al Ameen Pharmacy - Backend Schema Documentation
 
 **Version:** 2.0
-**Last Updated:** 2026-04-10
-**Stack:** Django 5.x + Django REST Framework + PostgreSQL
+**Last Updated:** 2026-04-12
+**Stack:** Django 5.x + Django REST Framework + PostgreSQL (Neon)
 
 ---
 
@@ -51,7 +51,7 @@ Brand:
 Category:
     id              AutoField (PK)
     name            CharField(100)
-    slug            SlugField(120), UNIQUE, auto-generated
+    slug            SlugField(120), UNIQUE, nullable, auto-generated
     description     TextField, optional
     parent          ForeignKey(self), nullable, CASCADE
     is_active       BooleanField, default=True
@@ -73,18 +73,18 @@ Product:
     # Basic
     id                      AutoField (PK)
     name                    CharField(200), indexed
-    slug                    SlugField(220), UNIQUE, auto-generated
+    slug                    SlugField(220), UNIQUE, nullable, auto-generated
     brand                   ForeignKey(Brand), nullable, SET_NULL
     category                ForeignKey(Category), nullable, SET_NULL
 
     # Descriptions
-    short_description       TextField, required
+    short_description       TextField, optional (blank default)
     detailed_description    TextField, optional
 
     # Pricing & Inventory
     price                   DecimalField(10,2), min 0.01
     stock_quantity          PositiveIntegerField, default=0
-    sku                     CharField(100), UNIQUE, nullable
+    sku                     CharField(100), optional
     barcode                 CharField(50), optional
 
     # Pharmacy-specific
@@ -231,14 +231,14 @@ Order:
     user                    ForeignKey(User), CASCADE
     order_number            CharField(50), UNIQUE, auto-generated
 
-    # Denormalized delivery (snapshot)
-    full_name               CharField(200)
-    email                   EmailField
-    phone                   CharField(20)
-    address                 CharField(255)
-    city                    CharField(100)
-    emirate                 CharField(50)
-    delivery_notes          TextField, optional
+    # Denormalized delivery (snapshot, all optional with defaults)
+    full_name               CharField(200), default=''
+    email                   EmailField, default=''
+    phone                   CharField(20), default=''
+    address                 CharField(255), default=''
+    city                    CharField(100), default=''
+    emirate                 CharField(50), default=''
+    delivery_notes          TextField, default=''
 
     # Status
     status                  CharField(20), choices: pending/processing/shipped/delivered/cancelled
