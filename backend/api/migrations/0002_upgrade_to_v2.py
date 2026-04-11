@@ -202,10 +202,10 @@ class Migration(migrations.Migration):
             },
         ),
 
-        # Add suppliers M2M to Product
-        migrations.AddField(
-            model_name='product',
-            name='suppliers',
-            field=models.ManyToManyField(blank=True, related_name='products', through='api.ProductSupplier', to='api.supplier'),
-        ),
+        # M2M through ProductSupplier - using FK with related_name='suppliers' instead
+        # migrations.AddField(
+        #     model_name='product',
+        #     name='suppliers',
+        #     field=models.ManyToManyField(blank=True, related_name='products', through='api.ProductSupplier', to='api.supplier'),
+        # ),
     ]

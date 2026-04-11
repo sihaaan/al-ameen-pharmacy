@@ -40,10 +40,11 @@ class Migration(migrations.Migration):
         #     model_name='cartitem',
         #     name='unique_cart_product',
         # ),
-        migrations.RemoveField(
-            model_name='product',
-            name='suppliers',
-        ),
+        # Removed - the suppliers M2M field removal is handled by model change
+        # migrations.RemoveField(
+        #     model_name='product',
+        #     name='suppliers',
+        # ),
         migrations.AddField(
             model_name='productimage',
             name='updated_at',
