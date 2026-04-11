@@ -139,11 +139,6 @@ class Product(models.Model):
         null=True,
         help_text="Full description with usage, dosage, warnings, etc."
     )
-    # Legacy fields (kept for backward compatibility during migration)
-    description = models.TextField(blank=True, null=True)
-    manufacturer = models.CharField(max_length=200, blank=True)
-    image = models.ImageField(upload_to='products/', blank=True, null=True)
-    image_url = models.URLField(blank=True, null=True)
 
     # Pricing & Inventory
     price = models.DecimalField(

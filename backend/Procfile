@@ -1,2 +1,2 @@
-release: python run_migrations.py && python manage.py collectstatic --noinput
+release: python manage.py migrate --noinput && python manage.py collectstatic --noinput
 web: gunicorn pharmacy_api.wsgi --timeout 120 --log-file -
