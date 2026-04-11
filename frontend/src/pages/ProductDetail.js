@@ -17,6 +17,7 @@ const ProductDetail = () => {
   const [quantity, setQuantity] = useState(1);
   const [addingToCart, setAddingToCart] = useState(false);
   const [addedSuccess, setAddedSuccess] = useState(false);
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
 
   useEffect(() => {
     fetchProduct();
@@ -27,11 +28,39 @@ const ProductDetail = () => {
       setLoading(true);
       const response = await axiosInstance.get(`/products/${id}/`);
       setProduct(response.data);
+      setSelectedImageIndex(0);
       setLoading(false);
     } catch (err) {
       console.error('Error fetching product:', err);
       setError('Product not found');
       setLoading(false);
+    }
+  };
+
+  // Get all images
+  const getImages = () => {
+    if (!product) return [];
+    if (product.images && product.images.length > 0) {
+      return product.images.map(img => img.image_url);
+    }
+    if (product.primary_image_url) {
+      return [product.primary_image_url];
+    }
+    return [];
+  };
+
+  const images = product ? getImages() : [];
+  const selectedImage = images[selectedImageIndex] || null;
+
+  const nextImage = () => {
+    if (images.length > 1) {
+      setSelectedImageIndex((prev) => (prev + 1) % images.length);
+    }
+  };
+
+  const prevImage = () => {
+    if (images.length > 1) {
+      setSelectedImageIndex((prev) => (prev - 1 + images.length) % images.length);
     }
   };
 
@@ -99,14 +128,48 @@ const ProductDetail = () => {
         {/* Product Image */}
         <div className="product-image-section">
           <div className="product-image-container">
-            {product.primary_image_url ? (
-              <img src={product.primary_image_url} alt={product.name} />
+            {selectedImage ? (
+              <>
+                <img src={selectedImage} alt={product.name} />
+                {/* Navigation Arrows */}
+                {images.length > 1 && (
+                  <>
+                    <button className="image-nav-btn prev" onClick={prevImage}>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                      </svg>
+                    </button>
+                    <button className="image-nav-btn next" onClick={nextImage}>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                      </svg>
+                    </button>
+                    <div className="image-counter">
+                      {selectedImageIndex + 1} / {images.length}
+                    </div>
+                  </>
+                )}
+              </>
             ) : (
               <div className="no-image-placeholder">
                 <span>No Image Available</span>
               </div>
             )}
           </div>
+          {/* Thumbnail Strip */}
+          {images.length > 1 && (
+            <div className="image-thumbnails">
+              {images.map((img, index) => (
+                <button
+                  key={index}
+                  className={`thumbnail-btn ${index === selectedImageIndex ? 'active' : ''}`}
+                  onClick={() => setSelectedImageIndex(index)}
+                >
+                  <img src={img} alt={`${product.name} ${index + 1}`} />
+                </button>
+              ))}
+            </div>
+          )}
           {product.requires_prescription && (
             <div className="prescription-badge">
               <span>⚕️ Prescription Required</span>

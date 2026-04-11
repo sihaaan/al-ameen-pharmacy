@@ -15,7 +15,7 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
   const [quantity, setQuantity] = useState(1);
   const [addingToCart, setAddingToCart] = useState(false);
   const [addedSuccess, setAddedSuccess] = useState(false);
-  const [selectedImage, setSelectedImage] = useState(null);
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
 
   useEffect(() => {
     const fetchProduct = async () => {
@@ -23,7 +23,7 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
         setLoading(true);
         const response = await axiosInstance.get(`/products/${productId}/`);
         setProduct(response.data);
-        setSelectedImage(response.data.primary_image_url);
+        setSelectedImageIndex(0);
       } catch (error) {
         console.error("Error fetching product:", error);
       } finally {
@@ -35,6 +35,35 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
       fetchProduct();
     }
   }, [productId]);
+
+  // Get all images (from images array or fall back to primary_image_url)
+  const getImages = () => {
+    if (!product) return [];
+    if (product.images && product.images.length > 0) {
+      return product.images.map(img => img.image_url);
+    }
+    if (product.primary_image_url) {
+      return [product.primary_image_url];
+    }
+    return [];
+  };
+
+  const images = product ? getImages() : [];
+  const selectedImage = images[selectedImageIndex] || null;
+
+  const nextImage = (e) => {
+    e.stopPropagation();
+    if (images.length > 1) {
+      setSelectedImageIndex((prev) => (prev + 1) % images.length);
+    }
+  };
+
+  const prevImage = (e) => {
+    e.stopPropagation();
+    if (images.length > 1) {
+      setSelectedImageIndex((prev) => (prev - 1 + images.length) % images.length);
+    }
+  };
 
   useEffect(() => {
     // Prevent body scroll when modal is open
@@ -136,11 +165,32 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
               <div className="modal-image-section">
                 <div className="main-image-container">
                   {selectedImage ? (
-                    <img
-                      src={selectedImage}
-                      alt={product.name}
-                      className="main-product-image"
-                    />
+                    <>
+                      <img
+                        src={selectedImage}
+                        alt={product.name}
+                        className="main-product-image"
+                      />
+                      {/* Navigation Arrows */}
+                      {images.length > 1 && (
+                        <>
+                          <button className="image-nav-btn prev" onClick={prevImage}>
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="15 18 9 12 15 6"></polyline>
+                            </svg>
+                          </button>
+                          <button className="image-nav-btn next" onClick={nextImage}>
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                          </button>
+                          {/* Image Counter */}
+                          <div className="image-counter">
+                            {selectedImageIndex + 1} / {images.length}
+                          </div>
+                        </>
+                      )}
+                    </>
                   ) : (
                     <div className="no-image-modal">
                       <svg
@@ -166,6 +216,20 @@ const ProductModal = ({ productId, onClose, onViewFullPage }) => {
                     </div>
                   )}
                 </div>
+                {/* Thumbnail Strip */}
+                {images.length > 1 && (
+                  <div className="image-thumbnails">
+                    {images.map((img, index) => (
+                      <button
+                        key={index}
+                        className={`thumbnail-btn ${index === selectedImageIndex ? 'active' : ''}`}
+                        onClick={() => setSelectedImageIndex(index)}
+                      >
+                        <img src={img} alt={`${product.name} ${index + 1}`} />
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {/* View Full Product Details — under the image */}
                 <button
                   className="view-full-details-below-image"

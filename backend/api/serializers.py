@@ -122,7 +122,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage
         fields = [
-            'id', 'image', 'image_url', 'alt_text', 'is_primary',
+            'id', 'product', 'image', 'image_url', 'alt_text', 'is_primary',
             'display_order', 'source_type', 'source_url', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']

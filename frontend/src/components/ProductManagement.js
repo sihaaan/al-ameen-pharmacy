@@ -27,8 +27,12 @@ const ProductManagement = ({ onUpdate }) => {
     requires_prescription: false,
     status: 'draft',
     is_featured: false,
-    image: null,
   });
+
+  // Multi-image state
+  const [productImages, setProductImages] = useState([]); // Existing images from server
+  const [newImages, setNewImages] = useState([]); // New images to upload
+  const [imagesToDelete, setImagesToDelete] = useState([]); // Image IDs to delete
 
   // New brand creation state
   const [newBrandName, setNewBrandName] = useState('');
@@ -85,13 +89,66 @@ const ProductManagement = ({ onUpdate }) => {
     });
   };
 
-  const handleImageChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      setFormData({
-        ...formData,
-        image: e.target.files[0],
-      });
+  // Handle multiple image selection
+  const handleImagesChange = (e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const filesArray = Array.from(e.target.files).map(file => ({
+        file,
+        preview: URL.createObjectURL(file),
+        isPrimary: newImages.length === 0 && productImages.length === 0, // First image is primary
+      }));
+      setNewImages(prev => [...prev, ...filesArray]);
     }
+  };
+
+  // Remove a new image before upload
+  const handleRemoveNewImage = (index) => {
+    setNewImages(prev => {
+      const updated = prev.filter((_, i) => i !== index);
+      // If we removed the primary, make the first one primary
+      if (prev[index]?.isPrimary && updated.length > 0) {
+        updated[0].isPrimary = true;
+      }
+      return updated;
+    });
+  };
+
+  // Mark an existing image for deletion
+  const handleDeleteExistingImage = (imageId) => {
+    setImagesToDelete(prev => [...prev, imageId]);
+    setProductImages(prev => prev.filter(img => img.id !== imageId));
+  };
+
+  // Set an image as primary
+  const handleSetPrimary = async (imageId) => {
+    if (!editingProduct) return;
+
+    try {
+      await axiosInstance.patch(`/product-images/${imageId}/`, {
+        is_primary: true
+      });
+      // Update local state
+      setProductImages(prev => prev.map(img => ({
+        ...img,
+        is_primary: img.id === imageId
+      })));
+    } catch (error) {
+      console.error('Error setting primary image:', error);
+      alert('Failed to set primary image');
+    }
+  };
+
+  // Set a new image as primary (before upload)
+  const handleSetNewImagePrimary = (index) => {
+    setNewImages(prev => prev.map((img, i) => ({
+      ...img,
+      isPrimary: i === index
+    })));
+    // Also unset primary from existing images
+    setProductImages(prev => prev.map(img => ({
+      ...img,
+      is_primary: false
+    })));
   };
 
   const handleCreateBrand = async () => {
@@ -155,22 +212,79 @@ const ProductManagement = ({ onUpdate }) => {
       }
     });
 
-    // Append image file if present
-    if (formData.image) {
-      data.append('image', formData.image);
+    // Append the first new image as primary if there are new images
+    const primaryNewImage = newImages.find(img => img.isPrimary);
+    if (primaryNewImage) {
+      data.append('image', primaryNewImage.file);
+    } else if (newImages.length > 0) {
+      data.append('image', newImages[0].file);
     }
 
     try {
+      let productId;
+
       if (editingProduct) {
-        // Use slug for update (v2 uses slug-based lookup)
-        await axiosInstance.put(`/products/${editingProduct.slug}/`, data, {
+        // Update product
+        const response = await axiosInstance.put(`/products/${editingProduct.slug}/`, data, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
+        productId = response.data.id;
+
+        // Delete marked images
+        for (const imageId of imagesToDelete) {
+          try {
+            await axiosInstance.delete(`/product-images/${imageId}/`);
+          } catch (err) {
+            console.error('Error deleting image:', err);
+          }
+        }
+
+        // Upload additional new images (skip the first one if it was sent with the product)
+        const additionalImages = primaryNewImage
+          ? newImages.filter(img => !img.isPrimary)
+          : newImages.slice(1);
+
+        for (const img of additionalImages) {
+          const imgData = new FormData();
+          imgData.append('product', productId);
+          imgData.append('image', img.file);
+          imgData.append('is_primary', 'false');
+          try {
+            await axiosInstance.post('/product-images/', imgData, {
+              headers: { 'Content-Type': 'multipart/form-data' },
+            });
+          } catch (err) {
+            console.error('Error uploading image:', err);
+          }
+        }
+
         alert('Product updated successfully!');
       } else {
-        await axiosInstance.post('/products/', data, {
+        // Create new product
+        const response = await axiosInstance.post('/products/', data, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
+        productId = response.data.id;
+
+        // Upload additional images
+        const additionalImages = primaryNewImage
+          ? newImages.filter(img => !img.isPrimary)
+          : newImages.slice(1);
+
+        for (const img of additionalImages) {
+          const imgData = new FormData();
+          imgData.append('product', productId);
+          imgData.append('image', img.file);
+          imgData.append('is_primary', 'false');
+          try {
+            await axiosInstance.post('/product-images/', imgData, {
+              headers: { 'Content-Type': 'multipart/form-data' },
+            });
+          } catch (err) {
+            console.error('Error uploading image:', err);
+          }
+        }
+
         alert('Product added successfully!');
       }
 
@@ -186,33 +300,43 @@ const ProductManagement = ({ onUpdate }) => {
     }
   };
 
-  const handleEdit = (product) => {
-    setEditingProduct(product);
-    setFormData({
-      name: product.name,
-      short_description: product.short_description || '',
-      detailed_description: product.detailed_description || '',
-      price: product.price,
-      stock_quantity: product.stock_quantity,
-      category: product.category || '',
-      brand: product.brand || '',
-      dosage: product.dosage || '',
-      pack_size: product.pack_size || '',
-      active_ingredient: product.active_ingredient || '',
-      requires_prescription: product.requires_prescription || false,
-      status: product.status || 'draft',
-      is_featured: product.is_featured || false,
-      image: null, // Don't pre-fill image (user must re-upload if changing)
-    });
-    setNewBrandName('');
-    setBrandError('');
-    setShowAddModal(true);
+  const handleEdit = async (product) => {
+    // Fetch full product details to get images
+    try {
+      const response = await axiosInstance.get(`/products/${product.slug}/`);
+      const fullProduct = response.data;
+
+      setEditingProduct(fullProduct);
+      setFormData({
+        name: fullProduct.name,
+        short_description: fullProduct.short_description || '',
+        detailed_description: fullProduct.detailed_description || '',
+        price: fullProduct.price,
+        stock_quantity: fullProduct.stock_quantity,
+        category: fullProduct.category || '',
+        brand: fullProduct.brand || '',
+        dosage: fullProduct.dosage || '',
+        pack_size: fullProduct.pack_size || '',
+        active_ingredient: fullProduct.active_ingredient || '',
+        requires_prescription: fullProduct.requires_prescription || false,
+        status: fullProduct.status || 'draft',
+        is_featured: fullProduct.is_featured || false,
+      });
+      setProductImages(fullProduct.images || []);
+      setNewImages([]);
+      setImagesToDelete([]);
+      setNewBrandName('');
+      setBrandError('');
+      setShowAddModal(true);
+    } catch (error) {
+      console.error('Error fetching product details:', error);
+      alert('Error loading product details');
+    }
   };
 
   const handleDelete = async (product) => {
     if (window.confirm('Are you sure you want to delete this product?')) {
       try {
-        // Use slug for delete (v2 uses slug-based lookup)
         await axiosInstance.delete(`/products/${product.slug}/`);
         alert('Product deleted successfully!');
         fetchProducts();
@@ -238,9 +362,11 @@ const ProductManagement = ({ onUpdate }) => {
       requires_prescription: false,
       status: 'draft',
       is_featured: false,
-      image: null,
     });
     setEditingProduct(null);
+    setProductImages([]);
+    setNewImages([]);
+    setImagesToDelete([]);
     setNewBrandName('');
     setBrandError('');
   };
@@ -359,7 +485,7 @@ const ProductManagement = ({ onUpdate }) => {
       {/* Add/Edit Modal */}
       {showAddModal && (
         <div className="modal-overlay" onClick={() => { setShowAddModal(false); resetForm(); }}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-content modal-large" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>{editingProduct ? 'Edit Product' : 'Add New Product'}</h2>
               <button className="modal-close" onClick={() => { setShowAddModal(false); resetForm(); }}>
@@ -368,8 +494,8 @@ const ProductManagement = ({ onUpdate }) => {
             </div>
 
             <form onSubmit={handleSubmit} className="product-form">
-              <div className="form-grid">
-                {/* Basic Information */}
+              <div className="form-grid-two-col">
+                {/* Left Column - Basic Information */}
                 <div className="form-section">
                   <h3>Basic Information</h3>
 
@@ -531,27 +657,6 @@ const ProductManagement = ({ onUpdate }) => {
                   </div>
 
                   <div className="form-group">
-                    <label>Primary Image (optional)</label>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleImageChange}
-                      className="file-input"
-                    />
-                    <small>Recommended: 800x800px, JPG or PNG</small>
-                    {editingProduct && editingProduct.primary_image_url && (
-                      <div className="current-image-preview">
-                        <p>Current image:</p>
-                        <img
-                          src={editingProduct.primary_image_url}
-                          alt="Current"
-                          style={{ maxWidth: '100px', maxHeight: '100px' }}
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="form-group">
                     <label className="checkbox-label">
                       <input
                         type="checkbox"
@@ -574,6 +679,104 @@ const ProductManagement = ({ onUpdate }) => {
                       Featured Product
                     </label>
                   </div>
+                </div>
+
+                {/* Right Column - Image Management Section */}
+                <div className="form-section">
+                  <h3>Product Images</h3>
+
+                  {/* Existing Images */}
+                  {productImages.length > 0 && (
+                    <div className="existing-images">
+                      <label>Current Images ({productImages.length})</label>
+                      <div className="image-grid">
+                        {productImages.map((img) => (
+                          <div key={img.id} className={`image-item ${img.is_primary ? 'is-primary' : ''}`}>
+                            <img src={img.image_url} alt="Product" />
+                            <div className="image-actions">
+                              {!img.is_primary && (
+                                <button
+                                  type="button"
+                                  className="btn-set-primary"
+                                  onClick={() => handleSetPrimary(img.id)}
+                                  title="Set as primary"
+                                >
+                                  ★
+                                </button>
+                              )}
+                              {img.is_primary && (
+                                <span className="primary-badge">Primary</span>
+                              )}
+                              <button
+                                type="button"
+                                className="btn-delete-image"
+                                onClick={() => handleDeleteExistingImage(img.id)}
+                                title="Delete image"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* New Images to Upload */}
+                  {newImages.length > 0 && (
+                    <div className="new-images">
+                      <label>New Images to Upload ({newImages.length})</label>
+                      <div className="image-grid">
+                        {newImages.map((img, index) => (
+                          <div key={index} className={`image-item ${img.isPrimary ? 'is-primary' : ''}`}>
+                            <img src={img.preview} alt="Preview" />
+                            <div className="image-actions">
+                              {!img.isPrimary && (
+                                <button
+                                  type="button"
+                                  className="btn-set-primary"
+                                  onClick={() => handleSetNewImagePrimary(index)}
+                                  title="Set as primary"
+                                >
+                                  ★
+                                </button>
+                              )}
+                              {img.isPrimary && (
+                                <span className="primary-badge">Primary</span>
+                              )}
+                              <button
+                                type="button"
+                                className="btn-delete-image"
+                                onClick={() => handleRemoveNewImage(index)}
+                                title="Remove"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Add Images Button */}
+                  <div className="form-group">
+                    <label>Add Images</label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={handleImagesChange}
+                      className="file-input"
+                    />
+                    <small>Select multiple images. Click ★ to set primary. Recommended: 800x800px</small>
+                  </div>
+
+                  {productImages.length === 0 && newImages.length === 0 && (
+                    <div className="no-images-placeholder">
+                      <p>No images yet. Add images to showcase your product.</p>
+                    </div>
+                  )}
                 </div>
               </div>
 
