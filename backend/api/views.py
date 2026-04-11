@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
+from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
 from django.db.models import Q, Prefetch
 
 from .models import (
@@ -320,12 +321,32 @@ class ProductViewSet(viewsets.ModelViewSet):
         # Search
         search_query = self.request.query_params.get('search', '').strip()
         if search_query:
-            queryset = queryset.filter(
-                Q(name__icontains=search_query) |
-                Q(brand__name__icontains=search_query) |
-                Q(active_ingredient__icontains=search_query) |
-                Q(short_description__icontains=search_query)
-            ).order_by('name')[:20]
+            if len(search_query) < 3:
+                # Fast autocomplete search
+                queryset = queryset.filter(
+                    Q(name__icontains=search_query) |
+                    Q(brand__name__icontains=search_query) |
+                    Q(sku__icontains=search_query)
+                ).order_by('name')[:10]
+            else:
+                # Full-text search with ranking
+                search_vector = (
+                    SearchVector('name', weight='A') +
+                    SearchVector('short_description', weight='B') +
+                    SearchVector('brand__name', weight='C') +
+                    SearchVector('active_ingredient', weight='C')
+                )
+                search_query_obj = SearchQuery(search_query, search_type='websearch')
+
+                queryset = queryset.annotate(
+                    search=search_vector,
+                    rank=SearchRank(search_vector, search_query_obj)
+                ).filter(
+                    Q(search=search_query_obj) |
+                    Q(name__icontains=search_query) |
+                    Q(brand__name__icontains=search_query) |
+                    Q(active_ingredient__icontains=search_query)
+                ).order_by('-rank', 'name')[:20]
         else:
             queryset = queryset.order_by('-is_featured', 'name')
 

@@ -51,7 +51,7 @@ class Category(models.Model):
     Examples: Medications > Pain Relief > Headache
     """
     name = models.CharField(max_length=100)
-    slug = models.SlugField(max_length=120, unique=True, blank=True)
+    slug = models.SlugField(max_length=120, unique=True, blank=True, null=True)
     description = models.TextField(blank=True)
     parent = models.ForeignKey(
         'self',
@@ -112,7 +112,7 @@ class Product(models.Model):
 
     # Basic info
     name = models.CharField(max_length=200, db_index=True)
-    slug = models.SlugField(max_length=220, unique=True, blank=True)
+    slug = models.SlugField(max_length=220, unique=True, blank=True, null=True)
     brand = models.ForeignKey(
         Brand,
         on_delete=models.SET_NULL,
@@ -130,12 +130,20 @@ class Product(models.Model):
 
     # Descriptions
     short_description = models.TextField(
+        blank=True,
+        default='',
         help_text="Brief description shown in product cards/grid"
     )
     detailed_description = models.TextField(
         blank=True,
+        null=True,
         help_text="Full description with usage, dosage, warnings, etc."
     )
+    # Legacy fields (kept for backward compatibility during migration)
+    description = models.TextField(blank=True, null=True)
+    manufacturer = models.CharField(max_length=200, blank=True)
+    image = models.ImageField(upload_to='products/', blank=True, null=True)
+    image_url = models.URLField(blank=True, null=True)
 
     # Pricing & Inventory
     price = models.DecimalField(
@@ -146,9 +154,7 @@ class Product(models.Model):
     stock_quantity = models.PositiveIntegerField(default=0)
     sku = models.CharField(
         max_length=100,
-        unique=True,
         blank=True,
-        null=True,
         help_text="Stock Keeping Unit - unique product identifier"
     )
     barcode = models.CharField(
