@@ -1,5 +1,5 @@
 // frontend/src/components/ProductManagement.js
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axiosInstance from '../utils/axios';
 
 const ProductManagement = ({ onUpdate }) => {
@@ -14,8 +14,17 @@ const ProductManagement = ({ onUpdate }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
-  const [activeTab, setActiveTab] = useState('products'); // 'products' or 'categories'
+  const [filterBrand, setFilterBrand] = useState('');
+  const [activeTab, setActiveTab] = useState('products');
   const [saving, setSaving] = useState(false);
+
+  // Multi-select state
+  const [selectedProducts, setSelectedProducts] = useState(new Set());
+  const [bulkActionInProgress, setBulkActionInProgress] = useState(false);
+
+  // Sorting state
+  const [sortField, setSortField] = useState('name');
+  const [sortDirection, setSortDirection] = useState('asc');
 
   // Product form state
   const [formData, setFormData] = useState({
@@ -80,6 +89,11 @@ const ProductManagement = ({ onUpdate }) => {
     fetchData();
   }, [fetchData]);
 
+  // Clear selection when filters change
+  useEffect(() => {
+    setSelectedProducts(new Set());
+  }, [searchTerm, filterCategory, filterStatus, filterBrand]);
+
   const fetchCategories = async () => {
     try {
       const response = await axiosInstance.get('/categories/?flat=true');
@@ -102,9 +116,204 @@ const ProductManagement = ({ onUpdate }) => {
     try {
       const response = await axiosInstance.get('/products/');
       setProducts(response.data);
+      setSelectedProducts(new Set());
       if (onUpdate) onUpdate();
     } catch (error) {
       console.error('Error fetching products:', error);
+    }
+  };
+
+  // ==================== FILTERING & SORTING ====================
+
+  const filteredAndSortedProducts = useMemo(() => {
+    let result = products.filter((product) => {
+      const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                            (product.short_description || '').toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesCategory = filterCategory === '' || product.category === parseInt(filterCategory);
+      const matchesStatus = filterStatus === '' || product.status === filterStatus;
+      const matchesBrand = filterBrand === '' || product.brand === parseInt(filterBrand);
+      return matchesSearch && matchesCategory && matchesStatus && matchesBrand;
+    });
+
+    // Sort
+    result.sort((a, b) => {
+      let aVal, bVal;
+
+      switch (sortField) {
+        case 'name':
+          aVal = a.name.toLowerCase();
+          bVal = b.name.toLowerCase();
+          break;
+        case 'category':
+          aVal = (a.category_name || '').toLowerCase();
+          bVal = (b.category_name || '').toLowerCase();
+          break;
+        case 'brand':
+          aVal = (a.brand_name || '').toLowerCase();
+          bVal = (b.brand_name || '').toLowerCase();
+          break;
+        case 'price':
+          aVal = parseFloat(a.price) || 0;
+          bVal = parseFloat(b.price) || 0;
+          break;
+        case 'stock':
+          aVal = a.stock_quantity || 0;
+          bVal = b.stock_quantity || 0;
+          break;
+        case 'status':
+          aVal = a.status || '';
+          bVal = b.status || '';
+          break;
+        default:
+          aVal = a.name.toLowerCase();
+          bVal = b.name.toLowerCase();
+      }
+
+      if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    return result;
+  }, [products, searchTerm, filterCategory, filterStatus, filterBrand, sortField, sortDirection]);
+
+  const handleSort = (field) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
+
+  const SortIcon = ({ field }) => {
+    if (sortField !== field) {
+      return (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.3">
+          <path d="M7 15l5 5 5-5M7 9l5-5 5 5"/>
+        </svg>
+      );
+    }
+    return sortDirection === 'asc' ? (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M7 15l5 5 5-5"/>
+      </svg>
+    ) : (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M7 9l5-5 5 5"/>
+      </svg>
+    );
+  };
+
+  // ==================== MULTI-SELECT HANDLERS ====================
+
+  const handleSelectAll = (e) => {
+    if (e.target.checked) {
+      const allIds = new Set(filteredAndSortedProducts.map(p => p.id));
+      setSelectedProducts(allIds);
+    } else {
+      setSelectedProducts(new Set());
+    }
+  };
+
+  const handleSelectProduct = (productId) => {
+    setSelectedProducts(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(productId)) {
+        newSet.delete(productId);
+      } else {
+        newSet.add(productId);
+      }
+      return newSet;
+    });
+  };
+
+  const isAllSelected = filteredAndSortedProducts.length > 0 &&
+    filteredAndSortedProducts.every(p => selectedProducts.has(p.id));
+
+  const isSomeSelected = selectedProducts.size > 0 && !isAllSelected;
+
+  // ==================== BULK ACTIONS ====================
+
+  const handleBulkStatusChange = async (newStatus) => {
+    if (selectedProducts.size === 0) return;
+
+    const statusLabel = newStatus === 'active' ? 'activate' : newStatus === 'archived' ? 'archive' : 'set to draft';
+    const confirm = window.confirm(
+      `Are you sure you want to ${statusLabel} ${selectedProducts.size} product(s)?`
+    );
+
+    if (!confirm) return;
+
+    setBulkActionInProgress(true);
+    try {
+      const promises = Array.from(selectedProducts).map(id => {
+        const product = products.find(p => p.id === id);
+        if (product) {
+          return axiosInstance.patch(`/products/${product.slug}/`, { status: newStatus });
+        }
+        return Promise.resolve();
+      });
+
+      await Promise.all(promises);
+      await fetchProducts();
+    } catch (error) {
+      console.error('Error updating products:', error);
+      alert('Some products could not be updated. Please try again.');
+    } finally {
+      setBulkActionInProgress(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedProducts.size === 0) return;
+
+    const confirm = window.confirm(
+      `Are you sure you want to delete ${selectedProducts.size} product(s)? This action cannot be undone.`
+    );
+
+    if (!confirm) return;
+
+    setBulkActionInProgress(true);
+    try {
+      const promises = Array.from(selectedProducts).map(id => {
+        const product = products.find(p => p.id === id);
+        if (product) {
+          return axiosInstance.delete(`/products/${product.slug}/`);
+        }
+        return Promise.resolve();
+      });
+
+      await Promise.all(promises);
+      await fetchProducts();
+    } catch (error) {
+      console.error('Error deleting products:', error);
+      alert('Some products could not be deleted. Please try again.');
+    } finally {
+      setBulkActionInProgress(false);
+    }
+  };
+
+  const handleBulkToggleFeatured = async (featured) => {
+    if (selectedProducts.size === 0) return;
+
+    setBulkActionInProgress(true);
+    try {
+      const promises = Array.from(selectedProducts).map(id => {
+        const product = products.find(p => p.id === id);
+        if (product) {
+          return axiosInstance.patch(`/products/${product.slug}/`, { is_featured: featured });
+        }
+        return Promise.resolve();
+      });
+
+      await Promise.all(promises);
+      await fetchProducts();
+    } catch (error) {
+      console.error('Error updating products:', error);
+      alert('Some products could not be updated. Please try again.');
+    } finally {
+      setBulkActionInProgress(false);
     }
   };
 
@@ -457,15 +666,7 @@ const ProductManagement = ({ onUpdate }) => {
     setEditingCategory(null);
   };
 
-  // ==================== FILTERING ====================
-
-  const filteredProducts = products.filter((product) => {
-    const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          (product.short_description || '').toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = filterCategory === '' || product.category === parseInt(filterCategory);
-    const matchesStatus = filterStatus === '' || product.status === filterStatus;
-    return matchesSearch && matchesCategory && matchesStatus;
-  });
+  // ==================== HELPERS ====================
 
   const getStatusConfig = (status) => {
     const configs = {
@@ -543,6 +744,12 @@ const ProductManagement = ({ onUpdate }) => {
                   <option key={cat.id} value={cat.id}>{cat.name}</option>
                 ))}
               </select>
+              <select value={filterBrand} onChange={(e) => setFilterBrand(e.target.value)} className="pm-filter-select">
+                <option value="">All Brands</option>
+                {brands.map((brand) => (
+                  <option key={brand.id} value={brand.id}>{brand.name}</option>
+                ))}
+              </select>
               <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="pm-filter-select">
                 <option value="">All Status</option>
                 <option value="draft">Draft</option>
@@ -552,23 +759,134 @@ const ProductManagement = ({ onUpdate }) => {
             </div>
           </div>
 
+          {/* Bulk Actions Toolbar */}
+          {selectedProducts.size > 0 && (
+            <div className="pm-bulk-toolbar">
+              <div className="pm-bulk-info">
+                <span className="pm-bulk-count">{selectedProducts.size}</span>
+                <span>product{selectedProducts.size !== 1 ? 's' : ''} selected</span>
+                <button className="pm-bulk-clear" onClick={() => setSelectedProducts(new Set())}>
+                  Clear selection
+                </button>
+              </div>
+              <div className="pm-bulk-actions">
+                <button
+                  className="pm-bulk-btn pm-bulk-activate"
+                  onClick={() => handleBulkStatusChange('active')}
+                  disabled={bulkActionInProgress}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  Activate
+                </button>
+                <button
+                  className="pm-bulk-btn pm-bulk-archive"
+                  onClick={() => handleBulkStatusChange('archived')}
+                  disabled={bulkActionInProgress}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                    <rect x="1" y="3" width="22" height="5"></rect>
+                  </svg>
+                  Archive
+                </button>
+                <button
+                  className="pm-bulk-btn pm-bulk-draft"
+                  onClick={() => handleBulkStatusChange('draft')}
+                  disabled={bulkActionInProgress}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                  </svg>
+                  Set Draft
+                </button>
+                <div className="pm-bulk-divider"></div>
+                <button
+                  className="pm-bulk-btn pm-bulk-feature"
+                  onClick={() => handleBulkToggleFeatured(true)}
+                  disabled={bulkActionInProgress}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                  </svg>
+                  Feature
+                </button>
+                <button
+                  className="pm-bulk-btn pm-bulk-unfeature"
+                  onClick={() => handleBulkToggleFeatured(false)}
+                  disabled={bulkActionInProgress}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+                    <line x1="2" y1="2" x2="22" y2="22"></line>
+                  </svg>
+                  Unfeature
+                </button>
+                <div className="pm-bulk-divider"></div>
+                <button
+                  className="pm-bulk-btn pm-bulk-delete"
+                  onClick={handleBulkDelete}
+                  disabled={bulkActionInProgress}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                  </svg>
+                  Delete
+                </button>
+              </div>
+              {bulkActionInProgress && (
+                <div className="pm-bulk-loading">
+                  <div className="pm-bulk-spinner"></div>
+                  Processing...
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="pm-table-container">
             <table className="pm-table">
               <thead>
                 <tr>
+                  <th style={{ width: '40px' }}>
+                    <label className="pm-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={isAllSelected}
+                        ref={(el) => { if (el) el.indeterminate = isSomeSelected; }}
+                        onChange={handleSelectAll}
+                      />
+                      <span className="pm-checkmark"></span>
+                    </label>
+                  </th>
                   <th style={{ width: '60px' }}>Image</th>
-                  <th>Product</th>
-                  <th>Category</th>
-                  <th>Price</th>
-                  <th>Stock</th>
-                  <th>Status</th>
-                  <th style={{ width: '120px' }}>Actions</th>
+                  <th className="pm-sortable" onClick={() => handleSort('name')}>
+                    Product <SortIcon field="name" />
+                  </th>
+                  <th className="pm-sortable" onClick={() => handleSort('category')}>
+                    Category <SortIcon field="category" />
+                  </th>
+                  <th className="pm-sortable" onClick={() => handleSort('brand')}>
+                    Brand <SortIcon field="brand" />
+                  </th>
+                  <th className="pm-sortable" onClick={() => handleSort('price')}>
+                    Price <SortIcon field="price" />
+                  </th>
+                  <th className="pm-sortable" onClick={() => handleSort('stock')}>
+                    Stock <SortIcon field="stock" />
+                  </th>
+                  <th className="pm-sortable" onClick={() => handleSort('status')}>
+                    Status <SortIcon field="status" />
+                  </th>
+                  <th style={{ width: '100px' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredProducts.length === 0 ? (
+                {filteredAndSortedProducts.length === 0 ? (
                   <tr>
-                    <td colSpan="7" className="pm-empty">
+                    <td colSpan="9" className="pm-empty">
                       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
                         <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
                       </svg>
@@ -576,10 +894,21 @@ const ProductManagement = ({ onUpdate }) => {
                     </td>
                   </tr>
                 ) : (
-                  filteredProducts.map((product) => {
+                  filteredAndSortedProducts.map((product) => {
                     const statusConfig = getStatusConfig(product.status);
+                    const isSelected = selectedProducts.has(product.id);
                     return (
-                      <tr key={product.id}>
+                      <tr key={product.id} className={isSelected ? 'pm-row-selected' : ''}>
+                        <td>
+                          <label className="pm-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleSelectProduct(product.id)}
+                            />
+                            <span className="pm-checkmark"></span>
+                          </label>
+                        </td>
                         <td>
                           {product.primary_image_url ? (
                             <img src={product.primary_image_url} alt="" className="pm-product-thumb" />
@@ -595,12 +924,20 @@ const ProductManagement = ({ onUpdate }) => {
                         </td>
                         <td>
                           <div className="pm-product-info">
-                            <span className="pm-product-name">{product.name}</span>
-                            {product.brand_name && <span className="pm-product-brand">{product.brand_name}</span>}
+                            <span className="pm-product-name">
+                              {product.name}
+                              {product.is_featured && (
+                                <span className="pm-featured-badge" title="Featured">★</span>
+                              )}
+                            </span>
+                            {product.pack_size && <span className="pm-product-detail">{product.pack_size}</span>}
                           </div>
                         </td>
                         <td>
                           <span className="pm-category-tag">{product.category_name || 'Uncategorized'}</span>
+                        </td>
+                        <td>
+                          <span className="pm-brand-tag">{product.brand_name || '—'}</span>
                         </td>
                         <td><span className="pm-price">AED {parseFloat(product.price).toFixed(2)}</span></td>
                         <td>
@@ -635,6 +972,11 @@ const ProductManagement = ({ onUpdate }) => {
                 )}
               </tbody>
             </table>
+          </div>
+
+          {/* Results count */}
+          <div className="pm-results-count">
+            Showing {filteredAndSortedProducts.length} of {products.length} products
           </div>
         </>
       )}
