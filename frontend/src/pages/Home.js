@@ -84,13 +84,46 @@ const UsersIcon = ({ size = 24 }) => (
   </svg>
 );
 
+const PRODUCTS_PER_PAGE = 12;
+
+// Category order based on pharmacy conversion psychology (high-demand/urgent first)
+const CATEGORY_ORDER = [
+  { slug: 'pain-relief', name: 'Pain Relief' },
+  { slug: 'cold-flu-allergy', name: 'Cold, Flu & Allergy' },
+  { slug: 'vitamins-supplements', name: 'Vitamins & Supplements' },
+  { slug: 'digestive-health', name: 'Digestive Health' },
+  { slug: 'baby-care', name: 'Baby Care' },
+  { slug: 'skincare', name: 'Skincare' },
+  { slug: 'first-aid', name: 'First Aid' },
+  { slug: 'oral-care', name: 'Oral Care' },
+  { slug: 'eye-ear-care', name: 'Eye & Ear Care' },
+  { slug: 'personal-care', name: 'Personal Care' },
+];
+
+const ChevronDownIcon = ({ size = 16 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <polyline points="6 9 12 15 18 9"/>
+  </svg>
+);
+
+const XIcon = ({ size = 14 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <line x1="18" y1="6" x2="6" y2="18"/>
+    <line x1="6" y1="6" x2="18" y2="18"/>
+  </svg>
+);
+
 function Home() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [products, setProducts] = useState([]);
   const [filteredProducts, setFilteredProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState('newest');
+  const [displayCount, setDisplayCount] = useState(PRODUCTS_PER_PAGE);
+  const [selectedCategory, setSelectedCategory] = useState('');
+  const [priceRange, setPriceRange] = useState('all');
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
 
   useEffect(() => {
     const fetchProducts = async () => {
@@ -111,6 +144,7 @@ function Home() {
   useEffect(() => {
     let result = [...products];
 
+    // Search filter
     const searchQuery = searchParams.get('search');
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
@@ -122,6 +156,36 @@ function Home() {
       );
     }
 
+    // Category filter
+    if (selectedCategory) {
+      result = result.filter(product =>
+        product.category_slug === selectedCategory ||
+        product.category_name?.toLowerCase().replace(/[^a-z0-9]+/g, '-') === selectedCategory
+      );
+    }
+
+    // Price range filter
+    if (priceRange !== 'all') {
+      const getPrice = (p) => parseFloat(p.price);
+      switch (priceRange) {
+        case 'under-25':
+          result = result.filter(p => getPrice(p) < 25);
+          break;
+        case '25-50':
+          result = result.filter(p => getPrice(p) >= 25 && getPrice(p) <= 50);
+          break;
+        case '50-100':
+          result = result.filter(p => getPrice(p) >= 50 && getPrice(p) <= 100);
+          break;
+        case 'over-100':
+          result = result.filter(p => getPrice(p) > 100);
+          break;
+        default:
+          break;
+      }
+    }
+
+    // Sorting
     switch (sortBy) {
       case 'price-low':
         result.sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
@@ -137,7 +201,32 @@ function Home() {
     }
 
     setFilteredProducts(result);
-  }, [products, searchParams, sortBy]);
+    setDisplayCount(PRODUCTS_PER_PAGE);
+  }, [products, searchParams, sortBy, selectedCategory, priceRange]);
+
+  const loadMore = () => {
+    setDisplayCount(prev => prev + PRODUCTS_PER_PAGE);
+  };
+
+  const clearFilters = () => {
+    setSelectedCategory('');
+    setPriceRange('all');
+    setSearchParams({});
+  };
+
+  const displayedProducts = filteredProducts.slice(0, displayCount);
+  const hasMore = displayCount < filteredProducts.length;
+
+  // Count products per category
+  const categoryCounts = products.reduce((acc, product) => {
+    const slug = product.category_slug || 'other';
+    acc[slug] = (acc[slug] || 0) + 1;
+    return acc;
+  }, {});
+
+  // Check if any filters are active
+  const hasActiveFilters = selectedCategory || priceRange !== 'all' || searchParams.get('search');
+  const activeFilterCount = [selectedCategory, priceRange !== 'all' ? priceRange : null, searchParams.get('search')].filter(Boolean).length;
 
   if (loading) {
     return (
@@ -300,34 +389,190 @@ function Home() {
         </div>
       </section>
 
-      {/* ===== PRODUCTS SECTION ===== */}
-      <section className="products-section" id="products">
-        <div className="products-header">
-          <h2 className="products-title">
-            {searchParams.get('search')
-              ? `Results for "${searchParams.get('search')}"`
-              : 'Popular Medicines'}
-          </h2>
+      {/* ===== PRODUCTS SECTION WITH SIDEBAR ===== */}
+      <section className="shop-section" id="products">
+        <div className="shop-container">
+          {/* Filter Sidebar */}
+          <aside className={`filter-sidebar ${showMobileFilters ? 'show' : ''}`}>
+            <div className="filter-sidebar-header">
+              <h3>Filters</h3>
+              {hasActiveFilters && (
+                <button className="clear-all-filters" onClick={clearFilters}>
+                  Clear All
+                </button>
+              )}
+              <button
+                className="close-filters-mobile"
+                onClick={() => setShowMobileFilters(false)}
+              >
+                <XIcon size={20} />
+              </button>
+            </div>
 
-          <select
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
-            className="sort-select"
-          >
-            <option value="newest">Newest</option>
-            <option value="name">Name A-Z</option>
-            <option value="price-low">Price: Low to High</option>
-            <option value="price-high">Price: High to Low</option>
-          </select>
-        </div>
+            {/* Category Filter */}
+            <div className="filter-group">
+              <h4 className="filter-group-title">
+                <ChevronDownIcon size={16} />
+                Categories
+              </h4>
+              <div className="filter-options">
+                <label className={`filter-option ${!selectedCategory ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="category"
+                    checked={!selectedCategory}
+                    onChange={() => setSelectedCategory('')}
+                  />
+                  <span className="filter-label">All Categories</span>
+                  <span className="filter-count">{products.length}</span>
+                </label>
+                {CATEGORY_ORDER.map((cat) => (
+                  <label
+                    key={cat.slug}
+                    className={`filter-option ${selectedCategory === cat.slug ? 'active' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="category"
+                      checked={selectedCategory === cat.slug}
+                      onChange={() => setSelectedCategory(cat.slug)}
+                    />
+                    <span className="filter-label">{cat.name}</span>
+                    <span className="filter-count">{categoryCounts[cat.slug] || 0}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
 
-        {filteredProducts.length === 0 ? (
-          <div className="no-results">
-            <p>No products found</p>
+            {/* Price Filter */}
+            <div className="filter-group">
+              <h4 className="filter-group-title">
+                <ChevronDownIcon size={16} />
+                Price Range
+              </h4>
+              <div className="filter-options">
+                {[
+                  { value: 'all', label: 'All Prices' },
+                  { value: 'under-25', label: 'Under AED 25' },
+                  { value: '25-50', label: 'AED 25 - 50' },
+                  { value: '50-100', label: 'AED 50 - 100' },
+                  { value: 'over-100', label: 'Over AED 100' },
+                ].map((option) => (
+                  <label
+                    key={option.value}
+                    className={`filter-option ${priceRange === option.value ? 'active' : ''}`}
+                  >
+                    <input
+                      type="radio"
+                      name="price"
+                      checked={priceRange === option.value}
+                      onChange={() => setPriceRange(option.value)}
+                    />
+                    <span className="filter-label">{option.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Products Area */}
+          <div className="products-main">
+            {/* Products Header */}
+            <div className="products-header">
+              <div className="products-header-left">
+                <button
+                  className="mobile-filter-btn"
+                  onClick={() => setShowMobileFilters(true)}
+                >
+                  Filters
+                  {activeFilterCount > 0 && (
+                    <span className="filter-badge">{activeFilterCount}</span>
+                  )}
+                </button>
+                <h2 className="products-title">
+                  {searchParams.get('search')
+                    ? `Results for "${searchParams.get('search')}"`
+                    : selectedCategory
+                      ? CATEGORY_ORDER.find(c => c.slug === selectedCategory)?.name || 'Products'
+                      : 'All Products'
+                  }
+                </h2>
+                <span className="products-count">{filteredProducts.length} products</span>
+              </div>
+              <div className="products-header-right">
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value)}
+                  className="sort-select"
+                >
+                  <option value="newest">Newest</option>
+                  <option value="name">Name A-Z</option>
+                  <option value="price-low">Price: Low to High</option>
+                  <option value="price-high">Price: High to Low</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Active Filters */}
+            {hasActiveFilters && (
+              <div className="active-filters">
+                {searchParams.get('search') && (
+                  <span className="active-filter-tag">
+                    Search: {searchParams.get('search')}
+                    <button onClick={() => setSearchParams({})}>
+                      <XIcon size={12} />
+                    </button>
+                  </span>
+                )}
+                {selectedCategory && (
+                  <span className="active-filter-tag">
+                    {CATEGORY_ORDER.find(c => c.slug === selectedCategory)?.name}
+                    <button onClick={() => setSelectedCategory('')}>
+                      <XIcon size={12} />
+                    </button>
+                  </span>
+                )}
+                {priceRange !== 'all' && (
+                  <span className="active-filter-tag">
+                    {priceRange.replace('-', ' - ').replace('under', 'Under').replace('over', 'Over')} AED
+                    <button onClick={() => setPriceRange('all')}>
+                      <XIcon size={12} />
+                    </button>
+                  </span>
+                )}
+                <button className="clear-filters-link" onClick={clearFilters}>
+                  Clear all filters
+                </button>
+              </div>
+            )}
+
+            {/* Products Grid */}
+            {filteredProducts.length === 0 ? (
+              <div className="no-results">
+                <div className="no-results-icon">🔍</div>
+                <h3>No products found</h3>
+                <p>Try adjusting your filters or search terms</p>
+                <button className="clear-filters-btn" onClick={clearFilters}>
+                  Clear all filters
+                </button>
+              </div>
+            ) : (
+              <>
+                <ProductGrid products={displayedProducts} />
+                {hasMore && (
+                  <div className="load-more-container">
+                    <button className="load-more-btn" onClick={loadMore}>
+                      Load More Products
+                      <span className="load-more-count">
+                        (Showing {displayCount} of {filteredProducts.length})
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
-        ) : (
-          <ProductGrid products={filteredProducts} />
-        )}
+        </div>
       </section>
 
       {/* ===== WHY CHOOSE US / STATS ===== */}

@@ -6,7 +6,9 @@ import { useNavigate } from "react-router-dom";
 import ProductModal from "./ProductModal";
 import "../styles/ProductGrid.css";
 
-const ProductGrid = ({ products }) => {
+const ProductGrid = ({ products, limit, showViewAll, onViewAll, viewAllText = "View All" }) => {
+  // Apply limit if specified
+  const displayProducts = limit ? products.slice(0, limit) : products;
   const { addToCart, updateQuantity, items } = useCart();
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -162,52 +164,72 @@ const ProductGrid = ({ products }) => {
   return (
     <>
       <div className="products-grid">
-        {products.map((product) => (
-          <div
-            key={product.id}
-            className="product-card"
-            onClick={(e) => handleCardClick(e, product)}
-          >
-            <div className="product-image">
-              {product.primary_image_url ? (
-                <img src={product.primary_image_url} alt={product.name} />
-              ) : (
-                <div className="no-image">No Image</div>
-              )}
-            </div>
-            <div className="product-card-content">
-              <h3>{product.name}</h3>
-              <p className="product-description">{product.short_description}</p>
-              {product.category_name && (
-                <p className="product-category">Category: {product.category_name}</p>
-              )}
+        {displayProducts.map((product) => {
+          const qty = getCartQuantity(product.id);
+          const isInCart = qty > 0;
 
-              <div className="card-cart-controls">
-                <div className="price-and-quantity">
+          return (
+            <div
+              key={product.id}
+              className="product-card"
+              onClick={(e) => handleCardClick(e, product)}
+            >
+              <div className="product-image">
+                {product.primary_image_url ? (
+                  <img src={product.primary_image_url} alt={product.name} />
+                ) : (
+                  <div className="no-image">No Image</div>
+                )}
+              </div>
+              <div className="product-card-content">
+                <h3>{product.name}</h3>
+                <div className="card-bottom-row">
                   <span className="product-price">AED {parseFloat(product.price).toFixed(2)}</span>
-                  <div className="card-quantity-controls">
-                    <button
-                      className="card-qty-btn"
-                      onClick={(e) => decrementQuantity(e, product)}
-                      disabled={getCartQuantity(product.id) <= 0}
-                    >
-                      −
-                    </button>
-                    <span className="card-qty-display">{getCartQuantity(product.id)}</span>
-                    <button
-                      className="card-qty-btn"
-                      onClick={(e) => incrementQuantity(e, product)}
-                      disabled={getCartQuantity(product.id) >= product.stock_quantity}
-                    >
-                      +
-                    </button>
+                  <div className="card-cart-controls">
+                    {isInCart ? (
+                      <div className="card-quantity-controls">
+                        <button
+                          className="card-qty-btn"
+                          onClick={(e) => decrementQuantity(e, product)}
+                        >
+                          −
+                        </button>
+                        <span className="card-qty-display">{qty}</span>
+                        <button
+                          className="card-qty-btn"
+                          onClick={(e) => incrementQuantity(e, product)}
+                          disabled={qty >= product.stock_quantity}
+                        >
+                          +
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        className="card-add-btn"
+                        onClick={(e) => incrementQuantity(e, product)}
+                        disabled={product.stock_quantity <= 0}
+                      >
+                        Add
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+
+      {showViewAll && products.length > (limit || 0) && (
+        <div className="view-all-container">
+          <button className="view-all-btn" onClick={onViewAll}>
+            {viewAllText}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </button>
+        </div>
+      )}
 
       {selectedProductId && (
         <ProductModal

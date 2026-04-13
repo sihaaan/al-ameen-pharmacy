@@ -1,6 +1,6 @@
 # Al Ameen Pharmacy - Project Status
 
-**Last Updated:** 2026-04-12
+**Last Updated:** 2026-04-13
 **Status:** Production
 **Schema Version:** v2.0 (clean reset)
 
@@ -190,13 +190,13 @@ SEO:          meta_title, meta_description
 frontend/src/
 ├── components/
 │   ├── Navbar.js              # Header with search
-│   ├── ProductGrid.js         # Product cards with quantity controls
+│   ├── ProductGrid.js         # Product cards with quantity stepper controls
 │   ├── ProductModal.js        # Quick view modal with image gallery
 │   ├── Cart.js                # Cart drawer
 │   ├── ProductManagement.js   # Admin: Products + Categories tabs
 │   └── OrderManagement.js     # Admin: Order status management
 ├── pages/
-│   ├── Home.js                # Hero + products
+│   ├── Home.js                # Hero + filter sidebar + product grid
 │   ├── ProductDetail.js       # Full product page with image gallery
 │   ├── Login.js, Register.js
 │   ├── Profile.js             # User profile + order history
@@ -206,6 +206,9 @@ frontend/src/
 ├── context/
 │   ├── AuthContext.js         # JWT auth state
 │   └── CartContext.js         # Shopping cart state
+├── styles/
+│   ├── Home.css               # Homepage with filter sidebar styles
+│   └── ProductGrid.css        # Product card design (compact, teal theme)
 └── utils/
     └── axios.js               # Axios instance with JWT interceptors
 ```
@@ -217,6 +220,9 @@ frontend/src/
 3. **Cart operations**: Uses numeric `product.id` for add/update/remove
 4. **Image gallery**: Products can have multiple images, navigable via arrows/thumbnails
 5. **Admin UI**: Tab-based Products/Categories management, inline brand/category creation
+6. **Filter sidebar**: Category filter (conversion-psychology ordered) + price range filter
+7. **Product cards**: Compact design with price left, Add/quantity stepper right
+8. **Pagination**: Load More pattern with product count display
 
 ---
 
@@ -279,13 +285,18 @@ Backend uses two-tier search:
 ## Features
 
 ### Customer
-- Product browsing with search and category filter
+- Product browsing with category filter sidebar and price range filters
+- Active filters display with clear functionality
+- Load More pagination for products
+- Redesigned product cards: compact layout, price left, controls right
+- Larger quantity control buttons (34px) for better usability
 - Quick view modal + full product detail page
 - Multi-image gallery with navigation
 - Cart with optimistic UI updates
 - Checkout with saved addresses
 - Order history in profile
 - Password reset via email
+- Mobile-responsive filter panel (full-screen overlay)
 
 ### Admin
 - Product CRUD with image management
