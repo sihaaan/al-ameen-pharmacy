@@ -194,6 +194,10 @@ class Product(models.Model):
         default=False,
         help_text="Show on homepage featured section"
     )
+    show_price = models.BooleanField(
+        default=False,
+        help_text="Display price publicly on the storefront. When off, customers see an inquiry link instead."
+    )
 
     # SEO
     meta_title = models.CharField(
@@ -217,6 +221,7 @@ class Product(models.Model):
             models.Index(fields=['slug']),
             models.Index(fields=['status']),
             models.Index(fields=['is_featured']),
+            models.Index(fields=['show_price']),
             models.Index(fields=['requires_prescription']),
             models.Index(fields=['created_at']),
             models.Index(fields=['brand']),

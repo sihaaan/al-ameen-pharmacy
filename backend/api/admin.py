@@ -106,14 +106,14 @@ class CategoryAdmin(admin.ModelAdmin):
 class ProductAdmin(admin.ModelAdmin):
     list_display = [
         'image_preview', 'name', 'brand', 'category', 'price',
-        'stock_quantity', 'status', 'is_featured', 'requires_prescription'
+        'stock_quantity', 'status', 'is_featured', 'show_price', 'requires_prescription'
     ]
     list_filter = [
-        'status', 'is_featured', 'requires_prescription',
+        'status', 'is_featured', 'show_price', 'requires_prescription',
         'brand', 'category', 'requires_manual_review', 'created_at'
     ]
     search_fields = ['name', 'slug', 'sku', 'barcode', 'active_ingredient']
-    list_editable = ['price', 'stock_quantity', 'status', 'is_featured']
+    list_editable = ['price', 'stock_quantity', 'status', 'is_featured', 'show_price']
     prepopulated_fields = {'slug': ('name',)}
     autocomplete_fields = ['brand', 'category']
     readonly_fields = ['created_at', 'updated_at', 'image_preview']
@@ -135,7 +135,7 @@ class ProductAdmin(admin.ModelAdmin):
             'fields': ('requires_prescription', 'dosage', 'pack_size', 'active_ingredient')
         }),
         ('Status & Visibility', {
-            'fields': ('status', 'requires_manual_review', 'is_featured')
+            'fields': ('status', 'requires_manual_review', 'is_featured', 'show_price')
         }),
         ('SEO', {
             'fields': ('meta_title', 'meta_description'),

@@ -1918,6 +1918,20 @@
   color: #374151;
 }
 
+/* Price toggle gets a green accent to signal its public-facing impact */
+.pm-toggle--price .pm-toggle-slider {
+  background: #fee2e2;
+}
+
+.pm-toggle--price input:checked + .pm-toggle-slider {
+  background: #22c55e;
+}
+
+.pm-toggle--price span:last-child {
+  color: #15803d;
+  font-weight: 600;
+}
+
 /* Image Grid */
 .pm-images-grid {
   display: grid;

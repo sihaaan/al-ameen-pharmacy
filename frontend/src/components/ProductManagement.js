@@ -41,6 +41,7 @@ const ProductManagement = ({ onUpdate }) => {
     requires_prescription: false,
     status: 'draft',
     is_featured: false,
+    show_price: false,
   });
 
   // Category form state
@@ -436,7 +437,7 @@ const ProductManagement = ({ onUpdate }) => {
       'name', 'short_description', 'detailed_description',
       'price', 'stock_quantity', 'category', 'brand',
       'dosage', 'pack_size', 'active_ingredient',
-      'requires_prescription', 'status', 'is_featured'
+      'requires_prescription', 'status', 'is_featured', 'show_price'
     ];
 
     fieldsToSend.forEach((key) => {
@@ -535,6 +536,7 @@ const ProductManagement = ({ onUpdate }) => {
         requires_prescription: fullProduct.requires_prescription || false,
         status: fullProduct.status || 'draft',
         is_featured: fullProduct.is_featured || false,
+        show_price: fullProduct.show_price || false,
       });
       setProductImages(fullProduct.images || []);
       setNewImages([]);
@@ -577,6 +579,7 @@ const ProductManagement = ({ onUpdate }) => {
       requires_prescription: false,
       status: 'draft',
       is_featured: false,
+      show_price: false,
     });
     setEditingProduct(null);
     setProductImages([]);
@@ -1207,6 +1210,11 @@ const ProductManagement = ({ onUpdate }) => {
                         <input type="checkbox" name="is_featured" checked={formData.is_featured} onChange={handleInputChange} />
                         <span className="pm-toggle-slider"></span>
                         <span>Featured Product</span>
+                      </label>
+                      <label className="pm-toggle pm-toggle--price">
+                        <input type="checkbox" name="show_price" checked={formData.show_price} onChange={handleInputChange} />
+                        <span className="pm-toggle-slider"></span>
+                        <span>Show Price Publicly</span>
                       </label>
                     </div>
                   </div>

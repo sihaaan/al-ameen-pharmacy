@@ -1,6 +1,6 @@
 # Al Ameen Pharmacy - Project Status
 
-**Last Updated:** 2026-04-13
+**Last Updated:** 2026-04-23
 **Status:** Production
 **Schema Version:** v2.0 (clean reset)
 
@@ -61,6 +61,7 @@ Content:      short_description (required), detailed_description (optional)
 Inventory:    price, stock_quantity, sku, barcode
 Pharmacy:     requires_prescription, dosage, pack_size, active_ingredient
 Status:       status (draft/active/archived), is_featured
+Pricing:      show_price (bool, default=False) — controls public price visibility
 SEO:          meta_title, meta_description
 ```
 
@@ -290,6 +291,7 @@ Backend uses two-tier search:
 - Load More pagination for products
 - Redesigned product cards: compact layout, price left, controls right
 - Larger quantity control buttons (34px) for better usability
+- **Price visibility**: price shown only when `show_price=True`; otherwise a WhatsApp inquiry link is shown
 - Quick view modal + full product detail page
 - Multi-image gallery with navigation
 - Cart with optimistic UI updates
@@ -303,6 +305,7 @@ Backend uses two-tier search:
 - Category CRUD (hierarchical)
 - Brand dropdown + inline creation
 - Product status workflow (draft/active/archived)
+- **show_price toggle** in list_editable — flip price visibility per-product without opening edit form
 - Order status management
 - Django admin at `/admin`
 
@@ -346,6 +349,38 @@ CI=false
 
 ---
 
+## Catalog (Brochure-based)
+
+Catalog is sourced exclusively from the Al Ameen Pharmacy brochure PDF. Every product has a named, labeled image in the brochure — no extras.
+
+| Category | Sub-categories | Products |
+|----------|---------------|---------|
+| First Aid | First Aid Kits, Wound Care, Bandages, Eye & Ear, Resuscitation | 21 |
+| Medical Disposables | Gloves, Gowns, Sterilization, General Disposables | 9 |
+| Orthopaedic | Collars & Slings, Splints, Mobility Aids, Pillows | 9 |
+| Gynaecology | Instruments, Obstetrics | 3 |
+| Plastic Products | Patient Hygiene, Basins & Bowls | 6 |
+| Anaesthesia & Airway | Airway Management, Oxygen Therapy, Suction | 9 |
+| Urology | Catheters, Urine Collection, Irrigation | 6 |
+| Medical Devices & Lab | Lab Consumables, Surgical Instruments, Diagnostics | 14 |
+| Furniture & Equipment | Examination, Hospital Furniture, Trolleys | 8 |
+| Emergency & Transport | Stretchers, Immobilisation, Nebulisers, Walking Aids | 12 |
+
+**Total: 107 products, 20 brands, 43 categories (10 parent + 33 child)**
+**Images: 98 of 107 products have images (150 images total on Cloudinary)**
+
+The 9 products without individual images (Face Shield, Guidance Card, Eye Patches, Eye Wash/Eye Bath, Safety Pins, Triangular Bandages, Burn Dressing, Antiseptic Wipes, Dressing Kit) appear only as part of a composite grid image in the brochure PDF — no individual extracted images exist for them.
+
+All products seeded with `show_price=False` and placeholder price `AED 1.00`.
+To activate pricing: set `show_price=True` and update actual price via Django admin.
+
+Seed command: `python manage.py seed_brochure_catalog [--clear]`
+Image import: `python manage.py import_brochure_images [--pdf path] [--force] [--dry-run]`
+
+The `PAGE_IMAGE_MAP` in `import_brochure_images.py` was verified by visual inspection of every extracted image — the PDF image order differs from the brochure's visual layout, particularly on page 5.
+
+---
+
 ## Development Notes
 
 1. **Slug-based lookups**: Products, categories, brands use `slug` field
@@ -353,3 +388,4 @@ CI=false
 3. **Image handling**: `primary_image_url` computed from ProductImage table
 4. **Status visibility**: Non-admin users only see `status='active'` products
 5. **Admin UI**: Brand/category dropdowns, status selector, multi-image management
+6. **show_price**: Per-product boolean. When `False`, storefront shows a WhatsApp inquiry link instead of price. Toggle via Django admin list view (no page reload needed).

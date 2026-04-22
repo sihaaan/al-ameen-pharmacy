@@ -158,7 +158,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             'category', 'category_name', 'category_slug',
             'brand', 'brand_name', 'brand_slug',
             'primary_image_url', 'dosage', 'pack_size',
-            'requires_prescription', 'is_featured', 'status', 'in_stock', 'created_at'
+            'requires_prescription', 'is_featured', 'show_price', 'status', 'in_stock', 'created_at'
         ]
         read_only_fields = ['id', 'slug', 'in_stock', 'created_at']
 
@@ -191,7 +191,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'short_description', 'detailed_description',
             'price', 'stock_quantity', 'sku', 'barcode',
             'requires_prescription', 'dosage', 'pack_size', 'active_ingredient',
-            'status', 'is_featured',
+            'status', 'is_featured', 'show_price',
             'meta_title', 'meta_description',
             'images', 'primary_image_url',
             'in_stock', 'created_at', 'updated_at'
@@ -218,7 +218,7 @@ class ProductCreateUpdateSerializer(serializers.ModelSerializer):
             'short_description', 'detailed_description',
             'price', 'stock_quantity', 'sku', 'barcode',
             'requires_prescription', 'dosage', 'pack_size', 'active_ingredient',
-            'status', 'requires_manual_review', 'is_featured',
+            'status', 'requires_manual_review', 'is_featured', 'show_price',
             'meta_title', 'meta_description'
         ]
 

@@ -97,6 +97,27 @@
   letter-spacing: -0.02em;
 }
 
+/* Inquiry link (shown when show_price=false) */
+.product-inquire-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #25d366;
+  text-decoration: none;
+  padding: 5px 10px;
+  border: 1px solid #25d366;
+  border-radius: 20px;
+  transition: background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.product-inquire-link:hover {
+  background: #25d366;
+  color: white;
+}
+
 /* Hidden elements */
 .product-description,
 .product-category {

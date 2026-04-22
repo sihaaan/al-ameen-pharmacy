@@ -231,6 +231,26 @@
   letter-spacing: -1px;
 }
 
+.detail-inquire-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 700;
+  color: #25d366;
+  text-decoration: none;
+  padding: 16px 28px;
+  border: 2px solid #25d366;
+  border-radius: 12px;
+  transition: background 0.15s ease, color 0.15s ease;
+  margin: 8px 0;
+}
+
+.detail-inquire-link:hover {
+  background: #25d366;
+  color: white;
+}
+
 .product-stock {
   padding: 12px 0;
 }
