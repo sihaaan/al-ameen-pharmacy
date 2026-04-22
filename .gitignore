@@ -63,3 +63,7 @@ sent_emails/
 htmlcov/
 .coverage
 .pytest_cache/
+
+# Brochure assets (large binaries, not needed in repo)
+brochure_extracted/
+*.pdf
