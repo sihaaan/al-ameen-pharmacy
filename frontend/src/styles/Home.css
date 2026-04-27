@@ -405,6 +405,8 @@
   border-radius: 12px;
   padding: 24px;
   height: fit-content;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
   position: sticky;
   top: 100px;
   border: 1px solid #e5e7eb;

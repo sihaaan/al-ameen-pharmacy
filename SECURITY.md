@@ -2,6 +2,9 @@
 
 This document explains the security measures implemented in this project and how to configure them for production.
 
+**Live deployment:** https://www.ameenpharmacy.ae/
+**Infrastructure:** Railway (backend + frontend), Neon PostgreSQL, Cloudinary CDN
+
 ## ✅ Security Fixes Implemented
 
 ### 1. **Environment Variables Protection**
@@ -62,95 +65,78 @@ REACT_APP_API_URL=http://localhost:8000/api
 
 ## 🚀 Production Deployment Checklist
 
-### Step 1: Get Your Domain
-- Purchase domain (e.g., `alameenpharmacy.com`)
-- Set up DNS to point to your hosting provider
-- Configure both frontend and backend subdomains:
-  - Frontend: `https://alameenpharmacy.com`
-  - Backend API: `https://api.alameenpharmacy.com`
+### Step 1: Domain & DNS
+- Domain: `ameenpharmacy.ae` (already live)
+- Frontend: https://www.ameenpharmacy.ae/
+- Backend API: https://al-ameen-pharmacy-production.up.railway.app/api
+- Django Admin: https://al-ameen-pharmacy-production.up.railway.app/admin
 
-### Step 2: Backend Environment Variables
+### Step 2: Backend Environment Variables (Railway)
 
-Create `backend/.env` on your production server:
+Set these in the Railway project's environment variables panel — never in a committed file:
 
 ```env
 # Django Settings
 DJANGO_SECRET_KEY=your-strong-secret-key-here
 DEBUG=0
-ALLOWED_HOSTS=api.yourdomain.com,yourdomain.com,www.yourdomain.com
+ALLOWED_HOSTS=al-ameen-pharmacy-production.up.railway.app,www.ameenpharmacy.ae
 
-# Database (use your production database URL)
+# Database (Neon PostgreSQL — copy connection string from Neon dashboard)
 DATABASE_URL=postgresql://user:password@host:5432/dbname?sslmode=require
 
-# CORS (IMPORTANT: Only your frontend domain!)
-CORS_ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+# CORS (only the frontend domain)
+CORS_ALLOWED_ORIGINS=https://www.ameenpharmacy.ae,https://ameenpharmacy.ae
 
-# Email (SMTP for production)
+# Cloudinary (image storage and CDN)
+CLOUDINARY_URL=cloudinary://api_key:api_secret@cloud_name
+
+# Email (Gmail SMTP with App Password — not your main Gmail password)
 EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
 EMAIL_HOST=smtp.gmail.com
 EMAIL_PORT=587
 EMAIL_USE_TLS=1
 EMAIL_HOST_USER=your-email@gmail.com
 EMAIL_HOST_PASSWORD=your-gmail-app-password
-DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <noreply@yourdomain.com>
-
-# Stripe (if using)
-STRIPE_SECRET_KEY=sk_live_your_live_key_here
-STRIPE_PUBLISHABLE_KEY=pk_live_your_live_key_here
+DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <noreply@ameenpharmacy.ae>
 ```
 
 ### Step 3: Frontend Environment Variables
 
-Create `frontend/.env.production`:
+Set in Railway frontend service environment variables (never commit):
 
 ```env
-# Backend API URL (your production domain)
-REACT_APP_API_URL=https://api.yourdomain.com/api
-
-# Stripe Public Key (if using)
-REACT_APP_STRIPE_PUBLISHABLE_KEY=pk_live_your_live_key_here
+REACT_APP_API_URL=https://al-ameen-pharmacy-production.up.railway.app/api
+CI=false
 ```
 
-### Step 4: Build Frontend
-```bash
-cd frontend
-npm run build
+### Step 4: Build & Deploy
 
-# This creates an optimized production build in frontend/build/
-# Deploy this folder to your web hosting (Vercel, Netlify, AWS S3, etc.)
-```
+Railway auto-deploys on every git push to `main`. The project includes a smart migration runner that safely runs `python manage.py migrate` on each backend deploy against the Neon production database.
 
-### Step 5: Deploy Backend
+For a manual backend deploy:
 ```bash
-# Install dependencies
 cd backend
 pip install -r requirements.txt
-
-# Run migrations
 python manage.py migrate
-
-# Collect static files
 python manage.py collectstatic --noinput
-
-# Start with Gunicorn (production server)
 gunicorn pharmacy_api.wsgi:application --bind 0.0.0.0:8000
 ```
 
 ---
 
-## 🔒 Security Checklist Before Going Live
+## 🔒 Security Checklist
 
-- [ ] `DEBUG=0` in production `.env`
-- [ ] Strong `SECRET_KEY` generated and set
-- [ ] `ALLOWED_HOSTS` set to your actual domain(s)
-- [ ] `CORS_ALLOWED_ORIGINS` set to your frontend URL only
-- [ ] Database password is strong and secure
-- [ ] Email credentials use App Password (not main Gmail password)
-- [ ] HTTPS certificate installed and working
-- [ ] `.env` files are NOT in git (check with `git status`)
-- [ ] Changed database password from the one in git history
-- [ ] Static files served correctly
-- [ ] Media files (uploads) working with cloud storage (recommended)
+- [x] `DEBUG=0` set in Railway environment variables
+- [x] Strong `SECRET_KEY` generated and stored in Railway (not in code)
+- [x] `ALLOWED_HOSTS` set to Railway app domain and `ameenpharmacy.ae`
+- [x] `CORS_ALLOWED_ORIGINS` restricted to `ameenpharmacy.ae` only
+- [x] Neon database password is strong and not shared
+- [x] Email credentials use Gmail App Password (not main Gmail password)
+- [x] HTTPS active on both Railway and custom domain
+- [x] `.env` files excluded via `.gitignore` — not in git
+- [x] `frontend/.env.production` not committed
+- [x] Image storage on Cloudinary CDN (not local filesystem)
+- [x] Static files served correctly via Railway
 
 ---
 
@@ -213,6 +199,6 @@ git push origin --force --all
 ## 🎯 Current Status
 
 ✅ **Development**: Fully secured and ready
-⏳ **Production**: Configured and ready - just needs domain and deployment
+✅ **Production**: Live at https://www.ameenpharmacy.ae/ — Railway + Neon + Cloudinary
 
-All security measures are in place. When you're ready to deploy, just follow the Production Deployment Checklist above.
+All security measures are in place and the site is fully deployed.
