@@ -1,6 +1,6 @@
 # 🏥 Al Ameen Pharmacy E-Commerce Platform
 
-A full-stack e-commerce platform for pharmacy products built with Django REST Framework and React.
+A full-stack e-commerce platform for pharmacy products built with Django REST Framework and React. **Live**: https://www.ameenpharmacy.ae/
 
 ## 🌟 Features
 
