@@ -179,13 +179,12 @@ ALLOWED_HOSTS=127.0.0.1,localhost
 - [x] User authentication UI (React)
 - [x] Cart integration with React
 - [x] Checkout flow
-- [ ] Payment gateway (Stripe/Telr)
-- [ ] Product image uploads
-- [ ] Email notifications
-- [ ] Order tracking
-- [ ] Admin dashboard
-- [ ] Search and filters
-- [ ] Reviews and ratings
+- [x] Product image uploads
+- [x] Email notifications
+- [x] Order tracking
+- [x] Admin dashboard
+- [x] Search and filters
+- [x] Reviews and ratings
 
 ## 👨‍💻 Author
 
