@@ -26,28 +26,21 @@
   align-items: center;
   gap: 12px;
   text-decoration: none;
+  flex-shrink: 0;
 }
 
-.brand-container {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+.nav-logo {
+  height: 46px;
+  width: auto;
+  display: block;
 }
 
-.brand-arabic {
-  font-size: 13px;
+.nav-brand-text {
+  font-size: 15px;
   font-weight: 700;
-  color: var(--primary, #0D9488);
-  letter-spacing: 0.5px;
-  direction: rtl;
-  margin-bottom: 1px;
-}
-
-.brand-english {
-  font-size: 18px;
-  font-weight: 800;
-  color: var(--gray-900, #0F172A);
-  letter-spacing: 0.5px;
+  color: #0f172a;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 /* Trust Badge next to brand */
@@ -488,12 +481,12 @@
     flex: 1;
   }
 
-  .brand-arabic {
-    font-size: 11px;
+  .nav-logo {
+    height: 38px;
   }
 
-  .brand-english {
-    font-size: 15px;
+  .nav-brand-text {
+    font-size: 13px;
   }
 
   .nav-links {
@@ -502,12 +495,12 @@
 }
 
 @media (max-width: 400px) {
-  .brand-arabic {
-    font-size: 10px;
+  .nav-logo {
+    height: 36px;
   }
 
-  .brand-english {
-    font-size: 14px;
+  .nav-brand-text {
+    display: none;
   }
 
   .search-input {

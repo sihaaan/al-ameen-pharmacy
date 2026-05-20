@@ -260,7 +260,7 @@ function Home() {
 
             <div className="hero-brand">
               <span className="hero-brand-arabic">صيدلية الأمين</span>
-              <span className="hero-brand-english">Al Ameen Pharmacy</span>
+              <span className="hero-brand-english">AL AMEEN PHARMACY</span>
             </div>
 
             <h1 className="hero-headline">
@@ -657,8 +657,31 @@ function Home() {
           {/* Brand & About */}
           <div className="footer-section footer-brand-section">
             <div className="footer-brand">
-              <span className="footer-arabic">صيدلية الأمين</span>
-              <span className="footer-name">Al Ameen Pharmacy</span>
+              <div className="footer-brand-mark">
+                <div className="footer-brand-icon">
+                  <svg className="footer-brand-icon-svg" viewBox="0 0 100 120" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <path d="M43 58 C54 62, 60 72, 54 82 C49 90, 40 94, 37 102"
+                      stroke="white" strokeWidth="5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                    <rect x="38" y="10" width="10" height="96" rx="5" fill="white"/>
+                    <path d="M56 28 C60 36, 56 44, 48 48 C40 52, 32 54, 28 62 C24 70, 28 80, 38 84"
+                      stroke="white" strokeWidth="5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                    <circle cx="56" cy="22" r="8" fill="white"/>
+                    <path d="M74 20 C88 36, 92 58, 88 82 C86 92, 80 100, 74 104 C78 96, 80 84, 78 68 C76 52, 72 38, 74 20Z"
+                      fill="rgba(212,175,55,0.75)"/>
+                    <path d="M70 28 C80 44, 82 66, 76 88"
+                      stroke="rgba(212,175,55,0.4)" strokeWidth="2" fill="none" strokeLinecap="round"/>
+                  </svg>
+                </div>
+                <div className="footer-brand-text">
+                  <span className="footer-brand-arabic">صيدلية الأمين</span>
+                  <span className="footer-brand-english">AL AMEEN PHARMACY</span>
+                  <span className="footer-brand-subline">
+                    <span className="footer-brand-divider" aria-hidden="true" />
+                    PHARMACY LLC
+                    <span className="footer-brand-divider" aria-hidden="true" />
+                  </span>
+                </div>
+              </div>
             </div>
             <p className="footer-about">
               DHA licensed pharmacy serving Dubai with quality medicines,

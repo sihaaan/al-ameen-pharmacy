@@ -118,14 +118,14 @@ const Navbar = () => {
   return (
     <>
       <nav className="navbar">
-        <div className="nav-brand">
-          <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }} onClick={closeMobileMenu}>
-            <div className="brand-container">
-              <div className="brand-arabic">صيدلية الأمين</div>
-              <div className="brand-english">AL AMEEN PHARMACY</div>
-            </div>
-          </Link>
-        </div>
+        <Link to="/" className="nav-brand" onClick={closeMobileMenu}>
+          <img
+            src={`${process.env.PUBLIC_URL}/brand/al-ameen-pharmacy-icon.png`}
+            alt="Al Ameen Pharmacy LLC"
+            className="nav-logo"
+          />
+          <span className="nav-brand-text">Al Ameen Pharmacy</span>
+        </Link>
 
         {showSearchBar && (
           <div className="search-container" ref={searchRef}>

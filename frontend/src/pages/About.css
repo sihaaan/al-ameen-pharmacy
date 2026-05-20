@@ -15,10 +15,14 @@
     #0D9488 50%,
     #14B8A6 100%);
   color: white;
-  padding: 120px 20px 100px;
+  padding: 160px 20px 140px;
   text-align: center;
   position: relative;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 520px;
 }
 
 /* Animated mesh gradient background */
@@ -75,59 +79,124 @@
 }
 
 .hero-content {
+  width: 100%;
   max-width: 1200px;
   margin: 0 auto;
   position: relative;
   z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .logo-container {
-  margin-bottom: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 36px;
   animation: fadeSlideUp 1s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.company-branding {
+  width: 100%;
   text-align: center;
 }
 
-.company-name-arabic {
-  font-size: 36px;
-  font-weight: 800;
-  margin-bottom: 16px;
-  letter-spacing: 3px;
-  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
-  direction: rtl;
+/* Hero brand lockup — icon PNG + text */
+.about-brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 36px;
   animation: fadeSlideUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
 }
 
-.company-name-english {
-  font-size: 64px;
+.about-brand-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.about-brand-icon-svg {
+  height: 106px;
+  width: auto;
+  display: block;
+}
+
+.about-brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.about-brand-arabic {
+  font-size: 24px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.8);
+  direction: rtl;
+  line-height: 1;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+  text-align: center;
+}
+
+.about-brand-english {
+  font-size: 48px;
   font-weight: 900;
-  margin-bottom: 20px;
-  letter-spacing: 2px;
-  text-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
-  background: linear-gradient(to right, #ffffff 0%, #f0f9ff 50%, #ffffff 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #ffffff;
+  letter-spacing: 3px;
+  line-height: 1;
+  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.12);
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.about-brand-subline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(212, 175, 55, 0.9);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.about-brand-divider {
+  display: block;
+  width: 40px;
+  height: 1px;
+  background: rgba(212, 175, 55, 0.45);
+  flex-shrink: 0;
+}
+
+.hero-supporting-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  /* max-width matches the approximate rendered width of the text block in the lockup
+     so the supporting copy sits visually under the wordmark, not the full lockup width */
+  max-width: 560px;
+  width: 100%;
   animation: fadeSlideUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both;
 }
 
 .company-tagline {
-  font-size: 22px;
-  color: rgba(255, 255, 255, 0.95);
-  font-weight: 500;
-  letter-spacing: 1px;
-  animation: fadeSlideUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  text-align: center;
+  margin: 0;
 }
 
 .hero-description {
-  font-size: 20px;
-  line-height: 1.7;
-  max-width: 800px;
-  margin: 0 auto;
-  color: rgba(255, 255, 255, 0.9);
-  animation: fadeSlideUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.4s both;
+  font-size: 17px;
+  line-height: 1.85;
+  max-width: 500px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.72);
+  margin: 0;
 }
 
 @keyframes fadeSlideUp {
@@ -624,15 +693,25 @@
 
 @media (max-width: 768px) {
   .about-container .hero-section {
-    padding: 80px 20px 70px;
+    padding: 120px 20px 100px;
+    min-height: 420px;
   }
 
-  .about-container .company-name-arabic {
-    font-size: 26px;
+  .about-brand-mark {
+    gap: 20px;
   }
 
-  .about-container .company-name-english {
-    font-size: 42px;
+  .about-brand-icon-svg {
+    height: 82px;
+  }
+
+  .about-brand-english {
+    font-size: 34px;
+    letter-spacing: 2px;
+  }
+
+  .about-brand-arabic {
+    font-size: 20px;
   }
 
   .about-container .section-title {
@@ -653,8 +732,44 @@
 }
 
 @media (max-width: 480px) {
-  .about-container .company-name-english {
-    font-size: 32px;
+  .about-container .hero-section {
+    padding: 100px 20px 80px;
+    min-height: 380px;
+  }
+
+  .logo-container {
+    gap: 28px;
+  }
+
+  .about-brand-mark {
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+
+  .about-brand-text {
+    align-items: center;
+  }
+
+  .about-brand-icon-svg {
+    height: 70px;
+  }
+
+  .about-brand-english {
+    font-size: 26px;
+    letter-spacing: 1.5px;
+  }
+
+  .about-brand-arabic {
+    font-size: 18px;
+  }
+
+  .about-brand-divider {
+    width: 28px;
+  }
+
+  .hero-description {
+    font-size: 16px;
   }
 
   .about-container .section-title {
