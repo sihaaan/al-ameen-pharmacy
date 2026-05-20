@@ -11,7 +11,7 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 ### Customer-Facing
 - **Product Catalog** — 107 products across 10 parent / 33 child categories, sourced from the official brochure
 - **Multi-Image Gallery** — Multiple images per product with arrow/thumbnail navigation
-- **Category & Price Filters** — Sticky sidebar with 10 categories + AED price range bands; active filters display with clear functionality
+- **Category & Price Filters** — Sticky, independently scrollable sidebar with 10 categories + AED price range bands; active filters display with clear functionality
 - **Full-Text Search** — Two-tier Postgres search: ILIKE for short queries (<3 chars), weighted full-text ranking for longer ones
 - **show_price** — Price shown only when enabled per-product; otherwise a WhatsApp inquiry link appears
 - **Quick View Modal** — Product quick-view without leaving the catalog page
@@ -22,10 +22,11 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 - **Password Reset** — Via Gmail SMTP email link
 - **WhatsApp Integration** — Order and wholesale enquiry buttons throughout the site
 - **Responsive Design** — Mobile-first; full-screen filter overlay on small screens, Load More pagination
+- **About Page** — Company info, services, contact, location, and full footer; inline SVG brand lockup matching site branding
 
 ### Admin
 - **Product Management UI** — React-based CRUD with image upload, brand/category dropdowns, inline creation
-- **Category Management** — Hierarchical (parent → child), tab-based UI
+- **Category Management** — Hierarchical (parent → child) via Django admin at `/admin`
 - **Order Management** — Status updates: pending → processing → shipped → delivered → cancelled
 - **show_price toggle** — Flippable per-product in Django admin list view without opening the edit form
 - **Product Status Workflow** — draft / active / archived
@@ -36,27 +37,29 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 ## Tech Stack
 
 ### Backend
-- **Django 5.x** + **Django REST Framework**
+- **Django 5.2** + **Django REST Framework 3.16**
 - **PostgreSQL** (Neon serverless)
 - **JWT Authentication** — `djangorestframework-simplejwt`
 - **Cloudinary** — Image storage and CDN (`products/` and `brands/` paths)
 - **Gmail SMTP** — Transactional emails (password reset)
+- **Gunicorn** + **WhiteNoise** — Production WSGI server and static file serving
 - **Railway** — Deployment with smart migration runner
 - **Python 3.13**
 
 ### Frontend
-- **React 18**
-- **React Router v6**
+- **React 19**
+- **React Router v7**
 - **Axios** with JWT interceptors
 - **Context API** — `AuthContext`, `CartContext`
+- **Stripe SDK** — `@stripe/react-stripe-js` installed; Order model has Stripe fields (payment not yet live)
 - **Railway** — Frontend deployment
 
 ---
 
 ## Prerequisites
 
-- Python 3.11+
-- Node.js 16+
+- Python 3.13+
+- Node.js 18+
 - PostgreSQL database (Neon free tier works)
 - Cloudinary account (free tier works)
 - Git
@@ -323,11 +326,13 @@ CI=false
 - [x] Order management with status workflow
 - [x] React frontend — full auth, cart, checkout, order history
 - [x] Admin dashboard (React) — products, categories, orders
-- [x] Category + price filter sidebar (sticky, scrollable)
+- [x] Category + price filter sidebar (sticky, independently scrollable)
 - [x] WhatsApp integration (orders + wholesale)
 - [x] Responsive homepage (hero, branches, trust signals, stats, footer)
+- [x] About page with full footer, inline SVG brand lockup, services, contact, location
+- [x] Site-wide branding — inline SVG caduceus icon, gold accent, Arabic/English wordmark in hero and footer
 - [x] Deployed on Railway with custom domain (ameenpharmacy.ae)
-- [ ] Payment gateway (Stripe/Telr)
+- [ ] Payment gateway — Stripe SDK installed and Order model fields ready; payment flow not yet live
 - [ ] Email order notifications
 - [ ] Customer reviews and ratings
 - [ ] Delivery zone / shipping calculator
