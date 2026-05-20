@@ -67,3 +67,6 @@ htmlcov/
 # Brochure assets (large binaries, not needed in repo)
 brochure_extracted/
 *.pdf
+
+# Logo source assets (design files — compiled assets live in frontend/public/brand/)
+logoAssets/
