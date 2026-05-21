@@ -3,8 +3,10 @@ from django.db.models import Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
+from .import_parsers import parse_file_preview, parse_text_preview
 from .models import (
     Company,
     CompanyContact,
@@ -22,6 +24,7 @@ from .serializers import (
     CompanyContactSerializer,
     CompanyPriceHistorySerializer,
     CompanySerializer,
+    ImportedInquiryCreateSerializer,
     InquiryLineSerializer,
     InquirySerializer,
     QuotationAuditLogSerializer,
@@ -32,6 +35,7 @@ from .serializers import (
 )
 from .services import (
     audit_log,
+    create_imported_inquiry,
     create_quotation_from_inquiry,
     ensure_quotation_editable,
     finalize_quotation,
@@ -141,7 +145,7 @@ class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = InquirySerializer
-    queryset = Inquiry.objects.select_related("company", "contact", "created_by").prefetch_related("lines")
+    queryset = Inquiry.objects.select_related("company", "contact", "created_by").prefetch_related("lines", "quotations")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -164,15 +168,38 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         inquiry = serializer.save()
         audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, inquiry, message="Updated inquiry.")
 
+    @action(detail=False, methods=["post"])
+    def parse_text(self, request):
+        raw_text = request.data.get("raw_text") or request.data.get("text") or ""
+        if not str(raw_text).strip():
+            return Response({"detail": "Paste inquiry text before extracting lines."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(parse_text_preview(raw_text))
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def parse_file(self, request):
+        try:
+            preview = parse_file_preview(request.FILES.get("file"))
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return Response(preview)
+
+    @action(detail=False, methods=["post"])
+    def create_imported(self, request):
+        serializer = ImportedInquiryCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        inquiry = create_imported_inquiry(serializer.validated_data, request.user)
+        response_serializer = InquirySerializer(inquiry, context={"request": request})
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=["post"])
     def create_quote(self, request, pk=None):
         inquiry = self.get_object()
         try:
-            quotation = create_quotation_from_inquiry(inquiry, request.user)
+            quotation, created = create_quotation_from_inquiry(inquiry, request.user)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         serializer = QuotationSerializer(quotation, context={"request": request})
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class InquiryLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

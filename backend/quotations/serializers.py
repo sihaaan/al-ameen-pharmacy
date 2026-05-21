@@ -96,6 +96,7 @@ class InquiryLineSerializer(serializers.ModelSerializer):
             "id",
             "inquiry",
             "raw_name",
+            "raw_line",
             "normalized_name",
             "quantity",
             "unit",
@@ -103,6 +104,8 @@ class InquiryLineSerializer(serializers.ModelSerializer):
             "matched_quote_item",
             "matched_quote_item_name",
             "match_status",
+            "parse_status",
+            "parse_confidence",
             "sort_order",
             "created_at",
             "updated_at",
@@ -118,6 +121,8 @@ class InquirySerializer(serializers.ModelSerializer):
     contact_name = serializers.CharField(source="contact.name", read_only=True, allow_null=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     lines = InquiryLineSerializer(many=True, required=False)
+    quotation_id = serializers.SerializerMethodField()
+    quotation_number = serializers.SerializerMethodField()
 
     class Meta:
         model = Inquiry
@@ -128,6 +133,12 @@ class InquirySerializer(serializers.ModelSerializer):
             "contact",
             "contact_name",
             "source",
+            "source_type",
+            "source_filename",
+            "source_mime_type",
+            "source_sha256",
+            "parse_method",
+            "parse_meta",
             "subject",
             "original_text",
             "received_at",
@@ -135,19 +146,43 @@ class InquirySerializer(serializers.ModelSerializer):
             "created_by",
             "created_by_username",
             "lines",
+            "quotation_id",
+            "quotation_number",
             "created_at",
             "updated_at",
         ]
         read_only_fields = [
             "id",
             "source",
+            "source_type",
+            "source_filename",
+            "source_mime_type",
+            "source_sha256",
+            "parse_method",
+            "parse_meta",
             "created_by",
             "created_by_username",
+            "quotation_id",
+            "quotation_number",
             "company_name",
             "contact_name",
             "created_at",
             "updated_at",
         ]
+
+    def get_quotation_id(self, obj):
+        quotation = self._get_existing_quotation(obj)
+        return quotation.id if quotation else None
+
+    def get_quotation_number(self, obj):
+        quotation = self._get_existing_quotation(obj)
+        return quotation.quotation_number if quotation else ""
+
+    def _get_existing_quotation(self, obj):
+        quotations = getattr(obj, "_prefetched_objects_cache", {}).get("quotations")
+        if quotations is not None:
+            return sorted(quotations, key=lambda quote: (quote.version, quote.created_at, quote.pk), reverse=True)[0] if quotations else None
+        return obj.quotations.order_by("-version", "-created_at", "-pk").first()
 
     def create(self, validated_data):
         lines_data = validated_data.pop("lines", [])
@@ -160,6 +195,59 @@ class InquirySerializer(serializers.ModelSerializer):
             sort_order = line_data.pop("sort_order", index)
             InquiryLine.objects.create(inquiry=inquiry, sort_order=sort_order, **line_data)
         return inquiry
+
+
+class ImportedInquiryLineSerializer(serializers.Serializer):
+    raw_name = serializers.CharField(max_length=255)
+    raw_line = serializers.CharField(required=False, allow_blank=True)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=3, required=False, allow_null=True)
+    unit = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    matched_quote_item = serializers.PrimaryKeyRelatedField(
+        queryset=QuoteItem.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    match_status = serializers.ChoiceField(
+        choices=InquiryLine.MATCH_STATUS_CHOICES,
+        default=InquiryLine.MATCH_UNRESOLVED,
+    )
+    parse_status = serializers.ChoiceField(
+        choices=InquiryLine.PARSE_STATUS_CHOICES,
+        default=InquiryLine.PARSE_NEEDS_REVIEW,
+    )
+    parse_confidence = serializers.FloatField(min_value=0, max_value=1, required=False, default=0.0)
+
+
+class ImportedInquiryCreateSerializer(serializers.Serializer):
+    company = serializers.PrimaryKeyRelatedField(queryset=Company.objects.all())
+    contact = serializers.PrimaryKeyRelatedField(
+        queryset=CompanyContact.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    subject = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    original_text = serializers.CharField(required=False, allow_blank=True)
+    source_type = serializers.ChoiceField(
+        choices=[
+            Inquiry.SOURCE_TYPE_PASTED_TEXT,
+            Inquiry.SOURCE_TYPE_EXCEL,
+            Inquiry.SOURCE_TYPE_PDF,
+        ]
+    )
+    source_filename = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    source_mime_type = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    source_sha256 = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    parse_method = serializers.CharField(max_length=80, required=False, allow_blank=True)
+    parse_meta = serializers.JSONField(required=False, default=dict)
+    lines = ImportedInquiryLineSerializer(many=True, allow_empty=False)
+
+    def validate(self, attrs):
+        contact = attrs.get("contact")
+        company = attrs.get("company")
+        if contact and company and contact.company_id != company.id:
+            raise serializers.ValidationError({"contact": "Contact must belong to the selected company."})
+        return attrs
 
 
 class QuotationLineSerializer(serializers.ModelSerializer):

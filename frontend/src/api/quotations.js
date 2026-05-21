@@ -77,6 +77,11 @@ const quotationAPI = {
     list: (params = {}) => axiosInstance.get('/quotations/inquiries/', { params }),
     create: (data) => axiosInstance.post('/quotations/inquiries/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/inquiries/${id}/`, data),
+    parseText: (data) => axiosInstance.post('/quotations/inquiries/parse_text/', data),
+    parseFile: (formData) => axiosInstance.post('/quotations/inquiries/parse_file/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+    createImported: (data) => axiosInstance.post('/quotations/inquiries/create_imported/', data),
     createQuote: (id) => axiosInstance.post(`/quotations/inquiries/${id}/create_quote/`),
   },
   inquiryLines: {

@@ -109,8 +109,21 @@ class QuoteItem(models.Model):
 
 class Inquiry(models.Model):
     SOURCE_MANUAL = "manual"
+    SOURCE_IMPORTED = "imported"
     SOURCE_CHOICES = [
         (SOURCE_MANUAL, "Manual"),
+        (SOURCE_IMPORTED, "Imported"),
+    ]
+
+    SOURCE_TYPE_MANUAL = "manual"
+    SOURCE_TYPE_PASTED_TEXT = "pasted_text"
+    SOURCE_TYPE_EXCEL = "excel"
+    SOURCE_TYPE_PDF = "pdf"
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_TYPE_MANUAL, "Manual"),
+        (SOURCE_TYPE_PASTED_TEXT, "Pasted Text"),
+        (SOURCE_TYPE_EXCEL, "Excel"),
+        (SOURCE_TYPE_PDF, "PDF"),
     ]
 
     STATUS_DRAFT = "draft"
@@ -131,6 +144,12 @@ class Inquiry(models.Model):
         related_name="inquiries",
     )
     source = models.CharField(max_length=30, choices=SOURCE_CHOICES, default=SOURCE_MANUAL)
+    source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES, default=SOURCE_TYPE_MANUAL)
+    source_filename = models.CharField(max_length=255, blank=True)
+    source_mime_type = models.CharField(max_length=120, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    parse_method = models.CharField(max_length=80, blank=True)
+    parse_meta = models.JSONField(default=dict, blank=True)
     subject = models.CharField(max_length=255, blank=True)
     original_text = models.TextField(blank=True)
     received_at = models.DateTimeField(default=timezone.now)
@@ -166,9 +185,20 @@ class InquiryLine(models.Model):
         (MATCH_CONFIRMED, "Confirmed"),
         (MATCH_IGNORED, "Ignored"),
     ]
+    PARSE_MANUAL = "manual"
+    PARSE_PARSED = "parsed"
+    PARSE_NEEDS_REVIEW = "needs_review"
+    PARSE_UNPARSED = "unparsed"
+    PARSE_STATUS_CHOICES = [
+        (PARSE_MANUAL, "Manual"),
+        (PARSE_PARSED, "Parsed"),
+        (PARSE_NEEDS_REVIEW, "Needs Review"),
+        (PARSE_UNPARSED, "Unparsed"),
+    ]
 
     inquiry = models.ForeignKey(Inquiry, on_delete=models.CASCADE, related_name="lines")
     raw_name = models.CharField(max_length=255)
+    raw_line = models.TextField(blank=True)
     normalized_name = models.CharField(max_length=255, db_index=True, editable=False)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     unit = models.CharField(max_length=50, blank=True)
@@ -185,6 +215,8 @@ class InquiryLine(models.Model):
         choices=MATCH_STATUS_CHOICES,
         default=MATCH_UNRESOLVED,
     )
+    parse_status = models.CharField(max_length=30, choices=PARSE_STATUS_CHOICES, default=PARSE_MANUAL)
+    parse_confidence = models.FloatField(default=1.0)
     sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -440,6 +472,7 @@ class QuotationAuditLog(models.Model):
     ACTION_FINALIZED = "finalized"
     ACTION_REVISED = "revised"
     ACTION_PDF_DOWNLOADED = "pdf_downloaded"
+    ACTION_IMPORTED = "imported"
     ACTION_CHOICES = [
         (ACTION_CREATED, "Created"),
         (ACTION_UPDATED, "Updated"),
@@ -448,6 +481,7 @@ class QuotationAuditLog(models.Model):
         (ACTION_FINALIZED, "Finalized"),
         (ACTION_REVISED, "Revised"),
         (ACTION_PDF_DOWNLOADED, "PDF Downloaded"),
+        (ACTION_IMPORTED, "Imported"),
     ]
 
     actor = models.ForeignKey(

@@ -52,9 +52,9 @@ class InquiryLineInline(admin.TabularInline):
 
 @admin.register(Inquiry)
 class InquiryAdmin(admin.ModelAdmin):
-    list_display = ["subject", "company", "status", "received_at", "created_by"]
-    list_filter = ["status", "source", "received_at"]
-    search_fields = ["subject", "company__name", "original_text"]
+    list_display = ["subject", "company", "status", "source_type", "received_at", "created_by"]
+    list_filter = ["status", "source", "source_type", "parse_method", "received_at"]
+    search_fields = ["subject", "company__name", "original_text", "source_filename", "source_sha256"]
     autocomplete_fields = ["company", "contact", "created_by"]
     readonly_fields = ["created_at", "updated_at"]
     inlines = [InquiryLineInline]
@@ -62,9 +62,9 @@ class InquiryAdmin(admin.ModelAdmin):
 
 @admin.register(InquiryLine)
 class InquiryLineAdmin(admin.ModelAdmin):
-    list_display = ["raw_name", "inquiry", "quantity", "unit", "match_status", "sort_order"]
-    list_filter = ["match_status"]
-    search_fields = ["raw_name", "inquiry__subject", "matched_quote_item__name"]
+    list_display = ["raw_name", "inquiry", "quantity", "unit", "match_status", "parse_status", "parse_confidence", "sort_order"]
+    list_filter = ["match_status", "parse_status"]
+    search_fields = ["raw_name", "raw_line", "inquiry__subject", "matched_quote_item__name"]
     autocomplete_fields = ["inquiry", "matched_quote_item"]
     readonly_fields = ["normalized_name", "created_at", "updated_at"]
 

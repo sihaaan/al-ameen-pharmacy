@@ -105,6 +105,28 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'  # Where collectstatic puts files
 
+# ---- quotation PDF branding ----
+# Override these in Railway/local env when the final business details are confirmed.
+QUOTATION_COMPANY_NAME = os.environ.get("QUOTATION_COMPANY_NAME", "Al Ameen Pharmacy")
+QUOTATION_COMPANY_NAME_AR = os.environ.get("QUOTATION_COMPANY_NAME_AR", "")
+QUOTATION_COMPANY_ADDRESS = os.environ.get("QUOTATION_COMPANY_ADDRESS", "Dubai, United Arab Emirates")
+QUOTATION_COMPANY_PHONE = os.environ.get("QUOTATION_COMPANY_PHONE", "+971 50 545 6388")
+QUOTATION_COMPANY_EMAIL = os.environ.get("QUOTATION_COMPANY_EMAIL", "alameenpharmacyllc@gmail.com")
+QUOTATION_COMPANY_TRN = os.environ.get("QUOTATION_COMPANY_TRN", "")
+QUOTATION_LOGO_PATH = os.environ.get(
+    "QUOTATION_LOGO_PATH",
+    str(BASE_DIR.parent / "frontend" / "public" / "brand" / "al-ameen-pharmacy-logo-dark.png"),
+)
+QUOTATION_DEFAULT_TERMS = os.environ.get(
+    "QUOTATION_DEFAULT_TERMS",
+    "Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
+)
+QUOTATION_VALIDITY_DAYS = int(os.environ.get("QUOTATION_VALIDITY_DAYS", "14"))
+QUOTATION_PAYMENT_TERMS = os.environ.get("QUOTATION_PAYMENT_TERMS", "Payment terms to be confirmed with the customer.")
+QUOTATION_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_IMPORT_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
+QUOTATION_IMPORT_MAX_EXCEL_ROWS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_ROWS", "500"))
+QUOTATION_IMPORT_MAX_PDF_PAGES = int(os.environ.get("QUOTATION_IMPORT_MAX_PDF_PAGES", "10"))
+
 # ---- Cloudinary Configuration (Cloud Image Storage) ----
 # Images will be stored on Cloudinary CDN instead of local filesystem
 

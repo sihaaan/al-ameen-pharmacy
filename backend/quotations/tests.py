@@ -1,11 +1,17 @@
 from decimal import Decimal
+from io import BytesIO
 
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
+from openpyxl import Workbook
+from pypdf import PdfWriter
+from reportlab.pdfgen import canvas
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Company, CompanyPriceHistory, Quotation, QuotationLine, QuoteItem
+from .models import Company, CompanyContact, CompanyPriceHistory, Inquiry, InquiryLine, Quotation, QuotationLine, QuoteItem
 
 
 class QuotationPermissionTests(APITestCase):
@@ -140,6 +146,25 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(revision.parent, quotation)
         self.assertEqual(revision.lines.count(), 1)
 
+    def test_create_quote_from_inquiry_is_idempotent(self):
+        inquiry = Inquiry.objects.create(company=self.company, subject="Repeat inquiry", created_by=self.staff)
+        InquiryLine.objects.create(
+            inquiry=inquiry,
+            raw_name="Bandage Pack",
+            matched_quote_item=self.quote_item,
+            quantity=Decimal("2.000"),
+            unit="box",
+            match_status=InquiryLine.MATCH_CONFIRMED,
+        )
+
+        first_response = self.client.post(reverse("quotation-inquiry-create-quote", args=[inquiry.id]))
+        second_response = self.client.post(reverse("quotation-inquiry-create-quote", args=[inquiry.id]))
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["id"], second_response.data["id"])
+        self.assertEqual(Quotation.objects.filter(inquiry=inquiry).count(), 1)
+
     def test_pdf_endpoint_is_staff_only(self):
         quotation = self.create_quote()
         self.create_valid_line(quotation)
@@ -152,3 +177,233 @@ class QuotationWorkflowTests(APITestCase):
         allowed = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         self.assertEqual(allowed["Content-Type"], "application/pdf")
+
+
+class InquiryImportTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="import_staff", password="pass", is_staff=True)
+        self.customer = User.objects.create_user(username="import_customer", password="pass")
+        self.company = Company.objects.create(name="Import Company")
+        self.contact = CompanyContact.objects.create(company=self.company, name="Buyer")
+        self.client.force_authenticate(self.staff)
+
+    def make_excel_upload(self, name="inquiry.xlsx"):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "LPO"
+        sheet.append(["Item", "Qty", "Unit"])
+        sheet.append(["Panadol 500mg", 10, "box"])
+        sheet.append(["Gloves medium", 5, "packs"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return SimpleUploadedFile(
+            name,
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    def make_pdf_upload(self, text=True, encrypted=False, name="inquiry.pdf"):
+        buffer = BytesIO()
+        if text:
+            pdf = canvas.Canvas(buffer)
+            pdf.drawString(72, 740, "Panadol 500mg - 10 boxes")
+            pdf.drawString(72, 720, "Gloves medium 5 packs")
+            pdf.save()
+            data = buffer.getvalue()
+        else:
+            writer = PdfWriter()
+            writer.add_blank_page(width=300, height=300)
+            if encrypted:
+                writer.encrypt("secret")
+            writer.write(buffer)
+            data = buffer.getvalue()
+        return SimpleUploadedFile(name, data, content_type="application/pdf")
+
+    def test_import_actions_are_staff_only(self):
+        actions = [
+            ("post", reverse("quotation-inquiry-parse-text"), {"raw_text": "Panadol 500mg - 10 boxes"}, "json"),
+            ("post", reverse("quotation-inquiry-parse-file"), {"file": self.make_excel_upload()}, "multipart"),
+            (
+                "post",
+                reverse("quotation-inquiry-create-imported"),
+                {
+                    "company": self.company.id,
+                    "source_type": Inquiry.SOURCE_TYPE_PASTED_TEXT,
+                    "lines": [{"raw_name": "Panadol 500mg", "raw_line": "Panadol 500mg - 10 boxes"}],
+                },
+                "json",
+            ),
+        ]
+
+        self.client.force_authenticate(None)
+        for method, url, payload, request_format in actions:
+            with self.subTest(url=url, user="anonymous"):
+                response = getattr(self.client, method)(url, payload, format=request_format)
+                self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+        self.client.force_authenticate(self.customer)
+        for method, url, payload, request_format in actions:
+            with self.subTest(url=url, user="customer"):
+                if url.endswith("parse_file/"):
+                    payload = {"file": self.make_excel_upload()}
+                response = getattr(self.client, method)(url, payload, format=request_format)
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.staff)
+        staff_actions = [
+            ("post", reverse("quotation-inquiry-parse-text"), {"raw_text": "Panadol 500mg - 10 boxes"}, "json", status.HTTP_200_OK),
+            ("post", reverse("quotation-inquiry-parse-file"), {"file": self.make_excel_upload()}, "multipart", status.HTTP_200_OK),
+            (
+                "post",
+                reverse("quotation-inquiry-create-imported"),
+                {
+                    "company": self.company.id,
+                    "source_type": Inquiry.SOURCE_TYPE_PASTED_TEXT,
+                    "lines": [{"raw_name": "Panadol 500mg", "raw_line": "Panadol 500mg - 10 boxes"}],
+                },
+                "json",
+                status.HTTP_201_CREATED,
+            ),
+        ]
+        for method, url, payload, request_format, expected_status in staff_actions:
+            with self.subTest(url=url, user="staff"):
+                response = getattr(self.client, method)(url, payload, format=request_format)
+                self.assertEqual(response.status_code, expected_status)
+
+    def test_parse_text_examples(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-text"),
+            {
+                "raw_text": "\n".join(
+                    [
+                        "Panadol 500mg - 10 boxes",
+                        "Panadol 500mg x 10",
+                        "10 boxes Panadol 500mg",
+                        "Gloves medium 5 packs",
+                        "1. Panadol 500mg - 10 box",
+                    ]
+                )
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["lines"]), 5)
+        self.assertEqual(response.data["lines"][0]["raw_name"], "Panadol 500mg")
+        self.assertEqual(response.data["lines"][0]["quantity"], "10")
+        self.assertEqual(response.data["lines"][0]["unit"].lower(), "boxes")
+
+    def test_invalid_extension_rejected(self):
+        upload = SimpleUploadedFile("inquiry.txt", b"Panadol 500mg - 10 boxes", content_type="text/plain")
+        response = self.client.post(reverse("quotation-inquiry-parse-file"), {"file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Unsupported file type", str(response.data))
+
+    @override_settings(QUOTATION_IMPORT_MAX_UPLOAD_BYTES=12)
+    def test_file_size_limit_rejected(self):
+        upload = SimpleUploadedFile("big.xlsx", b"PK" + b"x" * 100, content_type="application/octet-stream")
+        response = self.client.post(reverse("quotation-inquiry-parse-file"), {"file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("too large", str(response.data))
+
+    def test_excel_parse_happy_path(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_excel_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["source_type"], Inquiry.SOURCE_TYPE_EXCEL)
+        self.assertEqual(response.data["parse_method"], "openpyxl_v1")
+        self.assertEqual(len(response.data["lines"]), 2)
+        self.assertEqual(response.data["lines"][0]["source_sheet"], "LPO")
+        self.assertEqual(response.data["lines"][0]["raw_name"], "Panadol 500mg")
+
+    def test_pdf_parse_happy_path(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_pdf_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["source_type"], Inquiry.SOURCE_TYPE_PDF)
+        self.assertEqual(response.data["parse_method"], "pypdf_pdfplumber_v1")
+        self.assertGreaterEqual(len(response.data["lines"]), 2)
+        self.assertIn("Panadol 500mg", response.data["lines"][0]["raw_name"])
+
+    def test_pdf_no_selectable_text_returns_warning(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_pdf_upload(text=False)},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["lines"], [])
+        self.assertIn("No selectable text detected", response.data["warnings"][0])
+
+    def test_encrypted_pdf_rejected(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_pdf_upload(text=False, encrypted=True)},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Encrypted PDF files are not supported", str(response.data))
+
+    def test_create_imported_creates_inquiry_and_lines_atomically(self):
+        payload = {
+            "company": self.company.id,
+            "contact": self.contact.id,
+            "subject": "Imported LPO",
+            "original_text": "Panadol 500mg - 10 boxes",
+            "source_type": Inquiry.SOURCE_TYPE_PASTED_TEXT,
+            "source_filename": "",
+            "source_mime_type": "text/plain",
+            "source_sha256": "a" * 64,
+            "parse_method": "deterministic_text_v1",
+            "parse_meta": {"warnings": []},
+            "lines": [
+                {
+                    "raw_name": "Panadol 500mg",
+                    "raw_line": "Panadol 500mg - 10 boxes",
+                    "quantity": "10.000",
+                    "unit": "boxes",
+                    "parse_status": InquiryLine.PARSE_PARSED,
+                    "parse_confidence": 0.9,
+                }
+            ],
+        }
+
+        response = self.client.post(reverse("quotation-inquiry-create-imported"), payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        inquiry = Inquiry.objects.get(id=response.data["id"])
+        self.assertEqual(inquiry.source, Inquiry.SOURCE_IMPORTED)
+        self.assertEqual(inquiry.source_type, Inquiry.SOURCE_TYPE_PASTED_TEXT)
+        self.assertEqual(inquiry.lines.count(), 1)
+        line = inquiry.lines.get()
+        self.assertEqual(line.raw_line, "Panadol 500mg - 10 boxes")
+        self.assertEqual(line.parse_status, InquiryLine.PARSE_PARSED)
+
+    def test_manual_inquiry_flow_still_works(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-list"),
+            {
+                "company": self.company.id,
+                "subject": "Manual inquiry still works",
+                "lines": [{"raw_name": "Manual Item", "quantity": "1.000", "unit": "box"}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        inquiry = Inquiry.objects.get(id=response.data["id"])
+        self.assertEqual(inquiry.source, Inquiry.SOURCE_MANUAL)
+        self.assertEqual(inquiry.source_type, Inquiry.SOURCE_TYPE_MANUAL)
+        self.assertEqual(inquiry.lines.count(), 1)

@@ -54,8 +54,54 @@ def recalculate_quotation_totals(quotation):
 
 
 @transaction.atomic
+def create_imported_inquiry(validated_data, actor):
+    lines_data = validated_data.pop("lines")
+    inquiry = Inquiry.objects.create(
+        source=Inquiry.SOURCE_IMPORTED,
+        created_by=actor if getattr(actor, "is_authenticated", False) else None,
+        **validated_data,
+    )
+    for index, line_data in enumerate(lines_data):
+        InquiryLine.objects.create(
+            inquiry=inquiry,
+            sort_order=index,
+            raw_line=line_data.get("raw_line", ""),
+            raw_name=line_data["raw_name"],
+            quantity=line_data.get("quantity"),
+            unit=line_data.get("unit", ""),
+            notes=line_data.get("notes", ""),
+            matched_quote_item=line_data.get("matched_quote_item"),
+            match_status=line_data.get("match_status", InquiryLine.MATCH_UNRESOLVED),
+            parse_status=line_data.get("parse_status", InquiryLine.PARSE_NEEDS_REVIEW),
+            parse_confidence=line_data.get("parse_confidence", 0.0),
+        )
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_IMPORTED,
+        inquiry,
+        message=f"Imported inquiry {inquiry.pk} with {len(lines_data)} reviewed line(s).",
+        changes={
+            "source_type": inquiry.source_type,
+            "source_filename": inquiry.source_filename,
+            "parse_method": inquiry.parse_method,
+            "line_count": len(lines_data),
+        },
+    )
+    return inquiry
+
+
+@transaction.atomic
 def create_quotation_from_inquiry(inquiry, actor):
     inquiry = Inquiry.objects.select_for_update().select_related("company").get(pk=inquiry.pk)
+    existing = (
+        Quotation.objects.filter(inquiry=inquiry)
+        .select_related("company", "contact", "inquiry", "created_by", "finalized_by", "parent")
+        .order_by("-version", "-created_at", "-pk")
+        .first()
+    )
+    if existing:
+        return existing, False
+
     quotation = Quotation.objects.create(
         company=inquiry.company,
         contact=inquiry.contact,
@@ -87,7 +133,7 @@ def create_quotation_from_inquiry(inquiry, actor):
         quotation,
         message=f"Created quotation {quotation.quotation_number} from inquiry {inquiry.pk}.",
     )
-    return quotation
+    return quotation, True
 
 
 def _validate_line_for_finalization(line):

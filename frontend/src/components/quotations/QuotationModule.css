@@ -160,6 +160,7 @@
   min-width: 190px;
 }
 
+.qm-import-panel label,
 .qm-form {
   display: flex;
   flex-direction: column;
@@ -177,6 +178,34 @@
   color: #374151;
   font-size: 13px;
   font-weight: 700;
+}
+
+.qm-import-panel label,
+.qm-full-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-label-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-height: 18px;
+}
+
+.qm-import-panel input,
+.qm-import-panel textarea,
+.qm-import-panel select {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+  background: #ffffff;
 }
 
 .qm-checkbox {
@@ -231,6 +260,10 @@
 
 .line-table {
   min-width: 1040px;
+}
+
+.import-table {
+  min-width: 980px;
 }
 
 .qm-badge {
@@ -399,7 +432,39 @@
   gap: 10px;
 }
 
-.qm-line-form,
+.qm-line-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+  max-width: 100%;
+}
+
+.qm-line-form input,
+.qm-line-form select {
+  min-width: 0;
+}
+
+.qm-line-form input:first-child {
+  flex: 2 1 220px;
+}
+
+.qm-line-form input[type="number"] {
+  flex: 0 1 92px;
+}
+
+.qm-line-form input:not(:first-child):not([type="number"]) {
+  flex: 0 1 96px;
+}
+
+.qm-line-form select {
+  flex: 1 1 190px;
+}
+
+.qm-line-form button {
+  flex: 0 0 auto;
+}
+
 .qm-add-line {
   display: grid;
   grid-template-columns: minmax(160px, 1.4fr) 90px 90px minmax(160px, 1fr) auto;
@@ -410,6 +475,252 @@
 .qm-add-line {
   grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1.2fr) 80px 90px 100px auto;
   margin-top: 14px;
+}
+
+.qm-success,
+.qm-feedback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.qm-success {
+  border: 1px solid #a7f3d0;
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.qm-success p {
+  margin: 4px 0 0;
+}
+
+.qm-feedback.success {
+  border: 1px solid #a7f3d0;
+  background: #ecfdf5;
+  color: #065f46;
+  font-weight: 700;
+}
+
+.qm-feedback.error {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #7f1d1d;
+  font-weight: 700;
+}
+
+.qm-import-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.qm-mode-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 8px;
+  background: #f3f4f6;
+}
+
+.qm-mode-tabs button {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 11px;
+  background: transparent;
+  color: #4b5563;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.qm-mode-tabs button.active {
+  background: #ffffff;
+  color: #0f766e;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.qm-import-source {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.qm-import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.qm-preview-meta,
+.qm-import-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.qm-preview-meta span {
+  padding: 6px 9px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-confidence {
+  display: inline-flex;
+  min-width: 46px;
+  justify-content: center;
+  padding: 5px 7px;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-workflow-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.qm-workflow-step.compact {
+  align-items: center;
+  margin: 2px 0 0;
+}
+
+.qm-workflow-step > span {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #ccfbf1;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-workflow-step h3,
+.qm-workflow-step h4,
+.qm-workflow-step p {
+  margin: 0;
+}
+
+.qm-workflow-step p {
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.qm-workflow-step button {
+  margin-left: auto;
+}
+
+.qm-required {
+  color: #b91c1c;
+  font-weight: 900;
+}
+
+.qm-helper {
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.qm-status-progress {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.qm-status-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #6b7280;
+  font-weight: 800;
+}
+
+.qm-status-step span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 12px;
+}
+
+.qm-status-step p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.qm-status-step.complete {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+  color: #0f766e;
+}
+
+.qm-status-step.complete span,
+.qm-status-step.active span {
+  background: #0d9488;
+  color: #ffffff;
+}
+
+.qm-status-step.active {
+  border-color: #0d9488;
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.12);
+}
+
+.qm-save-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 0;
+}
+
+.qm-unsaved,
+.qm-saved,
+.qm-line-state {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-unsaved,
+.qm-line-state.unsaved {
+  color: #b45309;
+}
+
+.qm-saved,
+.qm-line-state.saved {
+  color: #047857;
+}
+
+.qm-line-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  white-space: nowrap;
 }
 
 .qm-total {
@@ -426,8 +737,11 @@
     grid-template-columns: 1fr;
   }
 
-  .qm-line-form,
   .qm-add-line {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-status-progress {
     grid-template-columns: 1fr;
   }
 }
@@ -446,5 +760,28 @@
   .qm-action-row button,
   .qm-controls .qm-input {
     flex: 1;
+  }
+
+  .qm-line-form > * {
+    flex: 1 1 100%;
+  }
+
+  .qm-line-form button,
+  .qm-success button {
+    width: 100%;
+  }
+
+  .qm-success {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qm-import-source {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-mode-tabs {
+    width: 100%;
+    overflow-x: auto;
   }
 }
