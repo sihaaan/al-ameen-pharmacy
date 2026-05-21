@@ -16,7 +16,7 @@ from .serializers import (
     UserRegistrationSerializer, UserSerializer,
     BrandSerializer,
     CategorySerializer, CategoryListSerializer,
-    ProductListSerializer, ProductDetailSerializer, ProductCreateUpdateSerializer,
+    ProductListSerializer, ProductOptionSerializer, ProductDetailSerializer, ProductCreateUpdateSerializer,
     ProductImageSerializer,
     SupplierSerializer, ProductSupplierSerializer,
     CartSerializer, CartItemSerializer,
@@ -203,6 +203,8 @@ class ProductViewSet(viewsets.ModelViewSet):
             return ProductDetailSerializer
         if self.action in ['create', 'update', 'partial_update']:
             return ProductCreateUpdateSerializer
+        if self.action == 'list' and self.request.query_params.get('compact') == 'true':
+            return ProductOptionSerializer
         return ProductListSerializer
 
     def get_permissions(self):
@@ -273,9 +275,13 @@ class ProductViewSet(viewsets.ModelViewSet):
         Advanced product filtering and search.
         Supports: search, category, brand, featured, status
         """
-        queryset = Product.objects.select_related('brand', 'category').prefetch_related(
-            Prefetch('images', queryset=ProductImage.objects.order_by('-is_primary', 'display_order'))
-        )
+        compact = self.request.query_params.get('compact') == 'true'
+        if compact:
+            queryset = Product.objects.all()
+        else:
+            queryset = Product.objects.select_related('brand', 'category').prefetch_related(
+                Prefetch('images', queryset=ProductImage.objects.order_by('-is_primary', 'display_order'))
+            )
 
         # Non-admin users only see active products
         if not self.request.user.is_staff:
@@ -348,9 +354,21 @@ class ProductViewSet(viewsets.ModelViewSet):
                     Q(active_ingredient__icontains=search_query)
                 ).order_by('-rank', 'name')[:20]
         else:
-            queryset = queryset.order_by('-is_featured', 'name')
+            queryset = queryset.order_by('name' if compact else '-is_featured', 'name')
+
+        if compact and not search_query:
+            try:
+                limit = int(self.request.query_params.get('limit', 200))
+            except (TypeError, ValueError):
+                limit = 200
+            queryset = queryset[:max(1, min(limit, 500))]
 
         return queryset
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Lightweight product summary for admin dashboard stats."""
+        return Response({'count': self.get_queryset().count()})
 
 
 # ====================

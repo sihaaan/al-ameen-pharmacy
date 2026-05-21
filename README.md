@@ -25,6 +25,7 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 - **About Page** — Company info, services, contact, location, and full footer; inline SVG brand lockup matching site branding
 
 ### Admin
+- **Quotation Module** - Staff-only quotation workflow in `Admin Dashboard -> Quotations` for companies, quote items, inquiries, price history, finalization, and PDFs
 - **Product Management UI** — React-based CRUD with image upload, brand/category dropdowns, inline creation
 - **Category Management** — Hierarchical (parent → child) via Django admin at `/admin`
 - **Order Management** — Status updates: pending → processing → shipped → delivered → cancelled
@@ -313,6 +314,7 @@ CI=false
 
 ## Roadmap
 
+- [ ] Quotation module - staff-only admin workflow for company quotations, price history, finalization, and PDFs
 - [x] Django backend with REST API
 - [x] PostgreSQL via Neon
 - [x] Cloudinary image storage and CDN

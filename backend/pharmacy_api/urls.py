@@ -30,6 +30,7 @@ urlpatterns = [
 
     # All API endpoints from our api app
     path('api/', include('api.urls')),
+    path('api/quotations/', include('quotations.urls')),
 ]
 
 # Serve media files in development (images uploaded via admin)

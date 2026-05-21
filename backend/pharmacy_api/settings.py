@@ -34,7 +34,8 @@ INSTALLED_APPS = [
     'rest_framework','corsheaders',
     'cloudinary_storage',  # Must be before django.contrib.staticfiles
     'cloudinary',
-    'api'
+    'api',
+    'quotations',
 ]
 
 # ---- middleware (CORS FIRST) ----

@@ -107,6 +107,15 @@
   gap: 32px;
 }
 
+.admin-error {
+  padding: 14px 16px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-weight: 600;
+}
+
 /* Stats Grid */
 .stats-grid {
   display: grid;

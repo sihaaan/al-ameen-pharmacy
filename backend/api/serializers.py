@@ -172,6 +172,15 @@ class ProductListSerializer(serializers.ModelSerializer):
         return None
 
 
+class ProductOptionSerializer(serializers.ModelSerializer):
+    """Tiny product serializer for dropdowns and count-light admin workflows."""
+
+    class Meta:
+        model = Product
+        fields = ['id', 'name']
+        read_only_fields = ['id']
+
+
 class ProductDetailSerializer(serializers.ModelSerializer):
     """
     Full product serializer with all details, images, and related data.

@@ -239,6 +239,12 @@ class Product(models.Model):
     @property
     def primary_image(self):
         """Get primary product image"""
+        prefetched_images = getattr(self, '_prefetched_objects_cache', {}).get('images')
+        if prefetched_images is not None:
+            for image in prefetched_images:
+                if image.is_primary:
+                    return image
+            return prefetched_images[0] if prefetched_images else None
         return self.images.filter(is_primary=True).first() or self.images.first()
 
     def save(self, *args, **kwargs):

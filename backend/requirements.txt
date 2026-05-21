@@ -53,6 +53,9 @@ Pillow==11.3.0
 cloudinary==1.41.0
 django-cloudinary-storage==0.3.0
 
+# PDF generation for staff-only quotations
+reportlab==4.4.3
+
 # Email Backend
 # django-anymail==13.0.2
 

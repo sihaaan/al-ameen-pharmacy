@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import axiosInstance from '../utils/axios';
 import ProductManagement from '../components/ProductManagement';
 import OrderManagement from '../components/OrderManagement';
+import QuotationModule from '../components/quotations/QuotationModule';
 import '../styles/Dashboard.css';
 
 const AdminDashboard = () => {
@@ -17,7 +18,8 @@ const AdminDashboard = () => {
     pendingOrders: 0,
     totalRevenue: 0
   });
-  const [loading, setLoading] = useState(true);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState('');
 
   // Check if user is admin
   useEffect(() => {
@@ -32,9 +34,11 @@ const AdminDashboard = () => {
   }, [user, navigate]);
 
   const fetchStats = async () => {
+    setStatsLoading(true);
+    setStatsError('');
     try {
-      const [productsRes, ordersRes] = await Promise.all([
-        axiosInstance.get('/products/'),
+      const [productSummaryRes, ordersRes] = await Promise.all([
+        axiosInstance.get('/products/summary/'),
         axiosInstance.get('/orders/')
       ]);
 
@@ -45,26 +49,18 @@ const AdminDashboard = () => {
         .reduce((sum, o) => sum + parseFloat(o.total_amount), 0);
 
       setStats({
-        totalProducts: productsRes.data.length,
+        totalProducts: productSummaryRes.data.count || 0,
         totalOrders: orders.length,
         pendingOrders: pendingCount,
         totalRevenue: revenue
       });
-      setLoading(false);
     } catch (error) {
       console.error('Error fetching stats:', error);
-      setLoading(false);
+      setStatsError('Could not load dashboard stats');
+    } finally {
+      setStatsLoading(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="admin-loading">
-        <div className="loading-spinner-admin"></div>
-        <p>Loading dashboard...</p>
-      </div>
-    );
-  }
 
   return (
     <div className="admin-dashboard">
@@ -92,16 +88,23 @@ const AdminDashboard = () => {
         >
           📋 Orders
         </button>
+        <button
+          className={`tab-button ${activeTab === 'quotations' ? 'active' : ''}`}
+          onClick={() => setActiveTab('quotations')}
+        >
+          Quotations
+        </button>
       </div>
 
       <div className="admin-content">
         {activeTab === 'overview' && (
           <div className="overview-section">
+            {statsError && <div className="admin-error">{statsError}</div>}
             <div className="stats-grid">
               <div className="stat-card">
                 <div className="stat-icon" style={{ background: '#3b82f6' }}>📦</div>
                 <div className="stat-details">
-                  <h3>{stats.totalProducts}</h3>
+                  <h3>{statsLoading ? '...' : stats.totalProducts}</h3>
                   <p>Total Products</p>
                 </div>
               </div>
@@ -109,7 +112,7 @@ const AdminDashboard = () => {
               <div className="stat-card">
                 <div className="stat-icon" style={{ background: '#10b981' }}>📋</div>
                 <div className="stat-details">
-                  <h3>{stats.totalOrders}</h3>
+                  <h3>{statsLoading ? '...' : stats.totalOrders}</h3>
                   <p>Total Orders</p>
                 </div>
               </div>
@@ -117,7 +120,7 @@ const AdminDashboard = () => {
               <div className="stat-card">
                 <div className="stat-icon" style={{ background: '#f59e0b' }}>⏳</div>
                 <div className="stat-details">
-                  <h3>{stats.pendingOrders}</h3>
+                  <h3>{statsLoading ? '...' : stats.pendingOrders}</h3>
                   <p>Pending Orders</p>
                 </div>
               </div>
@@ -125,7 +128,7 @@ const AdminDashboard = () => {
               <div className="stat-card">
                 <div className="stat-icon" style={{ background: '#8b5cf6' }}>💰</div>
                 <div className="stat-details">
-                  <h3>AED {stats.totalRevenue.toFixed(2)}</h3>
+                  <h3>{statsLoading ? '...' : `AED ${stats.totalRevenue.toFixed(2)}`}</h3>
                   <p>Total Revenue</p>
                 </div>
               </div>
@@ -148,6 +151,13 @@ const AdminDashboard = () => {
                   <span>📦</span>
                   View Orders
                 </button>
+                <button
+                  className="action-button"
+                  onClick={() => setActiveTab('quotations')}
+                >
+                  <span>QT</span>
+                  Manage Quotations
+                </button>
               </div>
             </div>
           </div>
@@ -155,6 +165,7 @@ const AdminDashboard = () => {
 
         {activeTab === 'products' && <ProductManagement onUpdate={fetchStats} />}
         {activeTab === 'orders' && <OrderManagement onUpdate={fetchStats} />}
+        {activeTab === 'quotations' && <QuotationModule />}
       </div>
     </div>
   );

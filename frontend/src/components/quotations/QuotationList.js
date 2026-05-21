@@ -1,0 +1,152 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import QuotationErrorNotice from './QuotationErrorNotice';
+
+const statusLabels = {
+  draft: 'Draft',
+  pending_review: 'Pending Review',
+  approved: 'Approved',
+  finalized: 'Finalized',
+  sent: 'Sent',
+  revised: 'Revised',
+  cancelled: 'Cancelled',
+};
+
+const QuotationList = ({ onOpenQuote }) => {
+  const [quotes, setQuotes] = useState([]);
+  const [companies, setCompanies] = useState([]);
+  const [form, setForm] = useState({ company: '', contact: '', notes: '' });
+  const [statusFilter, setStatusFilter] = useState('');
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [errorInfo, setErrorInfo] = useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    setErrorInfo(null);
+    try {
+      const [quotesRes, companiesRes] = await Promise.all([
+        quotationAPI.quotes.list(),
+        quotationAPI.companies.list({ active: 'true' }),
+      ]);
+      setQuotes(quotesRes.data);
+      setCompanies(companiesRes.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load quotations', 'GET /quotations/quotes/ and GET /quotations/companies/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const filteredQuotes = useMemo(() => {
+    const term = search.toLowerCase();
+    return quotes.filter((quote) => {
+      const statusMatch = !statusFilter || quote.status === statusFilter;
+      const searchMatch = !term ||
+        quote.quotation_number.toLowerCase().includes(term) ||
+        quote.company_name.toLowerCase().includes(term);
+      return statusMatch && searchMatch;
+    });
+  }, [quotes, statusFilter, search]);
+
+  const createQuote = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.create({
+        company: form.company,
+        contact: form.contact || null,
+        notes: form.notes,
+      });
+      setForm({ company: '', contact: '', notes: '' });
+      if (onOpenQuote) onOpenQuote(response.data.id);
+      await load();
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Create quotation', 'POST /quotations/quotes/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const contactsForCompany = companies.find((company) => String(company.id) === String(form.company))?.contacts || [];
+
+  if (loading) return <div className="qm-loading">Loading quotations...</div>;
+
+  return (
+    <div className="qm-section">
+      <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+      <div className="qm-split wide-left">
+        <div className="qm-panel">
+        <div className="qm-panel-heading">
+          <h3>Quotations</h3>
+          <div className="qm-controls">
+            <input className="qm-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search quotes" />
+            <select className="qm-input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="">All statuses</option>
+              {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="qm-table-wrap">
+          <table className="qm-table">
+            <thead>
+              <tr>
+                <th>Number</th>
+                <th>Company</th>
+                <th>Status</th>
+                <th>Version</th>
+                <th>Total</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredQuotes.map((quote) => (
+                <tr key={quote.id} onClick={() => onOpenQuote(quote.id)}>
+                  <td><strong>{quote.quotation_number}</strong></td>
+                  <td>{quote.company_name}</td>
+                  <td><span className={`qm-badge status-${quote.status}`}>{statusLabels[quote.status] || quote.status}</span></td>
+                  <td>{quote.version}</td>
+                  <td>{quote.currency} {parseFloat(quote.total || 0).toFixed(2)}</td>
+                  <td>{new Date(quote.updated_at).toLocaleDateString('en-AE')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        </div>
+
+        <div className="qm-panel">
+        <h3>New Quotation</h3>
+        <form onSubmit={createQuote} className="qm-form">
+          <label>Company
+            <select required value={form.company} onChange={(event) => setForm({ ...form, company: event.target.value, contact: '' })}>
+              <option value="">Select company</option>
+              {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+            </select>
+          </label>
+          <label>Contact
+            <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
+              <option value="">No contact</option>
+              {contactsForCompany.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}
+            </select>
+          </label>
+          <label>Notes<textarea rows="4" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
+          <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Creating...' : 'Create Quotation'}</button>
+        </form>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default QuotationList;
