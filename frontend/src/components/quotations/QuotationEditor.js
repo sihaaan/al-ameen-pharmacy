@@ -294,7 +294,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
           {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
           {!['revised', 'cancelled'].includes(quote.status) && <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>{actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}</button>}
-          <button type="button" className="qm-secondary" disabled={downloadLoading || Boolean(actionInFlight)} onClick={downloadPdf}>{downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : 'Download PDF'}</button>
+          <button type="button" className="qm-secondary" disabled={downloadLoading || Boolean(actionInFlight)} onClick={downloadPdf}>{downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}</button>
         </div>
       </div>
 
@@ -315,7 +315,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       {!isEditable && (
         <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
       )}
-      <div className="qm-helper">PDF is generated from the latest saved quotation data. Save line changes before downloading or finalizing.</div>
+      <div className="qm-helper">PDF is generated from the latest saved quotation data and current quotation settings. Save line changes before downloading or finalizing.</div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
       {finalizeIssues.length > 0 && (
         <div className="qm-notice">

@@ -107,6 +107,90 @@ class QuoteItem(models.Model):
         super().save(*args, **kwargs)
 
 
+class QuotationSettings(models.Model):
+    STYLE_CLASSIC = "classic"
+    STYLE_MODERN = "modern"
+    STYLE_COMPACT = "compact"
+    LOGO_LAYOUT_FULL = "full_logo_only"
+    LOGO_LAYOUT_LOGO_TEXT = "logo_plus_company_text"
+    LOGO_LAYOUT_ICON_TEXT = "icon_left_company_text"
+    LOGO_LAYOUT_NONE = "no_logo"
+    PDF_TEMPLATE_STYLE_CHOICES = [
+        (STYLE_CLASSIC, "Classic"),
+        (STYLE_MODERN, "Modern"),
+        (STYLE_COMPACT, "Compact"),
+    ]
+    LOGO_LAYOUT_CHOICES = [
+        (LOGO_LAYOUT_FULL, "Full logo only"),
+        (LOGO_LAYOUT_LOGO_TEXT, "Logo plus company text"),
+        (LOGO_LAYOUT_ICON_TEXT, "Icon left, company text"),
+        (LOGO_LAYOUT_NONE, "No logo"),
+    ]
+
+    company_name = models.CharField(max_length=255, default="Al Ameen Pharmacy")
+    company_name_ar = models.CharField(max_length=255, blank=True)
+    address = models.TextField(default="Dubai, United Arab Emirates", blank=True)
+    phone = models.CharField(max_length=80, default="+971 50 545 6388", blank=True)
+    email = models.EmailField(default="alameenpharmacyllc@gmail.com", blank=True)
+    trn = models.CharField(max_length=80, blank=True)
+    license_number = models.CharField(max_length=80, blank=True)
+    logo = models.ImageField(upload_to="quotations/logos/", blank=True, null=True)
+    signature_image = models.ImageField(upload_to="quotations/signatures/", blank=True, null=True)
+    stamp_image = models.ImageField(upload_to="quotations/stamps/", blank=True, null=True)
+    logo_layout = models.CharField(
+        max_length=40,
+        choices=LOGO_LAYOUT_CHOICES,
+        default=LOGO_LAYOUT_FULL,
+    )
+    footer_note = models.TextField(blank=True)
+    default_terms = models.TextField(
+        default="Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
+        blank=True,
+    )
+    payment_terms = models.TextField(default="Payment terms to be confirmed with the customer.", blank=True)
+    validity_days = models.PositiveIntegerField(default=14)
+    prepared_by_default = models.CharField(max_length=255, blank=True)
+    signature_label = models.CharField(max_length=120, default="Signature", blank=True)
+    stamp_label = models.CharField(max_length=120, default="Stamp", blank=True)
+    pdf_template_style = models.CharField(
+        max_length=30,
+        choices=PDF_TEMPLATE_STYLE_CHOICES,
+        default=STYLE_CLASSIC,
+    )
+    primary_color = models.CharField(max_length=7, default="#0F766E")
+    accent_color = models.CharField(max_length=7, default="#ECFDF5")
+    show_arabic_name = models.BooleanField(default=True)
+    show_trn = models.BooleanField(default=True)
+    show_license_number = models.BooleanField(default=True)
+    show_signature_area = models.BooleanField(default=True)
+    show_stamp_area = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_quotation_settings",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Quotation Settings"
+        verbose_name_plural = "Quotation Settings"
+
+    def __str__(self):
+        return "Quotation Settings"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        settings_obj, _ = cls.objects.get_or_create(pk=1)
+        return settings_obj
+
+
 class Inquiry(models.Model):
     SOURCE_MANUAL = "manual"
     SOURCE_IMPORTED = "imported"

@@ -2,8 +2,9 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
+from rest_framework.views import APIView
 from rest_framework.decorators import action
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from .import_parsers import parse_file_preview, parse_text_preview
@@ -16,6 +17,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationSettings,
     QuoteItem,
 )
 from .pdf import build_quotation_pdf
@@ -29,6 +31,7 @@ from .serializers import (
     InquirySerializer,
     QuotationAuditLogSerializer,
     QuotationLineSerializer,
+    QuotationSettingsSerializer,
     QuotationSerializer,
     QuoteItemSerializer,
     serializer_error_from_django_validation,
@@ -50,6 +53,31 @@ class QuotationBaseViewSet:
 
     def handle_workflow_error(self, exc):
         return Response(serializer_error_from_django_validation(exc), status=status.HTTP_400_BAD_REQUEST)
+
+
+class QuotationSettingsView(APIView):
+    permission_classes = [IsQuotationStaff]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_object(self):
+        return QuotationSettings.get_solo()
+
+    def get(self, request):
+        serializer = QuotationSettingsSerializer(self.get_object(), context={"request": request})
+        return Response(serializer.data)
+
+    def patch(self, request):
+        settings_obj = self.get_object()
+        serializer = QuotationSettingsSerializer(settings_obj, data=request.data, partial=True, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        settings_obj = serializer.save(updated_by=request.user)
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            settings_obj,
+            message="Updated quotation settings.",
+        )
+        return Response(QuotationSettingsSerializer(settings_obj, context={"request": request}).data)
 
 
 class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

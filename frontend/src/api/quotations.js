@@ -113,6 +113,12 @@ const quotationAPI = {
   auditLogs: {
     list: (params = {}) => axiosInstance.get('/quotations/audit-logs/', { params }),
   },
+  settings: {
+    retrieve: () => axiosInstance.get('/quotations/settings/'),
+    update: (data, isMultipart = false) => axiosInstance.patch('/quotations/settings/', data, isMultipart ? {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    } : undefined),
+  },
 };
 
 export default quotationAPI;

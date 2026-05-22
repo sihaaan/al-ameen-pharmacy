@@ -15,5 +15,6 @@ router.register(r"price-history", views.CompanyPriceHistoryViewSet, basename="qu
 router.register(r"audit-logs", views.QuotationAuditLogViewSet, basename="quotation-audit-log")
 
 urlpatterns = [
+    path("settings/", views.QuotationSettingsView.as_view(), name="quotation-settings"),
     path("", include(router.urls)),
 ]

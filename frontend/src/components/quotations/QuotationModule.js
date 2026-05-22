@@ -7,6 +7,7 @@ import QuotationEditor from './QuotationEditor';
 import QuotationDashboard from './QuotationDashboard';
 import PriceHistoryPanel from './PriceHistoryPanel';
 import AuditLogPanel from './AuditLogPanel';
+import QuotationSettings from './QuotationSettings';
 import './QuotationModule.css';
 
 const tabs = [
@@ -17,6 +18,7 @@ const tabs = [
   { id: 'quotes', label: 'Quotations' },
   { id: 'history', label: 'Price History' },
   { id: 'audit', label: 'Audit Logs' },
+  { id: 'settings', label: 'Settings' },
 ];
 
 const QuotationModule = () => {
@@ -75,6 +77,7 @@ const QuotationModule = () => {
         )}
         {activeTab === 'history' && <PriceHistoryPanel />}
         {activeTab === 'audit' && <AuditLogPanel />}
+        {activeTab === 'settings' && <QuotationSettings />}
       </div>
     </div>
   );

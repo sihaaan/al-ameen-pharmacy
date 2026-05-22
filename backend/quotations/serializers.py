@@ -1,3 +1,6 @@
+import re
+
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
@@ -12,8 +15,13 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationSettings,
     QuoteItem,
 )
+
+
+SAFE_BRANDING_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
+SAFE_BRANDING_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 
 class CompanyContactSerializer(serializers.ModelSerializer):
@@ -85,6 +93,153 @@ class QuoteItemSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "normalized_name", "product_name", "product_detail", "created_at", "updated_at"]
+
+
+class QuotationSettingsSerializer(serializers.ModelSerializer):
+    logo_url = serializers.SerializerMethodField()
+    signature_image_url = serializers.SerializerMethodField()
+    stamp_image_url = serializers.SerializerMethodField()
+    clear_logo = serializers.BooleanField(write_only=True, required=False, default=False)
+    clear_signature_image = serializers.BooleanField(write_only=True, required=False, default=False)
+    clear_stamp_image = serializers.BooleanField(write_only=True, required=False, default=False)
+
+    class Meta:
+        model = QuotationSettings
+        fields = [
+            "id",
+            "company_name",
+            "company_name_ar",
+            "address",
+            "phone",
+            "email",
+            "trn",
+            "license_number",
+            "logo",
+            "logo_url",
+            "signature_image",
+            "signature_image_url",
+            "stamp_image",
+            "stamp_image_url",
+            "clear_logo",
+            "clear_signature_image",
+            "clear_stamp_image",
+            "logo_layout",
+            "footer_note",
+            "default_terms",
+            "payment_terms",
+            "validity_days",
+            "prepared_by_default",
+            "signature_label",
+            "stamp_label",
+            "pdf_template_style",
+            "primary_color",
+            "accent_color",
+            "show_arabic_name",
+            "show_trn",
+            "show_license_number",
+            "show_signature_area",
+            "show_stamp_area",
+            "updated_by",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "logo_url",
+            "signature_image_url",
+            "stamp_image_url",
+            "updated_by",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_logo_url(self, obj):
+        return self._get_image_url(obj.logo)
+
+    def get_signature_image_url(self, obj):
+        return self._get_image_url(obj.signature_image)
+
+    def get_stamp_image_url(self, obj):
+        return self._get_image_url(obj.stamp_image)
+
+    def _get_image_url(self, image):
+        if not image:
+            return ""
+        try:
+            return image.url
+        except ValueError:
+            return ""
+
+    def validate_logo(self, logo):
+        return self._validate_branding_image(logo, "Logo")
+
+    def validate_signature_image(self, image):
+        return self._validate_branding_image(image, "Signature image")
+
+    def validate_stamp_image(self, image):
+        return self._validate_branding_image(image, "Stamp image")
+
+    def _validate_branding_image(self, image, label):
+        if not image:
+            return image
+        max_bytes = int(
+            getattr(
+                settings,
+                "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
+                getattr(settings, "QUOTATION_LOGO_MAX_UPLOAD_BYTES", 2 * 1024 * 1024),
+            )
+        )
+        if image.size > max_bytes:
+            raise serializers.ValidationError(f"{label} file is too large. Maximum size is {max_bytes // (1024 * 1024)} MB.")
+        extension = image.name.rsplit(".", 1)[-1].lower() if "." in image.name else ""
+        if extension not in SAFE_BRANDING_IMAGE_EXTENSIONS:
+            raise serializers.ValidationError(f"Unsupported {label.lower()} type. Upload png, jpg, jpeg, or webp only.")
+        if getattr(image, "content_type", "") and image.content_type not in SAFE_BRANDING_IMAGE_CONTENT_TYPES:
+            raise serializers.ValidationError(f"Unsupported {label.lower()} content type.")
+        header = image.read(512)
+        image.seek(0)
+        if extension == "webp":
+            if not (header.startswith(b"RIFF") and b"WEBP" in header[:16]):
+                raise serializers.ValidationError("Uploaded file does not look like a valid WebP image.")
+        elif extension == "png" and not header.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise serializers.ValidationError("Uploaded file does not look like a valid PNG image.")
+        elif extension in {"jpg", "jpeg"} and not header.startswith(b"\xff\xd8\xff"):
+            raise serializers.ValidationError("Uploaded file does not look like a valid image.")
+        return image
+
+    def validate_primary_color(self, value):
+        return self._validate_hex_color(value, "primary_color")
+
+    def validate_accent_color(self, value):
+        return self._validate_hex_color(value, "accent_color")
+
+    def _validate_hex_color(self, value, field_name):
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value or ""):
+            raise serializers.ValidationError(f"{field_name} must be a 6-digit hex color such as #0F766E.")
+        return value
+
+    def validate_validity_days(self, value):
+        if value < 1 or value > 365:
+            raise serializers.ValidationError("Validity days must be between 1 and 365.")
+        return value
+
+    def update(self, instance, validated_data):
+        clear_map = {
+            "clear_logo": "logo",
+            "clear_signature_image": "signature_image",
+            "clear_stamp_image": "stamp_image",
+        }
+        for clear_field, image_field in clear_map.items():
+            should_clear = validated_data.pop(clear_field, False)
+            if should_clear:
+                image = getattr(instance, image_field)
+                if image:
+                    try:
+                        image.delete(save=False)
+                    except Exception:
+                        pass
+                setattr(instance, image_field, None)
+        return super().update(instance, validated_data)
 
 
 class InquiryLineSerializer(serializers.ModelSerializer):

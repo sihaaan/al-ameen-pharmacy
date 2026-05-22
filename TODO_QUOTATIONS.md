@@ -36,16 +36,27 @@
 - [x] Add reviewed imported-inquiry save flow without automatic quotation creation
 - [x] Add parser/security tests for text, Excel, PDF, invalid uploads, no-text PDFs, encrypted PDFs, and manual inquiry regression
 - [x] Browser-verify pasted text, Excel, PDF, no-text PDF warning, save imported inquiry, and create quote after save
+- [x] Add staff-editable `Quotations -> Settings` page for PDF branding and defaults
+- [x] Add singleton `QuotationSettings` model and staff-only settings API
+- [x] Validate quotation logo uploads by extension, MIME type, file size, and binary signature
+- [x] Drive ReportLab PDF branding from saved quotation settings with environment fallbacks
+- [x] Fix PDF image rendering for storage-backed logo URLs such as Cloudinary
+- [x] Add uploadable signature and stamp images for the PDF approval area
+- [x] Add logo layout controls so full brand lockups do not duplicate company-name text
+- [x] Add remove actions for uploaded logo/signature/stamp images
+- [x] Improve signature/stamp placeholder behavior in generated PDFs
 
 ## Phase 1 Follow-Ups Before Phase 2
 
 - [ ] Have Dad/staff repeat the quotation workflow with real-ish sample data
+- [ ] Browser-verify quotation settings save/logo behavior on the deployed-like environment before merging
+- [ ] Add a safe `Download Sample PDF` action to Quotation Settings if staff want a preview without opening an existing quotation
 - [ ] Fix the existing admin route guard so hard-refreshing `/admin` waits for auth initialization before redirecting
 - [ ] Continue tuning labels/empty states after real staff feedback
 - [ ] Consider moving `Price History` and `Audit Logs` into contextual/advanced areas if daily use feels too busy
 - [ ] Add frontend smoke tests after the manual workflow is accepted
 - [ ] Consider draft PDF watermarking if staff might accidentally send draft quotations
-- [ ] Decide whether DOCX template customization should be implemented through LibreOffice, an external conversion service, or kept as a manual admin-only export workflow
+- [ ] Prototype static PDF/image background templates with ReportLab overlays before considering DOCX-to-PDF conversion
 - [ ] Tune import parser rules with real company LPO samples after staff review
 
 ## Phase 2 Ideas
@@ -67,4 +78,4 @@
 - [ ] Background worker infrastructure
 - [ ] Reporting and analytics
 - [ ] More granular quotation roles and Django groups
-- [ ] Richer PDF templates and branding
+- [ ] More PDF template styles and optional static background template upload

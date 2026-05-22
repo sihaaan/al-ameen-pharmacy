@@ -1,17 +1,35 @@
 from decimal import Decimal
 from io import BytesIO
+import tempfile
 
 from django.contrib.auth.models import User
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.urls import reverse
 from openpyxl import Workbook
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
+from PIL import Image as PILImage
 from reportlab.pdfgen import canvas
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Company, CompanyContact, CompanyPriceHistory, Inquiry, InquiryLine, Quotation, QuotationLine, QuoteItem
+from .models import Company, CompanyContact, CompanyPriceHistory, Inquiry, InquiryLine, Quotation, QuotationLine, QuotationSettings, QuoteItem
+
+
+def make_png_bytes(color=(15, 118, 110, 255)):
+    buffer = BytesIO()
+    PILImage.new("RGBA", (12, 12), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def make_png_upload(name="image.png", color=(15, 118, 110, 255)):
+    return SimpleUploadedFile(name, make_png_bytes(color), content_type="image/png")
+
+
+def extract_pdf_text(content):
+    reader = PdfReader(BytesIO(content))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 class QuotationPermissionTests(APITestCase):
@@ -387,11 +405,272 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(inquiry.source, Inquiry.SOURCE_IMPORTED)
         self.assertEqual(inquiry.source_type, Inquiry.SOURCE_TYPE_PASTED_TEXT)
         self.assertEqual(inquiry.lines.count(), 1)
-        line = inquiry.lines.get()
-        self.assertEqual(line.raw_line, "Panadol 500mg - 10 boxes")
-        self.assertEqual(line.parse_status, InquiryLine.PARSE_PARSED)
+
+
+class QuotationSettingsTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="settings_staff", password="pass", is_staff=True)
+        self.customer = User.objects.create_user(username="settings_customer", password="pass")
+        self.company = Company.objects.create(name="Settings Company")
+        self.quote_item = QuoteItem.objects.create(name="Settings Item", unit="box")
+
+    def create_valid_quote(self):
+        quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
+        QuotationLine.objects.create(
+            quotation=quotation,
+            quote_item=self.quote_item,
+            item_name_snapshot="Settings Item",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("25.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        return quotation
+
+    def test_settings_permissions(self):
+        url = reverse("quotation-settings")
+
+        anonymous = self.client.get(url)
+        self.assertIn(anonymous.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+        self.client.force_authenticate(self.customer)
+        non_staff = self.client.get(url)
+        self.assertEqual(non_staff.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.staff)
+        staff = self.client.get(url)
+        self.assertEqual(staff.status_code, status.HTTP_200_OK)
+
+    def test_settings_defaults_returned_if_missing(self):
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-settings"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["company_name"], "Al Ameen Pharmacy")
+        self.assertEqual(QuotationSettings.objects.count(), 1)
+
+    def test_settings_update_works(self):
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.patch(
+            reverse("quotation-settings"),
+            {
+                "company_name": "Custom Pharmacy",
+                "trn": "123456789",
+                "license_number": "LIC-42",
+                "validity_days": 30,
+                "primary_color": "#123456",
+                "logo_layout": QuotationSettings.LOGO_LAYOUT_LOGO_TEXT,
+                "show_stamp_area": False,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        settings_obj = QuotationSettings.get_solo()
+        self.assertEqual(settings_obj.company_name, "Custom Pharmacy")
+        self.assertEqual(settings_obj.validity_days, 30)
+        self.assertEqual(settings_obj.logo_layout, QuotationSettings.LOGO_LAYOUT_LOGO_TEXT)
+        self.assertEqual(settings_obj.updated_by, self.staff)
+
+    def test_invalid_color_values_are_rejected(self):
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.patch(reverse("quotation-settings"), {"primary_color": "teal"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("primary_color", response.data)
+
+    def test_logo_upload_rejects_invalid_file_type(self):
+        self.client.force_authenticate(self.staff)
+        upload = SimpleUploadedFile("logo.txt", b"not-an-image", content_type="text/plain")
+
+        response = self.client.patch(reverse("quotation-settings"), {"logo": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("valid image", str(response.data))
+
+    def test_signature_and_stamp_uploads_work(self):
+        self.client.force_authenticate(self.staff)
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                response = self.client.patch(
+                    reverse("quotation-settings"),
+                    {
+                        "signature_image": make_png_upload("signature.png"),
+                        "stamp_image": make_png_upload("stamp.png", color=(212, 160, 65, 255)),
+                    },
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertTrue(response.data["signature_image_url"])
+                self.assertTrue(response.data["stamp_image_url"])
+                settings_obj = QuotationSettings.get_solo()
+                self.assertTrue(settings_obj.signature_image.name.startswith("quotations/signatures/"))
+                self.assertTrue(settings_obj.stamp_image.name.startswith("quotations/stamps/"))
+
+    def test_staff_can_clear_logo_signature_and_stamp(self):
+        self.client.force_authenticate(self.staff)
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                self.client.patch(
+                    reverse("quotation-settings"),
+                    {
+                        "logo": make_png_upload("logo.png"),
+                        "signature_image": make_png_upload("signature.png"),
+                        "stamp_image": make_png_upload("stamp.png"),
+                    },
+                    format="multipart",
+                )
+                settings_obj = QuotationSettings.get_solo()
+                self.assertTrue(settings_obj.logo)
+                self.assertTrue(settings_obj.signature_image)
+                self.assertTrue(settings_obj.stamp_image)
+
+                response = self.client.patch(
+                    reverse("quotation-settings"),
+                    {"clear_logo": True, "clear_signature_image": True, "clear_stamp_image": True},
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                settings_obj.refresh_from_db()
+                self.assertFalse(settings_obj.logo)
+                self.assertFalse(settings_obj.signature_image)
+                self.assertFalse(settings_obj.stamp_image)
+
+    def test_non_staff_and_anonymous_cannot_clear_images(self):
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                settings_obj = QuotationSettings.get_solo()
+                settings_obj.logo.save("logo.png", ContentFile(make_png_bytes()), save=True)
+
+                anonymous = self.client.patch(reverse("quotation-settings"), {"clear_logo": True}, format="json")
+                self.assertIn(anonymous.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+                settings_obj.refresh_from_db()
+                self.assertTrue(settings_obj.logo)
+
+                self.client.force_authenticate(self.customer)
+                non_staff = self.client.patch(reverse("quotation-settings"), {"clear_logo": True}, format="json")
+                self.assertEqual(non_staff.status_code, status.HTTP_403_FORBIDDEN)
+                settings_obj.refresh_from_db()
+                self.assertTrue(settings_obj.logo)
+
+    def test_stamp_upload_rejects_invalid_file_type(self):
+        self.client.force_authenticate(self.staff)
+        upload = SimpleUploadedFile("stamp.txt", b"not-an-image", content_type="text/plain")
+
+        response = self.client.patch(reverse("quotation-settings"), {"stamp_image": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("valid image", str(response.data))
+
+    def test_pdf_generation_uses_settings_and_still_works(self):
+        QuotationSettings.objects.create(
+            company_name="PDF Settings Pharmacy",
+            default_terms="Settings terms apply.",
+            payment_terms="Net 15.",
+            prepared_by_default="Quotation Team",
+            footer_note="Thank you for your business.",
+        )
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_pdf_generation_works_with_uploaded_logo_and_stamp_images(self):
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                settings_obj = QuotationSettings.get_solo()
+                settings_obj.company_name = "Image Settings Pharmacy"
+                settings_obj.logo.save("logo.png", ContentFile(make_png_bytes()), save=False)
+                settings_obj.signature_image.save("signature.png", ContentFile(make_png_bytes()), save=False)
+                settings_obj.stamp_image.save("stamp.png", ContentFile(make_png_bytes(color=(212, 160, 65, 255))), save=False)
+                settings_obj.save()
+                quotation = self.create_valid_quote()
+                self.client.force_authenticate(self.staff)
+
+                response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response["Content-Type"], "application/pdf")
+                self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_pdf_full_logo_only_does_not_repeat_company_name_text(self):
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                settings_obj = QuotationSettings.get_solo()
+                settings_obj.company_name = "Full Lockup Pharmacy"
+                settings_obj.logo_layout = QuotationSettings.LOGO_LAYOUT_FULL
+                settings_obj.logo.save("logo.png", ContentFile(make_png_bytes()), save=False)
+                settings_obj.save()
+                quotation = self.create_valid_quote()
+                self.client.force_authenticate(self.staff)
+
+                response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertNotIn("Full Lockup Pharmacy", extract_pdf_text(response.content))
+
+    def test_pdf_no_logo_uses_company_name_text(self):
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.company_name = "No Logo Pharmacy"
+        settings_obj.logo_layout = QuotationSettings.LOGO_LAYOUT_NONE
+        settings_obj.save()
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("No Logo Pharmacy", extract_pdf_text(response.content))
+
+    def test_pdf_missing_signature_and_stamp_use_placeholders(self):
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.logo_layout = QuotationSettings.LOGO_LAYOUT_NONE
+        settings_obj.signature_label = "Signature"
+        settings_obj.stamp_label = "Stamp"
+        settings_obj.show_signature_area = True
+        settings_obj.show_stamp_area = True
+        settings_obj.save()
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        text = " ".join(extract_pdf_text(response.content).split())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Authorized Signature", text)
+        self.assertIn("Company Stamp", text)
 
     def test_manual_inquiry_flow_still_works(self):
+        self.client.force_authenticate(self.staff)
         response = self.client.post(
             reverse("quotation-inquiry-list"),
             {

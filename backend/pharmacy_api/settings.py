@@ -126,6 +126,8 @@ QUOTATION_PAYMENT_TERMS = os.environ.get("QUOTATION_PAYMENT_TERMS", "Payment ter
 QUOTATION_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_IMPORT_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 QUOTATION_IMPORT_MAX_EXCEL_ROWS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_ROWS", "500"))
 QUOTATION_IMPORT_MAX_PDF_PAGES = int(os.environ.get("QUOTATION_IMPORT_MAX_PDF_PAGES", "10"))
+QUOTATION_LOGO_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_LOGO_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
+QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 
 # ---- Cloudinary Configuration (Cloud Image Storage) ----
 # Images will be stored on Cloudinary CDN instead of local filesystem

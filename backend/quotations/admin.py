@@ -9,6 +9,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationSettings,
     QuoteItem,
 )
 
@@ -42,6 +43,58 @@ class QuoteItemAdmin(admin.ModelAdmin):
     search_fields = ["name", "internal_code", "brand_text", "generic_name", "product__name"]
     autocomplete_fields = ["product"]
     readonly_fields = ["normalized_name", "created_at", "updated_at"]
+
+
+@admin.register(QuotationSettings)
+class QuotationSettingsAdmin(admin.ModelAdmin):
+    fieldsets = (
+        ("Company Branding", {
+            "fields": (
+                "company_name",
+                "company_name_ar",
+                "logo",
+                "signature_image",
+                "stamp_image",
+                "logo_layout",
+                "address",
+                "phone",
+                "email",
+                "trn",
+                "license_number",
+            )
+        }),
+        ("PDF Defaults", {
+            "fields": (
+                "default_terms",
+                "payment_terms",
+                "validity_days",
+                "footer_note",
+                "prepared_by_default",
+                "signature_label",
+                "stamp_label",
+                "pdf_template_style",
+            )
+        }),
+        ("Style", {
+            "fields": (
+                "primary_color",
+                "accent_color",
+                "show_arabic_name",
+                "show_trn",
+                "show_license_number",
+                "show_signature_area",
+                "show_stamp_area",
+            )
+        }),
+        ("Audit", {"fields": ("updated_by", "created_at", "updated_at")}),
+    )
+    readonly_fields = ["created_at", "updated_at"]
+
+    def has_add_permission(self, request):
+        return not QuotationSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 class InquiryLineInline(admin.TabularInline):

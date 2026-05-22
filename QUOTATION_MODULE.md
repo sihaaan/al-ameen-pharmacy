@@ -75,6 +75,12 @@ Completed:
   - reviewed imported inquiry save endpoint
   - no automatic quotation creation from uploaded content
   - no persistent uploaded binary storage
+- Staff-editable quotation settings:
+  - `Quotations -> Settings` page inside the React admin dashboard
+  - singleton `QuotationSettings` model
+  - staff-only settings API
+  - logo, signature, and stamp image upload with extension, MIME type, size, and file-signature validation
+  - PDF branding pulled from saved settings with sensible defaults
 
 Partially completed:
 - None
@@ -225,6 +231,8 @@ Verify price history:
 - [ ] Finalized/sent quote can create a new draft revision
 - [ ] PDF downloads for staff
 - [ ] PDF has pharmacy branding, quotation metadata, totals, terms, and signature/stamp area
+- [ ] `Quotations -> Settings` opens for staff and saves PDF branding details
+- [ ] Invalid logo, signature, or stamp uploads are rejected with a clear validation error
 - [ ] Anonymous users cannot access quotation API endpoints
 - [ ] Normal customer users cannot access quotation API endpoints
 - [ ] Staff users can access quotation API endpoints
@@ -241,6 +249,7 @@ Implemented Phase 1 models:
 - `QuotationLine`
 - `CompanyPriceHistory`
 - `QuotationAuditLog`
+- `QuotationSettings`
 
 `QuoteItem` is intentionally separate from the public ecommerce `Product` model. It has an optional nullable link to `Product` so private/internal/customer-specific quotation items do not need to become storefront products.
 
@@ -269,6 +278,7 @@ Implemented endpoints:
 - `/quote-lines/`
 - `/price-history/`
 - `/audit-logs/`
+- `/settings/`
 
 Implemented custom actions:
 - `POST /inquiries/parse_text/`
@@ -289,6 +299,11 @@ Import endpoints:
 - `parse_file` accepts multipart `file`, supports `.xlsx` and `.pdf`, validates size/type/signature, computes SHA-256, and returns preview JSON only.
 - `create_imported` accepts reviewed preview JSON and atomically creates `Inquiry` plus `InquiryLine` rows. It does not create a quotation automatically.
 
+Settings endpoints:
+- `GET /api/quotations/settings/` returns the singleton quotation PDF branding settings, creating a default settings row if one does not exist.
+- `PATCH /api/quotations/settings/` updates settings. It accepts JSON for text/style changes and multipart form data when uploading a logo.
+- All settings access uses `IsQuotationStaff`.
+
 ## Frontend Components Added
 
 Implemented React admin components:
@@ -301,11 +316,14 @@ Implemented React admin components:
 - `QuotationEditor`
 - `PriceHistoryPanel`
 - `AuditLogPanel`
+- `QuotationSettings`
 - `QuotationErrorNotice`
 
 The module appears only inside the existing React admin dashboard at `/admin` as a top-level `Quotations` tab beside `Overview`, `Products`, and `Orders`.
 
 `InquiryManager` now includes an `Import Inquiry` area with paste text, Excel upload, PDF upload, shared preview/review table, save imported inquiry, and create quotation from saved inquiry actions. The existing manual inquiry form remains available as a fallback.
+
+`QuotationSettings` provides a staff-editable branding page at `Quotations -> Settings`. It controls company details, logo, optional signature/stamp images, terms, validity, payment text, footer note, style colors, template style selection, and signature/stamp labels used by generated PDFs.
 
 ## Phase 1 Stabilization: Sub-Tab Error Fix
 
@@ -485,24 +503,30 @@ Workflow/UI changes:
 - PDF buttons are labeled `Download Draft PDF` or `Download PDF`, with helper text explaining the PDF uses latest saved data.
 
 PDF branding:
-- ReportLab remains the stable Phase 1 PDF generator.
+- ReportLab remains the stable PDF generator.
 - PDFs are generated from quotation snapshot fields, not mutable live product fields.
 - PDFs include the configured pharmacy name, optional Arabic name, address, phone, email, TRN/license, optional logo, quotation metadata, line table, totals box, terms, payment terms, prepared-by line, and signature/stamp area.
 - PDFs continue to stream through the staff-only backend endpoint and are not stored in public Cloudinary URLs.
 
-Branding settings:
-- `QUOTATION_COMPANY_NAME`
-- `QUOTATION_COMPANY_NAME_AR`
-- `QUOTATION_COMPANY_ADDRESS`
-- `QUOTATION_COMPANY_PHONE`
-- `QUOTATION_COMPANY_EMAIL`
-- `QUOTATION_COMPANY_TRN`
-- `QUOTATION_LOGO_PATH`
-- `QUOTATION_DEFAULT_TERMS`
-- `QUOTATION_VALIDITY_DAYS`
-- `QUOTATION_PAYMENT_TERMS`
+Staff-editable branding settings:
+- Settings are edited in `Admin Dashboard -> Quotations -> Settings`.
+- Backend data lives in singleton model `quotations.QuotationSettings`.
+- API endpoints are `GET/PATCH /api/quotations/settings/`.
+- Supported fields include company name, Arabic name, address, phone, email, TRN, license number, logo, signature image, stamp image, footer note, default terms, payment terms, validity days, prepared-by default, signature/stamp labels, PDF template style, primary/accent colors, and display toggles.
+- If no settings row exists, the API returns sensible defaults and creates the singleton settings record.
+- Environment variables remain fallback defaults through `backend/quotations/pdf_config.py`, but daily changes should be made through the Settings page.
 
-These can be set as environment variables. Defaults are defined in `backend/pharmacy_api/settings.py` and read through `backend/quotations/pdf_config.py`.
+Branding image uploads:
+- Staff can upload logo, signature, and stamp images as `png`, `jpg`, `jpeg`, or `webp`.
+- The backend validates extension, MIME type, file size, and basic binary signature.
+- Default max upload size is `QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES`, currently 2 MB.
+- Image storage uses the configured Django file storage/media setup. These images are branding material; quotation PDFs and quote data remain protected and are not exposed through public PDF URLs.
+- PDF rendering supports local filesystem paths, local `/media/...` URLs, and storage-backed `http`/`https` URLs such as Cloudinary. This fixes uploaded logos disappearing from generated PDFs when storage returns a URL instead of a local file path.
+- If a signature or stamp image is configured, the generated PDF renders it in the approval area. If no image is configured, the PDF falls back to the configured text label.
+
+PDF template style:
+- `classic` is the implemented polished default.
+- `modern` and `compact` are reserved style choices so the data model/API can support additional layouts later without changing the settings contract.
 
 Logo notes:
 - By default, local development looks for `frontend/public/brand/al-ameen-pharmacy-logo-dark.png`.
@@ -512,8 +536,9 @@ Logo notes:
 Word-template investigation:
 - Filling a `.docx` template is feasible with `python-docx` or `docxtpl`.
 - Reliable DOCX-to-PDF conversion on Railway/Linux usually requires LibreOffice in headless mode or an external conversion service.
-- Adding LibreOffice/package-level document conversion is too heavy and risky for Phase 1 hardening, so Word-template PDF support is deferred.
-- Recommended future approach: keep ReportLab as the stable default, then add an optional template-rendering service that can produce DOCX previews and convert to PDF only if the deployment environment explicitly supports LibreOffice or a trusted conversion service.
+- Adding LibreOffice/package-level document conversion is too heavy and risky for this production-safe pass, so Word-template PDF support is deferred.
+- Preferred future approach: allow staff/admins to upload a static PDF/image background template with logo/header/footer already designed, then use ReportLab to overlay quotation metadata, dynamic lines, totals, terms, and signature text. This avoids LibreOffice and keeps Railway deployment simpler.
+- A DOCX-template path should only be added later if the deployment explicitly supports LibreOffice/headless conversion or a trusted external conversion service.
 
 Hardening browser verification on May 21, 2026:
 - Manual Inquiry requested-line layout no longer overflows; the Delete button stayed inside the right-side form card and no horizontal body overflow was detected.
@@ -596,6 +621,92 @@ Import browser verification on May 22, 2026:
 - Blank/no-text PDF showed the expected no-OCR warning.
 - Temporary smoke-test records, user, and files were removed after verification.
 
+## Quotation Settings And PDF Branding
+
+Status: implemented and browser/API verified on May 22, 2026.
+
+Purpose:
+- Let staff/admin users update quotation PDF branding and default business text without editing code or environment variables.
+- Keep ReportLab as the stable production-safe PDF generator.
+- Avoid heavy template-conversion dependencies on Railway.
+
+Where to edit:
+- Open `Admin Dashboard -> Quotations -> Settings`.
+
+Backend implementation:
+- Model: `quotations.QuotationSettings`
+- Migrations:
+  - `quotations.0003_quotationsettings`
+  - `quotations.0004_quotationsettings_signature_image_and_more`
+  - `quotations.0005_quotationsettings_logo_layout`
+- API:
+  - `GET /api/quotations/settings/`
+  - `PATCH /api/quotations/settings/`
+- Serializer: `QuotationSettingsSerializer`
+- Permission: `IsQuotationStaff`
+- Django Admin backup access: `QuotationSettingsAdmin`
+
+Settings fields that affect generated PDFs:
+- company name and optional Arabic name
+- address, phone, email, TRN, and license number
+- logo
+- logo layout
+- signature image
+- stamp image
+- default terms
+- payment terms
+- validity days
+- footer note
+- prepared-by default
+- signature and stamp labels
+- primary and accent colors
+- display toggles for Arabic name, TRN, license number, signature area, and stamp area
+- `pdf_template_style`
+
+Logo layout options:
+- `full_logo_only`: use the uploaded logo as the complete brand lockup. Do not print a separate large company name beside it. This is the recommended default for the current Al Ameen full logo.
+- `logo_plus_company_text`: use a smaller logo plus company name/details.
+- `icon_left_company_text`: use an icon-only mark on the left plus company name/details beside it.
+- `no_logo`: hide the logo and render company name/details as text.
+
+Use `full_logo_only` when the uploaded logo already includes the icon, Arabic name, English brand name, and `Pharmacy LLC`.
+
+Branding image behavior:
+- Staff can upload logo, signature, and stamp images as `png`, `jpg`, `jpeg`, or `webp`.
+- The backend validates file extension, MIME type, max size, and basic binary signature.
+- Default max size is `QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES` in Django settings.
+- Branding image media may be normal branding media. Quotation PDFs and quotation data remain protected and are not exposed through public PDF URLs.
+- PDF rendering supports local filesystem paths, local `/media/...` URLs, and storage-backed `http`/`https` URLs such as Cloudinary.
+- This fixes the uploaded-logo issue where Cloudinary-backed logos could preview in the settings UI but disappear from generated PDFs.
+- Signature and stamp images render in the approval area when configured. If an image is not configured, the PDF falls back to the text label.
+- Uploaded logo, signature, and stamp images can be removed from `Quotations -> Settings` with the visible remove buttons. The backend also supports `clear_logo`, `clear_signature_image`, and `clear_stamp_image` on the staff-only settings PATCH endpoint.
+- Recommended logo format: tightly cropped PNG/WebP with transparent background if possible. Avoid huge white padding around the artwork because the PDF preserves the image aspect ratio and fits it into the header.
+
+PDF style:
+- `classic` is the implemented polished default.
+- `modern` and `compact` are reserved choices for later styles.
+- The current code is structured so more styles can be added without replacing the settings API.
+
+Template upload decision:
+- Full Word-template upload and DOCX-to-PDF conversion is deferred.
+- `python-docx`/`docxtpl` can fill DOCX files, but production-safe PDF conversion on Railway usually needs LibreOffice/headless conversion or an external service.
+- Preferred future route: upload a static PDF/image background template and overlay dynamic quotation data with ReportLab. This keeps deployment lighter and avoids LibreOffice.
+- A Settings-page `Download Sample PDF` action is not implemented yet. It remains a good future improvement, but was skipped here to avoid adding dummy quotation generation complexity to the stable settings API.
+
+Verification on May 22, 2026:
+- Browser opened `/admin`, then `Quotations -> Settings`.
+- Settings page loaded defaults and showed the logo, signature, and stamp upload areas, company fields, PDF text fields, style fields, and signature/stamp toggles.
+- Settings page showed the `Logo layout` selector with `Full Logo Only`, `Logo + Company Text`, `Icon Left + Company Text`, and `No Logo`.
+- Remove buttons were visible for configured logo/signature images; the stamp remove button stays hidden until a stamp image exists.
+- Clicking `Save Settings` showed `Quotation settings saved.`
+- Anonymous `GET /api/quotations/settings/` returned `401`.
+- Normal non-staff `GET /api/quotations/settings/` returned `403`.
+- Staff `GET /api/quotations/settings/` returned `200`.
+- Staff `PATCH /api/quotations/settings/` returned `200`.
+- Runtime PDF generation with the already-uploaded Cloudinary logo embedded an image in the generated PDF.
+- Runtime PDF generation with `full_logo_only` produced a header with the uploaded full logo and did not extract a separate duplicate `Al Ameen Pharmacy` text title from the PDF.
+- Temporary smoke-test users and temporary settings text were removed after verification.
+
 ## Permission Model
 
 Phase 1 uses staff-only backend access. Every quotation API endpoint and custom action must enforce `IsQuotationStaff`.
@@ -637,8 +748,9 @@ Phase 1 PDFs are generated on demand from stored quotation snapshot fields and s
 Sensitive quotation PDFs are not stored in public Cloudinary URLs in Phase 1.
 
 The current PDF layout includes:
-- pharmacy logo/text branding
+- logo-layout-aware pharmacy branding
 - pharmacy contact/TRN/license details
+- quotation title, quotation number, and date in the header
 - quotation metadata
 - customer/contact details
 - itemized quotation lines
@@ -646,7 +758,37 @@ The current PDF layout includes:
 - default terms and payment terms
 - prepared-by, signature, and stamp areas
 
-Default branding values live in `backend/pharmacy_api/settings.py`. Override them with environment variables when deploying.
+Default branding values live in `backend/pharmacy_api/settings.py` and can be overridden with environment variables, but the active daily configuration should be managed from `Admin Dashboard -> Quotations -> Settings`.
+
+The Settings page controls:
+- company name and optional Arabic name
+- address, phone, email, TRN, and license number
+- logo
+- logo layout
+- signature image
+- stamp image
+- default terms, payment terms, validity days, and footer note
+- prepared-by text
+- signature/stamp labels and visibility toggles
+- primary/accent colors
+- PDF template style (`classic` implemented; `modern` and `compact` reserved)
+
+Logo/signature/stamp uploads currently use the configured Django storage backend. These images can be served as normal media/static branding, but generated quotation PDFs are still protected and streamed only from staff-only endpoints.
+
+Header behavior:
+- `full_logo_only` is the default and prevents duplicated branding when the uploaded logo is a full lockup.
+- `logo_plus_company_text` and `icon_left_company_text` are available for smaller/icon-only logos.
+- `no_logo` uses text branding only.
+
+Approval behavior:
+- A configured signature image renders in the approval section.
+- Without a signature image, the placeholder is `Authorized Signature` unless a custom signature label is configured.
+- A configured stamp image renders in the approval section.
+- Without a stamp image, the placeholder is `Company Stamp` unless a custom stamp label is configured.
+
+Future template customization:
+- Preferred: upload a static PDF/image background and overlay dynamic data with ReportLab.
+- Deferred: DOCX template upload plus PDF conversion, because reliable conversion on Railway/Linux usually needs LibreOffice/headless conversion or an external service.
 
 ## Phase 2/3 Roadmap
 
@@ -708,6 +850,15 @@ Automated tests also cover staff-only import endpoints:
 - `/api/quotations/inquiries/parse_file/`
 - `/api/quotations/inquiries/create_imported/`
 
+Automated tests also cover quotation settings:
+- anonymous users are blocked from `/api/quotations/settings/`
+- normal non-staff users receive `403`
+- staff users receive `200`
+- defaults are returned if no settings row exists
+- settings updates persist
+- invalid logo, signature, and stamp uploads are rejected
+- existing PDF generation still works with saved settings
+
 Local manual endpoint checks during stabilization:
 - Anonymous requests to local quotation endpoints return `401`.
 - Existing automated tests verify normal non-staff users are blocked with `403`.
@@ -728,7 +879,7 @@ Expected result: all quotation tests pass.
 - Continue tuning labels, empty states, and tab organization after real staff feedback.
 - Consider simplifying the sub-tabs for daily use: keep `Dashboard`, `Companies`, `Quote Items`, `Inquiries`, and `Quotations` primary; tuck `Price History` and `Audit Logs` into contextual panels.
 - Add a small branded/draft indication to generated PDFs if staff will download draft quotes.
-- Decide whether Word-template customization should use LibreOffice, an external conversion service, or a DOCX-only export path.
+- Decide whether future template customization should start with static PDF/image backgrounds overlaid by ReportLab. This is safer for Railway than DOCX-to-PDF conversion.
 - Add frontend component tests or a Playwright smoke test once the UI flow is accepted.
 - Resolve the existing non-quotation React hook warnings in `OrderManagement.js` and `ProductDetail.js` separately.
 - Fix the existing admin route guard so a hard refresh on `/admin` waits for auth initialization before redirecting.
@@ -781,11 +932,13 @@ Completed:
 - Safe inquiry import implementation adds parser modules, metadata migration, staff-only parse/save endpoints, reviewed import UI, and backend tests for text/Excel/PDF paths
 - Latest safe import browser verification passed for pasted text, Excel, digitally generated PDF, no-text PDF warning, save imported inquiry, and create quotation from saved imported inquiry
 - Latest import smoke-test data and temporary files were cleaned from the database/filesystem
+- Quotation Settings implementation adds singleton `QuotationSettings`, staff-only settings API, logo/signature/stamp validation and upload, Settings tab, and PDF branding driven from saved settings with environment fallbacks
 
 Partially completed:
 - None
 
 Next:
+- Browser-verify `Quotations -> Settings` and protected settings API access before committing the settings branch
 - Have Dad/staff manually repeat create/edit/finalize/PDF workflow in `/admin -> Quotations` with real-ish sample data
 - Add real company/item data
 - Continue with Phase 2 only after Phase 1 is accepted
@@ -794,6 +947,7 @@ Warnings:
 - Do not add quotation models to `backend/api/models.py`
 - Do not create public quotation routes
 - Do not store sensitive quotation PDFs in public Cloudinary URLs
+- Do not add DOCX-to-PDF conversion unless Railway deployment has an explicit, supported conversion path
 - Do not implement AI, Gmail API, pgvector, aliases, document parsing, reporting, or background workers in Phase 1
 - Do not break product catalog, cart, checkout, orders, admin product management, admin order management, or JWT auth flows
 - Current frontend build still has pre-existing hook dependency warnings in `OrderManagement.js` and `ProductDetail.js`; quotation-specific build warnings were fixed
