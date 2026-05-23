@@ -24,6 +24,7 @@ Included:
 - Audit logs for important quotation actions
 - Protected PDF generation streamed from the backend
 - React admin dashboard tab: `Admin Dashboard -> Quotations`
+- Historical finalized quotation PDF import for reviewed company price-history backfill
 
 Not included in Phase 1:
 - AI matching
@@ -33,10 +34,10 @@ Not included in Phase 1:
 - Gmail API import
 - Gmail draft creation
 - Background workers
-- Document parsing
+- Full free-form document parsing outside deterministic Excel/PDF flows
 - OCR/scanned PDF extraction
 - Automatic quotation creation from uploaded files
-- Persistent storage of uploaded inquiry files
+- Public storage or public URLs for uploaded inquiry/source files
 - Complex reporting
 - Public quotation pages
 - Public Cloudinary storage for sensitive quotation PDFs
@@ -70,8 +71,8 @@ Completed:
   - PDF output has configurable Al Ameen Pharmacy branding, metadata, totals, terms, and signature/stamp area
 - Safe inquiry import:
   - pasted text preview
-  - Excel `.xlsx` preview through `openpyxl`
-  - digitally generated PDF preview through `pypdf` and `pdfplumber`
+  - Excel `.xlsx`, `.xlsb`, and `.xls` preview through deterministic header/row parsing
+  - digitally generated PDF preview through PyMuPDF, `pypdf`, and `pdfplumber`
   - reviewed imported inquiry save endpoint
   - no automatic quotation creation from uploaded content
   - no persistent uploaded binary storage
@@ -81,6 +82,23 @@ Completed:
   - staff-only settings API
   - logo, signature, and stamp image upload with extension, MIME type, size, and file-signature validation
   - PDF branding pulled from saved settings with sensible defaults
+- Historical finalized quotation backfill:
+  - `Quotations -> Historical Imports` tab inside the React admin dashboard
+  - staff-only upload of old finalized Al Ameen quotation PDFs
+  - deterministic extraction of quotation number, date, totals, and price rows from text-based PDF tables
+  - private source-file refs stored outside public media/Cloudinary URLs
+  - staff review/linking to `QuoteItem` before committing any `CompanyPriceHistory`
+  - committed rows create a hidden finalized historical quotation record so price history keeps a traceable source
+- Inline company creation:
+  - company selectors in inquiry import, manual inquiry, direct quotation creation, historical imports, and price-history filtering are searchable
+  - missing companies can be created in place and are selected automatically
+  - historical imports prefill the inline create form from the suggested company name parsed from the source filename
+- Bulk import review:
+  - historical import price rows support checkbox selection, select visible, select unmatched, select needs-review, select ready, and clear selection
+  - bulk toolbar supports duplicate-safe QuoteItem create/link, mark ready, mark needs-review, and skip
+  - compact review table includes status row highlighting, search, status/unmatched/error filters, hidden raw source rows, and a row action menu
+  - sticky commit bar shows total/ready/needs-review/skipped/duplicate/selected counts and commits only ready rows
+  - imported inquiry previews support checkbox selection and bulk delete for removing parser noise before saving
 
 Partially completed:
 - None
@@ -144,7 +162,7 @@ Import an inquiry:
 - In `Import Inquiry`, select a company and optional contact
 - Choose one import mode:
   - `Paste Text`: paste item lines, then click `Extract Lines`
-  - `Upload Excel`: choose a `.xlsx` workbook, then click `Parse File`
+  - `Upload Excel`: choose a `.xlsx`, `.xlsb`, or `.xls` workbook, then click `Parse File`
   - `Upload PDF`: choose a digitally generated `.pdf`, then click `Parse File`
 - Review the preview table before saving:
   - requested item name
@@ -158,10 +176,22 @@ Import an inquiry:
 - After the inquiry is saved, click `Create Quotation from This Inquiry` if you want to start the quotation editor
 
 Import limitations:
-- Uploaded files are parsed for preview only and are not stored.
+- Uploaded source files are stored as private source-file refs after a successful parse; they are not exposed through public URLs.
 - PDF import supports selectable text/tables only.
 - Scanned/image-only PDFs show: `No selectable text detected. OCR is not enabled in this environment.`
 - OCR, Gmail import, AI matching, and background workers are intentionally not part of this implementation.
+
+Backfill historical finalized quotation prices:
+- Go to `Quotations -> Historical Imports`
+- Upload an old finalized Al Ameen quotation PDF
+- Confirm the detected quotation number, quotation date, suggested company name, and totals
+- Select the real company from `Companies`; create it first in `Quotations -> Companies` if needed
+- Review each extracted price row
+- Link each usable row to a `QuoteItem`; use `Create Item` for private quote items that do not exist yet
+- Mark reviewed usable rows as `Ready`; mark irrelevant/unclear rows as `Skipped`
+- Click `Commit Price History`
+- Confirm `Quotations -> Price History` shows the imported company-specific prices
+- This does not create a new active quotation to send. It creates a hidden finalized historical quotation record only to keep price history traceable.
 
 Create a quotation from an inquiry:
 - In `Quotations -> Inquiries`, click `Create Quotation from Inquiry` beside the inquiry
@@ -233,6 +263,11 @@ Verify price history:
 - [ ] PDF has pharmacy branding, quotation metadata, totals, terms, and signature/stamp area
 - [ ] `Quotations -> Settings` opens for staff and saves PDF branding details
 - [ ] Invalid logo, signature, or stamp uploads are rejected with a clear validation error
+- [ ] `Quotations -> Historical Imports` opens for staff
+- [ ] Old finalized quotation PDF can be parsed into staged historical price rows
+- [ ] Historical import rows can be linked to Quote Items and marked ready
+- [ ] Committing historical imports appends price history once and hides the generated historical quotation from normal quotation lists
+- [ ] Duplicate historical imports do not append duplicate company price-history rows
 - [ ] Anonymous users cannot access quotation API endpoints
 - [ ] Normal customer users cannot access quotation API endpoints
 - [ ] Staff users can access quotation API endpoints
@@ -250,6 +285,8 @@ Implemented Phase 1 models:
 - `CompanyPriceHistory`
 - `QuotationAuditLog`
 - `QuotationSettings`
+- `HistoricalPriceImport`
+- `HistoricalPriceImportLine`
 
 `QuoteItem` is intentionally separate from the public ecommerce `Product` model. It has an optional nullable link to `Product` so private/internal/customer-specific quotation items do not need to become storefront products.
 
@@ -258,11 +295,18 @@ Import metadata fields added for reviewed imported inquiries:
 - `Inquiry.source_filename`
 - `Inquiry.source_mime_type`
 - `Inquiry.source_sha256`
+- `Inquiry.source_file_ref`
+- `Inquiry.source_file_size`
 - `Inquiry.parse_method`
 - `Inquiry.parse_meta`
 - `InquiryLine.raw_line`
 - `InquiryLine.parse_status`
 - `InquiryLine.parse_confidence`
+
+Historical price backfill models:
+- `HistoricalPriceImport` stores the reviewed source metadata for an old finalized quotation PDF: company, suggested company name, source filename/MIME/SHA-256/private ref, parser metadata, document number/date, currency, totals, status, committed user/time, and the hidden historical quotation created during commit.
+- `HistoricalPriceImportLine` stores each extracted old price row: raw source line, cleaned item text, linked `QuoteItem`, quantity, unit, unit price, VAT/total fields, serial/page/row metadata, parse confidence, status, duplicate reason, and notes.
+- `Quotation.is_historical_import` marks hidden finalized quotations created only to keep historical price-history rows traceable. Normal `GET /api/quotations/quotes/` excludes these unless `include_historical=true`.
 
 ## API Endpoints Added
 
@@ -274,6 +318,8 @@ Implemented endpoints:
 - `/items/`
 - `/inquiries/`
 - `/inquiry-lines/`
+- `/historical-imports/`
+- `/historical-import-lines/`
 - `/quotes/`
 - `/quote-lines/`
 - `/price-history/`
@@ -285,6 +331,9 @@ Implemented custom actions:
 - `POST /inquiries/parse_file/`
 - `POST /inquiries/create_imported/`
 - `POST /inquiries/{id}/create_quote/` (idempotent for existing inquiry quotations)
+- `POST /historical-imports/parse_file/`
+- `POST /historical-imports/{id}/commit/`
+- `GET /historical-imports/{id}/preview_page/`
 - `GET /companies/{id}/price_history/`
 - `POST /quotes/{id}/submit_review/`
 - `POST /quotes/{id}/approve/`
@@ -298,6 +347,16 @@ Import endpoints:
 - `parse_text` accepts JSON with `raw_text`, runs deterministic rules, and returns preview JSON only.
 - `parse_file` accepts multipart `file`, supports `.xlsx` and `.pdf`, validates size/type/signature, computes SHA-256, and returns preview JSON only.
 - `create_imported` accepts reviewed preview JSON and atomically creates `Inquiry` plus `InquiryLine` rows. It does not create a quotation automatically.
+
+Historical import endpoints:
+- `POST /historical-imports/parse_file/` accepts a finalized quotation PDF, validates it, stores the source file in private quotation storage, parses known Al Ameen quotation table fields, and creates a staged `HistoricalPriceImport` with review lines.
+- `PATCH /historical-imports/{id}/` updates reviewed company/date/metadata before commit.
+- `PATCH /historical-import-lines/{id}/` updates reviewed row fields, linked `QuoteItem`, notes, and row status.
+- `POST /historical-imports/{id}/bulk_create_quote_items/` creates missing private `QuoteItem` records only for selected rows and links exact normalized existing items instead of duplicating them.
+- `POST /historical-imports/{id}/bulk_update_rows/` marks selected rows `ready`, `needs_review`, or `skipped` with validation and per-row results.
+- `POST /historical-imports/{id}/bulk_skip_rows/` marks selected rows skipped so they remain visible but are excluded from commit.
+- `POST /historical-imports/{id}/commit/` atomically creates hidden finalized historical quotation/line records and appends non-duplicate `CompanyPriceHistory` rows only for reviewed `ready` lines.
+- `GET /historical-imports/{id}/preview_page/` streams a staff-only first-page PNG preview from private storage when PyMuPDF is available.
 
 Settings endpoints:
 - `GET /api/quotations/settings/` returns the singleton quotation PDF branding settings, creating a default settings row if one does not exist.
@@ -315,6 +374,7 @@ Implemented React admin components:
 - `QuotationList`
 - `QuotationEditor`
 - `PriceHistoryPanel`
+- `HistoricalImportManager`
 - `AuditLogPanel`
 - `QuotationSettings`
 - `QuotationErrorNotice`
@@ -324,6 +384,20 @@ The module appears only inside the existing React admin dashboard at `/admin` as
 `InquiryManager` now includes an `Import Inquiry` area with paste text, Excel upload, PDF upload, shared preview/review table, save imported inquiry, and create quotation from saved inquiry actions. The existing manual inquiry form remains available as a fallback.
 
 `QuotationSettings` provides a staff-editable branding page at `Quotations -> Settings`. It controls company details, logo, optional signature/stamp images, terms, validity, payment text, footer note, style colors, template style selection, and signature/stamp labels used by generated PDFs.
+
+`HistoricalImportManager` provides `Quotations -> Historical Imports`. It is separate from the new inquiry importer because it backfills old approved prices instead of creating a live customer quotation. Staff upload a finalized quotation PDF, review detected company/date/totals and price rows, link rows to `QuoteItem`, and commit only approved rows into company-specific price history.
+
+The historical import review header is organized as a staff workflow instead of a raw form: a `Document Preview` card shows the source file, parser status, and lines found, while an `Import Details` card groups import summary, company selection/inline company creation, quotation number/date/totals, and the `Save Import Details` action. The suggested company from the file appears as a banner with a `Use suggestion` action. `+ New Company` opens the inline company form, `Create Company` submits it, and newly created companies are selected automatically with a selected-company badge. Final price-history commit remains in the sticky row-review bar below.
+
+Historical import bulk workflow:
+- Select a staged historical import.
+- Use row filters (`All`, `Ready`, `Needs Review`, `Unmatched`, `Skipped`, `Errors`) and search to narrow the table.
+- Use `Select Visible`, `Select Unmatched`, `Select Needs Review`, or `Select Ready`.
+- Click `Create Quote Items` to create/link private QuoteItems for the selected rows. Exact normalized matches are linked instead of duplicated.
+- Use `Mark Ready`, `Needs Review`, or `Skip` for selected rows. `Ready` requires company, quotation date, linked QuoteItem, quantity greater than zero, and unit price zero or more.
+- Commit from the sticky bottom bar. Only ready rows are committed into price history; skipped/needs-review/duplicate rows are ignored.
+
+`CompanySelectWithCreate` is the shared inline company selector/creator used by daily quotation workflows. Use it instead of a raw company `<select>` when staff are choosing a company for a quotation/inquiry/backfill task, so missing companies can be added without leaving the current screen.
 
 ## Phase 1 Stabilization: Sub-Tab Error Fix
 
@@ -555,71 +629,96 @@ Hardening browser verification on May 21, 2026:
 
 ## Safe Inquiry Import Workflow
 
-Status: implemented and browser verified on May 22, 2026.
+Status: production importer hardening implemented and verified on May 22, 2026.
 
 Purpose:
 - Help staff turn pasted text, company Excel LPOs, or digitally generated PDFs into reviewed inquiry lines.
 - Keep humans in control before any inquiry is saved.
-- Avoid storing sensitive uploaded files in Phase 1.
+- Keep uploaded inquiry source files private. The parser stores a private source-file reference after a successful parse and never exposes a public URL.
 
 Supported sources:
 - Pasted text
-- `.xlsx` Excel workbooks
+- `.xlsx`, `.xlsb`, and `.xls` Excel workbooks
 - Digitally generated `.pdf` files with selectable text/tables
 
 Unsupported in this implementation:
 - scanned/image-only PDF OCR
-- `.xls`, `.csv`, `.docx`, images, email messages, ZIPs, or arbitrary file types
+- `.csv`, `.docx`, images, email messages, ZIPs, or arbitrary file types
 - AI matching or product guessing
 - automatic quotation creation from uploaded files
-- persistent uploaded binary storage
+- public storage or public download URLs for uploaded inquiry source files
 
 Parser modules:
 - `backend/quotations/import_rules.py`
-  - deterministic line normalization and common quantity/unit patterns
+  - deterministic line normalization, title/header detection, repeated-header skipping, serial stripping, and common quantity/unit patterns
   - examples covered by tests:
     - `Panadol 500mg - 10 boxes`
     - `Panadol 500mg x 10`
     - `10 boxes Panadol 500mg`
     - `Gloves medium 5 packs`
     - `1. Panadol 500mg - 10 box`
+    - `SL NO | ITEMS | UNIT | QUANTITY` with quantities like `1 bottle`, `1 BOX`, `5 Nos`, and `2 packs`
 - `backend/quotations/import_parsers.py`
-  - upload size/type/signature validation
+  - upload size/type/signature validation through optional `python-magic`, `filetype`, and explicit PDF/ZIP/OLE signatures
   - SHA-256 hashing
-  - Excel parsing with `openpyxl.load_workbook(read_only=True, data_only=True)`
+  - Excel parsing with `openpyxl.load_workbook(read_only=True, data_only=True)` for `.xlsx`
+  - Excel parsing fallback/coverage with `python-calamine` for `.xlsx`, `.xlsb`, and `.xls`
   - PDF preflight with `pypdf`
-  - PDF text/table extraction with `pdfplumber`
+  - PDF text classification with PyMuPDF
+  - PDF table/text extraction with `pdfplumber`
+- `backend/quotations/private_storage.py`
+  - saves successful uploaded inquiry source files under a private storage root and returns a DB metadata ref only
+- `backend/quotations/ocr.py`
+  - scaffolds OCR provider interfaces for `local_tesseract` and `google_document_ai`; neither provider is enabled by default
 
 Security/storage behavior:
 - All import APIs use `IsQuotationStaff`.
-- Uploaded files are read into memory with a size limit and are not saved to Cloudinary, local media, or public URLs.
-- Browser `Content-Type` is not trusted by itself; file extension and basic binary signatures are checked.
-- `.xlsx` files must look like ZIP/OpenXML files.
+- Uploaded files are read with a size limit and validated before parsing.
+- Successful uploaded source files are stored in private storage, not Cloudinary public media. The inquiry stores metadata such as `source_file_ref`, `source_file_size`, filename, MIME, SHA-256, and parser metadata.
+- Browser `Content-Type` is not trusted by itself; extension, MIME sniffing, and binary signatures are checked.
+- `.xlsx` and `.xlsb` files must look like ZIP/OpenXML-style files.
+- `.xls` files must look like OLE compound documents.
 - `.pdf` files must start with a PDF signature and pass `pypdf` preflight.
 - Encrypted PDFs are rejected with a clear 400 response.
 - Scanned/no-text PDFs return preview JSON with the warning: `No selectable text detected. OCR is not enabled in this environment.`
+- Local development private files live under `backend/private_media/quotations` by default and are gitignored. For Railway production, configure durable private object storage or persistent private storage before relying on source-file retention.
 
 Default limits:
 - `QUOTATION_IMPORT_MAX_UPLOAD_BYTES`: 5 MB
 - `QUOTATION_IMPORT_MAX_EXCEL_ROWS`: 500 rows per inspected sheet
+- `QUOTATION_IMPORT_MAX_EXCEL_SHEETS`: 10 sheets
 - `QUOTATION_IMPORT_MAX_PDF_PAGES`: 10 pages
+- `QUOTATION_IMPORT_STORE_SOURCE_FILES`: `1`
+- `QUOTATION_PRIVATE_STORAGE_ROOT`: `backend/private_media/quotations` by default
+- `QUOTATION_IMPORT_OCR_PROVIDER`: empty by default
 
 Dependencies added:
+- `PyMuPDF`
 - `pdfplumber`
 - `pypdf`
 - `openpyxl`
 - `defusedxml`
+- `filetype`
+- `python-calamine`
+- `pyxlsb`
 
-OCR is deferred because Tesseract/Poppler/image conversion would add heavy native dependencies and deployment risk on Railway. If OCR becomes necessary, it should be evaluated separately with a production-safe deployment design.
+OCR is deferred as a runtime feature because Tesseract/Poppler/image conversion would add heavy native dependencies and deployment risk on Railway. The provider interface exists now; enabling OCR should be a separate deployment decision using either a managed OCR provider or a verified local runtime image.
 
-Import browser verification on May 22, 2026:
+Importer verification on May 22, 2026:
+- Backend tests cover the exact `FIRST AID MATERIAL LOG.xlsx` pattern:
+  - row 1 title skipped
+  - row 2 header detected
+  - serial numbers excluded from item names
+  - `1 bottle`, `1 BOX`, `5 Nos`, and `2 packs` split into quantity/unit correctly
+  - no false `no clear header row detected` warning
 - Pasted text extracted two preview lines.
 - Reviewed pasted-text inquiry saved successfully.
 - `Create Quotation from This Inquiry` worked only after the imported inquiry was saved.
-- Excel `.xlsx` upload parsed two preview lines through `openpyxl_v1`.
-- Digitally generated PDF upload parsed two preview lines through `pypdf_pdfplumber_v1`.
+- Excel `.xlsx` upload now parses through `openpyxl_structured_v2`.
+- Digitally generated PDF upload now parses through `pymupdf_pdfplumber_table_v2` or `pymupdf_text_v2`.
 - Blank/no-text PDF showed the expected no-OCR warning.
-- Temporary smoke-test records, user, and files were removed after verification.
+- Browser verification confirmed `Quotations -> Inquiries -> Import Inquiry` opens with the Excel mode, company selector, private-source helper text, and compact import controls.
+- The Browser plugin could not automate the native file input directly, so the FIRST AID workbook was verified through the same staff-only `/api/quotations/inquiries/parse_file/` endpoint with a real generated `.xlsx` upload. The API returned `200`, selected header row 2, parsed 4/4 lines, returned no warnings, and included a private source-file ref.
 
 ## Quotation Settings And PDF Branding
 
@@ -859,6 +958,20 @@ Automated tests also cover quotation settings:
 - invalid logo, signature, and stamp uploads are rejected
 - existing PDF generation still works with saved settings
 
+Automated tests also cover historical price backfill:
+- anonymous and non-staff users cannot parse historical PDFs
+- staff users can parse staged finalized quotation PDFs
+- encrypted historical PDFs are rejected
+- parser extracts Al Ameen quotation number/date/rows from a machine-generated table PDF
+- commit requires reviewed linked rows and appends company price history
+- committed historical quotations are hidden from normal quotation lists unless `include_historical=true`
+- duplicate historical imports do not append duplicate price-history rows
+- bulk actions are staff-only
+- bulk create links exact normalized existing QuoteItems instead of duplicating them
+- bulk create creates missing private QuoteItems only for selected rows
+- bulk ready status validates required fields
+- bulk skipped rows are excluded from commit
+
 Local manual endpoint checks during stabilization:
 - Anonymous requests to local quotation endpoints return `401`.
 - Existing automated tests verify normal non-staff users are blocked with `403`.
@@ -876,6 +989,8 @@ Expected result: all quotation tests pass.
 ## Next Recommended Fixes Before Phase 2
 
 - Have a staff user, ideally Dad, repeat the workflow with real-ish sample data and confirm labels/order of operations feel natural.
+- Run a small batch of real old finalized quotation PDFs through `Historical Imports` and record which layouts/rows fail before expanding parser scope.
+- Configure durable private storage for Railway before using historical source-file retention as an audit/archive feature.
 - Continue tuning labels, empty states, and tab organization after real staff feedback.
 - Consider simplifying the sub-tabs for daily use: keep `Dashboard`, `Companies`, `Quote Items`, `Inquiries`, and `Quotations` primary; tuck `Price History` and `Audit Logs` into contextual panels.
 - Add a small branded/draft indication to generated PDFs if staff will download draft quotes.
@@ -933,12 +1048,48 @@ Completed:
 - Latest safe import browser verification passed for pasted text, Excel, digitally generated PDF, no-text PDF warning, save imported inquiry, and create quotation from saved imported inquiry
 - Latest import smoke-test data and temporary files were cleaned from the database/filesystem
 - Quotation Settings implementation adds singleton `QuotationSettings`, staff-only settings API, logo/signature/stamp validation and upload, Settings tab, and PDF branding driven from saved settings with environment fallbacks
+- Production-grade importer hardening adds robust header detection, title/repeated-header skipping, serial stripping, quantity/unit splitting, `.xlsb/.xls` parser support through `python-calamine`, PyMuPDF PDF classification, private source-file refs, and OCR provider abstractions
+- `python manage.py test quotations --keepdb -v 2` passed 41 tests after importer hardening
+- `python manage.py migrate` applied `quotations.0006_inquiry_source_file_ref_inquiry_source_file_size`
+- `python manage.py check` passed after importer hardening
+- `npm run build` passed after importer hardening with only pre-existing non-quotation hook dependency warnings
+- Browser/API verification confirmed the FIRST AID workbook parse result through the staff-only parse endpoint and confirmed the updated import UI is reachable in `/admin -> Quotations -> Inquiries`
+- Historical finalized quotation backfill adds `Quotations -> Historical Imports`, `HistoricalPriceImport`, `HistoricalPriceImportLine`, staff-only PDF parse/preview/commit APIs, private source-file refs, and a commit service that appends reviewed non-duplicate rows into `CompanyPriceHistory`
+- Historical backfill tests passed for staff-only parse access, encrypted PDF rejection, Al Ameen PDF table extraction, private source refs, commit into price history, hidden historical quotation records, and duplicate prevention
+- `python manage.py makemigrations quotations` created `quotations.0007_historicalpriceimport_historicalpriceimportline_and_more`
+- `python manage.py migrate` applied `quotations.0007_historicalpriceimport_historicalpriceimportline_and_more`
+- `python manage.py check` passed after historical backfill implementation
+- `python manage.py test quotations --keepdb` passed 47 tests after historical backfill implementation
+- `npm run build` passed after historical backfill implementation with the existing non-quotation hook dependency warnings and Browserslist data-age notice
+- Real sample parser check against `ANCIENT BUILDERS CONSTN  21052026.pdf` detected quotation `QUOTATION-26052101`, date `2026-05-21`, 19 rows, no parser warnings, and totals `551.25 / 17.15 / 568.40`
+- After private source-ref resolver hardening, `python manage.py check` passed and `python manage.py test quotations.tests.InquiryImportTests quotations.tests.HistoricalPriceImportTests --keepdb` passed 18 tests
+- Inline company creation QoL added through `CompanySelectWithCreate` and wired into inquiry import, manual inquiry, direct quotation creation, historical imports, and price-history filtering
+- `python manage.py check` passed after the inline company creation update
+- `npm run build` passed after the inline company creation update with the existing non-quotation hook dependency warnings and Browserslist data-age notice
+- Historical import bulk review UX added with checkbox selection, filters/search, bulk create/link QuoteItems, bulk skip/status updates, row action menu, row highlighting, and sticky commit bar
+- Imported inquiry preview rows now support checkbox selection and bulk delete
+- `python manage.py test quotations --keepdb` passed 51 tests after the bulk review update
+- `python manage.py check` passed after the bulk review update
+- `npm run build` passed after the bulk review update with the existing non-quotation hook dependency warnings and Browserslist data-age notice
+- Browser verification reached `/admin -> Quotations -> Historical Imports`, selected the sample import, confirmed the bulk toolbar/sticky commit bar/action menu rendered, and confirmed `Select Visible` selected 19 visible rows
+- Historical import review header was polished into a two-card layout with a document preview card and import details card
+- Suggested company handling now uses a banner/action, and inline company creation opens inside the Company section with the suggested name prefilled
+- `python manage.py check` passed after the historical import header polish
+- `python manage.py test quotations --keepdb` passed 51 tests after the historical import header polish
+- `npm run build` passed after the historical import header polish with the existing non-quotation hook dependency warnings and Browserslist data-age notice
+- Browser verification confirmed the polished historical import header, inline company creation form, no horizontal overflow, and sticky commit bar presence
+- Historical import company creation UX was refined so `+ New Company` opens the collapsed form, `Create Company` submits it, selected companies show a badge, and the document preview card stretches with the import details card
+- Browser verification captured form-closed, form-open, and company-created/selected states at normal zoom with no horizontal overflow
 
 Partially completed:
-- None
+- Native file-picker automation was not available in the Browser plugin, so the actual `.xlsx` upload parse was verified with a staff JWT against the real DRF endpoint rather than through the browser file chooser
+- Historical import inline company creation was browser-verified up to opening the inline create form with the suggested company name prefilled. Creating and saving a real new company should still be done by staff during manual acceptance with a non-temporary company.
 
 Next:
-- Browser-verify `Quotations -> Settings` and protected settings API access before committing the settings branch
+- Have staff try `Quotations -> Inquiries -> Import Inquiry` with real company files and confirm the compact review table labels feel clear
+- Have staff click-test inline company creation in all company selection spots and confirm the search/create wording feels natural
+- Have staff try `Quotations -> Historical Imports` with several real old finalized quotation PDFs. The parser is intentionally tuned for Al Ameen quotation tables first; reviewed failures should drive the next parser rule updates.
+- Confirm the Railway private storage plan before relying on historical source PDFs being retained long term
 - Have Dad/staff manually repeat create/edit/finalize/PDF workflow in `/admin -> Quotations` with real-ish sample data
 - Add real company/item data
 - Continue with Phase 2 only after Phase 1 is accepted
@@ -947,7 +1098,9 @@ Warnings:
 - Do not add quotation models to `backend/api/models.py`
 - Do not create public quotation routes
 - Do not store sensitive quotation PDFs in public Cloudinary URLs
+- Do not expose uploaded inquiry or historical source files through Cloudinary public URLs; use private storage refs only
+- Railway production needs a durable private storage plan before relying on long-term source-file retention
 - Do not add DOCX-to-PDF conversion unless Railway deployment has an explicit, supported conversion path
-- Do not implement AI, Gmail API, pgvector, aliases, document parsing, reporting, or background workers in Phase 1
+- Do not implement AI, Gmail API, pgvector, aliases, OCR, broad free-form document parsing, reporting, or background workers in Phase 1
 - Do not break product catalog, cart, checkout, orders, admin product management, admin order management, or JWT auth flows
 - Current frontend build still has pre-existing hook dependency warnings in `OrderManagement.js` and `ProductDetail.js`; quotation-specific build warnings were fixed

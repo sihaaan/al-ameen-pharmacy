@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 const newLine = () => ({
@@ -54,6 +55,8 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [importParsing, setImportParsing] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
   const [importNotice, setImportNotice] = useState(null);
+  const [expandedRawRows, setExpandedRawRows] = useState({});
+  const [selectedImportRows, setSelectedImportRows] = useState([]);
   const [errorInfo, setErrorInfo] = useState(null);
 
   const load = async () => {
@@ -92,6 +95,13 @@ const InquiryManager = ({ onOpenQuote }) => {
   const filteredInquiries = useMemo(() => (
     statusFilter ? inquiries.filter((inquiry) => inquiry.status === statusFilter) : inquiries
   ), [inquiries, statusFilter]);
+
+  const rememberCompany = (company) => {
+    setCompanies((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
+      return [...withoutDuplicate, company].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
 
   const updateLine = (index, patch) => {
     setForm((current) => ({
@@ -180,11 +190,14 @@ const InquiryManager = ({ onOpenQuote }) => {
   const setPreview = (preview) => {
     setSavedImportedInquiry(null);
     setImportNotice(null);
+    setExpandedRawRows({});
+    setSelectedImportRows([]);
     setImportPreview({
       ...preview,
       lines: (preview.lines || []).map((line) => ({
         ...newImportLine(),
         ...line,
+        raw_line: line.raw_line || line.raw_source_line || '',
         parse_confidence: Number(line.parse_confidence || 0),
       })),
     });
@@ -240,10 +253,34 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const removeImportLine = (index) => {
     setSavedImportedInquiry(null);
+    setSelectedImportRows((current) => current.filter((rowIndex) => rowIndex !== index).map((rowIndex) => rowIndex > index ? rowIndex - 1 : rowIndex));
     setImportPreview((current) => ({
       ...current,
       lines: current.lines.filter((_, lineIndex) => lineIndex !== index),
     }));
+  };
+
+  const toggleImportRowSelection = (index) => {
+    setSelectedImportRows((current) => (
+      current.includes(index)
+        ? current.filter((rowIndex) => rowIndex !== index)
+        : [...current, index]
+    ));
+  };
+
+  const toggleAllImportRows = () => {
+    const allIndexes = (importPreview?.lines || []).map((_, index) => index);
+    setSelectedImportRows((current) => current.length === allIndexes.length ? [] : allIndexes);
+  };
+
+  const removeSelectedImportRows = () => {
+    if (!selectedImportRows.length) return;
+    setSavedImportedInquiry(null);
+    setImportPreview((current) => ({
+      ...current,
+      lines: current.lines.filter((_, index) => !selectedImportRows.includes(index)),
+    }));
+    setSelectedImportRows([]);
   };
 
   const addImportLine = () => {
@@ -254,13 +291,20 @@ const InquiryManager = ({ onOpenQuote }) => {
         source_filename: importFile?.name || '',
         source_mime_type: importFile?.type || '',
         source_sha256: '',
+        source_file_ref: '',
+        source_file_size: null,
         parse_method: 'manual_review',
         original_text: importForm.raw_text,
         warnings: [],
+        summary: {},
         meta: {},
       }),
       lines: [...(current?.lines || []), newImportLine()],
     }));
+  };
+
+  const toggleRawRow = (index) => {
+    setExpandedRawRows((current) => ({ ...current, [index]: !current[index] }));
   };
 
   const saveImportedInquiry = async () => {
@@ -297,6 +341,8 @@ const InquiryManager = ({ onOpenQuote }) => {
         source_filename: importPreview?.source_filename || importFile?.name || '',
         source_mime_type: importPreview?.source_mime_type || importFile?.type || '',
         source_sha256: importPreview?.source_sha256 || '',
+        source_file_ref: importPreview?.source_file_ref || '',
+        source_file_size: importPreview?.source_file_size || null,
         parse_method: importPreview?.parse_method || 'manual_review',
         parse_meta: {
           ...(importPreview?.meta || {}),
@@ -334,7 +380,7 @@ const InquiryManager = ({ onOpenQuote }) => {
         <div className="qm-panel-heading">
           <div>
             <h3>Import Inquiry</h3>
-            <p>Paste text or preview a supported file, review the lines, then save the inquiry. Files are parsed only for preview and are not stored.</p>
+            <p>Paste text or preview a supported file, review the lines, then save the inquiry. Source files are kept private and are never exposed publicly.</p>
           </div>
           <div className="qm-mode-tabs">
             <button type="button" className={importMode === 'paste' ? 'active' : ''} onClick={() => { setImportMode('paste'); setImportFile(null); }}>Paste Text</button>
@@ -344,12 +390,13 @@ const InquiryManager = ({ onOpenQuote }) => {
         </div>
 
         <div className="qm-grid-two">
-          <label><span className="qm-label-text">Company <span className="qm-required">*</span></span>
-            <select value={importForm.company} onChange={(event) => setImportForm({ ...importForm, company: event.target.value, contact: '' })}>
-              <option value="">Select company</option>
-              {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-            </select>
-          </label>
+          <CompanySelectWithCreate
+            companies={companies}
+            value={importForm.company}
+            required
+            onChange={(companyId) => setImportForm({ ...importForm, company: companyId, contact: '' })}
+            onCreated={rememberCompany}
+          />
           <label><span className="qm-label-text">Contact</span>
             <select value={importForm.contact} onChange={(event) => setImportForm({ ...importForm, contact: event.target.value })}>
               <option value="">No contact</option>
@@ -372,11 +419,11 @@ const InquiryManager = ({ onOpenQuote }) => {
           </div>
         ) : (
           <div className="qm-import-source">
-            <label><span className="qm-label-text">{importMode === 'excel' ? 'Upload .xlsx file' : 'Upload digitally generated .pdf file'}</span>
+            <label><span className="qm-label-text">{importMode === 'excel' ? 'Upload Excel file' : 'Upload digitally generated .pdf file'}</span>
               <input
                 key={importMode}
                 type="file"
-                accept={importMode === 'excel' ? '.xlsx' : '.pdf'}
+                accept={importMode === 'excel' ? '.xlsx,.xlsb,.xls' : '.pdf'}
                 onChange={(event) => setImportFile(event.target.files?.[0] || null)}
               />
             </label>
@@ -389,10 +436,43 @@ const InquiryManager = ({ onOpenQuote }) => {
         {importNotice && <div className={`qm-feedback ${importNotice.type}`}>{importNotice.message}</div>}
         {importPreview && (
           <div className="qm-import-preview">
+            <div className="qm-summary-banner">
+              <div className="qm-summary-stat">
+                <span>Source</span>
+                <strong>{importPreview.source_filename || importPreview.source_type}</strong>
+              </div>
+              <div className="qm-summary-stat">
+                <span>Method</span>
+                <strong>{importPreview.parse_method || 'manual_review'}</strong>
+              </div>
+              <div className="qm-summary-stat success">
+                <span>Parsed</span>
+                <strong>{importPreview.summary?.parsed_count ?? 0}</strong>
+              </div>
+              <div className="qm-summary-stat warning">
+                <span>Needs review</span>
+                <strong>{importPreview.summary?.needs_review_count ?? 0}</strong>
+              </div>
+              <div className="qm-summary-stat muted">
+                <span>Skipped</span>
+                <strong>{importPreview.summary?.skipped_count ?? 0}</strong>
+              </div>
+            </div>
             <div className="qm-preview-meta">
-              <span>Source: {importPreview.source_filename || importPreview.source_type}</span>
-              <span>Method: {importPreview.parse_method}</span>
-              <span>Lines: {importPreview.lines.length}</span>
+              <span>Total lines: {importPreview.lines.length}</span>
+              <span>Selected: {selectedImportRows.length}</span>
+              {(importPreview.meta?.selected_sheets || []).map((sheet) => (
+                <span key={sheet.sheet_name}>{sheet.sheet_name}: header row {sheet.header_row}</span>
+              ))}
+              {importPreview.source_file_ref && <span>Private source saved</span>}
+            </div>
+            <div className="qm-bulk-toolbar compact">
+              <strong>{selectedImportRows.length} rows selected</strong>
+              <button type="button" className="qm-secondary small" disabled={!importPreview.lines.length} onClick={toggleAllImportRows}>
+                {selectedImportRows.length === importPreview.lines.length ? 'Deselect All' : 'Select All'}
+              </button>
+              <button type="button" className="qm-secondary small danger" disabled={!selectedImportRows.length} onClick={removeSelectedImportRows}>Delete Selected</button>
+              <button type="button" className="qm-secondary small" disabled={!selectedImportRows.length} onClick={() => setSelectedImportRows([])}>Clear</button>
             </div>
             {(importPreview.warnings || []).length > 0 && (
               <div className="qm-notice">
@@ -404,38 +484,62 @@ const InquiryManager = ({ onOpenQuote }) => {
               <table className="qm-table import-table">
                 <thead>
                   <tr>
+                    <th className="qm-check-cell"><input type="checkbox" checked={importPreview.lines.length > 0 && selectedImportRows.length === importPreview.lines.length} onChange={toggleAllImportRows} /></th>
                     <th>Requested Item Name</th>
                     <th>Qty</th>
                     <th>Unit</th>
-                    <th>Parse Status</th>
+                    <th>Status</th>
                     <th>Confidence</th>
-                    <th>Raw Source Line</th>
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {importPreview.lines.map((line, index) => (
-                    <tr key={`${line.raw_line}-${index}`}>
-                      <td><input value={line.raw_name} onChange={(event) => updateImportLine(index, { raw_name: event.target.value })} /></td>
-                      <td><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
-                      <td><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
-                      <td>
-                        <select value={line.parse_status || 'needs_review'} onChange={(event) => updateImportLine(index, { parse_status: event.target.value })}>
-                          <option value="parsed">Parsed</option>
-                          <option value="needs_review">Needs Review</option>
-                          <option value="unparsed">Unparsed</option>
-                          <option value="manual">Manual</option>
-                        </select>
-                      </td>
-                      <td><span className="qm-confidence">{Math.round(Number(line.parse_confidence || 0) * 100)}%</span></td>
-                      <td><input value={line.raw_line || ''} onChange={(event) => updateImportLine(index, { raw_line: event.target.value })} /></td>
-                      <td><button type="button" className="qm-secondary small danger" onClick={() => removeImportLine(index)}>Delete</button></td>
-                    </tr>
+                    <React.Fragment key={`${line.raw_line || line.raw_name}-${index}`}>
+                      <tr>
+                        <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRows.includes(index)} onChange={() => toggleImportRowSelection(index)} /></td>
+                        <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, { raw_name: event.target.value })} /></td>
+                        <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
+                        <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
+                        <td className="qm-import-status-cell">
+                          <select value={line.parse_status || 'needs_review'} onChange={(event) => updateImportLine(index, { parse_status: event.target.value })}>
+                            <option value="parsed">Parsed</option>
+                            <option value="needs_review">Needs Review</option>
+                            <option value="unparsed">Unparsed</option>
+                            <option value="manual">Manual</option>
+                          </select>
+                        </td>
+                        <td><span className={`qm-confidence status-${line.parse_status || 'needs_review'}`}>{Math.round(Number(line.parse_confidence || 0) * 100)}%</span></td>
+                        <td className="qm-row-actions">
+                          <button type="button" className="qm-secondary small" onClick={() => toggleRawRow(index)}>
+                            {expandedRawRows[index] ? 'Hide Raw' : 'View Raw'}
+                          </button>
+                          <button type="button" className="qm-secondary small danger" onClick={() => removeImportLine(index)}>Delete</button>
+                        </td>
+                      </tr>
+                      {expandedRawRows[index] && (
+                        <tr className="qm-raw-row">
+                          <td />
+                          <td colSpan="6">
+                            <label>
+                              <span className="qm-label-text">Raw source line</span>
+                              <textarea rows="2" value={line.raw_line || ''} onChange={(event) => updateImportLine(index, { raw_line: event.target.value })} />
+                            </label>
+                            <div className="qm-raw-meta">
+                              {line.sheet_name && <span>Sheet: {line.sheet_name}</span>}
+                              {line.row_number && <span>Row: {line.row_number}</span>}
+                              {line.page_number && <span>Page: {line.page_number}</span>}
+                              {line.serial_no && <span>Serial: {line.serial_no}</span>}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
             </div>
-            <div className="qm-import-actions">
+            <div className="qm-import-actions sticky">
               <button type="button" className="qm-secondary" onClick={addImportLine}>Add Missing Row</button>
               <button type="button" className="qm-primary" disabled={importSaving || Boolean(savedImportedInquiry)} onClick={saveImportedInquiry}>
                 {importSaving ? 'Saving...' : savedImportedInquiry ? 'Inquiry Saved' : 'Save Inquiry'}
@@ -546,12 +650,13 @@ const InquiryManager = ({ onOpenQuote }) => {
           </div>
         </div>
         <form onSubmit={saveInquiry} className="qm-form">
-          <label><span className="qm-label-text">Company <span className="qm-required">*</span></span>
-            <select required value={form.company} onChange={(event) => setForm({ ...form, company: event.target.value, contact: '' })}>
-              <option value="">Select company</option>
-              {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-            </select>
-          </label>
+          <CompanySelectWithCreate
+            companies={companies}
+            value={form.company}
+            required
+            onChange={(companyId) => setForm({ ...form, company: companyId, contact: '' })}
+            onCreated={rememberCompany}
+          />
           <label><span className="qm-label-text">Contact</span>
             <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
               <option value="">No contact</option>

@@ -57,10 +57,14 @@ django-cloudinary-storage==0.3.0
 reportlab==4.4.3
 
 # Inquiry import parsing for staff-only quotation previews
+PyMuPDF==1.27.2.2
 pdfplumber==0.11.8
 pypdf==6.12.0
 openpyxl==3.1.5
 defusedxml==0.7.1
+filetype==1.2.0
+python-calamine==0.6.2
+pyxlsb==1.0.10
 
 # Email Backend
 # django-anymail==13.0.2

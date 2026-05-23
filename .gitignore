@@ -57,6 +57,7 @@ logs/
 local_settings.py
 staticfiles/
 media/
+private_media/
 sent_emails/
 
 # Test coverage

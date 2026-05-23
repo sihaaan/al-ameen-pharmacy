@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
@@ -42,16 +43,30 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
     load();
   }, [load]);
 
+  const rememberCompany = (company) => {
+    setCompanies((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
+      return [...withoutDuplicate, company].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
+
   return (
     <div className="qm-panel">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       <div className="qm-panel-heading">
         <h3>Price History</h3>
         <div className="qm-controls">
-          <select className="qm-input" value={filters.company} onChange={(event) => setFilters({ ...filters, company: event.target.value })}>
-            <option value="">All companies</option>
-            {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-          </select>
+          <CompanySelectWithCreate
+            companies={companies}
+            value={filters.company}
+            label="Company filter"
+            placeholder="All companies"
+            onChange={(companyId) => setFilters({ ...filters, company: companyId })}
+            onCreated={(company) => {
+              rememberCompany(company);
+              setFilters((current) => ({ ...current, company: String(company.id) }));
+            }}
+          />
           <select className="qm-input" value={filters.item} onChange={(event) => setFilters({ ...filters, item: event.target.value })}>
             <option value="">All items</option>
             {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}

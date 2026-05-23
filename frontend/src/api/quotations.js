@@ -89,6 +89,23 @@ const quotationAPI = {
     create: (data) => axiosInstance.post('/quotations/inquiry-lines/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/inquiry-lines/${id}/`, data),
   },
+  historicalImports: {
+    list: (params = {}) => axiosInstance.get('/quotations/historical-imports/', { params }),
+    retrieve: (id) => axiosInstance.get(`/quotations/historical-imports/${id}/`),
+    update: (id, data) => axiosInstance.patch(`/quotations/historical-imports/${id}/`, data),
+    parseFile: (formData) => axiosInstance.post('/quotations/historical-imports/parse_file/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+    commit: (id) => axiosInstance.post(`/quotations/historical-imports/${id}/commit/`),
+    bulkCreateQuoteItems: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_create_quote_items/`, data),
+    bulkUpdateRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_update_rows/`, data),
+    bulkSkipRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_skip_rows/`, data),
+    previewPage: (id) => axiosInstance.get(`/quotations/historical-imports/${id}/preview_page/`, { responseType: 'blob' }),
+  },
+  historicalImportLines: {
+    list: (params = {}) => axiosInstance.get('/quotations/historical-import-lines/', { params }),
+    update: (id, data) => axiosInstance.patch(`/quotations/historical-import-lines/${id}/`, data),
+  },
   quotes: {
     list: (params = {}) => axiosInstance.get('/quotations/quotes/', { params }),
     retrieve: (id) => axiosInstance.get(`/quotations/quotes/${id}/`),

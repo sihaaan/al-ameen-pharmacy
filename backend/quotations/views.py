@@ -7,11 +7,14 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
+from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
 from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    HistoricalPriceImport,
+    HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
     Quotation,
@@ -26,6 +29,8 @@ from .serializers import (
     CompanyContactSerializer,
     CompanyPriceHistorySerializer,
     CompanySerializer,
+    HistoricalPriceImportLineSerializer,
+    HistoricalPriceImportSerializer,
     ImportedInquiryCreateSerializer,
     InquiryLineSerializer,
     InquirySerializer,
@@ -38,6 +43,10 @@ from .serializers import (
 )
 from .services import (
     audit_log,
+    bulk_create_quote_items_for_historical_import,
+    bulk_update_historical_import_rows,
+    commit_historical_price_import,
+    create_historical_price_import,
     create_imported_inquiry,
     create_quotation_from_inquiry,
     ensure_quotation_editable,
@@ -46,6 +55,12 @@ from .services import (
     revise_quotation,
     transition_quotation_status,
 )
+from .private_storage import read_private_ref
+
+try:
+    import fitz
+except Exception:  # pragma: no cover
+    fitz = None
 
 
 class QuotationBaseViewSet:
@@ -258,6 +273,8 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.request.query_params.get("include_historical") != "true":
+            queryset = queryset.filter(is_historical_import=False)
         company_id = self.request.query_params.get("company")
         status_filter = self.request.query_params.get("status")
         search = self.request.query_params.get("search", "").strip()
@@ -417,6 +434,179 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         response = super().destroy(request, *args, **kwargs)
         recalculate_quotation_totals(quotation)
         return response
+
+
+class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = HistoricalPriceImportSerializer
+    queryset = HistoricalPriceImport.objects.select_related(
+        "company", "created_by", "committed_by", "created_quotation"
+    ).prefetch_related("lines", "lines__quote_item")
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+    http_method_names = ["get", "patch", "post", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        company_id = self.request.query_params.get("company")
+        status_filter = self.request.query_params.get("status")
+        search = self.request.query_params.get("search", "").strip()
+        if company_id:
+            queryset = queryset.filter(company_id=company_id)
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        if search:
+            queryset = queryset.filter(
+                Q(source_filename__icontains=search)
+                | Q(document_number__icontains=search)
+                | Q(suggested_company_name__icontains=search)
+                | Q(company__name__icontains=search)
+            )
+        return queryset
+
+    def perform_update(self, serializer):
+        historical_import = serializer.instance
+        if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
+            raise DjangoValidationError("Committed historical imports cannot be edited.")
+        serializer.save()
+        audit_log(
+            self.request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            serializer.instance,
+            message="Updated historical price import.",
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            return super().partial_update(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def parse_file(self, request):
+        try:
+            preview = parse_historical_pdf_upload(request.FILES.get("file"))
+            duplicate_count = HistoricalPriceImport.objects.filter(source_sha256=preview["source_sha256"]).count()
+            if duplicate_count:
+                preview.setdefault("warnings", []).append(
+                    f"This source file hash already appears in {duplicate_count} historical import(s). Review before committing."
+                )
+            historical_import = create_historical_price_import(preview, request.user)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        serializer = self.get_serializer(historical_import)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def commit(self, request, pk=None):
+        historical_import = self.get_object()
+        try:
+            historical_import = commit_historical_price_import(historical_import, request.user)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        serializer = self.get_serializer(historical_import)
+        return Response(serializer.data)
+
+    def _bulk_row_ids(self, request):
+        row_ids = request.data.get("row_ids", [])
+        if not isinstance(row_ids, list):
+            raise DjangoValidationError("row_ids must be a list.")
+        try:
+            return [int(row_id) for row_id in row_ids]
+        except (TypeError, ValueError) as exc:
+            raise DjangoValidationError("row_ids must contain only row ids.") from exc
+
+    def _bulk_response(self, historical_import, summary):
+        historical_import.refresh_from_db()
+        serializer = self.get_serializer(historical_import)
+        return Response({"summary": summary, "import": serializer.data})
+
+    @action(detail=True, methods=["post"])
+    def bulk_create_quote_items(self, request, pk=None):
+        historical_import = self.get_object()
+        try:
+            summary, historical_import = bulk_create_quote_items_for_historical_import(
+                historical_import,
+                self._bulk_row_ids(request),
+                request.user,
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return self._bulk_response(historical_import, summary)
+
+    @action(detail=True, methods=["post"])
+    def bulk_update_rows(self, request, pk=None):
+        historical_import = self.get_object()
+        try:
+            summary, historical_import = bulk_update_historical_import_rows(
+                historical_import,
+                self._bulk_row_ids(request),
+                request.data.get("status", ""),
+                request.user,
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return self._bulk_response(historical_import, summary)
+
+    @action(detail=True, methods=["post"])
+    def bulk_skip_rows(self, request, pk=None):
+        historical_import = self.get_object()
+        try:
+            summary, historical_import = bulk_update_historical_import_rows(
+                historical_import,
+                self._bulk_row_ids(request),
+                HistoricalPriceImportLine.STATUS_SKIPPED,
+                request.user,
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return self._bulk_response(historical_import, summary)
+
+    @action(detail=True, methods=["get"])
+    def preview_page(self, request, pk=None):
+        historical_import = self.get_object()
+        if fitz is None:
+            return Response({"detail": "PDF preview rendering is not available in this environment."}, status=status.HTTP_400_BAD_REQUEST)
+        data = read_private_ref(historical_import.source_file_ref)
+        if not data:
+            return Response({"detail": "Source PDF is not available in private storage."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            with fitz.open(stream=data, filetype="pdf") as document:
+                page = document[0]
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+                png_bytes = pixmap.tobytes("png")
+        except Exception as exc:
+            return Response({"detail": f"Could not render source PDF preview: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+        return HttpResponse(png_bytes, content_type="image/png")
+
+
+class HistoricalPriceImportLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = HistoricalPriceImportLineSerializer
+    queryset = HistoricalPriceImportLine.objects.select_related("historical_import", "quote_item")
+    http_method_names = ["get", "patch", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        historical_import_id = self.request.query_params.get("historical_import")
+        if historical_import_id:
+            queryset = queryset.filter(historical_import_id=historical_import_id)
+        return queryset
+
+    def perform_update(self, serializer):
+        historical_import = serializer.instance.historical_import
+        if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
+            raise DjangoValidationError("Committed historical import lines cannot be edited.")
+        line = serializer.save()
+        audit_log(
+            self.request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            line,
+            message="Updated historical import line.",
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            return super().partial_update(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
 
 
 class CompanyPriceHistoryViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):

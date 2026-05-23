@@ -146,6 +146,12 @@
 .qm-line-form select,
 .qm-table input,
 .qm-table select,
+.qm-company-picker input,
+.qm-company-picker textarea,
+.qm-company-picker select,
+.qm-details-grid input,
+.qm-details-grid select,
+.qm-details-grid textarea,
 .qm-add-line input,
 .qm-add-line select {
   width: 100%;
@@ -158,6 +164,11 @@
 
 .qm-input {
   min-width: 190px;
+}
+
+.qm-controls .qm-company-picker {
+  min-width: 320px;
+  flex: 1 1 360px;
 }
 
 .qm-import-panel label,
@@ -195,6 +206,130 @@
   align-items: baseline;
   gap: 4px;
   min-height: 18px;
+}
+
+.qm-company-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qm-company-picker-label,
+.qm-inline-create-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.qm-link-button {
+  border: 0;
+  background: transparent;
+  color: #0f766e;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.qm-link-button:hover {
+  color: #0d9488;
+  text-decoration: underline;
+}
+
+.qm-link-button:disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.qm-company-picker-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.9fr) minmax(220px, 1.1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.qm-company-picker-grid.creating {
+  grid-template-columns: minmax(170px, 0.9fr) minmax(220px, 1.1fr);
+}
+
+.qm-company-picker-grid button {
+  white-space: nowrap;
+}
+
+.qm-company-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+
+.qm-company-suggestion span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.qm-company-suggestion strong {
+  display: block;
+  margin-top: 3px;
+  color: #134e4a;
+  overflow-wrap: anywhere;
+}
+
+.qm-selected-company {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #065f46;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-selected-company strong {
+  overflow-wrap: anywhere;
+}
+
+.qm-inline-create {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #f0fdfa;
+  box-shadow: inset 3px 0 0 #0d9488;
+}
+
+.qm-inline-create-heading p {
+  margin: 4px 0 0;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-inline-create label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .qm-import-panel input,
@@ -261,12 +396,127 @@
   background: #f0fdfa;
 }
 
+.qm-table .qm-check-cell {
+  width: 38px;
+  min-width: 38px;
+  text-align: center;
+}
+
+.qm-table .qm-check-cell input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.qm-table.historical-table {
+  min-width: 1180px;
+}
+
+.qm-table.historical-table th,
+.qm-table.historical-table td {
+  padding: 8px;
+  vertical-align: middle;
+}
+
+.qm-table.historical-table .qm-check-cell {
+  width: 38px;
+  min-width: 38px;
+  text-align: center;
+}
+
+.qm-table.historical-table .qm-item-cell {
+  min-width: 260px;
+  width: 30%;
+}
+
+.qm-table.historical-table th:nth-child(3),
+.qm-table.historical-table td:nth-child(3) {
+  min-width: 230px;
+}
+
+.qm-table.historical-table th:nth-child(4),
+.qm-table.historical-table td:nth-child(4),
+.qm-table.historical-table th:nth-child(6),
+.qm-table.historical-table td:nth-child(6),
+.qm-table.historical-table th:nth-child(7),
+.qm-table.historical-table td:nth-child(7),
+.qm-table.historical-table th:nth-child(8),
+.qm-table.historical-table td:nth-child(8) {
+  width: 92px;
+}
+
+.qm-table.historical-table th:nth-child(5),
+.qm-table.historical-table td:nth-child(5) {
+  width: 84px;
+}
+
+.qm-table.historical-table th:nth-child(9),
+.qm-table.historical-table td:nth-child(9) {
+  width: 130px;
+}
+
+.qm-table.historical-table th:nth-child(10),
+.qm-table.historical-table td:nth-child(10) {
+  width: 120px;
+}
+
+.qm-table.historical-table input,
+.qm-table.historical-table select {
+  min-width: 0;
+  padding: 6px 7px;
+  font-size: 12px;
+}
+
+.qm-table.historical-table input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.qm-row-menu {
+  min-width: 96px;
+}
+
+.qm-review-row.row-ready td {
+  background: #f0fdf4;
+}
+
+.qm-review-row.row-needs_review td {
+  background: #fffbeb;
+}
+
+.qm-review-row.row-skipped td {
+  background: #f9fafb;
+  color: #6b7280;
+}
+
+.qm-review-row.row-error td {
+  background: #fef2f2;
+}
+
 .line-table {
   min-width: 1040px;
 }
 
 .import-table {
-  min-width: 980px;
+  min-width: 760px;
+}
+
+.import-table .qm-import-item-cell {
+  min-width: 260px;
+  width: 46%;
+}
+
+.import-table .qm-import-qty-cell {
+  width: 96px;
+}
+
+.import-table .qm-import-unit-cell {
+  width: 110px;
+}
+
+.import-table .qm-import-status-cell {
+  width: 150px;
 }
 
 .qm-badge {
@@ -283,22 +533,31 @@
 
 .qm-badge.success,
 .qm-badge.status-finalized,
-.qm-badge.status-sent {
+.qm-badge.status-sent,
+.qm-badge.status-ready,
+.qm-badge.status-committed {
   background: #d1fae5;
   color: #065f46;
 }
 
 .qm-badge.status-draft,
 .qm-badge.status-pending_review,
-.qm-badge.status-approved {
+.qm-badge.status-approved,
+.qm-badge.status-needs_review {
   background: #fef3c7;
   color: #92400e;
 }
 
 .qm-badge.status-cancelled,
-.qm-badge.status-revised {
+.qm-badge.status-revised,
+.qm-badge.status-duplicate {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.qm-badge.status-skipped {
+  background: #e5e7eb;
+  color: #4b5563;
 }
 
 .qm-badge.muted {
@@ -514,6 +773,13 @@
   font-weight: 700;
 }
 
+.qm-feedback.warning {
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+  font-weight: 700;
+}
+
 .qm-import-panel {
   display: flex;
   flex-direction: column;
@@ -565,6 +831,80 @@
   gap: 10px;
 }
 
+.qm-row-review-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qm-bulk-toolbar {
+  position: sticky;
+  top: 72px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.qm-bulk-toolbar strong {
+  color: #111827;
+  margin-right: 4px;
+}
+
+.qm-bulk-toolbar.compact {
+  position: static;
+  box-shadow: none;
+  padding: 8px 10px;
+}
+
+.qm-bulk-spacer {
+  flex: 1 1 auto;
+}
+
+.qm-sticky-commit-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: rgba(240, 253, 250, 0.98);
+  box-shadow: 0 -4px 18px rgba(15, 23, 42, 0.08);
+}
+
+.qm-commit-stats {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-commit-stats span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #ccfbf1;
+}
+
+.qm-commit-stats strong {
+  color: #0f766e;
+}
+
 .qm-preview-meta span {
   padding: 6px 9px;
   border-radius: 999px;
@@ -572,6 +912,228 @@
   color: #374151;
   font-size: 12px;
   font-weight: 800;
+}
+
+.qm-review-import-panel {
+  padding: 16px;
+}
+
+.qm-review-import-shell {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.95fr) minmax(440px, 1.05fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.qm-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.qm-review-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.qm-review-card-heading h4,
+.qm-details-section h5 {
+  margin: 0;
+  color: #111827;
+}
+
+.qm-review-card-heading p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.qm-document-card {
+  min-height: 0;
+}
+
+.qm-document-card .qm-pdf-preview {
+  flex: 1 1 auto;
+  min-height: 430px;
+  max-height: none;
+  padding: 8px;
+}
+
+.qm-document-card .qm-meta-grid {
+  flex: 0 0 auto;
+  margin-top: auto;
+}
+
+.qm-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.qm-meta-item {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.qm-meta-item span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.qm-meta-item strong {
+  display: block;
+  margin-top: 4px;
+  color: #111827;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.qm-import-details-card {
+  gap: 16px;
+}
+
+.qm-details-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qm-details-section + .qm-details-section {
+  padding-top: 14px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.qm-details-section h5 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.qm-details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.qm-details-grid label,
+.qm-review-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-summary-banner.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.qm-summary-banner.compact .qm-summary-stat {
+  padding: 10px;
+}
+
+.qm-details-actions {
+  align-items: flex-start;
+}
+
+.qm-unsaved-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #b45309;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.qm-field-warning {
+  margin: 0;
+  color: #b45309 !important;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-summary-banner {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 10px;
+}
+
+.qm-summary-stat {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.qm-summary-stat span {
+  display: block;
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.qm-summary-stat strong {
+  display: block;
+  margin-top: 4px;
+  color: #111827;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.qm-summary-stat.success strong {
+  color: #047857;
+}
+
+.qm-summary-stat.warning strong {
+  color: #b45309;
+}
+
+.qm-summary-stat.muted strong {
+  color: #6b7280;
+}
+
+.qm-pdf-preview {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px;
+}
+
+.qm-pdf-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+}
+
+.qm-danger-text {
+  display: block;
+  margin-top: 4px;
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .qm-confidence {
@@ -583,6 +1145,62 @@
   background: #f0fdfa;
   color: #0f766e;
   font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-confidence.status-needs_review,
+.qm-confidence.status-unparsed {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.qm-confidence.status-parsed {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.qm-import-actions.sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 0 -18px -18px;
+  padding: 12px 18px;
+  border-top: 1px solid #e5e7eb;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.qm-raw-row td {
+  background: #f9fafb;
+}
+
+.qm-raw-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qm-raw-row textarea {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+  background: #ffffff;
+}
+
+.qm-raw-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.qm-raw-meta span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -641,6 +1259,11 @@
 .qm-empty.compact {
   padding: 10px;
   font-size: 12px;
+}
+
+.qm-helper.warning {
+  background: #fffbeb;
+  color: #92400e;
 }
 
 .qm-settings-form {
@@ -829,8 +1452,16 @@
   .qm-split,
   .qm-split.wide-left,
   .qm-grid-two,
+  .qm-company-picker-grid,
+  .qm-review-import-shell,
+  .qm-details-grid,
   .qm-settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .qm-summary-banner.compact,
+  .qm-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .qm-add-line {
@@ -879,5 +1510,25 @@
   .qm-mode-tabs {
     width: 100%;
     overflow-x: auto;
+  }
+
+  .qm-review-import-panel,
+  .qm-review-card {
+    padding: 14px;
+  }
+
+  .qm-document-card .qm-pdf-preview {
+    min-height: 320px;
+  }
+
+  .qm-summary-banner.compact,
+  .qm-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-company-suggestion,
+  .qm-review-card-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

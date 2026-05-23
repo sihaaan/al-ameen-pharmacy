@@ -4,6 +4,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    HistoricalPriceImport,
+    HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
     Quotation,
@@ -107,7 +109,7 @@ class InquiryLineInline(admin.TabularInline):
 class InquiryAdmin(admin.ModelAdmin):
     list_display = ["subject", "company", "status", "source_type", "received_at", "created_by"]
     list_filter = ["status", "source", "source_type", "parse_method", "received_at"]
-    search_fields = ["subject", "company__name", "original_text", "source_filename", "source_sha256"]
+    search_fields = ["subject", "company__name", "original_text", "source_filename", "source_sha256", "source_file_ref"]
     autocomplete_fields = ["company", "contact", "created_by"]
     readonly_fields = ["created_at", "updated_at"]
     inlines = [InquiryLineInline]
@@ -122,6 +124,32 @@ class InquiryLineAdmin(admin.ModelAdmin):
     readonly_fields = ["normalized_name", "created_at", "updated_at"]
 
 
+class HistoricalPriceImportLineInline(admin.TabularInline):
+    model = HistoricalPriceImportLine
+    extra = 0
+    autocomplete_fields = ["quote_item"]
+    readonly_fields = ["normalized_item_name", "duplicate_reason", "created_at", "updated_at"]
+
+
+@admin.register(HistoricalPriceImport)
+class HistoricalPriceImportAdmin(admin.ModelAdmin):
+    list_display = ["source_filename", "company", "document_number", "document_date", "status", "created_at"]
+    list_filter = ["status", "source_type", "document_date", "created_at"]
+    search_fields = ["source_filename", "source_sha256", "source_file_ref", "document_number", "suggested_company_name", "company__name"]
+    autocomplete_fields = ["company", "created_quotation", "created_by", "committed_by"]
+    readonly_fields = ["created_at", "updated_at", "committed_at"]
+    inlines = [HistoricalPriceImportLineInline]
+
+
+@admin.register(HistoricalPriceImportLine)
+class HistoricalPriceImportLineAdmin(admin.ModelAdmin):
+    list_display = ["item_name", "historical_import", "quote_item", "quantity", "unit_price", "status", "sort_order"]
+    list_filter = ["status"]
+    search_fields = ["item_name", "raw_line", "quote_item__name", "historical_import__source_filename"]
+    autocomplete_fields = ["historical_import", "quote_item"]
+    readonly_fields = ["normalized_item_name", "created_at", "updated_at"]
+
+
 class QuotationLineInline(admin.TabularInline):
     model = QuotationLine
     extra = 0
@@ -131,8 +159,8 @@ class QuotationLineInline(admin.TabularInline):
 
 @admin.register(Quotation)
 class QuotationAdmin(admin.ModelAdmin):
-    list_display = ["quotation_number", "company", "status", "version", "total", "created_at"]
-    list_filter = ["status", "created_at"]
+    list_display = ["quotation_number", "company", "status", "version", "total", "is_historical_import", "created_at"]
+    list_filter = ["status", "is_historical_import", "created_at"]
     search_fields = ["quotation_number", "company__name", "inquiry__subject"]
     autocomplete_fields = ["company", "contact", "inquiry", "parent", "created_by", "finalized_by"]
     readonly_fields = ["quotation_number", "subtotal", "vat_total", "total", "finalized_at", "sent_at", "created_at", "updated_at"]

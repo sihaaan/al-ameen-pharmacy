@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 const statusLabels = {
@@ -79,6 +80,12 @@ const QuotationList = ({ onOpenQuote }) => {
   };
 
   const contactsForCompany = companies.find((company) => String(company.id) === String(form.company))?.contacts || [];
+  const rememberCompany = (company) => {
+    setCompanies((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
+      return [...withoutDuplicate, company].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
 
   if (loading) return <div className="qm-loading">Loading quotations...</div>;
 
@@ -128,12 +135,13 @@ const QuotationList = ({ onOpenQuote }) => {
         <div className="qm-panel">
         <h3>New Quotation</h3>
         <form onSubmit={createQuote} className="qm-form">
-          <label>Company
-            <select required value={form.company} onChange={(event) => setForm({ ...form, company: event.target.value, contact: '' })}>
-              <option value="">Select company</option>
-              {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-            </select>
-          </label>
+          <CompanySelectWithCreate
+            companies={companies}
+            value={form.company}
+            required
+            onChange={(companyId) => setForm({ ...form, company: companyId, contact: '' })}
+            onCreated={rememberCompany}
+          />
           <label>Contact
             <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
               <option value="">No contact</option>

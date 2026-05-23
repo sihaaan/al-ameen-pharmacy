@@ -3,33 +3,45 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
+import filetype
 import pdfplumber
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from openpyxl import load_workbook
+from openpyxl import load_workbook as load_openpyxl_workbook
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from python_calamine import load_workbook as load_calamine_workbook
 
-from .import_rules import make_preview_line, normalize_import_line, parse_inquiry_line, parse_text_lines
+try:
+    import fitz
+except Exception:  # pragma: no cover - optional runtime dependency guard
+    fitz = None
+
+try:
+    import magic
+except Exception:  # pragma: no cover - libmagic is optional and platform dependent
+    magic = None
+
+from .import_rules import (
+    detect_header_row,
+    parse_inquiry_line,
+    parse_structured_row,
+    parse_text_lines,
+    row_to_text,
+    summarize_lines,
+)
+from .ocr import OCRProviderUnavailable, get_ocr_provider
+from .private_storage import store_import_source
 
 
-ALLOWED_EXTENSIONS = {".xlsx", ".pdf"}
-EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+ALLOWED_EXTENSIONS = {".xlsx", ".xlsb", ".xls", ".pdf"}
+ZIP_EXCEL_EXTENSIONS = {".xlsx", ".xlsb"}
+OLE_EXCEL_EXTENSIONS = {".xls"}
 PDF_MIME = "application/pdf"
-
-ITEM_HEADERS = {
-    "item",
-    "item name",
-    "description",
-    "item description",
-    "product",
-    "product name",
-    "medicine",
-    "medicine name",
-    "name",
-}
-QTY_HEADERS = {"qty", "quantity", "qnty", "required qty", "requested qty", "requested quantity"}
-UNIT_HEADERS = {"unit", "uom", "unit of measure", "pack", "packing"}
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+XLSB_MIME = "application/vnd.ms-excel.sheet.binary.macroenabled.12"
+XLS_MIME = "application/vnd.ms-excel"
+OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def max_upload_bytes():
@@ -44,34 +56,25 @@ def max_pdf_pages():
     return int(getattr(settings, "QUOTATION_IMPORT_MAX_PDF_PAGES", 10))
 
 
-def _clean_header(value):
-    return normalize_import_line(value).lower().strip(":")
+def max_excel_sheets():
+    return int(getattr(settings, "QUOTATION_IMPORT_MAX_EXCEL_SHEETS", 10))
 
 
 def _cell_text(value):
     if value is None:
         return ""
-    return normalize_import_line(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
 
 
-def _row_text(row):
-    return " | ".join(_cell_text(value) for value in row if _cell_text(value))
-
-
-def _find_header_map(rows):
-    for offset, row in enumerate(rows[:15]):
-        headers = [_clean_header(value) for value in row]
-        item_index = next((index for index, header in enumerate(headers) if header in ITEM_HEADERS), None)
-        qty_index = next((index for index, header in enumerate(headers) if header in QTY_HEADERS), None)
-        unit_index = next((index for index, header in enumerate(headers) if header in UNIT_HEADERS), None)
-        if item_index is not None:
-            return {
-                "row_offset": offset,
-                "item": item_index,
-                "quantity": qty_index,
-                "unit": unit_index,
-            }
-    return None
+def _column_ref(index):
+    index += 1
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
 
 
 def read_upload_bytes(uploaded_file):
@@ -88,129 +91,313 @@ def read_upload_bytes(uploaded_file):
     return bytes(data)
 
 
+def _sniff_mime(data):
+    if magic:
+        try:
+            detected = magic.from_buffer(data[:4096], mime=True)
+            if detected:
+                return detected
+        except Exception:
+            pass
+    guessed = filetype.guess(data)
+    if guessed and guessed.mime:
+        return guessed.mime
+    if data.startswith(b"%PDF-"):
+        return PDF_MIME
+    if data.startswith(b"PK") and zipfile.is_zipfile(BytesIO(data)):
+        return XLSX_MIME
+    if data.startswith(OLE_SIGNATURE):
+        return XLS_MIME
+    return "application/octet-stream"
+
+
+def _validate_upload_type(data, filename):
+    extension = Path(filename or "").suffix.lower()
+    if extension not in ALLOWED_EXTENSIONS:
+        raise ValidationError("Unsupported file type. Upload .xlsx, .xlsb, .xls, or .pdf files only.")
+
+    sniffed_mime = _sniff_mime(data)
+    if extension == ".pdf":
+        if not data.startswith(b"%PDF-"):
+            raise ValidationError("Invalid PDF file. The upload does not look like a PDF.")
+        return extension, sniffed_mime or PDF_MIME
+
+    if extension in ZIP_EXCEL_EXTENSIONS:
+        if not data.startswith(b"PK") or not zipfile.is_zipfile(BytesIO(data)):
+            raise ValidationError(f"Invalid Excel file. The upload does not look like a valid {extension} workbook.")
+        return extension, sniffed_mime or (XLSB_MIME if extension == ".xlsb" else XLSX_MIME)
+
+    if extension in OLE_EXCEL_EXTENSIONS:
+        if not data.startswith(OLE_SIGNATURE):
+            raise ValidationError("Invalid Excel file. The upload does not look like a valid .xls workbook.")
+        return extension, sniffed_mime or XLS_MIME
+
+    raise ValidationError("Unsupported file type.")
+
+
+def _preview_response(
+    *,
+    source_type,
+    source_filename="",
+    source_mime_type="",
+    source_sha256="",
+    source_file_ref="",
+    source_file_size=None,
+    parse_method,
+    original_text="",
+    lines=None,
+    warnings=None,
+    skipped_count=0,
+    meta=None,
+):
+    lines = lines or []
+    warnings = warnings or []
+    summary = summarize_lines(lines, skipped_count=skipped_count)
+    payload = {
+        "source_type": source_type,
+        "source_filename": source_filename,
+        "source_mime_type": source_mime_type,
+        "source_sha256": source_sha256,
+        "source_file_ref": source_file_ref,
+        "source_file_size": source_file_size,
+        "parse_method": parse_method,
+        "original_text": original_text or "",
+        "lines": lines,
+        "warnings": warnings,
+        "summary": summary,
+        "meta": {
+            "line_count": len(lines),
+            **(meta or {}),
+        },
+    }
+    return payload
+
+
 def parse_text_preview(raw_text):
     lines, skipped = parse_text_lines(raw_text)
     warnings = []
     if not lines:
         warnings.append("No item lines were detected. Review the pasted text or add rows manually.")
-    return {
-        "source_type": "pasted_text",
-        "source_filename": "",
-        "source_mime_type": "text/plain",
-        "source_sha256": hashlib.sha256(str(raw_text or "").encode("utf-8")).hexdigest(),
-        "parse_method": "deterministic_text_v1",
-        "original_text": raw_text or "",
-        "lines": lines,
-        "warnings": warnings,
-        "meta": {
-            "line_count": len(lines),
-            "skipped_noise_lines": skipped,
-        },
-    }
+    return _preview_response(
+        source_type="pasted_text",
+        source_mime_type="text/plain",
+        source_sha256=hashlib.sha256(str(raw_text or "").encode("utf-8")).hexdigest(),
+        parse_method="deterministic_text_v2",
+        original_text=raw_text or "",
+        lines=lines,
+        warnings=warnings,
+        skipped_count=skipped,
+        meta={"skipped_noise_lines": skipped},
+    )
 
 
 def parse_file_preview(uploaded_file):
     data = read_upload_bytes(uploaded_file)
     filename = Path(uploaded_file.name or "").name
-    extension = Path(filename).suffix.lower()
-    if extension not in ALLOWED_EXTENSIONS:
-        raise ValidationError("Unsupported file type. Upload .xlsx or .pdf files only.")
-
+    extension, sniffed_mime = _validate_upload_type(data, filename)
     sha256 = hashlib.sha256(data).hexdigest()
+
+    if extension in {".xlsx", ".xlsb", ".xls"}:
+        preview = parse_excel_preview(
+            data,
+            filename,
+            sniffed_mime,
+            sha256,
+            extension=extension,
+        )
+    else:
+        preview = parse_pdf_preview(data, filename, sniffed_mime, sha256)
+
+    source_file_ref = store_import_source(data, filename=filename, sha256=sha256)
+    preview["source_file_ref"] = source_file_ref
+    preview["meta"]["source_file_ref"] = source_file_ref
+    return preview
+
+
+def _mapped_columns(header):
+    if not header:
+        return {}
+    return {
+        role: {
+            "index": index,
+            "column": _column_ref(index),
+            "label": header.labels.get(role, ""),
+        }
+        for role, index in header.columns.items()
+    }
+
+
+def _parse_sheet_rows(sheet_name, rows, *, parser_name):
+    header = detect_header_row([row for _, row in rows], max_scan_rows=20)
+    metadata = {
+        "sheet_name": sheet_name,
+        "selected": False,
+        "parser": parser_name,
+        "header_row": None,
+        "mapped_columns": {},
+        "score": 0,
+        "data_score": 0,
+        "rows_seen": len(rows),
+        "parsed_rows": 0,
+        "skipped_rows": 0,
+    }
+    if not header or header.score < 5 or header.data_score <= 0:
+        return [], metadata
+
+    metadata.update(
+        {
+            "selected": True,
+            "header_row": rows[header.row_offset][0],
+            "mapped_columns": _mapped_columns(header),
+            "score": header.score,
+            "data_score": header.data_score,
+        }
+    )
+    lines = []
+    skipped = 0
+    for source_row, row in rows[header.row_offset + 1 :]:
+        parsed, skipped_reason = parse_structured_row(
+            row,
+            header,
+            source_sheet=sheet_name,
+            source_row=source_row,
+            base_confidence=0.85,
+        )
+        if parsed:
+            lines.append(parsed)
+        elif skipped_reason:
+            skipped += 1
+    metadata["parsed_rows"] = len(lines)
+    metadata["skipped_rows"] = skipped
+    return lines, metadata
+
+
+def _fallback_parse_sheet_text(sheet_name, rows):
+    lines = []
+    skipped = 0
+    for source_row, row in rows:
+        raw_line = row_to_text(row)
+        if not raw_line:
+            continue
+        parsed = parse_inquiry_line(raw_line, source_sheet=sheet_name, sheet_name=sheet_name, source_row=source_row, row_number=source_row)
+        if parsed:
+            lines.append(parsed)
+        else:
+            skipped += 1
+    return lines, skipped
+
+
+def _openpyxl_rows(data):
+    workbook = load_openpyxl_workbook(BytesIO(data), read_only=True, data_only=True)
+    try:
+        for sheet in workbook.worksheets[: max_excel_sheets()]:
+            if getattr(sheet, "sheet_state", "visible") != "visible":
+                continue
+            rows = []
+            for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                rows.append((row_index, tuple(row)))
+                if len(rows) >= max_excel_rows():
+                    break
+            yield sheet.title, rows, "openpyxl_structured_v2"
+    finally:
+        workbook.close()
+
+
+def _calamine_rows(data):
+    workbook = load_calamine_workbook(BytesIO(data))
+    try:
+        for sheet_name in workbook.sheet_names[: max_excel_sheets()]:
+            sheet = workbook.get_sheet_by_name(sheet_name)
+            rows = []
+            for row_index, row in enumerate(sheet.iter_rows(), start=1):
+                rows.append((row_index, tuple(row)))
+                if len(rows) >= max_excel_rows():
+                    break
+            yield sheet_name, rows, "calamine_structured_v2"
+    finally:
+        workbook.close()
+
+
+def _iter_excel_rows(data, extension):
     if extension == ".xlsx":
-        return parse_excel_preview(data, filename, uploaded_file.content_type or "", sha256)
-    return parse_pdf_preview(data, filename, uploaded_file.content_type or "", sha256)
+        try:
+            yield from _openpyxl_rows(data)
+            return
+        except Exception:
+            yield from _calamine_rows(data)
+            return
+    yield from _calamine_rows(data)
 
 
-def parse_excel_preview(data, filename, content_type, sha256):
-    if not data.startswith(b"PK") or not zipfile.is_zipfile(BytesIO(data)):
-        raise ValidationError("Invalid Excel file. The upload does not look like a valid .xlsx workbook.")
+def parse_excel_preview(data, filename, content_type, sha256, *, extension=".xlsx", source_file_ref=""):
+    lines = []
+    warnings = []
+    sheet_metadata = []
+    fallback_candidates = []
+    skipped_count = 0
+    parser_used = "excel_structured_v2"
 
     try:
-        workbook = load_workbook(BytesIO(data), read_only=True, data_only=True)
+        for sheet_name, rows, parser_name in _iter_excel_rows(data, extension):
+            if not rows:
+                sheet_metadata.append(
+                    {
+                        "sheet_name": sheet_name,
+                        "selected": False,
+                        "parser": parser_name,
+                        "header_row": None,
+                        "mapped_columns": {},
+                        "score": 0,
+                        "data_score": 0,
+                        "rows_seen": 0,
+                        "parsed_rows": 0,
+                        "skipped_rows": 0,
+                    }
+                )
+                continue
+            parser_used = parser_name
+            sheet_lines, metadata = _parse_sheet_rows(sheet_name, rows, parser_name=parser_name)
+            sheet_metadata.append(metadata)
+            if metadata["selected"]:
+                lines.extend(sheet_lines)
+                skipped_count += metadata["skipped_rows"]
+            else:
+                fallback_candidates.append((sheet_name, rows))
+            if len(rows) >= max_excel_rows():
+                warnings.append(f"Stopped reading sheet '{sheet_name}' after {max_excel_rows()} rows.")
     except Exception as exc:
         raise ValidationError(f"Could not read Excel workbook: {exc}") from exc
 
-    lines = []
-    warnings = []
-    inspected_sheets = []
-    row_limit = max_excel_rows()
-
-    try:
-        for sheet in workbook.worksheets[:3]:
-            if getattr(sheet, "sheet_state", "visible") != "visible":
-                continue
-            inspected_sheets.append(sheet.title)
-            rows = []
-            for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                rows.append((row_index, row))
-                if len(rows) >= row_limit:
-                    warnings.append(f"Stopped reading sheet '{sheet.title}' after {row_limit} rows.")
-                    break
-            value_rows = [row for _, row in rows]
-            header_map = _find_header_map(value_rows)
-            if header_map:
-                start = header_map["row_offset"] + 1
-                for source_row, row in rows[start:]:
-                    raw_line = _row_text(row)
-                    if not raw_line:
-                        continue
-                    item = _cell_text(row[header_map["item"]]) if header_map["item"] < len(row) else ""
-                    if not item:
-                        continue
-                    quantity = (
-                        _cell_text(row[header_map["quantity"]])
-                        if header_map["quantity"] is not None and header_map["quantity"] < len(row)
-                        else None
-                    )
-                    unit = (
-                        _cell_text(row[header_map["unit"]])
-                        if header_map["unit"] is not None and header_map["unit"] < len(row)
-                        else ""
-                    )
-                    confidence = 0.9 if quantity else 0.7
-                    status = "parsed" if quantity else "needs_review"
-                    lines.append(
-                        make_preview_line(
-                            raw_line=raw_line,
-                            raw_name=item,
-                            quantity=quantity,
-                            unit=unit,
-                            parse_status=status,
-                            parse_confidence=confidence,
-                            source_sheet=sheet.title,
-                            source_row=source_row,
-                        )
-                    )
-            else:
-                warnings.append(f"No clear header row detected in sheet '{sheet.title}'. Parsed visible text rows instead.")
-                for source_row, row in rows:
-                    raw_line = _row_text(row)
-                    if not raw_line:
-                        continue
-                    parsed = parse_inquiry_line(raw_line, source_sheet=sheet.title, source_row=source_row)
-                    if parsed:
-                        lines.append(parsed)
-    finally:
-        workbook.close()
+    if not lines and fallback_candidates:
+        warnings.append("No clear header row detected. Parsed visible text rows instead; review all lines carefully.")
+        for sheet_name, rows in fallback_candidates:
+            fallback_lines, fallback_skipped = _fallback_parse_sheet_text(sheet_name, rows)
+            lines.extend(fallback_lines)
+            skipped_count += fallback_skipped
 
     if not lines:
         warnings.append("No item lines were detected in the Excel workbook.")
 
-    return {
-        "source_type": "excel",
-        "source_filename": filename,
-        "source_mime_type": content_type or EXCEL_MIME,
-        "source_sha256": sha256,
-        "parse_method": "openpyxl_v1",
-        "original_text": "",
-        "lines": lines,
-        "warnings": warnings,
-        "meta": {
-            "line_count": len(lines),
-            "inspected_sheets": inspected_sheets,
+    selected_sheets = [sheet for sheet in sheet_metadata if sheet.get("selected")]
+    return _preview_response(
+        source_type="excel",
+        source_filename=filename,
+        source_mime_type=content_type or XLSX_MIME,
+        source_sha256=sha256,
+        source_file_ref=source_file_ref,
+        source_file_size=len(data),
+        parse_method=parser_used,
+        lines=lines,
+        warnings=warnings,
+        skipped_count=skipped_count,
+        meta={
+            "sheet_metadata": sheet_metadata,
+            "selected_sheets": selected_sheets,
+            "inspected_sheets": [sheet["sheet_name"] for sheet in sheet_metadata],
+            "source_file_ref": source_file_ref,
+            "source_file_size": len(data),
         },
-    }
+    )
 
 
 def _preflight_pdf(data):
@@ -228,86 +415,142 @@ def _preflight_pdf(data):
     return page_count
 
 
-def parse_pdf_preview(data, filename, content_type, sha256):
-    page_count = _preflight_pdf(data)
-    lines = []
-    warnings = []
+def _extract_pymupdf_text(data):
     text_chunks = []
-    table_rows = 0
+    page_metadata = []
+    if fitz is None:
+        return text_chunks, page_metadata
 
-    try:
-        with pdfplumber.open(BytesIO(data)) as pdf:
-            for page_index, page in enumerate(pdf.pages, start=1):
-                for table in page.extract_tables() or []:
-                    table_rows += len(table)
-                    header_map = _find_header_map(table[:10])
-                    start = header_map["row_offset"] + 1 if header_map else 0
-                    for row_number, row in enumerate(table[start:], start=start + 1):
-                        raw_line = _row_text(row)
+    with fitz.open(stream=data, filetype="pdf") as document:
+        for page_number, page in enumerate(document, start=1):
+            words = page.get_text("words") or []
+            text = page.get_text("text") or ""
+            text_chunks.append(text)
+            page_metadata.append(
+                {
+                    "page_number": page_number,
+                    "text_based": len(words) >= 3 or len(text.strip()) >= 20,
+                    "word_count": len(words),
+                    "text_length": len(text.strip()),
+                }
+            )
+    return text_chunks, page_metadata
+
+
+def _parse_pdfplumber_tables(data):
+    lines = []
+    page_metadata = []
+    table_rows_seen = 0
+    skipped_count = 0
+    with pdfplumber.open(BytesIO(data)) as pdf:
+        for page_index, page in enumerate(pdf.pages, start=1):
+            page_tables_seen = 0
+            for table in page.extract_tables() or []:
+                table_rows_seen += len(table)
+                page_tables_seen += 1
+                rows = [(index + 1, tuple(row or [])) for index, row in enumerate(table)]
+                header = detect_header_row([row for _, row in rows], max_scan_rows=10)
+                if header and header.data_score > 0:
+                    for row_number, row in rows[header.row_offset + 1 :]:
+                        parsed, skipped_reason = parse_structured_row(
+                            row,
+                            header,
+                            source_page=page_index,
+                            source_row=row_number,
+                            base_confidence=0.80,
+                        )
+                        if parsed:
+                            lines.append(parsed)
+                        elif skipped_reason:
+                            skipped_count += 1
+                else:
+                    for row_number, row in rows:
+                        raw_line = row_to_text(row)
                         if not raw_line:
                             continue
-                        if header_map and header_map["item"] < len(row):
-                            item = _cell_text(row[header_map["item"]])
-                            if not item:
-                                continue
-                            quantity = (
-                                _cell_text(row[header_map["quantity"]])
-                                if header_map["quantity"] is not None and header_map["quantity"] < len(row)
-                                else None
-                            )
-                            unit = (
-                                _cell_text(row[header_map["unit"]])
-                                if header_map["unit"] is not None and header_map["unit"] < len(row)
-                                else ""
-                            )
-                            lines.append(
-                                make_preview_line(
-                                    raw_line=raw_line,
-                                    raw_name=item,
-                                    quantity=quantity,
-                                    unit=unit,
-                                    parse_status="parsed" if quantity else "needs_review",
-                                    parse_confidence=0.85 if quantity else 0.65,
-                                    source_page=page_index,
-                                    source_row=row_number,
-                                )
-                            )
-                        else:
-                            parsed = parse_inquiry_line(raw_line, source_page=page_index, source_row=row_number)
-                            if parsed:
-                                lines.append(parsed)
+                        parsed = parse_inquiry_line(raw_line, source_page=page_index, page_number=page_index, source_row=row_number)
+                        if parsed:
+                            lines.append(parsed)
+            extracted_text = page.extract_text() or ""
+            page_metadata.append(
+                {
+                    "page_number": page_index,
+                    "pdfplumber_text_length": len(extracted_text.strip()),
+                    "tables_seen": page_tables_seen,
+                }
+            )
+    return lines, page_metadata, table_rows_seen, skipped_count
 
-                extracted = page.extract_text() or ""
-                if extracted.strip():
-                    text_chunks.append(extracted)
-    except Exception as exc:
-        raise ValidationError(f"Could not parse PDF content: {exc}") from exc
 
-    if not lines and text_chunks:
-        parsed_lines, skipped = parse_text_lines("\n".join(text_chunks))
-        for parsed in parsed_lines:
-            parsed.setdefault("source_page", "")
+def _try_ocr_fallback(data, filename):
+    provider_name = getattr(settings, "QUOTATION_IMPORT_OCR_PROVIDER", "")
+    try:
+        provider = get_ocr_provider(provider_name)
+        return provider.extract_pdf(data=data, filename=filename)
+    except OCRProviderUnavailable as exc:
+        return "", str(exc)
+
+
+def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref=""):
+    page_count = _preflight_pdf(data)
+    warnings = []
+    skipped_count = 0
+    pymupdf_text_chunks, pymupdf_page_metadata = _extract_pymupdf_text(data)
+    selectable_text = "\n".join(chunk for chunk in pymupdf_text_chunks if chunk and chunk.strip()).strip()
+
+    lines = []
+    pdfplumber_page_metadata = []
+    table_rows_seen = 0
+    if selectable_text:
+        try:
+            lines, pdfplumber_page_metadata, table_rows_seen, table_skipped = _parse_pdfplumber_tables(data)
+            skipped_count += table_skipped
+        except Exception as exc:
+            warnings.append(f"PDF table extraction failed; fell back to text lines. Detail: {exc}")
+
+    parse_method = "pymupdf_pdfplumber_table_v2" if lines else "pymupdf_text_v2"
+    if not lines and selectable_text:
+        parsed_lines, skipped = parse_text_lines(selectable_text)
         lines = parsed_lines
+        skipped_count += skipped
         if skipped:
             warnings.append(f"Skipped {skipped} likely heading/footer line(s) while parsing PDF text.")
 
-    if not lines and not text_chunks:
-        warnings.append("No selectable text detected. OCR is not enabled in this environment.")
+    if not selectable_text:
+        ocr_text, ocr_warning = _try_ocr_fallback(data, filename)
+        if ocr_text:
+            ocr_lines, ocr_skipped = parse_text_lines(ocr_text)
+            lines = ocr_lines
+            selectable_text = ocr_text
+            skipped_count += ocr_skipped
+            parse_method = "ocr_deterministic_v2"
+        else:
+            parse_method = "ocr_required_not_configured_v2"
+            warnings.append(
+                "No selectable text detected. OCR is not enabled in this environment."
+                + (f" {ocr_warning}" if ocr_warning else "")
+            )
     elif not lines:
         warnings.append("Selectable text was found, but no item lines were confidently detected. Add rows manually if needed.")
 
-    return {
-        "source_type": "pdf",
-        "source_filename": filename,
-        "source_mime_type": content_type or PDF_MIME,
-        "source_sha256": sha256,
-        "parse_method": "pypdf_pdfplumber_v1",
-        "original_text": "\n".join(text_chunks).strip(),
-        "lines": lines,
-        "warnings": warnings,
-        "meta": {
-            "line_count": len(lines),
+    return _preview_response(
+        source_type="pdf",
+        source_filename=filename,
+        source_mime_type=content_type or PDF_MIME,
+        source_sha256=sha256,
+        source_file_ref=source_file_ref,
+        source_file_size=len(data),
+        parse_method=parse_method,
+        original_text=selectable_text,
+        lines=lines,
+        warnings=warnings,
+        skipped_count=skipped_count,
+        meta={
             "page_count": page_count,
-            "table_rows_seen": table_rows,
+            "page_metadata": pymupdf_page_metadata,
+            "pdfplumber_page_metadata": pdfplumber_page_metadata,
+            "table_rows_seen": table_rows_seen,
+            "source_file_ref": source_file_ref,
+            "source_file_size": len(data),
         },
-    }
+    )

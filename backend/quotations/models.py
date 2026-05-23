@@ -232,6 +232,8 @@ class Inquiry(models.Model):
     source_filename = models.CharField(max_length=255, blank=True)
     source_mime_type = models.CharField(max_length=120, blank=True)
     source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    source_file_ref = models.CharField(max_length=500, blank=True)
+    source_file_size = models.PositiveIntegerField(null=True, blank=True)
     parse_method = models.CharField(max_length=80, blank=True)
     parse_meta = models.JSONField(default=dict, blank=True)
     subject = models.CharField(max_length=255, blank=True)
@@ -321,6 +323,144 @@ class InquiryLine(models.Model):
         super().save(*args, **kwargs)
 
 
+class HistoricalPriceImport(models.Model):
+    STATUS_PARSED = "parsed"
+    STATUS_REVIEWED = "reviewed"
+    STATUS_COMMITTED = "committed"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_PARSED, "Parsed"),
+        (STATUS_REVIEWED, "Reviewed"),
+        (STATUS_COMMITTED, "Committed"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    SOURCE_TYPE_PDF = "pdf"
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_TYPE_PDF, "PDF"),
+    ]
+
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="historical_price_imports",
+    )
+    suggested_company_name = models.CharField(max_length=255, blank=True)
+    source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES, default=SOURCE_TYPE_PDF)
+    source_filename = models.CharField(max_length=255, blank=True)
+    source_mime_type = models.CharField(max_length=120, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    source_file_ref = models.CharField(max_length=500, blank=True)
+    source_file_size = models.PositiveIntegerField(null=True, blank=True)
+    parse_method = models.CharField(max_length=80, blank=True)
+    parse_meta = models.JSONField(default=dict, blank=True)
+    document_number = models.CharField(max_length=80, blank=True, db_index=True)
+    document_date = models.DateField(null=True, blank=True, db_index=True)
+    currency = models.CharField(max_length=3, default="AED")
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    vat_total = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    total = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PARSED)
+    created_quotation = models.OneToOneField(
+        "Quotation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="historical_price_import",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_historical_price_imports",
+    )
+    committed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="committed_historical_price_imports",
+    )
+    committed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["source_sha256"]),
+            models.Index(fields=["company", "document_date"]),
+            models.Index(fields=["document_number"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return self.document_number or self.source_filename or f"Historical import #{self.pk}"
+
+
+class HistoricalPriceImportLine(models.Model):
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_READY = "ready"
+    STATUS_SKIPPED = "skipped"
+    STATUS_DUPLICATE = "duplicate"
+    STATUS_COMMITTED = "committed"
+    STATUS_CHOICES = [
+        (STATUS_NEEDS_REVIEW, "Needs Review"),
+        (STATUS_READY, "Ready"),
+        (STATUS_SKIPPED, "Skipped"),
+        (STATUS_DUPLICATE, "Duplicate"),
+        (STATUS_COMMITTED, "Committed"),
+    ]
+
+    historical_import = models.ForeignKey(HistoricalPriceImport, on_delete=models.CASCADE, related_name="lines")
+    quote_item = models.ForeignKey(
+        QuoteItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="historical_import_lines",
+    )
+    raw_line = models.TextField(blank=True)
+    item_name = models.CharField(max_length=255)
+    normalized_item_name = models.CharField(max_length=255, db_index=True, editable=False)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    unit = models.CharField(max_length=50, blank=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    vat_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    line_total = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    serial_no = models.CharField(max_length=30, blank=True)
+    source_page = models.PositiveIntegerField(null=True, blank=True)
+    source_row = models.PositiveIntegerField(null=True, blank=True)
+    parse_confidence = models.FloatField(default=0.0)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_NEEDS_REVIEW)
+    duplicate_reason = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+        indexes = [
+            models.Index(fields=["historical_import", "sort_order"]),
+            models.Index(fields=["quote_item"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["normalized_item_name"]),
+        ]
+
+    def __str__(self):
+        return self.item_name
+
+    def save(self, *args, **kwargs):
+        self.normalized_item_name = normalize_label(self.item_name)
+        super().save(*args, **kwargs)
+
+
 class Quotation(models.Model):
     STATUS_DRAFT = "draft"
     STATUS_PENDING_REVIEW = "pending_review"
@@ -388,6 +528,7 @@ class Quotation(models.Model):
     )
     finalized_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
+    is_historical_import = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -399,6 +540,7 @@ class Quotation(models.Model):
             models.Index(fields=["status"]),
             models.Index(fields=["created_by"]),
             models.Index(fields=["parent", "version"]),
+            models.Index(fields=["is_historical_import"]),
         ]
 
     def __str__(self):

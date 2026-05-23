@@ -36,6 +36,12 @@
 - [x] Add reviewed imported-inquiry save flow without automatic quotation creation
 - [x] Add parser/security tests for text, Excel, PDF, invalid uploads, no-text PDFs, encrypted PDFs, and manual inquiry regression
 - [x] Browser-verify pasted text, Excel, PDF, no-text PDF warning, save imported inquiry, and create quote after save
+- [x] Harden Excel import header detection, title-row skipping, repeated-header skipping, serial stripping, and quantity/unit splitting
+- [x] Add `.xlsb`/`.xls` parser support through `python-calamine`
+- [x] Add private source-file refs for successful uploaded inquiry parses
+- [x] Add OCR provider abstraction without enabling heavy OCR runtime dependencies
+- [x] Add FIRST AID workbook parser regression tests
+- [x] Browser/API-verify compact import area is reachable and FIRST AID workbook parses correctly through staff-only upload endpoint
 - [x] Add staff-editable `Quotations -> Settings` page for PDF branding and defaults
 - [x] Add singleton `QuotationSettings` model and staff-only settings API
 - [x] Validate quotation logo uploads by extension, MIME type, file size, and binary signature
@@ -45,10 +51,28 @@
 - [x] Add logo layout controls so full brand lockups do not duplicate company-name text
 - [x] Add remove actions for uploaded logo/signature/stamp images
 - [x] Improve signature/stamp placeholder behavior in generated PDFs
+- [x] Add staff-only historical finalized quotation PDF import for price-history backfill
+- [x] Store historical import source PDFs in private quotation storage refs, not public URLs
+- [x] Add reviewed historical import commit flow that appends company price history only after staff links rows to Quote Items
+- [x] Hide historical backfill quotations from normal quotation lists unless explicitly requested
+- [x] Add backend tests for historical import permissions, parsing, commit, duplicate prevention, and encrypted PDF rejection
+- [x] Add inline searchable company creation to quotation forms so staff do not need to leave the current workflow to add a missing company
+- [x] Add checkbox selection and bulk actions to historical import price review rows
+- [x] Add duplicate-safe bulk QuoteItem create/link endpoint for historical import rows
+- [x] Add compact historical import review table filters, search, row action menu, row highlighting, and sticky commit bar
+- [x] Add checkbox/bulk delete to imported inquiry preview rows
+- [x] Polish the historical import review header into separate document preview and import details cards
+- [x] Move suggested-company handling into a proper banner/action and keep inline company creation inside the review screen
+- [x] Refine historical import company creation wording and balance the document preview/details card height
 
 ## Phase 1 Follow-Ups Before Phase 2
 
 - [ ] Have Dad/staff repeat the quotation workflow with real-ish sample data
+- [ ] Have staff try inline company creation in inquiry import, manual inquiry, direct quotation creation, and historical imports
+- [ ] Have staff try the historical import bulk review flow with a real 20+ row PDF and confirm the toolbar wording is natural
+- [ ] Consider adding keyboard shortcuts for row selection/save only after staff confirm the bulk workflow is useful
+- [ ] Try `Quotations -> Historical Imports` with a batch of real old finalized PDF quotations and tune parser rules from reviewed failures
+- [ ] Decide where durable private storage should live on Railway before relying on long-term historical source-file retention
 - [ ] Browser-verify quotation settings save/logo behavior on the deployed-like environment before merging
 - [ ] Add a safe `Download Sample PDF` action to Quotation Settings if staff want a preview without opening an existing quotation
 - [ ] Fix the existing admin route guard so hard-refreshing `/admin` waits for auth initialization before redirecting
@@ -58,6 +82,9 @@
 - [ ] Consider draft PDF watermarking if staff might accidentally send draft quotations
 - [ ] Prototype static PDF/image background templates with ReportLab overlays before considering DOCX-to-PDF conversion
 - [ ] Tune import parser rules with real company LPO samples after staff review
+- [ ] Do one human browser pass with the native file picker because Browser automation could not attach a file to the upload input directly
+- [ ] Configure durable private object storage/persistent private storage for Railway before relying on long-term inquiry/historical source-file retention
+- [ ] Review PyMuPDF licensing/deployment implications before production launch if the app will be used beyond internal operations
 
 ## Phase 2 Ideas
 

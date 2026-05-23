@@ -10,6 +10,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    HistoricalPriceImport,
+    HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
     Quotation,
@@ -292,6 +294,8 @@ class InquirySerializer(serializers.ModelSerializer):
             "source_filename",
             "source_mime_type",
             "source_sha256",
+            "source_file_ref",
+            "source_file_size",
             "parse_method",
             "parse_meta",
             "subject",
@@ -313,6 +317,8 @@ class InquirySerializer(serializers.ModelSerializer):
             "source_filename",
             "source_mime_type",
             "source_sha256",
+            "source_file_ref",
+            "source_file_size",
             "parse_method",
             "parse_meta",
             "created_by",
@@ -393,9 +399,16 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
     source_filename = serializers.CharField(max_length=255, required=False, allow_blank=True)
     source_mime_type = serializers.CharField(max_length=120, required=False, allow_blank=True)
     source_sha256 = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    source_file_ref = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    source_file_size = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     parse_method = serializers.CharField(max_length=80, required=False, allow_blank=True)
     parse_meta = serializers.JSONField(required=False, default=dict)
     lines = ImportedInquiryLineSerializer(many=True, allow_empty=False)
+
+    def validate_source_file_ref(self, value):
+        if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
+            raise serializers.ValidationError("Invalid private source file reference.")
+        return value
 
     def validate(self, attrs):
         contact = attrs.get("contact")
@@ -403,6 +416,143 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
         if contact and company and contact.company_id != company.id:
             raise serializers.ValidationError({"contact": "Contact must belong to the selected company."})
         return attrs
+
+
+class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
+    quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = HistoricalPriceImportLine
+        fields = [
+            "id",
+            "historical_import",
+            "quote_item",
+            "quote_item_name",
+            "raw_line",
+            "item_name",
+            "quantity",
+            "unit",
+            "unit_price",
+            "amount",
+            "vat_amount",
+            "vat_rate",
+            "line_total",
+            "serial_no",
+            "source_page",
+            "source_row",
+            "parse_confidence",
+            "status",
+            "duplicate_reason",
+            "notes",
+            "sort_order",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "historical_import",
+            "quote_item_name",
+            "raw_line",
+            "serial_no",
+            "source_page",
+            "source_row",
+            "parse_confidence",
+            "duplicate_reason",
+            "sort_order",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate(self, attrs):
+        status_value = attrs.get("status") or getattr(self.instance, "status", "")
+        quote_item = attrs.get("quote_item") if "quote_item" in attrs else getattr(self.instance, "quote_item", None)
+        quantity = attrs.get("quantity") if "quantity" in attrs else getattr(self.instance, "quantity", None)
+        unit_price = attrs.get("unit_price") if "unit_price" in attrs else getattr(self.instance, "unit_price", None)
+        if status_value == HistoricalPriceImportLine.STATUS_READY:
+            errors = {}
+            historical_import = getattr(self.instance, "historical_import", None)
+            if historical_import and not historical_import.company_id:
+                errors["historical_import"] = "Select the company before marking this row ready."
+            if historical_import and not historical_import.document_date:
+                errors["document_date"] = "Enter the quotation date before marking this row ready."
+            if not quote_item:
+                errors["quote_item"] = "Select a Quote Item before marking this row ready."
+            if quantity is None or quantity <= 0:
+                errors["quantity"] = "Enter a valid quantity before marking this row ready."
+            if unit_price is None or unit_price < 0:
+                errors["unit_price"] = "Enter a valid unit price before marking this row ready."
+            if errors:
+                raise serializers.ValidationError(errors)
+        return attrs
+
+
+class HistoricalPriceImportSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source="company.name", read_only=True, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    committed_by_username = serializers.CharField(source="committed_by.username", read_only=True, allow_null=True)
+    created_quotation_number = serializers.CharField(source="created_quotation.quotation_number", read_only=True, allow_null=True)
+    lines = HistoricalPriceImportLineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = HistoricalPriceImport
+        fields = [
+            "id",
+            "company",
+            "company_name",
+            "suggested_company_name",
+            "source_type",
+            "source_filename",
+            "source_mime_type",
+            "source_sha256",
+            "source_file_ref",
+            "source_file_size",
+            "parse_method",
+            "parse_meta",
+            "document_number",
+            "document_date",
+            "currency",
+            "subtotal",
+            "vat_total",
+            "total",
+            "status",
+            "created_quotation",
+            "created_quotation_number",
+            "created_by",
+            "created_by_username",
+            "committed_by",
+            "committed_by_username",
+            "committed_at",
+            "lines",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "source_type",
+            "source_filename",
+            "source_mime_type",
+            "source_sha256",
+            "source_file_ref",
+            "source_file_size",
+            "parse_method",
+            "parse_meta",
+            "status",
+            "created_quotation",
+            "created_quotation_number",
+            "created_by",
+            "created_by_username",
+            "committed_by",
+            "committed_by_username",
+            "committed_at",
+            "lines",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate_source_file_ref(self, value):
+        if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
+            raise serializers.ValidationError("Invalid private source file reference.")
+        return value
 
 
 class QuotationLineSerializer(serializers.ModelSerializer):
@@ -491,6 +641,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "finalized_by_username",
             "finalized_at",
             "sent_at",
+            "is_historical_import",
             "lines",
             "created_at",
             "updated_at",
@@ -510,6 +661,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "finalized_by_username",
             "finalized_at",
             "sent_at",
+            "is_historical_import",
             "lines",
             "created_at",
             "updated_at",
@@ -526,6 +678,7 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
     quote_item_name = serializers.CharField(source="quote_item.name", read_only=True)
     quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True)
+    quotation_is_historical_import = serializers.BooleanField(source="quotation.is_historical_import", read_only=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
 
     class Meta:
@@ -538,6 +691,7 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
             "quote_item_name",
             "quotation",
             "quotation_number",
+            "quotation_is_historical_import",
             "quotation_line",
             "unit_price",
             "currency",
@@ -556,6 +710,7 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
             "quote_item_name",
             "quotation",
             "quotation_number",
+            "quotation_is_historical_import",
             "quotation_line",
             "unit_price",
             "currency",
