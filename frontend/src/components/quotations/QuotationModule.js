@@ -14,7 +14,7 @@ import './QuotationModule.css';
 const tabs = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'companies', label: 'Companies' },
-  { id: 'items', label: 'Quote Items' },
+  { id: 'items', label: 'Products / Items' },
   { id: 'inquiries', label: 'Inquiries' },
   { id: 'quotes', label: 'Quotations' },
   { id: 'history', label: 'Price History' },

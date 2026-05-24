@@ -56,7 +56,7 @@ const QuotationDashboard = ({ onOpenQuotes }) => {
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       <div className="qm-stat-grid">
         <div className="qm-stat"><span>{stats.companies}</span><p>Companies</p></div>
-        <div className="qm-stat"><span>{stats.items}</span><p>Quote Items</p></div>
+        <div className="qm-stat"><span>{stats.items}</span><p>Products / Items</p></div>
         <div className="qm-stat"><span>{stats.inquiries}</span><p>Inquiries</p></div>
         <div className="qm-stat"><span>{stats.quotes}</span><p>Quotations</p></div>
         <div className="qm-stat warning"><span>{stats.pending}</span><p>Needs Action</p></div>
@@ -65,7 +65,7 @@ const QuotationDashboard = ({ onOpenQuotes }) => {
       <div className="qm-panel">
         <div>
           <h3>Daily workflow</h3>
-          <p>Create or select a company, enter a manual inquiry, match each line to a quote item, review previous prices, then finalize and download the PDF.</p>
+          <p>Create or select a company, enter a manual inquiry, match each line to a product, review previous prices, then finalize and download the PDF.</p>
         </div>
         <button type="button" className="qm-primary" onClick={onOpenQuotes}>Open Quotations</button>
       </div>

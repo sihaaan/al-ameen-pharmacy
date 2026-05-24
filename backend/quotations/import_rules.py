@@ -375,6 +375,9 @@ def make_preview_line(
         "notes": notes,
         "match_status": "unresolved",
         "matched_quote_item": None,
+        "matched_product": None,
+        "matched_product_name": "",
+        "match_reason": "",
         "parse_status": parse_status or confidence_status(confidence),
         "parse_confidence": confidence,
     }

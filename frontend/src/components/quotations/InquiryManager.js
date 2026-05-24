@@ -8,7 +8,7 @@ const newLine = () => ({
   quantity: '1',
   unit: '',
   notes: '',
-  matched_quote_item: '',
+  matched_product: '',
   match_status: 'unresolved',
 });
 
@@ -20,6 +20,9 @@ const newImportLine = () => ({
   parse_status: 'needs_review',
   parse_confidence: 0,
   notes: '',
+  matched_product: '',
+  match_reason: '',
+  match_status: 'unresolved',
 });
 
 const emptyImportForm = {
@@ -133,7 +136,7 @@ const InquiryManager = ({ onOpenQuote }) => {
           quantity: line.quantity || null,
           unit: line.unit,
           notes: line.notes,
-          matched_quote_item: line.matched_quote_item || null,
+          matched_product: line.matched_product || null,
           match_status: line.match_status,
           sort_order: index,
         })),
@@ -209,7 +212,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     setErrorInfo(null);
     setImportNotice(null);
     try {
-      const response = await quotationAPI.inquiries.parseText({ raw_text: importForm.raw_text });
+      const response = await quotationAPI.inquiries.parseText({ raw_text: importForm.raw_text, company: importForm.company || null });
       setPreview(response.data);
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse pasted inquiry text', 'POST /quotations/inquiries/parse_text/');
@@ -231,6 +234,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     setImportNotice(null);
     const formData = new FormData();
     formData.append('file', importFile);
+    if (importForm.company) formData.append('company', importForm.company);
     try {
       const response = await quotationAPI.inquiries.parseFile(formData);
       setPreview(response.data);
@@ -319,6 +323,9 @@ const InquiryManager = ({ onOpenQuote }) => {
         notes: line.notes || '',
         parse_status: line.parse_status || 'needs_review',
         parse_confidence: Number(line.parse_confidence || 0),
+        matched_product: line.matched_product || null,
+        match_reason: line.match_reason || '',
+        match_status: line.match_status || (line.matched_product ? 'confirmed' : 'unresolved'),
       }));
     if (!importForm.company) {
       setImportNotice({ type: 'error', message: 'Select a company before saving the imported inquiry.' });
@@ -486,6 +493,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                   <tr>
                     <th className="qm-check-cell"><input type="checkbox" checked={importPreview.lines.length > 0 && selectedImportRows.length === importPreview.lines.length} onChange={toggleAllImportRows} /></th>
                     <th>Requested Item Name</th>
+                    <th>Matched Product</th>
                     <th>Qty</th>
                     <th>Unit</th>
                     <th>Status</th>
@@ -499,6 +507,16 @@ const InquiryManager = ({ onOpenQuote }) => {
                       <tr>
                         <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRows.includes(index)} onChange={() => toggleImportRowSelection(index)} /></td>
                         <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, { raw_name: event.target.value })} /></td>
+                        <td>
+                          <select value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
+                            matched_product: event.target.value || null,
+                            match_status: event.target.value ? 'confirmed' : 'unresolved',
+                          })}>
+                            <option value="">Unmatched</option>
+                            {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                          </select>
+                          {line.match_reason && <small className="qm-muted-text">{line.match_reason}</small>}
+                        </td>
                         <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
                         <td className="qm-import-status-cell">
@@ -520,7 +538,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                       {expandedRawRows[index] && (
                         <tr className="qm-raw-row">
                           <td />
-                          <td colSpan="6">
+                          <td colSpan="7">
                             <label>
                               <span className="qm-label-text">Raw source line</span>
                               <textarea rows="2" value={line.raw_line || ''} onChange={(event) => updateImportLine(index, { raw_line: event.target.value })} />
@@ -630,7 +648,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                     <tr key={line.id}>
                       <td>{line.raw_name}</td>
                       <td>{line.quantity || '-'}</td>
-                      <td>{line.matched_quote_item_name || '-'}</td>
+                      <td>{line.matched_product_name || line.matched_quote_item_name || '-'}</td>
                       <td>{line.match_status}</td>
                     </tr>
                   ))}
@@ -671,7 +689,7 @@ const InquiryManager = ({ onOpenQuote }) => {
               <span>Step 2</span>
               <div>
                 <h4>Inquiry Lines</h4>
-                <p>Add the items requested by the customer. Match now if you know the private quote item.</p>
+              <p>Add the items requested by the customer. Match now if you know the product item.</p>
               </div>
               <button type="button" className="qm-secondary small" onClick={() => setForm({ ...form, lines: [...form.lines, newLine()] })}>Add Line</button>
             </div>
@@ -680,9 +698,9 @@ const InquiryManager = ({ onOpenQuote }) => {
                 <input aria-label="Requested item name" placeholder="Requested item name" required value={line.raw_name} onChange={(event) => updateLine(index, { raw_name: event.target.value })} />
                 <input aria-label="Qty" type="number" min="0" step="0.001" placeholder="Qty" value={line.quantity} onChange={(event) => updateLine(index, { quantity: event.target.value })} />
                 <input aria-label="Unit" placeholder="Unit" value={line.unit} onChange={(event) => updateLine(index, { unit: event.target.value })} />
-                <select aria-label="Match status" value={line.matched_quote_item} onChange={(event) => {
+                <select aria-label="Matched product" value={line.matched_product} onChange={(event) => {
                   const matched = event.target.value;
-                  updateLine(index, { matched_quote_item: matched, match_status: matched ? 'confirmed' : 'unresolved' });
+                  updateLine(index, { matched_product: matched, match_status: matched ? 'confirmed' : 'unresolved' });
                 }}>
                   <option value="">Match status: Unmatched</option>
                   {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}

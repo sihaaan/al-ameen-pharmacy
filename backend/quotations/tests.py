@@ -18,6 +18,8 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from api.models import Product
+
 from .import_rules import detect_header_row, parse_inquiry_line, parse_text_lines, split_quantity_unit
 from .models import (
     Company,
@@ -30,8 +32,10 @@ from .models import (
     Quotation,
     QuotationLine,
     QuotationSettings,
+    ProductAlias,
     QuoteItem,
 )
+from .matching import suggest_product_for_text
 from .ocr import OCRProviderUnavailable, get_ocr_provider
 
 
@@ -96,7 +100,7 @@ class QuotationWorkflowTests(APITestCase):
         self.staff = User.objects.create_user(username="staff", password="pass", is_staff=True)
         self.customer = User.objects.create_user(username="customer", password="pass")
         self.company = Company.objects.create(name="Workflow Company")
-        self.quote_item = QuoteItem.objects.create(name="Bandage Pack", unit="box")
+        self.product = Product.objects.create(name="Bandage Pack", price=Decimal("1.00"), pack_size="box", status="draft")
         self.client.force_authenticate(self.staff)
 
     def create_quote(self):
@@ -105,7 +109,7 @@ class QuotationWorkflowTests(APITestCase):
     def create_valid_line(self, quotation):
         return QuotationLine.objects.create(
             quotation=quotation,
-            quote_item=self.quote_item,
+            product=self.product,
             item_name_snapshot="Bandage Pack",
             quantity=Decimal("2.000"),
             unit="box",
@@ -142,7 +146,7 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(CompanyPriceHistory.objects.count(), 1)
         history = CompanyPriceHistory.objects.get()
         self.assertEqual(history.company, self.company)
-        self.assertEqual(history.quote_item, self.quote_item)
+        self.assertEqual(history.product, self.product)
         self.assertEqual(history.unit_price, Decimal("10.00"))
 
         second_response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
@@ -189,7 +193,7 @@ class QuotationWorkflowTests(APITestCase):
         InquiryLine.objects.create(
             inquiry=inquiry,
             raw_name="Bandage Pack",
-            matched_quote_item=self.quote_item,
+            matched_product=self.product,
             quantity=Decimal("2.000"),
             unit="box",
             match_status=InquiryLine.MATCH_CONFIRMED,
@@ -215,6 +219,59 @@ class QuotationWorkflowTests(APITestCase):
         allowed = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         self.assertEqual(allowed["Content-Type"], "application/pdf")
+
+
+class ProductCatalogMatchingTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="product_staff", password="pass", is_staff=True)
+        self.company_a = Company.objects.create(name="Company A")
+        self.company_b = Company.objects.create(name="Company B")
+        self.product_a = Product.objects.create(name="Plastic Band-Aids", price=Decimal("1.00"), status="draft")
+        self.product_b = Product.objects.create(name="Thin Band-Aids", price=Decimal("1.00"), status="draft")
+
+    def test_company_alias_overrides_same_global_or_other_company_alias(self):
+        ProductAlias.objects.create(company=self.company_a, product=self.product_a, alias="band aids", created_by=self.staff)
+        ProductAlias.objects.create(company=self.company_b, product=self.product_b, alias="band aids", created_by=self.staff)
+
+        match_a = suggest_product_for_text("band aids", self.company_a)
+        match_b = suggest_product_for_text("band aids", self.company_b)
+
+        self.assertEqual(match_a.product, self.product_a)
+        self.assertEqual(match_a.method, "company_alias")
+        self.assertEqual(match_b.product, self.product_b)
+        self.assertEqual(match_b.method, "company_alias")
+
+    def test_global_alias_is_used_when_company_alias_is_missing(self):
+        ProductAlias.objects.create(product=self.product_a, alias="plasters", created_by=self.staff)
+
+        match = suggest_product_for_text("plasters", self.company_b)
+
+        self.assertEqual(match.product, self.product_a)
+        self.assertEqual(match.method, "global_alias")
+
+    def test_public_product_list_hides_internal_draft_products_from_customers(self):
+        Product.objects.create(name="Public Item", price=Decimal("2.00"), status="active")
+
+        public_response = self.client.get(reverse("product-list"))
+
+        self.assertEqual(public_response.status_code, status.HTTP_200_OK)
+        names = [row["name"] for row in public_response.data]
+        self.assertIn("Public Item", names)
+        self.assertNotIn("Plastic Band-Aids", names)
+
+    def test_staff_can_create_internal_product_through_quotation_items_api(self):
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.post(
+            reverse("quotation-item-list"),
+            {"name": "Internal Gauze Roll", "pack_size": "roll"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        product = Product.objects.get(name="Internal Gauze Roll")
+        self.assertEqual(product.status, "draft")
+        self.assertFalse(product.show_price)
 
 
 class InquiryParserRuleTests(APITestCase):
@@ -576,8 +633,8 @@ class HistoricalPriceImportTests(APITestCase):
         self.staff = User.objects.create_user(username="historical_staff", password="pass", is_staff=True)
         self.customer = User.objects.create_user(username="historical_customer", password="pass")
         self.company = Company.objects.create(name="Ancient Builders Constructions LLC")
-        self.item_one = QuoteItem.objects.create(name="Savlon Antiseptic Solution 1000ml", unit="bottle")
-        self.item_two = QuoteItem.objects.create(name="Gauze Pieces", unit="BOX")
+        self.item_one = Product.objects.create(name="Savlon Antiseptic Solution 1000ml", price=Decimal("1.00"), pack_size="bottle", status="draft")
+        self.item_two = Product.objects.create(name="Gauze Pieces", price=Decimal("1.00"), pack_size="BOX", status="draft")
         self.client.force_authenticate(self.staff)
 
     def make_historical_pdf_upload(self, name="ANCIENT BUILDERS CONSTN 21052026.pdf", encrypted=False):
@@ -687,12 +744,12 @@ class HistoricalPriceImportTests(APITestCase):
         )
         self.client.patch(
             reverse("quotation-historical-import-line-detail", args=[lines[0]["id"]]),
-            {"quote_item": self.item_one.id, "status": HistoricalPriceImportLine.STATUS_READY},
+            {"product": self.item_one.id, "status": HistoricalPriceImportLine.STATUS_READY},
             format="json",
         )
         self.client.patch(
             reverse("quotation-historical-import-line-detail", args=[lines[1]["id"]]),
-            {"quote_item": self.item_two.id, "status": HistoricalPriceImportLine.STATUS_READY},
+            {"product": self.item_two.id, "status": HistoricalPriceImportLine.STATUS_READY},
             format="json",
         )
 
@@ -745,7 +802,7 @@ class HistoricalPriceImportTests(APITestCase):
             )
             self.client.patch(
                 reverse("quotation-historical-import-line-detail", args=[response.data["lines"][0]["id"]]),
-                {"quote_item": self.item_one.id, "status": HistoricalPriceImportLine.STATUS_READY},
+                {"product": self.item_one.id, "status": HistoricalPriceImportLine.STATUS_READY},
                 format="json",
             )
 
@@ -754,7 +811,7 @@ class HistoricalPriceImportTests(APITestCase):
 
         self.assertEqual(first_commit.status_code, status.HTTP_200_OK)
         self.assertEqual(second_commit.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company, quote_item=self.item_one).count(), 1)
+        self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company, product=self.item_one).count(), 1)
 
     def test_encrypted_historical_pdf_is_rejected(self):
         response = self.client.post(
@@ -796,7 +853,7 @@ class HistoricalPriceImportTests(APITestCase):
             unit_price=Decimal("4.00"),
             sort_order=99,
         )
-        before_count = QuoteItem.objects.count()
+        before_count = Product.objects.count()
         row_ids = [response.data["lines"][0]["id"], new_line.id]
 
         result = self.client.post(
@@ -808,11 +865,11 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(result.status_code, status.HTTP_200_OK)
         self.assertEqual(result.data["summary"]["linked_existing"], 1)
         self.assertEqual(result.data["summary"]["created"], 1)
-        self.assertEqual(QuoteItem.objects.count(), before_count + 1)
+        self.assertEqual(Product.objects.count(), before_count + 1)
         existing_line = HistoricalPriceImportLine.objects.get(pk=row_ids[0])
         created_line = HistoricalPriceImportLine.objects.get(pk=new_line.id)
-        self.assertEqual(existing_line.quote_item, self.item_one)
-        self.assertEqual(created_line.quote_item.name, "CUSTOM FIRST AID REFILL")
+        self.assertEqual(existing_line.product, self.item_one)
+        self.assertEqual(created_line.product.name, "CUSTOM FIRST AID REFILL")
         self.assertEqual(created_line.status, HistoricalPriceImportLine.STATUS_NEEDS_REVIEW)
 
         repeat = self.client.post(
@@ -823,7 +880,7 @@ class HistoricalPriceImportTests(APITestCase):
 
         self.assertEqual(repeat.status_code, status.HTTP_200_OK)
         self.assertEqual(repeat.data["summary"]["linked_existing"], 1)
-        self.assertEqual(QuoteItem.objects.count(), before_count + 1)
+        self.assertEqual(Product.objects.count(), before_count + 1)
 
     def test_bulk_update_ready_validation_blocks_missing_required_fields(self):
         response = self.create_parsed_historical_import()
@@ -883,13 +940,13 @@ class QuotationSettingsTests(APITestCase):
         self.staff = User.objects.create_user(username="settings_staff", password="pass", is_staff=True)
         self.customer = User.objects.create_user(username="settings_customer", password="pass")
         self.company = Company.objects.create(name="Settings Company")
-        self.quote_item = QuoteItem.objects.create(name="Settings Item", unit="box")
+        self.product = Product.objects.create(name="Settings Item", price=Decimal("1.00"), pack_size="box", status="draft")
 
     def create_valid_quote(self):
         quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
         QuotationLine.objects.create(
             quotation=quotation,
-            quote_item=self.quote_item,
+            product=self.product,
             item_name_snapshot="Settings Item",
             quantity=Decimal("1.000"),
             unit="box",

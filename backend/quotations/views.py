@@ -7,8 +7,11 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
+from api.models import Product
+
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
+from .matching import apply_match_to_preview_line
 from .models import (
     Company,
     CompanyContact,
@@ -21,7 +24,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationSettings,
-    QuoteItem,
+    ProductAlias,
 )
 from .pdf import build_quotation_pdf
 from .permissions import IsQuotationStaff
@@ -38,11 +41,13 @@ from .serializers import (
     QuotationLineSerializer,
     QuotationSettingsSerializer,
     QuotationSerializer,
+    ProductAliasSerializer,
     QuoteItemSerializer,
     serializer_error_from_django_validation,
 )
 from .services import (
     audit_log,
+    apply_product_matches_to_historical_import,
     bulk_create_quote_items_for_historical_import,
     bulk_update_historical_import_rows,
     commit_historical_price_import,
@@ -51,6 +56,9 @@ from .services import (
     create_quotation_from_inquiry,
     ensure_quotation_editable,
     finalize_quotation,
+    remember_historical_import_line_alias,
+    remember_inquiry_line_alias,
+    remember_quotation_line_alias,
     recalculate_quotation_totals,
     revise_quotation,
     transition_quotation_status,
@@ -121,15 +129,32 @@ class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         company = serializer.save()
         audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, company, message="Updated company.")
 
+    def destroy(self, request, *args, **kwargs):
+        company = self.get_object()
+        has_references = (
+            company.quotations.exists()
+            or company.inquiries.exists()
+            or company.price_history.exists()
+            or company.historical_price_imports.exists()
+            or company.product_aliases.exists()
+        )
+        if has_references:
+            company.is_active = False
+            company.save(update_fields=["is_active", "updated_at"])
+            audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, company, message="Deactivated referenced company.")
+            return Response(self.get_serializer(company).data)
+        audit_log(request.user, QuotationAuditLog.ACTION_DELETED, company, message="Deleted unused company.")
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=True, methods=["get"])
     def price_history(self, request, pk=None):
         company = self.get_object()
         queryset = CompanyPriceHistory.objects.filter(company=company).select_related(
-            "company", "quote_item", "quotation", "created_by"
+            "company", "product", "quote_item", "quotation", "created_by"
         )
-        quote_item_id = request.query_params.get("item")
-        if quote_item_id:
-            queryset = queryset.filter(quote_item_id=quote_item_id)
+        item_id = request.query_params.get("item")
+        if item_id:
+            queryset = queryset.filter(Q(product_id=item_id) | Q(quote_item_id=item_id))
         serializer = CompanyPriceHistorySerializer(queryset, many=True)
         return Response(serializer.data)
 
@@ -158,9 +183,7 @@ class CompanyContactViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuoteItemSerializer
-    queryset = QuoteItem.objects.select_related("product", "product__brand", "product__category").prefetch_related(
-        "product__images"
-    )
+    queryset = Product.objects.select_related("brand", "category").prefetch_related("images")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -168,22 +191,64 @@ class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         if search:
             queryset = queryset.filter(
                 Q(name__icontains=search)
-                | Q(internal_code__icontains=search)
-                | Q(brand_text__icontains=search)
-                | Q(generic_name__icontains=search)
-                | Q(product__name__icontains=search)
+                | Q(sku__icontains=search)
+                | Q(barcode__icontains=search)
+                | Q(brand__name__icontains=search)
+                | Q(active_ingredient__icontains=search)
             )
         if self.request.query_params.get("active") == "true":
-            queryset = queryset.filter(is_active=True)
-        return queryset
+            queryset = queryset.exclude(status="archived")
+        return queryset.order_by("name")
 
     def perform_create(self, serializer):
         item = serializer.save()
-        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, item, message="Created quote item.")
+        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, item, message="Created quotation product.")
 
     def perform_update(self, serializer):
         item = serializer.save()
-        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, item, message="Updated quote item.")
+        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, item, message="Updated quotation product.")
+
+    def destroy(self, request, *args, **kwargs):
+        product = self.get_object()
+        has_references = (
+            product.quotation_lines.exists()
+            or product.quotation_inquiry_lines.exists()
+            or product.historical_import_lines.exists()
+            or product.company_price_history.exists()
+        )
+        if has_references:
+            product.status = "archived"
+            product.save(update_fields=["status", "updated_at"])
+            audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, product, message="Archived referenced quotation product.")
+            return Response(self.get_serializer(product).data)
+        audit_log(request.user, QuotationAuditLog.ACTION_DELETED, product, message="Deleted unused quotation product.")
+        return super().destroy(request, *args, **kwargs)
+
+
+class ProductAliasViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = ProductAliasSerializer
+    queryset = ProductAlias.objects.select_related("company", "product", "created_by")
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        company_id = self.request.query_params.get("company")
+        product_id = self.request.query_params.get("product")
+        search = self.request.query_params.get("search", "").strip()
+        if company_id:
+            queryset = queryset.filter(company_id=company_id)
+        if product_id:
+            queryset = queryset.filter(product_id=product_id)
+        if search:
+            queryset = queryset.filter(Q(alias__icontains=search) | Q(product__name__icontains=search))
+        return queryset
+
+    def perform_create(self, serializer):
+        alias = serializer.save(created_by=self.request.user)
+        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, alias, message="Created product alias.")
+
+    def perform_update(self, serializer):
+        alias = serializer.save()
+        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, alias, message="Updated product alias.")
 
 
 class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
@@ -216,7 +281,9 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         raw_text = request.data.get("raw_text") or request.data.get("text") or ""
         if not str(raw_text).strip():
             return Response({"detail": "Paste inquiry text before extracting lines."}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(parse_text_preview(raw_text))
+        preview = parse_text_preview(raw_text)
+        self._apply_product_matches(preview, request.data.get("company"))
+        return Response(preview)
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def parse_file(self, request):
@@ -224,7 +291,15 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             preview = parse_file_preview(request.FILES.get("file"))
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
+        self._apply_product_matches(preview, request.data.get("company"))
         return Response(preview)
+
+    def _apply_product_matches(self, preview, company_id):
+        company = None
+        if company_id:
+            company = Company.objects.filter(pk=company_id).first()
+        for line in preview.get("lines", []):
+            apply_match_to_preview_line(line, company)
 
     @action(detail=False, methods=["post"])
     def create_imported(self, request):
@@ -247,7 +322,7 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class InquiryLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = InquiryLineSerializer
-    queryset = InquiryLine.objects.select_related("inquiry", "matched_quote_item")
+    queryset = InquiryLine.objects.select_related("inquiry", "inquiry__company", "matched_quote_item", "matched_product")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -264,12 +339,20 @@ class InquiryLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         line = serializer.save()
         audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated inquiry line.")
 
+    @action(detail=True, methods=["post"])
+    def remember_alias(self, request, pk=None):
+        try:
+            alias = remember_inquiry_line_alias(self.get_object(), request.user)
+        except (DjangoValidationError, ValueError) as exc:
+            return self.handle_workflow_error(exc)
+        return Response(ProductAliasSerializer(alias, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
 
 class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationSerializer
     queryset = Quotation.objects.select_related(
         "company", "contact", "inquiry", "created_by", "finalized_by", "parent"
-    ).prefetch_related("lines", "lines__quote_item")
+    ).prefetch_related("lines", "lines__quote_item", "lines__product")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -383,7 +466,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationLineSerializer
-    queryset = QuotationLine.objects.select_related("quotation", "quote_item", "inquiry_line")
+    queryset = QuotationLine.objects.select_related("quotation", "quotation__company", "quote_item", "product", "inquiry_line")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -435,12 +518,20 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         recalculate_quotation_totals(quotation)
         return response
 
+    @action(detail=True, methods=["post"])
+    def remember_alias(self, request, pk=None):
+        try:
+            alias = remember_quotation_line_alias(self.get_object(), request.user)
+        except (DjangoValidationError, ValueError) as exc:
+            return self.handle_workflow_error(exc)
+        return Response(ProductAliasSerializer(alias, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
 
 class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = HistoricalPriceImportSerializer
     queryset = HistoricalPriceImport.objects.select_related(
         "company", "created_by", "committed_by", "created_quotation"
-    ).prefetch_related("lines", "lines__quote_item")
+    ).prefetch_related("lines", "lines__quote_item", "lines__product")
     parser_classes = [JSONParser, MultiPartParser, FormParser]
     http_method_names = ["get", "patch", "post", "head", "options"]
 
@@ -466,11 +557,12 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         historical_import = serializer.instance
         if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
             raise DjangoValidationError("Committed historical imports cannot be edited.")
-        serializer.save()
+        historical_import = serializer.save()
+        apply_product_matches_to_historical_import(historical_import, self.request.user)
         audit_log(
             self.request.user,
             QuotationAuditLog.ACTION_UPDATED,
-            serializer.instance,
+            historical_import,
             message="Updated historical price import.",
         )
 
@@ -580,7 +672,7 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class HistoricalPriceImportLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = HistoricalPriceImportLineSerializer
-    queryset = HistoricalPriceImportLine.objects.select_related("historical_import", "quote_item")
+    queryset = HistoricalPriceImportLine.objects.select_related("historical_import", "historical_import__company", "quote_item", "product")
     http_method_names = ["get", "patch", "head", "options"]
 
     def get_queryset(self):
@@ -608,19 +700,27 @@ class HistoricalPriceImportLineViewSet(QuotationBaseViewSet, viewsets.ModelViewS
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
 
+    @action(detail=True, methods=["post"])
+    def remember_alias(self, request, pk=None):
+        try:
+            alias = remember_historical_import_line_alias(self.get_object(), request.user)
+        except (DjangoValidationError, ValueError) as exc:
+            return self.handle_workflow_error(exc)
+        return Response(ProductAliasSerializer(alias, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
 
 class CompanyPriceHistoryViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):
     serializer_class = CompanyPriceHistorySerializer
-    queryset = CompanyPriceHistory.objects.select_related("company", "quote_item", "quotation", "created_by")
+    queryset = CompanyPriceHistory.objects.select_related("company", "product", "quote_item", "quotation", "created_by")
 
     def get_queryset(self):
         queryset = super().get_queryset()
         company_id = self.request.query_params.get("company")
-        quote_item_id = self.request.query_params.get("item")
+        item_id = self.request.query_params.get("item")
         if company_id:
             queryset = queryset.filter(company_id=company_id)
-        if quote_item_id:
-            queryset = queryset.filter(quote_item_id=quote_item_id)
+        if item_id:
+            queryset = queryset.filter(Q(product_id=item_id) | Q(quote_item_id=item_id))
         return queryset
 
 

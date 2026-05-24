@@ -29,6 +29,7 @@ const CompanyManager = () => {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
   const loadCompanies = async () => {
@@ -82,6 +83,7 @@ const CompanyManager = () => {
   const saveCompany = async (event) => {
     event.preventDefault();
     setSaving(true);
+    setNotice(null);
     setErrorInfo(null);
     try {
       if (selectedCompany) {
@@ -97,6 +99,29 @@ const CompanyManager = () => {
         selectedCompany ? 'Update company' : 'Create company',
         selectedCompany ? `PATCH /quotations/companies/${selectedCompany.id}/` : 'POST /quotations/companies/'
       );
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteOrDeactivateCompany = async () => {
+    if (!selectedCompany || saving) return;
+    if (!window.confirm(`Delete or deactivate "${selectedCompany.name}"? Companies with quotation history are deactivated instead of deleted.`)) return;
+    setSaving(true);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.companies.delete(selectedCompany.id);
+      setNotice({
+        type: 'success',
+        message: response.status === 200 ? 'Company was deactivated because it has history.' : 'Unused company was deleted.',
+      });
+      reset();
+      await loadCompanies();
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Delete/deactivate company', `DELETE /quotations/companies/${selectedCompany.id}/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -132,6 +157,7 @@ const CompanyManager = () => {
   return (
     <div className="qm-section">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+      {notice && <div className={`qm-feedback ${notice.type}`}>{notice.message}</div>}
       <div className="qm-split">
         <div className="qm-panel">
         <div className="qm-panel-heading">
@@ -188,7 +214,14 @@ const CompanyManager = () => {
           <label>Billing Address<textarea rows="3" value={form.billing_address} onChange={(event) => setForm({ ...form, billing_address: event.target.value })} /></label>
           <label>Notes<textarea rows="2" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
           <label className="qm-checkbox"><input type="checkbox" checked={form.is_active} onChange={(event) => setForm({ ...form, is_active: event.target.checked })} /> Active</label>
-          <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving...' : 'Save Company'}</button>
+          <div className="qm-action-row">
+            <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving...' : 'Save Company'}</button>
+            {selectedCompany && (
+              <button type="button" className="qm-secondary danger" disabled={saving} onClick={deleteOrDeactivateCompany}>
+                Delete / Deactivate
+              </button>
+            )}
+          </div>
         </form>
 
         {selectedCompany && (

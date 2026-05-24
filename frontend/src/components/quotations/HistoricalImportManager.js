@@ -88,7 +88,7 @@ const HistoricalImportManager = () => {
   const filteredRows = useMemo(() => {
     const term = rowSearch.trim().toLowerCase();
     return (selectedImport?.lines || []).filter((line) => {
-      const unmatched = !line.quote_item;
+      const unmatched = !line.product;
       const hasError = Boolean(line.duplicate_reason);
       const statusMatch =
         rowFilter === 'all' ||
@@ -97,7 +97,7 @@ const HistoricalImportManager = () => {
         (rowFilter === 'errors' && hasError);
       const searchMatch = !term ||
         (line.item_name || '').toLowerCase().includes(term) ||
-        (line.quote_item_name || '').toLowerCase().includes(term);
+        (line.product_name || line.quote_item_name || '').toLowerCase().includes(term);
       return statusMatch && searchMatch;
     });
   }, [selectedImport, rowFilter, rowSearch]);
@@ -223,9 +223,9 @@ const HistoricalImportManager = () => {
     try {
       const response = await quotationAPI.historicalImports.bulkCreateQuoteItems(selectedImport.id, { row_ids: [line.id] });
       const summary = await updateImportFromBulkResponse(response);
-      setNotice({ type: 'success', message: `Quote item action complete: ${summary.created} created, ${summary.linked_existing} linked existing, ${summary.failed} failed.` });
+      setNotice({ type: 'success', message: `Product action complete: ${summary.created} created, ${summary.linked_existing} linked existing, ${summary.failed} failed.` });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Create/link Quote Item from historical line', `POST /quotations/historical-imports/${selectedImport.id}/bulk_create_quote_items/`);
+      const details = await describeQuotationError(error, 'Create/link Product from historical line', `POST /quotations/historical-imports/${selectedImport.id}/bulk_create_quote_items/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -265,10 +265,10 @@ const HistoricalImportManager = () => {
     try {
       const response = await quotationAPI.historicalImports.bulkCreateQuoteItems(selectedImport.id, { row_ids: selectedRowIds });
       const summary = await updateImportFromBulkResponse(response);
-      setNotice({ type: 'success', message: `Quote items processed: ${summary.created} created, ${summary.linked_existing} linked existing, ${summary.failed} failed.` });
+      setNotice({ type: 'success', message: `Products processed: ${summary.created} created, ${summary.linked_existing} linked existing, ${summary.failed} failed.` });
       if (!summary.failed) clearSelection();
     } catch (error) {
-      const details = await describeQuotationError(error, 'Bulk create Quote Items', `POST /quotations/historical-imports/${selectedImport.id}/bulk_create_quote_items/`);
+      const details = await describeQuotationError(error, 'Bulk create/link Products', `POST /quotations/historical-imports/${selectedImport.id}/bulk_create_quote_items/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -308,8 +308,27 @@ const HistoricalImportManager = () => {
     if (actionValue === 'skip') updateLine(line.id, { status: 'skipped' });
     if (actionValue === 'ready') updateLine(line.id, { status: 'ready' });
     if (actionValue === 'needs_review') updateLine(line.id, { status: 'needs_review' });
+    if (actionValue === 'remember_alias') rememberAliasForLine(line);
     if (actionValue === 'raw') toggleRawRow(line.id);
-    if (actionValue === 'reset') updateLine(line.id, { status: 'needs_review', quote_item: null });
+    if (actionValue === 'reset') updateLine(line.id, { status: 'needs_review', product: null });
+  };
+
+  const rememberAliasForLine = async (line) => {
+    if (saving || bulkAction) return;
+    setSaving(true);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      await quotationAPI.historicalImportLines.rememberAlias(line.id);
+      setNotice({ type: 'success', message: 'Company-specific alias remembered for future imports.' });
+      await load();
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Remember product alias', `POST /quotations/historical-import-lines/${line.id}/remember_alias/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const commitImport = async () => {
@@ -498,12 +517,12 @@ const HistoricalImportManager = () => {
           <div className="qm-panel-heading">
             <div>
               <h3>Review Price Rows</h3>
-              <p>Select rows, bulk create/link missing Quote Items, fix anything marked needs review, then commit only ready rows.</p>
+              <p>Select rows, bulk create/link missing Products, fix anything marked needs review, then commit only ready rows.</p>
             </div>
           </div>
           <div className="qm-row-review-controls">
             <div className="qm-controls">
-              <input className="qm-input" value={rowSearch} onChange={(event) => setRowSearch(event.target.value)} placeholder="Search imported or quote item" />
+              <input className="qm-input" value={rowSearch} onChange={(event) => setRowSearch(event.target.value)} placeholder="Search imported or product item" />
               <select className="qm-input" value={rowFilter} onChange={(event) => setRowFilter(event.target.value)}>
                 <option value="all">All rows</option>
                 <option value="ready">Ready</option>
@@ -518,12 +537,12 @@ const HistoricalImportManager = () => {
               <button type="button" className="qm-secondary small" disabled={!filteredRows.length} onClick={toggleVisibleSelection}>
                 {allVisibleSelected ? 'Deselect Visible' : 'Select Visible'}
               </button>
-              <button type="button" className="qm-secondary small" disabled={!filteredRows.length} onClick={() => selectRowsBy((line) => !line.quote_item)}>Select Unmatched</button>
+              <button type="button" className="qm-secondary small" disabled={!filteredRows.length} onClick={() => selectRowsBy((line) => !line.product)}>Select Unmatched</button>
               <button type="button" className="qm-secondary small" disabled={!filteredRows.length} onClick={() => selectRowsBy((line) => line.status === 'needs_review')}>Select Needs Review</button>
               <button type="button" className="qm-secondary small" disabled={!filteredRows.length} onClick={() => selectRowsBy((line) => line.status === 'ready')}>Select Ready</button>
               <span className="qm-bulk-spacer" />
               <button type="button" className="qm-primary small" disabled={!selectedRowIds.length || Boolean(bulkAction) || selectedImport.status === 'committed'} onClick={runBulkCreateQuoteItems}>
-                {bulkAction === 'bulk-create' ? 'Creating...' : 'Create Quote Items'}
+                {bulkAction === 'bulk-create' ? 'Creating...' : 'Create Products'}
               </button>
               <button type="button" className="qm-secondary small" disabled={!selectedRowIds.length || Boolean(bulkAction) || selectedImport.status === 'committed'} onClick={() => runBulkStatus('ready')}>Mark Ready</button>
               <button type="button" className="qm-secondary small" disabled={!selectedRowIds.length || Boolean(bulkAction) || selectedImport.status === 'committed'} onClick={() => runBulkStatus('needs_review')}>Needs Review</button>
@@ -537,7 +556,7 @@ const HistoricalImportManager = () => {
                 <tr>
                   <th className="qm-check-cell"><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisibleSelection} disabled={!visibleRowIds.length} /></th>
                   <th>Imported Item</th>
-                  <th>Matched Quote Item</th>
+                  <th>Matched Product</th>
                   <th>Qty</th>
                   <th>Unit</th>
                   <th>Unit Price</th>
@@ -558,10 +577,11 @@ const HistoricalImportManager = () => {
                       </td>
                       <td className="qm-item-cell"><input disabled={locked} value={line.item_name || ''} onChange={(event) => updateLine(line.id, { item_name: event.target.value })} /></td>
                       <td>
-                        <select disabled={locked} value={line.quote_item || ''} onChange={(event) => updateLine(line.id, { quote_item: event.target.value || null, status: event.target.value && line.quantity && line.unit_price ? 'ready' : line.status })}>
-                          <option value="">Select Quote Item</option>
+                        <select disabled={locked} value={line.product || ''} onChange={(event) => updateLine(line.id, { product: event.target.value || null, status: event.target.value && line.quantity && line.unit_price ? 'ready' : line.status })}>
+                          <option value="">Select Product</option>
                           {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                         </select>
+                        {line.match_reason && <small className="qm-muted-text">{line.match_reason}</small>}
                       </td>
                       <td><input disabled={locked} type="number" step="0.001" value={line.quantity || ''} onChange={(event) => updateLine(line.id, { quantity: event.target.value })} /></td>
                       <td><input disabled={locked} value={line.unit || ''} onChange={(event) => updateLine(line.id, { unit: event.target.value })} /></td>
@@ -575,9 +595,10 @@ const HistoricalImportManager = () => {
                       <td className="qm-row-actions">
                         <select className="qm-row-menu" disabled={locked || saving || Boolean(bulkAction)} value="" onChange={(event) => handleRowAction(line, event.target.value)}>
                           <option value="">Actions</option>
-                          <option value="create">Create/link item</option>
+                          <option value="create">Create/link product</option>
                           <option value="ready">Mark ready</option>
                           <option value="needs_review">Needs review</option>
+                          <option value="remember_alias">Remember alias</option>
                           <option value="skip">Skip row</option>
                           <option value="raw">{expandedRawRows[line.id] ? 'Hide raw' : 'View raw'}</option>
                           <option value="reset">Reset row</option>

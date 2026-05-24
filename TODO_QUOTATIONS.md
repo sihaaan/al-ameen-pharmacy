@@ -15,12 +15,12 @@
 - [x] Add frontend API helper
 - [x] Add inline quotation error panels with endpoint/status/backend detail
 - [x] Verify every quotation sub-tab opens against the local Django API
-- [x] Decouple Quote Items from slow optional public product dropdown loading
+- [x] Decouple quotation item creation from slow optional public product dropdown loading
 - [x] Fix local product list N+1 image query slowdown affecting admin/home performance
 - [x] Prevent admin shell/tabs from blocking on full product loading
 - [x] Browser-verify product/admin pages after product performance fixes
 - [x] Browser-verify full manual quotation workflow
-- [x] Browser-verify optional product dropdown failure does not block private quote item creation
+- [x] Browser-verify optional product dropdown failure does not block internal item creation
 - [x] Browser-verify anonymous, non-staff, and staff quotation/PDF access
 - [x] Clean up temporary browser smoke-test records and users
 - [x] Run migrations, backend tests/checks, and frontend build
@@ -53,17 +53,22 @@
 - [x] Improve signature/stamp placeholder behavior in generated PDFs
 - [x] Add staff-only historical finalized quotation PDF import for price-history backfill
 - [x] Store historical import source PDFs in private quotation storage refs, not public URLs
-- [x] Add reviewed historical import commit flow that appends company price history only after staff links rows to Quote Items
+- [x] Add reviewed historical import commit flow that appends company price history only after staff links rows to Products
 - [x] Hide historical backfill quotations from normal quotation lists unless explicitly requested
 - [x] Add backend tests for historical import permissions, parsing, commit, duplicate prevention, and encrypted PDF rejection
 - [x] Add inline searchable company creation to quotation forms so staff do not need to leave the current workflow to add a missing company
 - [x] Add checkbox selection and bulk actions to historical import price review rows
-- [x] Add duplicate-safe bulk QuoteItem create/link endpoint for historical import rows
+- [x] Add duplicate-safe bulk Product create/link behavior for historical import rows
 - [x] Add compact historical import review table filters, search, row action menu, row highlighting, and sticky commit bar
 - [x] Add checkbox/bulk delete to imported inquiry preview rows
 - [x] Polish the historical import review header into separate document preview and import details cards
 - [x] Move suggested-company handling into a proper banner/action and keep inline company creation inside the review screen
 - [x] Refine historical import company creation wording and balance the document preview/details card height
+- [x] Refactor quotation item identity around `Product` while keeping deprecated `QuoteItem` compatibility fields
+- [x] Add global and company-specific `ProductAlias` deterministic matching
+- [x] Keep draft/internal Products usable in quotations while hidden from public product lists
+- [x] Add safe delete/archive behavior for quotation products that have business history
+- [x] Add safe delete/deactivate behavior for companies that have quotation history
 
 ## Phase 1 Follow-Ups Before Phase 2
 
@@ -85,6 +90,8 @@
 - [ ] Do one human browser pass with the native file picker because Browser automation could not attach a file to the upload input directly
 - [ ] Configure durable private object storage/persistent private storage for Railway before relying on long-term inquiry/historical source-file retention
 - [ ] Review PyMuPDF licensing/deployment implications before production launch if the app will be used beyond internal operations
+- [ ] After production has run Product-backed quotation workflows safely, plan a later cleanup migration to remove deprecated `QuoteItem` fields/table.
+- [ ] Add a small alias-management UI if staff want to review/edit aliases outside row-level "Remember Alias" actions.
 
 ## Phase 2 Ideas
 

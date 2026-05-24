@@ -270,6 +270,39 @@ class ProductViewSet(viewsets.ModelViewSet):
             ProductDetailSerializer(product, context={'request': request}).data
         )
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        Archive products that have business history instead of hard deleting.
+
+        Quotation workflows now use Product as the master item identity, so old
+        quotations and price history must remain readable even if an item should
+        no longer be visible on the public catalog.
+        """
+        product = self.get_object()
+        quotation_related_managers = [
+            'quotation_lines',
+            'quotation_inquiry_lines',
+            'historical_import_lines',
+            'company_price_history',
+            'quotation_aliases',
+        ]
+        has_quotation_refs = any(
+            hasattr(product, manager_name) and getattr(product, manager_name).exists()
+            for manager_name in quotation_related_managers
+        )
+        has_commerce_refs = (
+            CartItem.objects.filter(product=product).exists()
+            or OrderItem.objects.filter(product=product).exists()
+        )
+        if has_quotation_refs or has_commerce_refs:
+            product.status = 'archived'
+            product.save(update_fields=['status', 'updated_at'])
+            return Response(
+                ProductDetailSerializer(product, context={'request': request}).data,
+                status=status.HTTP_200_OK,
+            )
+        return super().destroy(request, *args, **kwargs)
+
     def get_queryset(self):
         """
         Advanced product filtering and search.

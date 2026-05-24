@@ -4,7 +4,7 @@
 
 Al Ameen Pharmacy receives company inquiries and LPOs for pharmacy items. Staff currently use separate, unstructured Excel files per company to look up previous prices, match requested item names, copy prices into quotations, and manually update history after sending.
 
-The quotation module brings that workflow into the existing pharmacy website admin dashboard so staff can manage companies, inquiries, quote items, company-specific pricing history, generated quotations, PDFs, and finalization without Git, Docker, localhost, or a second application.
+The quotation module brings that workflow into the existing pharmacy website admin dashboard so staff can manage companies, inquiries, product-backed quotation items, company-specific aliases, company-specific pricing history, generated quotations, PDFs, and finalization without Git, Docker, localhost, or a second application.
 
 ## Phase 1 MVP Scope
 
@@ -14,7 +14,7 @@ Included:
 - Separate Django app named `quotations`
 - Staff-only DRF APIs
 - Company and contact management
-- Private quote item catalog with optional link to public `Product`
+- Product-backed quotation item catalog. `Product` is now the master item identity; draft/internal products stay hidden from the public website but remain usable in quotations.
 - Manual inquiry creation and inquiry lines
 - Safe inquiry import preview for pasted text, `.xlsx`, and digitally generated `.pdf`
 - Manual review/edit before saving imported inquiry lines
@@ -30,7 +30,6 @@ Not included in Phase 1:
 - AI matching
 - OpenAI embeddings
 - pgvector migrations
-- Item aliases
 - Gmail API import
 - Gmail draft creation
 - Background workers
@@ -87,7 +86,7 @@ Completed:
   - staff-only upload of old finalized Al Ameen quotation PDFs
   - deterministic extraction of quotation number, date, totals, and price rows from text-based PDF tables
   - private source-file refs stored outside public media/Cloudinary URLs
-  - staff review/linking to `QuoteItem` before committing any `CompanyPriceHistory`
+  - staff review/linking to `Product` before committing any `CompanyPriceHistory`
   - committed rows create a hidden finalized historical quotation record so price history keeps a traceable source
 - Inline company creation:
   - company selectors in inquiry import, manual inquiry, direct quotation creation, historical imports, and price-history filtering are searchable
@@ -95,10 +94,18 @@ Completed:
   - historical imports prefill the inline create form from the suggested company name parsed from the source filename
 - Bulk import review:
   - historical import price rows support checkbox selection, select visible, select unmatched, select needs-review, select ready, and clear selection
-  - bulk toolbar supports duplicate-safe QuoteItem create/link, mark ready, mark needs-review, and skip
+  - bulk toolbar supports duplicate-safe Product create/link, mark ready, mark needs-review, and skip
   - compact review table includes status row highlighting, search, status/unmatched/error filters, hidden raw source rows, and a row action menu
   - sticky commit bar shows total/ready/needs-review/skipped/duplicate/selected counts and commits only ready rows
-  - imported inquiry previews support checkbox selection and bulk delete for removing parser noise before saving
+- imported inquiry previews support checkbox selection and bulk delete for removing parser noise before saving
+- Product-as-master item refactor:
+  - `Product` is now the active quotation item identity
+  - old `QuoteItem` table/fields remain temporarily for migration compatibility and rollback safety
+  - internal quotation-only items are draft Products and are not shown publicly
+  - `ProductAlias` supports global aliases and company-specific aliases
+  - deterministic matching checks company aliases first, then global aliases, then conservative product-name/SKU/barcode matches
+  - finalized quotations and historical imports write price history against Products
+  - used Products are archived instead of deleted; used Companies are deactivated instead of deleted
 
 Partially completed:
 - None
@@ -142,19 +149,20 @@ Create a company:
 - Select the saved company from the table
 - Optionally add a contact in the `Contacts` section
 
-Create a quote item:
-- Go to `Quotations -> Quote Items`
-- Fill `Quote Item Name`
-- Optionally link a public product; leave blank for private/internal quote items
-- Optionally fill internal code, brand, generic name, strength, dosage form, pack size, and unit
-- Click `Save Quote Item`
+Create a product item:
+- Go to `Quotations -> Products / Items`
+- Fill `Product Name`
+- Keep status as `Draft / Internal` for quotation-only items that should not appear on the public website
+- Use `Active / Public` only for products that should be visible in the public catalog
+- Optionally fill SKU, barcode, dosage, pack/unit, active ingredient, and description
+- Click `Save Product Item`
 
 Create an inquiry:
 - Go to `Quotations -> Inquiries`
 - Select a company and optional contact
 - Enter a subject and source text
 - Add one or more requested lines
-- For each line, either select a quote item to confirm the match or leave it unmatched
+- For each line, either select a Product to confirm the match or leave it unmatched
 - Click `Create Inquiry`
 
 Import an inquiry:
@@ -187,7 +195,7 @@ Backfill historical finalized quotation prices:
 - Confirm the detected quotation number, quotation date, suggested company name, and totals
 - Select the real company from `Companies`; create it first in `Quotations -> Companies` if needed
 - Review each extracted price row
-- Link each usable row to a `QuoteItem`; use `Create Item` for private quote items that do not exist yet
+- Link each usable row to a `Product`; use `Create Products` for internal draft Products that do not exist yet
 - Mark reviewed usable rows as `Ready`; mark irrelevant/unclear rows as `Skipped`
 - Click `Commit Price History`
 - Confirm `Quotations -> Price History` shows the imported company-specific prices
@@ -197,7 +205,7 @@ Create a quotation from an inquiry:
 - In `Quotations -> Inquiries`, click `Create Quotation from Inquiry` beside the inquiry
 - The button changes to `Creating...` while the request is in progress
 - After success, click `Open Quotation`
-- Confirm each line is matched to a quote item
+- Confirm each line is matched to a Product
 - Enter quantity, unit, unit price, and VAT rate as needed
 - Click `Save All Lines`, or use row-level `Save`, after editing
 
@@ -209,7 +217,7 @@ Create a quotation directly:
 
 Finalize a quotation:
 - In the quotation editor, confirm every non-ignored line has:
-  - matched quote item
+  - matched Product
   - `Confirmed` match status
   - positive quantity
   - positive unit price
@@ -272,6 +280,21 @@ Verify price history:
 - [ ] Normal customer users cannot access quotation API endpoints
 - [ ] Staff users can access quotation API endpoints
 
+## Product Item Direction
+
+Current direction: `Product` is the master item catalog for both ecommerce and quotation workflows.
+
+- Public storefront items are `Product(status="active")`.
+- Internal quotation-only items are `Product(status="draft")`.
+- Archived Products are hidden from public catalog and excluded from quotation matching.
+- `QuoteItem` is deprecated but kept temporarily so existing migrations, old rows, cleanup scripts, and rollback paths remain safe. New runtime flows should use Product FKs.
+- Public product pages must never expose quotation aliases, company price history, private import data, or quotation PDFs.
+
+Aliases:
+- `ProductAlias(company=<company>, alias="band aids", product=<product>)` is company-specific.
+- `ProductAlias(company=None, ...)` is global.
+- Company-specific aliases override global aliases and deterministic name matching, so the same alias text can map to different Products for different companies.
+
 ## Models Added
 
 Implemented Phase 1 models:
@@ -287,8 +310,9 @@ Implemented Phase 1 models:
 - `QuotationSettings`
 - `HistoricalPriceImport`
 - `HistoricalPriceImportLine`
+- `ProductAlias`
 
-`QuoteItem` is intentionally separate from the public ecommerce `Product` model. It has an optional nullable link to `Product` so private/internal/customer-specific quotation items do not need to become storefront products.
+`QuoteItem` is deprecated compatibility storage. New inquiry lines, quotation lines, historical import lines, and price-history rows can link directly to `Product`.
 
 Import metadata fields added for reviewed imported inquiries:
 - `Inquiry.source_type`
@@ -305,7 +329,7 @@ Import metadata fields added for reviewed imported inquiries:
 
 Historical price backfill models:
 - `HistoricalPriceImport` stores the reviewed source metadata for an old finalized quotation PDF: company, suggested company name, source filename/MIME/SHA-256/private ref, parser metadata, document number/date, currency, totals, status, committed user/time, and the hidden historical quotation created during commit.
-- `HistoricalPriceImportLine` stores each extracted old price row: raw source line, cleaned item text, linked `QuoteItem`, quantity, unit, unit price, VAT/total fields, serial/page/row metadata, parse confidence, status, duplicate reason, and notes.
+- `HistoricalPriceImportLine` stores each extracted old price row: raw source line, cleaned item text, linked `Product`, compatibility `QuoteItem`, quantity, unit, unit price, VAT/total fields, serial/page/row metadata, parse confidence, status, duplicate reason, match reason, and notes.
 - `Quotation.is_historical_import` marks hidden finalized quotations created only to keep historical price-history rows traceable. Normal `GET /api/quotations/quotes/` excludes these unless `include_historical=true`.
 
 ## API Endpoints Added
@@ -316,6 +340,7 @@ Implemented endpoints:
 - `/companies/`
 - `/contacts/`
 - `/items/`
+- `/aliases/`
 - `/inquiries/`
 - `/inquiry-lines/`
 - `/historical-imports/`
@@ -327,6 +352,9 @@ Implemented endpoints:
 - `/settings/`
 
 Implemented custom actions:
+- `POST /inquiry-lines/{id}/remember_alias/`
+- `POST /quote-lines/{id}/remember_alias/`
+- `POST /historical-import-lines/{id}/remember_alias/`
 - `POST /inquiries/parse_text/`
 - `POST /inquiries/parse_file/`
 - `POST /inquiries/create_imported/`
@@ -351,8 +379,8 @@ Import endpoints:
 Historical import endpoints:
 - `POST /historical-imports/parse_file/` accepts a finalized quotation PDF, validates it, stores the source file in private quotation storage, parses known Al Ameen quotation table fields, and creates a staged `HistoricalPriceImport` with review lines.
 - `PATCH /historical-imports/{id}/` updates reviewed company/date/metadata before commit.
-- `PATCH /historical-import-lines/{id}/` updates reviewed row fields, linked `QuoteItem`, notes, and row status.
-- `POST /historical-imports/{id}/bulk_create_quote_items/` creates missing private `QuoteItem` records only for selected rows and links exact normalized existing items instead of duplicating them.
+- `PATCH /historical-import-lines/{id}/` updates reviewed row fields, linked `Product`, notes, and row status.
+- `POST /historical-imports/{id}/bulk_create_quote_items/` is a backward-compatible endpoint name that now creates/links internal draft Products for selected rows and links deterministic existing Product matches instead of duplicating them.
 - `POST /historical-imports/{id}/bulk_update_rows/` marks selected rows `ready`, `needs_review`, or `skipped` with validation and per-row results.
 - `POST /historical-imports/{id}/bulk_skip_rows/` marks selected rows skipped so they remain visible but are excluded from commit.
 - `POST /historical-imports/{id}/commit/` atomically creates hidden finalized historical quotation/line records and appends non-duplicate `CompanyPriceHistory` rows only for reviewed `ready` lines.
@@ -385,7 +413,7 @@ The module appears only inside the existing React admin dashboard at `/admin` as
 
 `QuotationSettings` provides a staff-editable branding page at `Quotations -> Settings`. It controls company details, logo, optional signature/stamp images, terms, validity, payment text, footer note, style colors, template style selection, and signature/stamp labels used by generated PDFs.
 
-`HistoricalImportManager` provides `Quotations -> Historical Imports`. It is separate from the new inquiry importer because it backfills old approved prices instead of creating a live customer quotation. Staff upload a finalized quotation PDF, review detected company/date/totals and price rows, link rows to `QuoteItem`, and commit only approved rows into company-specific price history.
+`HistoricalImportManager` provides `Quotations -> Historical Imports`. It is separate from the new inquiry importer because it backfills old approved prices instead of creating a live customer quotation. Staff upload a finalized quotation PDF, review detected company/date/totals and price rows, link rows to `Product`, and commit only approved rows into company-specific price history.
 
 The historical import review header is organized as a staff workflow instead of a raw form: a `Document Preview` card shows the source file, parser status, and lines found, while an `Import Details` card groups import summary, company selection/inline company creation, quotation number/date/totals, and the `Save Import Details` action. The suggested company from the file appears as a banner with a `Use suggestion` action. `+ New Company` opens the inline company form, `Create Company` submits it, and newly created companies are selected automatically with a selected-company badge. Final price-history commit remains in the sticky row-review bar below.
 
@@ -393,8 +421,8 @@ Historical import bulk workflow:
 - Select a staged historical import.
 - Use row filters (`All`, `Ready`, `Needs Review`, `Unmatched`, `Skipped`, `Errors`) and search to narrow the table.
 - Use `Select Visible`, `Select Unmatched`, `Select Needs Review`, or `Select Ready`.
-- Click `Create Quote Items` to create/link private QuoteItems for the selected rows. Exact normalized matches are linked instead of duplicated.
-- Use `Mark Ready`, `Needs Review`, or `Skip` for selected rows. `Ready` requires company, quotation date, linked QuoteItem, quantity greater than zero, and unit price zero or more.
+- Click `Create Products` to create/link internal draft Products for the selected rows. Exact deterministic matches are linked instead of duplicated.
+- Use `Mark Ready`, `Needs Review`, or `Skip` for selected rows. `Ready` requires company, quotation date, linked Product, quantity greater than zero, and unit price zero or more.
 - Commit from the sticky bottom bar. Only ready rows are committed into price history; skipped/needs-review/duplicate rows are ignored.
 
 `CompanySelectWithCreate` is the shared inline company selector/creator used by daily quotation workflows. Use it instead of a raw company `<select>` when staff are choosing a company for a quotation/inquiry/backfill task, so missing companies can be added without leaving the current screen.

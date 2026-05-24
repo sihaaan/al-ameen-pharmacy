@@ -6,7 +6,7 @@
 - Started Phase 1 quotation module implementation for the existing admin dashboard.
 - Added dedicated quotation module documentation and future-work tracking.
 - Added backend `quotations` app with staff-only APIs, workflow services, audit logs, PDF generation, and tests.
-- Added React admin dashboard `Quotations` tab with companies, quote items, inquiries, quotation editor, price history, and audit log views.
+- Added React admin dashboard `Quotations` tab with companies, product-backed items, inquiries, quotation editor, price history, and audit log views.
 - Verified quotation migrations, backend tests/checks, and frontend production build.
 - Completed final Phase 1 browser smoke verification for existing product/admin pages and the full manual quotation workflow.
 - Added configurable quotation PDF branding settings for pharmacy name, Arabic name, address, phone, email, TRN/license, logo, terms, validity, and payment terms.
@@ -27,12 +27,16 @@
 - Added staff-only historical finalized quotation PDF imports for reviewed company price-history backfill.
 - Added `HistoricalPriceImport` and `HistoricalPriceImportLine` models with private source-file refs, document metadata, parsed price rows, review status, and commit tracking.
 - Added historical import APIs for parsing finalized quotation PDFs, reviewing/editing extracted rows, rendering private first-page previews, and committing approved rows into `CompanyPriceHistory`.
-- Added a React `Quotations -> Historical Imports` tab for uploading old PDFs, selecting the real company, linking rows to Quote Items, creating private Quote Items when needed, and committing price history.
+- Added a React `Quotations -> Historical Imports` tab for uploading old PDFs, selecting the real company, linking rows to Products, creating internal draft Products when needed, and committing price history.
 - Added inline company creation wherever quotation staff select a company, including inquiry import, manual inquiry, direct quotation creation, historical imports, and price-history filtering.
-- Added checkbox-based bulk review actions for historical import price rows: select visible, select unmatched, select needs-review, select ready, bulk create/link Quote Items, bulk status changes, and bulk skip.
-- Added backend bulk endpoints for historical imports with per-row results and duplicate-safe QuoteItem linking by normalized item name.
+- Added checkbox-based bulk review actions for historical import price rows: select visible, select unmatched, select needs-review, select ready, bulk create/link Products, bulk status changes, and bulk skip.
+- Added backend bulk endpoints for historical imports with per-row results and duplicate-safe Product linking by deterministic matching.
 - Added a compact historical import review table with status row highlighting, row action menu, filters, search, hidden raw source rows, and a sticky commit bar.
 - Added a lighter checkbox/bulk-delete workflow for imported inquiry preview rows.
+- Added Product-backed quotation item identity: internal quotation items are now draft Products, public items remain active Products, and deprecated QuoteItem compatibility fields are retained temporarily.
+- Added `ProductAlias` for global and company-specific aliases, with company-specific aliases taking priority over global aliases and deterministic product matching.
+- Added row-level alias remembering from inquiry, quotation, and historical import lines.
+- Added safe delete/deactivate behavior for companies in the quotation module.
 
 ### Fixed
 - Corrected local frontend API targeting for quotation development so `/admin -> Quotations` calls the local Django API instead of undeployed Railway quotation routes.
@@ -52,6 +56,9 @@
 - Tightened the inline company creation layout so create/search/select controls stay grouped cleanly.
 - Polished the historical import review header so document preview, import summary, company selection/creation, quotation details, and save action are organized into structured cards.
 - Refined historical import company creation wording and layout balance: `+ New Company` opens the form, `Create Company` submits it, selected companies show a badge, and the document preview stretches with import details.
+- Changed historical import bulk create/link to create or link Products instead of new QuoteItem catalog rows.
+- Added safe archive-on-delete behavior for Products used by quotations, company price history, aliases, carts, or orders.
+- Referenced quotation companies are deactivated instead of destructively deleted.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.
@@ -63,7 +70,7 @@
 - Home products, product card images, product quick view, product detail, and product gallery still work after the product performance fix.
 - Admin dashboard shell renders immediately and Products/Orders tabs still open.
 - `/api/products/?compact=true&limit=200` returns compact `id`/`name` rows, and `/api/products/summary/` returns only product-count summary data.
-- Staff can complete company, contact, quote item, inquiry, quotation, finalize, PDF, price-history, and revision workflow inside `/admin -> Quotations`.
+- Staff can complete company, contact, product item, inquiry, quotation, finalize, PDF, price-history, and revision workflow inside `/admin -> Quotations`.
 - Anonymous and non-staff users are blocked from quotation APIs and PDFs; staff users are allowed.
 - Manual Inquiry overflow fix, duplicate Create Quote prevention, Save All Lines, branded PDF download, and staff-only PDF/API security were browser-verified after the hardening pass.
 - Backend tests cover import permissions, invalid file types, upload size limits, Excel parsing, machine-generated PDF parsing, no-text PDF warnings, encrypted PDF rejection, imported inquiry creation, and manual inquiry regression.
@@ -71,6 +78,6 @@
 - Backend verification passed for robust import parsing, including the FIRST AID workbook fixture, multi-sheet Excel selection, invalid signature rejection, encrypted/no-text PDF handling, and staff-only import endpoint permissions.
 - Backend tests cover quotation settings permissions, defaults, update, invalid logo/stamp rejection, signature/stamp upload, image clearing permissions, logo layout PDF rendering, missing signature/stamp placeholders, invalid colors, and PDF generation with saved branding images.
 - Backend tests cover historical import staff-only access, encrypted PDF rejection, deterministic price-row parsing, private source refs, commit into price history, hidden historical quotation records, and duplicate import protection.
-- Backend tests cover historical import bulk permissions, duplicate-safe QuoteItem creation/linking, ready-status validation, bulk skip behavior, and commit exclusion of skipped rows.
+- Backend tests cover historical import bulk permissions, duplicate-safe Product creation/linking, ready-status validation, bulk skip behavior, and commit exclusion of skipped rows.
 - Browser verification confirmed the historical import review header has aligned preview/details cards, suggested-company banner, inline company creation, no horizontal overflow, and the sticky commit bar remains available.
 - Browser verification captured historical import review states with the company form closed, open, and created/selected.

@@ -12,6 +12,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationSettings,
+    ProductAlias,
     QuoteItem,
 )
 
@@ -45,6 +46,15 @@ class QuoteItemAdmin(admin.ModelAdmin):
     search_fields = ["name", "internal_code", "brand_text", "generic_name", "product__name"]
     autocomplete_fields = ["product"]
     readonly_fields = ["normalized_name", "created_at", "updated_at"]
+
+
+@admin.register(ProductAlias)
+class ProductAliasAdmin(admin.ModelAdmin):
+    list_display = ["alias", "company", "product", "is_active", "updated_at"]
+    list_filter = ["is_active", "company"]
+    search_fields = ["alias", "normalized_alias", "company__name", "product__name", "product__sku"]
+    autocomplete_fields = ["company", "product", "created_by"]
+    readonly_fields = ["normalized_alias", "created_at", "updated_at"]
 
 
 @admin.register(QuotationSettings)
@@ -102,7 +112,7 @@ class QuotationSettingsAdmin(admin.ModelAdmin):
 class InquiryLineInline(admin.TabularInline):
     model = InquiryLine
     extra = 0
-    autocomplete_fields = ["matched_quote_item"]
+    autocomplete_fields = ["matched_product", "matched_quote_item"]
 
 
 @admin.register(Inquiry)
@@ -119,15 +129,15 @@ class InquiryAdmin(admin.ModelAdmin):
 class InquiryLineAdmin(admin.ModelAdmin):
     list_display = ["raw_name", "inquiry", "quantity", "unit", "match_status", "parse_status", "parse_confidence", "sort_order"]
     list_filter = ["match_status", "parse_status"]
-    search_fields = ["raw_name", "raw_line", "inquiry__subject", "matched_quote_item__name"]
-    autocomplete_fields = ["inquiry", "matched_quote_item"]
+    search_fields = ["raw_name", "raw_line", "inquiry__subject", "matched_product__name", "matched_quote_item__name"]
+    autocomplete_fields = ["inquiry", "matched_product", "matched_quote_item"]
     readonly_fields = ["normalized_name", "created_at", "updated_at"]
 
 
 class HistoricalPriceImportLineInline(admin.TabularInline):
     model = HistoricalPriceImportLine
     extra = 0
-    autocomplete_fields = ["quote_item"]
+    autocomplete_fields = ["product", "quote_item"]
     readonly_fields = ["normalized_item_name", "duplicate_reason", "created_at", "updated_at"]
 
 
@@ -143,17 +153,17 @@ class HistoricalPriceImportAdmin(admin.ModelAdmin):
 
 @admin.register(HistoricalPriceImportLine)
 class HistoricalPriceImportLineAdmin(admin.ModelAdmin):
-    list_display = ["item_name", "historical_import", "quote_item", "quantity", "unit_price", "status", "sort_order"]
+    list_display = ["item_name", "historical_import", "product", "quote_item", "quantity", "unit_price", "status", "sort_order"]
     list_filter = ["status"]
-    search_fields = ["item_name", "raw_line", "quote_item__name", "historical_import__source_filename"]
-    autocomplete_fields = ["historical_import", "quote_item"]
+    search_fields = ["item_name", "raw_line", "product__name", "quote_item__name", "historical_import__source_filename"]
+    autocomplete_fields = ["historical_import", "product", "quote_item"]
     readonly_fields = ["normalized_item_name", "created_at", "updated_at"]
 
 
 class QuotationLineInline(admin.TabularInline):
     model = QuotationLine
     extra = 0
-    autocomplete_fields = ["quote_item", "inquiry_line"]
+    autocomplete_fields = ["product", "quote_item", "inquiry_line"]
     readonly_fields = ["line_subtotal", "vat_amount", "line_total"]
 
 
@@ -171,17 +181,17 @@ class QuotationAdmin(admin.ModelAdmin):
 class QuotationLineAdmin(admin.ModelAdmin):
     list_display = ["item_name_snapshot", "quotation", "quantity", "unit_price", "line_total", "match_status"]
     list_filter = ["match_status"]
-    search_fields = ["item_name_snapshot", "quotation__quotation_number", "quote_item__name"]
-    autocomplete_fields = ["quotation", "quote_item", "inquiry_line"]
+    search_fields = ["item_name_snapshot", "quotation__quotation_number", "product__name", "quote_item__name"]
+    autocomplete_fields = ["quotation", "product", "quote_item", "inquiry_line"]
     readonly_fields = ["line_subtotal", "vat_amount", "line_total", "created_at", "updated_at"]
 
 
 @admin.register(CompanyPriceHistory)
 class CompanyPriceHistoryAdmin(admin.ModelAdmin):
-    list_display = ["company", "quote_item", "unit_price", "currency", "quoted_at", "quotation"]
+    list_display = ["company", "product", "quote_item", "unit_price", "currency", "quoted_at", "quotation"]
     list_filter = ["currency", "quoted_at"]
-    search_fields = ["company__name", "quote_item__name", "quotation__quotation_number"]
-    autocomplete_fields = ["company", "quote_item", "quotation", "quotation_line", "created_by"]
+    search_fields = ["company__name", "product__name", "quote_item__name", "quotation__quotation_number"]
+    autocomplete_fields = ["company", "product", "quote_item", "quotation", "quotation_line", "created_by"]
     readonly_fields = ["created_at"]
 
 

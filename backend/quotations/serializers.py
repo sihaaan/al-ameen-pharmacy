@@ -1,9 +1,11 @@
 import re
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from api.models import Product
 from api.serializers import ProductListSerializer
 
 from .models import (
@@ -19,6 +21,7 @@ from .models import (
     QuotationLine,
     QuotationSettings,
     QuoteItem,
+    ProductAlias,
 )
 
 
@@ -70,31 +73,79 @@ class CompanySerializer(serializers.ModelSerializer):
 
 
 class QuoteItemSerializer(serializers.ModelSerializer):
-    product_detail = ProductListSerializer(source="product", read_only=True)
-    product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
+    """Product-backed item serializer for the staff quotation item catalog."""
+    brand_name = serializers.CharField(source="brand.name", read_only=True, allow_null=True)
+    category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
+    unit = serializers.CharField(source="pack_size", read_only=True)
+    is_active = serializers.SerializerMethodField()
 
     class Meta:
-        model = QuoteItem
+        model = Product
         fields = [
             "id",
-            "product",
-            "product_name",
-            "product_detail",
             "name",
-            "normalized_name",
-            "internal_code",
-            "brand_text",
-            "generic_name",
-            "strength",
-            "dosage_form",
+            "slug",
+            "sku",
+            "barcode",
+            "brand",
+            "brand_name",
+            "category",
+            "category_name",
+            "short_description",
+            "detailed_description",
+            "price",
+            "stock_quantity",
+            "dosage",
             "pack_size",
             "unit",
-            "notes",
+            "active_ingredient",
+            "status",
+            "show_price",
             "is_active",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "normalized_name", "product_name", "product_detail", "created_at", "updated_at"]
+        read_only_fields = ["id", "slug", "brand_name", "category_name", "is_active", "created_at", "updated_at"]
+        extra_kwargs = {
+            "price": {"required": False},
+            "stock_quantity": {"required": False},
+            "status": {"required": False},
+            "show_price": {"required": False},
+        }
+
+    def get_is_active(self, obj):
+        return obj.status != "archived"
+
+    def validate(self, attrs):
+        if self.instance is None:
+            attrs.setdefault("price", Decimal("0.01"))
+            attrs.setdefault("stock_quantity", 0)
+            attrs.setdefault("status", "draft")
+            attrs.setdefault("show_price", False)
+        return attrs
+
+
+class ProductAliasSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source="company.name", read_only=True, allow_null=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+
+    class Meta:
+        model = ProductAlias
+        fields = [
+            "id",
+            "company",
+            "company_name",
+            "product",
+            "product_name",
+            "alias",
+            "normalized_alias",
+            "notes",
+            "is_active",
+            "created_by",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "normalized_alias", "company_name", "product_name", "created_by", "created_at", "updated_at"]
 
 
 class QuotationSettingsSerializer(serializers.ModelSerializer):
@@ -246,6 +297,7 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
 
 class InquiryLineSerializer(serializers.ModelSerializer):
     matched_quote_item_name = serializers.CharField(source="matched_quote_item.name", read_only=True, allow_null=True)
+    matched_product_name = serializers.CharField(source="matched_product.name", read_only=True, allow_null=True)
 
     class Meta:
         model = InquiryLine
@@ -260,6 +312,9 @@ class InquiryLineSerializer(serializers.ModelSerializer):
             "notes",
             "matched_quote_item",
             "matched_quote_item_name",
+            "matched_product",
+            "matched_product_name",
+            "match_reason",
             "match_status",
             "parse_status",
             "parse_confidence",
@@ -267,10 +322,15 @@ class InquiryLineSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "normalized_name", "matched_quote_item_name", "created_at", "updated_at"]
+        read_only_fields = ["id", "normalized_name", "matched_quote_item_name", "matched_product_name", "created_at", "updated_at"]
         extra_kwargs = {
             "inquiry": {"required": False},
         }
+
+    def update(self, instance, validated_data):
+        if "matched_product" in validated_data and validated_data.get("matched_product") != instance.matched_product:
+            validated_data.setdefault("match_reason", "Selected manually by staff.")
+        return super().update(instance, validated_data)
 
 
 class InquirySerializer(serializers.ModelSerializer):
@@ -369,6 +429,12 @@ class ImportedInquiryLineSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+    matched_product = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    match_reason = serializers.CharField(required=False, allow_blank=True)
     match_status = serializers.ChoiceField(
         choices=InquiryLine.MATCH_STATUS_CHOICES,
         default=InquiryLine.MATCH_UNRESOLVED,
@@ -420,6 +486,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
 
 class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
     quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
+    product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
 
     class Meta:
         model = HistoricalPriceImportLine
@@ -428,6 +495,9 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
             "historical_import",
             "quote_item",
             "quote_item_name",
+            "product",
+            "product_name",
+            "match_reason",
             "raw_line",
             "item_name",
             "quantity",
@@ -452,6 +522,7 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
             "id",
             "historical_import",
             "quote_item_name",
+            "product_name",
             "raw_line",
             "serial_no",
             "source_page",
@@ -465,6 +536,7 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         status_value = attrs.get("status") or getattr(self.instance, "status", "")
+        product = attrs.get("product") if "product" in attrs else getattr(self.instance, "product", None)
         quote_item = attrs.get("quote_item") if "quote_item" in attrs else getattr(self.instance, "quote_item", None)
         quantity = attrs.get("quantity") if "quantity" in attrs else getattr(self.instance, "quantity", None)
         unit_price = attrs.get("unit_price") if "unit_price" in attrs else getattr(self.instance, "unit_price", None)
@@ -475,8 +547,8 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
                 errors["historical_import"] = "Select the company before marking this row ready."
             if historical_import and not historical_import.document_date:
                 errors["document_date"] = "Enter the quotation date before marking this row ready."
-            if not quote_item:
-                errors["quote_item"] = "Select a Quote Item before marking this row ready."
+            if not product and not quote_item:
+                errors["product"] = "Select a product/item before marking this row ready."
             if quantity is None or quantity <= 0:
                 errors["quantity"] = "Enter a valid quantity before marking this row ready."
             if unit_price is None or unit_price < 0:
@@ -484,6 +556,11 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
             if errors:
                 raise serializers.ValidationError(errors)
         return attrs
+
+    def update(self, instance, validated_data):
+        if "product" in validated_data and validated_data.get("product") != instance.product:
+            validated_data.setdefault("match_reason", "Selected manually by staff.")
+        return super().update(instance, validated_data)
 
 
 class HistoricalPriceImportSerializer(serializers.ModelSerializer):
@@ -557,6 +634,7 @@ class HistoricalPriceImportSerializer(serializers.ModelSerializer):
 
 class QuotationLineSerializer(serializers.ModelSerializer):
     quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
+    product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
     inquiry_line_raw_name = serializers.CharField(source="inquiry_line.raw_name", read_only=True, allow_null=True)
 
     class Meta:
@@ -568,6 +646,9 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "inquiry_line_raw_name",
             "quote_item",
             "quote_item_name",
+            "product",
+            "product_name",
+            "match_reason",
             "item_name_snapshot",
             "description",
             "quantity",
@@ -587,6 +668,7 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "id",
             "inquiry_line_raw_name",
             "quote_item_name",
+            "product_name",
             "line_subtotal",
             "vat_amount",
             "line_total",
@@ -595,13 +677,21 @@ class QuotationLineSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        product = attrs.get("product") or getattr(self.instance, "product", None)
         quote_item = attrs.get("quote_item") or getattr(self.instance, "quote_item", None)
         item_name = attrs.get("item_name_snapshot") or getattr(self.instance, "item_name_snapshot", "")
-        if not item_name and quote_item:
+        if not item_name and product:
+            attrs["item_name_snapshot"] = product.name
+        elif not item_name and quote_item:
             attrs["item_name_snapshot"] = quote_item.name
         if not attrs.get("item_name_snapshot") and not item_name:
             raise serializers.ValidationError({"item_name_snapshot": "This field is required."})
         return attrs
+
+    def update(self, instance, validated_data):
+        if "product" in validated_data and validated_data.get("product") != instance.product:
+            validated_data.setdefault("match_reason", "Selected manually by staff.")
+        return super().update(instance, validated_data)
 
 
 class QuotationSerializer(serializers.ModelSerializer):
@@ -676,7 +766,8 @@ class QuotationSerializer(serializers.ModelSerializer):
 
 class CompanyPriceHistorySerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
-    quote_item_name = serializers.CharField(source="quote_item.name", read_only=True)
+    quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
+    product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
     quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True)
     quotation_is_historical_import = serializers.BooleanField(source="quotation.is_historical_import", read_only=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
@@ -689,6 +780,8 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
             "company_name",
             "quote_item",
             "quote_item_name",
+            "product",
+            "product_name",
             "quotation",
             "quotation_number",
             "quotation_is_historical_import",
@@ -708,6 +801,8 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
             "company_name",
             "quote_item",
             "quote_item_name",
+            "product",
+            "product_name",
             "quotation",
             "quotation_number",
             "quotation_is_historical_import",

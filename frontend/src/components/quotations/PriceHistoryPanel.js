@@ -83,7 +83,7 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
               {history.map((row) => (
                 <tr key={row.id}>
                   <td>{row.company_name}</td>
-                  <td>{row.quote_item_name}</td>
+                  <td>{row.product_name || row.quote_item_name}</td>
                   <td>{row.currency} {parseFloat(row.unit_price).toFixed(2)}</td>
                   <td>{parseFloat(row.quantity).toString()} {row.unit}</td>
                   <td>{row.quotation_number}</td>

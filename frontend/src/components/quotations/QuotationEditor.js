@@ -14,7 +14,7 @@ const statusSteps = [
 ];
 
 const emptyLine = {
-  quote_item: '',
+  product: '',
   item_name_snapshot: '',
   description: '',
   quantity: '1',
@@ -26,7 +26,7 @@ const emptyLine = {
 };
 
 const normalizeDraft = (draft = {}) => ({
-  quote_item: String(draft.quote_item || ''),
+  product: String(draft.product || ''),
   item_name_snapshot: String(draft.item_name_snapshot || ''),
   description: String(draft.description || ''),
   quantity: String(draft.quantity || ''),
@@ -64,7 +64,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       setQuote(quoteRes.data);
       setItems(itemsRes.data);
       const drafts = Object.fromEntries((quoteRes.data.lines || []).map((line) => [line.id, {
-        quote_item: line.quote_item || '',
+        product: line.product || '',
         item_name_snapshot: line.item_name_snapshot || '',
         description: line.description || '',
         quantity: line.quantity || '1',
@@ -104,7 +104,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       const draft = lineDrafts[line.id] || {};
       const name = draft.item_name_snapshot || `Line ${index + 1}`;
       if (draft.match_status !== 'ignored') {
-        if (!draft.quote_item) issues.push(`${name}: select a matched/private quote item.`);
+        if (!draft.product) issues.push(`${name}: select a matched product item.`);
         if (draft.match_status !== 'confirmed') issues.push(`${name}: set match status to Confirmed.`);
         if (!draft.quantity || Number(draft.quantity) <= 0) issues.push(`${name}: enter a valid quantity.`);
         if (!draft.unit_price || Number(draft.unit_price) <= 0) issues.push(`${name}: enter a valid unit price.`);
@@ -123,9 +123,9 @@ const QuotationEditor = ({ quoteId, onClose }) => {
 
   const payloadForLine = (draft) => ({
     ...draft,
-    quote_item: draft.quote_item || null,
+    product: draft.product || null,
     unit_price: draft.unit_price || null,
-    match_status: draft.quote_item && draft.match_status === 'unresolved' ? 'confirmed' : draft.match_status,
+    match_status: draft.product && draft.match_status === 'unresolved' ? 'confirmed' : draft.match_status,
   });
 
   const saveLine = async (lineId) => {
@@ -203,6 +203,24 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       setLineFeedback({ type: 'success', message: 'Line deleted.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Delete quote line', `DELETE /quotations/quote-lines/${lineId}/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const rememberAlias = async (lineId) => {
+    if (saving || actionInFlight) return;
+    setSaving(true);
+    setLineFeedback(null);
+    setErrorInfo(null);
+    try {
+      await quotationAPI.lines.rememberAlias(lineId);
+      setLineFeedback({ type: 'success', message: 'Company-specific alias remembered for this product.' });
+      await load();
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Remember product alias', `POST /quotations/quote-lines/${lineId}/remember_alias/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -331,7 +349,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
         <div className="qm-panel-heading">
           <div>
             <h3>Step 4: Edit Quotation Lines</h3>
-            <p>Each active line needs a matched item, confirmed status, quantity, unit price, and VAT before finalization.</p>
+            <p>Each active line needs a matched product, confirmed status, quantity, unit price, and VAT before finalization.</p>
           </div>
           <div className="qm-total">
             <span>Subtotal {quote.currency} {parseFloat(quote.subtotal).toFixed(2)}</span>
@@ -369,10 +387,10 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                 return (
                   <tr key={line.id}>
                     <td>
-                      <select disabled={!isEditable} value={draft.quote_item || ''} onChange={(event) => {
+                      <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => {
                         const item = items.find((candidate) => String(candidate.id) === event.target.value);
                         updateLineDraft(line.id, {
-                          quote_item: event.target.value,
+                          product: event.target.value,
                           item_name_snapshot: item ? item.name : draft.item_name_snapshot,
                           unit: item?.unit || draft.unit,
                           match_status: event.target.value ? 'confirmed' : 'unresolved',
@@ -399,7 +417,8 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td className="qm-row-actions">
                       <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty} onClick={() => saveLine(line.id)}>Save</button>
-                      <button type="button" className="qm-secondary small" onClick={() => setHistoryItem(draft.quote_item || '')}>History</button>
+                      <button type="button" className="qm-secondary small" onClick={() => setHistoryItem(draft.product || '')}>History</button>
+                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !draft.product} onClick={() => rememberAlias(line.id)}>Remember Alias</button>
                       <button type="button" className="qm-secondary small danger" disabled={!isEditable || saving || actionInFlight} onClick={() => deleteLine(line.id)}>Delete</button>
                     </td>
                   </tr>
@@ -411,11 +430,11 @@ const QuotationEditor = ({ quoteId, onClose }) => {
 
         {isEditable && (
           <form onSubmit={addLine} className="qm-add-line">
-            <select value={lineForm.quote_item} onChange={(event) => {
+            <select value={lineForm.product} onChange={(event) => {
               const item = items.find((candidate) => String(candidate.id) === event.target.value);
               setLineForm({
                 ...lineForm,
-                quote_item: event.target.value,
+                product: event.target.value,
                 item_name_snapshot: item ? item.name : lineForm.item_name_snapshot,
                 unit: item?.unit || lineForm.unit,
                 match_status: event.target.value ? 'confirmed' : 'unresolved',

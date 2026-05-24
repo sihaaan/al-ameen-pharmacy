@@ -61,6 +61,7 @@ const quotationAPI = {
     list: (params = {}) => axiosInstance.get('/quotations/companies/', { params }),
     create: (data) => axiosInstance.post('/quotations/companies/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/companies/${id}/`, data),
+    delete: (id) => axiosInstance.delete(`/quotations/companies/${id}/`),
     priceHistory: (id, params = {}) => axiosInstance.get(`/quotations/companies/${id}/price_history/`, { params }),
   },
   contacts: {
@@ -72,6 +73,13 @@ const quotationAPI = {
     list: (params = {}) => axiosInstance.get('/quotations/items/', { params }),
     create: (data) => axiosInstance.post('/quotations/items/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/items/${id}/`, data),
+    delete: (id) => axiosInstance.delete(`/quotations/items/${id}/`),
+  },
+  aliases: {
+    list: (params = {}) => axiosInstance.get('/quotations/aliases/', { params }),
+    create: (data) => axiosInstance.post('/quotations/aliases/', data),
+    update: (id, data) => axiosInstance.patch(`/quotations/aliases/${id}/`, data),
+    delete: (id) => axiosInstance.delete(`/quotations/aliases/${id}/`),
   },
   inquiries: {
     list: (params = {}) => axiosInstance.get('/quotations/inquiries/', { params }),
@@ -88,6 +96,7 @@ const quotationAPI = {
     list: (params = {}) => axiosInstance.get('/quotations/inquiry-lines/', { params }),
     create: (data) => axiosInstance.post('/quotations/inquiry-lines/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/inquiry-lines/${id}/`, data),
+    rememberAlias: (id) => axiosInstance.post(`/quotations/inquiry-lines/${id}/remember_alias/`),
   },
   historicalImports: {
     list: (params = {}) => axiosInstance.get('/quotations/historical-imports/', { params }),
@@ -105,6 +114,7 @@ const quotationAPI = {
   historicalImportLines: {
     list: (params = {}) => axiosInstance.get('/quotations/historical-import-lines/', { params }),
     update: (id, data) => axiosInstance.patch(`/quotations/historical-import-lines/${id}/`, data),
+    rememberAlias: (id) => axiosInstance.post(`/quotations/historical-import-lines/${id}/remember_alias/`),
   },
   quotes: {
     list: (params = {}) => axiosInstance.get('/quotations/quotes/', { params }),
@@ -123,6 +133,7 @@ const quotationAPI = {
     create: (data) => axiosInstance.post('/quotations/quote-lines/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/quote-lines/${id}/`, data),
     delete: (id) => axiosInstance.delete(`/quotations/quote-lines/${id}/`),
+    rememberAlias: (id) => axiosInstance.post(`/quotations/quote-lines/${id}/remember_alias/`),
   },
   priceHistory: {
     list: (params = {}) => axiosInstance.get('/quotations/price-history/', { params }),

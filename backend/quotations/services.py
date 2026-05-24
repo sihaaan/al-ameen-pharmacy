@@ -6,6 +6,9 @@ from django.db import transaction
 from django.db.models import Max, Sum
 from django.utils import timezone
 
+from api.models import Product
+
+from .matching import create_product_alias, suggest_product_for_text
 from .models import (
     CompanyPriceHistory,
     HistoricalPriceImport,
@@ -15,8 +18,6 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
-    QuoteItem,
-    normalize_label,
 )
 
 
@@ -77,9 +78,12 @@ def create_historical_price_import(preview_data, actor):
         **preview_data,
     )
     for index, line_data in enumerate(lines_data):
+        match = suggest_product_for_text(line_data.get("item_name", ""))
         HistoricalPriceImportLine.objects.create(
             historical_import=historical_import,
             sort_order=index,
+            product=match.product,
+            match_reason=match.reason if match.product else "",
             raw_line=line_data.get("raw_line", ""),
             item_name=line_data.get("item_name", "")[:255],
             quantity=line_data.get("quantity"),
@@ -129,13 +133,19 @@ def _quoted_at_for_historical_import(document_date):
 
 
 def _historical_line_is_duplicate(historical_import, line):
+    filters = {
+        "company": historical_import.company,
+        "quoted_at__date": historical_import.document_date,
+        "unit_price": line.unit_price,
+        "quantity": line.quantity,
+        "unit__iexact": line.unit,
+    }
+    if line.product_id:
+        filters["product"] = line.product
+    else:
+        filters["quote_item"] = line.quote_item
     return CompanyPriceHistory.objects.filter(
-        company=historical_import.company,
-        quote_item=line.quote_item,
-        quoted_at__date=historical_import.document_date,
-        unit_price=line.unit_price,
-        quantity=line.quantity,
-        unit__iexact=line.unit,
+        **filters,
     ).exists()
 
 
@@ -145,8 +155,8 @@ def _historical_ready_errors(historical_import, line):
         errors.append("Select the company before marking rows ready.")
     if not historical_import.document_date:
         errors.append("Enter the quotation date before marking rows ready.")
-    if not line.quote_item_id:
-        errors.append("Link a Quote Item.")
+    if not line.product_id and not line.quote_item_id:
+        errors.append("Link a product/item.")
     if line.quantity is None or line.quantity <= 0:
         errors.append("Enter a quantity greater than zero.")
     if line.unit_price is None or line.unit_price < 0:
@@ -206,35 +216,40 @@ def bulk_create_quote_items_for_historical_import(historical_import, row_ids, ac
             results.append({"row_id": line.id, "status": "failed", "message": "Row has no item name."})
             continue
 
-        normalized_name = normalize_label(item_name)
-        quote_item = QuoteItem.objects.filter(normalized_name=normalized_name).order_by("id").first()
+        match = suggest_product_for_text(item_name, historical_import.company)
+        product = match.product
         result_status = "linked_existing"
-        message = "Linked existing QuoteItem."
+        message = match.reason if product else "No matching product found."
 
-        if not quote_item:
-            quote_item = QuoteItem.objects.create(
+        if not product:
+            product = Product.objects.create(
                 name=item_name[:255],
-                unit=line.unit or "",
-                notes=f"Created from historical import {historical_import.source_filename}".strip(),
+                pack_size=line.unit or "",
+                price=Decimal("0.01"),
+                status="draft",
+                show_price=False,
+                requires_manual_review=True,
+                short_description=f"Internal quotation item created from {historical_import.source_filename}".strip(),
             )
-            created_items.append(quote_item.id)
+            created_items.append(product.id)
             result_status = "created"
-            message = "Created QuoteItem and linked row."
+            message = "Created internal draft Product and linked row."
 
-        line.quote_item = quote_item
+        line.product = product
+        line.match_reason = message
         line.status = (
             HistoricalPriceImportLine.STATUS_READY
             if not _historical_ready_errors(historical_import, line)
             else HistoricalPriceImportLine.STATUS_NEEDS_REVIEW
         )
         line.duplicate_reason = ""
-        line.save(update_fields=["quote_item", "status", "duplicate_reason", "updated_at"])
+        line.save(update_fields=["product", "match_reason", "status", "duplicate_reason", "updated_at"])
         results.append(
             {
                 "row_id": line.id,
                 "status": result_status,
-                "quote_item_id": quote_item.id,
-                "quote_item_name": quote_item.name,
+                "product_id": product.id,
+                "product_name": product.name,
                 "row_status": line.status,
                 "message": message,
             }
@@ -244,10 +259,87 @@ def bulk_create_quote_items_for_historical_import(historical_import, row_ids, ac
         actor,
         QuotationAuditLog.ACTION_UPDATED,
         historical_import,
-        message=f"Bulk linked QuoteItems for {len(lines)} historical import row(s).",
-        changes={"row_ids": row_ids, "created_quote_item_ids": created_items, "results": results},
+        message=f"Bulk linked products for {len(lines)} historical import row(s).",
+        changes={"row_ids": row_ids, "created_product_ids": created_items, "results": results},
     )
     return _historical_bulk_summary(results), historical_import
+
+
+def apply_product_match_to_historical_line(line, company=None):
+    if line.product_id:
+        return line
+    match = suggest_product_for_text(line.item_name, company)
+    if match.product:
+        line.product = match.product
+        line.match_reason = match.reason
+        if match.confidence >= 0.88 and not _historical_ready_errors(line.historical_import, line):
+            line.status = HistoricalPriceImportLine.STATUS_READY
+        line.save(update_fields=["product", "match_reason", "status", "updated_at"])
+    return line
+
+
+@transaction.atomic
+def apply_product_matches_to_historical_import(historical_import, actor=None):
+    historical_import = (
+        HistoricalPriceImport.objects.select_for_update()
+        .select_related("company")
+        .get(pk=historical_import.pk)
+    )
+    if historical_import.status in {
+        HistoricalPriceImport.STATUS_COMMITTED,
+        HistoricalPriceImport.STATUS_CANCELLED,
+    }:
+        return historical_import
+
+    updated_line_ids = []
+    auto_match_prefixes = (
+        "Matched exact product name.",
+        "Matched normalized product name.",
+        "Matched global alias",
+        "Found one conservative",
+        "No safe deterministic",
+        "No matching product",
+    )
+    candidate_lines = historical_import.lines.select_for_update().exclude(
+        status__in=[
+            HistoricalPriceImportLine.STATUS_COMMITTED,
+            HistoricalPriceImportLine.STATUS_DUPLICATE,
+            HistoricalPriceImportLine.STATUS_SKIPPED,
+        ]
+    ).order_by("sort_order", "id")
+    for line in candidate_lines:
+        before_status = line.status
+        match = suggest_product_for_text(line.item_name, historical_import.company)
+        if not match.product:
+            continue
+        can_override = (
+            not line.product_id
+            or (
+                match.method == "company_alias"
+                and line.product_id != match.product.id
+                and (not line.match_reason or line.match_reason.startswith(auto_match_prefixes))
+            )
+        )
+        if not can_override:
+            continue
+        line.product = match.product
+        line.match_reason = match.reason
+        if match.confidence >= 0.88 and not _historical_ready_errors(historical_import, line):
+            line.status = HistoricalPriceImportLine.STATUS_READY
+        line.save(update_fields=["product", "match_reason", "status", "updated_at"])
+        if line.product_id or line.status != before_status:
+            updated_line_ids.append(line.id)
+
+    if updated_line_ids:
+        audit_log(
+            actor,
+            QuotationAuditLog.ACTION_UPDATED,
+            historical_import,
+            message=f"Applied product matching to {len(updated_line_ids)} historical import row(s).",
+            changes={"line_ids": updated_line_ids},
+            company=historical_import.company,
+        )
+    return historical_import
 
 
 @transaction.atomic
@@ -309,8 +401,8 @@ def commit_historical_price_import(historical_import, actor):
         raise ValidationError("Mark at least one reviewed line as ready before committing.")
 
     for line in ready_lines:
-        if not line.quote_item_id:
-            raise ValidationError(f"Line '{line.item_name}' must be linked to a Quote Item before committing.")
+        if not line.product_id and not line.quote_item_id:
+            raise ValidationError(f"Line '{line.item_name}' must be linked to a product/item before committing.")
         if line.quantity is None or line.quantity <= 0:
             raise ValidationError(f"Line '{line.item_name}' must have a valid quantity.")
         if line.unit_price is None or line.unit_price < 0:
@@ -346,7 +438,8 @@ def commit_historical_price_import(historical_import, actor):
         quotation_line = QuotationLine.objects.create(
             quotation=quotation,
             quote_item=line.quote_item,
-            item_name_snapshot=line.quote_item.name,
+            product=line.product,
+            item_name_snapshot=line.product.name if line.product_id else line.quote_item.name,
             description=line.item_name,
             quantity=line.quantity,
             unit=line.unit,
@@ -359,6 +452,7 @@ def commit_historical_price_import(historical_import, actor):
         CompanyPriceHistory.objects.create(
             company=historical_import.company,
             quote_item=line.quote_item,
+            product=line.product,
             quotation=quotation,
             quotation_line=quotation_line,
             unit_price=line.unit_price,
@@ -418,6 +512,8 @@ def create_imported_inquiry(validated_data, actor):
             unit=line_data.get("unit", ""),
             notes=line_data.get("notes", ""),
             matched_quote_item=line_data.get("matched_quote_item"),
+            matched_product=line_data.get("matched_product"),
+            match_reason=line_data.get("match_reason", ""),
             match_status=line_data.get("match_status", InquiryLine.MATCH_UNRESOLVED),
             parse_status=line_data.get("parse_status", InquiryLine.PARSE_NEEDS_REVIEW),
             parse_confidence=line_data.get("parse_confidence", 0.0),
@@ -439,6 +535,86 @@ def create_imported_inquiry(validated_data, actor):
 
 
 @transaction.atomic
+def remember_inquiry_line_alias(line, actor):
+    line = InquiryLine.objects.select_for_update().select_related("inquiry__company", "matched_product").get(pk=line.pk)
+    if not line.matched_product_id:
+        raise ValidationError("Select a product before remembering this alias.")
+    alias, created = create_product_alias(
+        alias_text=line.raw_name,
+        product=line.matched_product,
+        company=line.inquiry.company,
+        actor=actor,
+        notes=f"Remembered from inquiry line {line.pk}.",
+    )
+    line.match_reason = f"Matched company alias '{alias.alias}'."
+    line.save(update_fields=["match_reason", "updated_at"])
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_UPDATED,
+        alias,
+        message=("Created" if created else "Updated") + " product alias from inquiry line.",
+        company=line.inquiry.company,
+    )
+    return alias
+
+
+@transaction.atomic
+def remember_historical_import_line_alias(line, actor):
+    line = (
+        HistoricalPriceImportLine.objects.select_for_update()
+        .select_related("historical_import__company", "product")
+        .get(pk=line.pk)
+    )
+    if not line.historical_import.company_id:
+        raise ValidationError("Select the company before remembering this alias.")
+    if not line.product_id:
+        raise ValidationError("Select a product before remembering this alias.")
+    alias, created = create_product_alias(
+        alias_text=line.item_name,
+        product=line.product,
+        company=line.historical_import.company,
+        actor=actor,
+        notes=f"Remembered from historical import line {line.pk}.",
+    )
+    line.match_reason = f"Matched company alias '{alias.alias}'."
+    line.save(update_fields=["match_reason", "updated_at"])
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_UPDATED,
+        alias,
+        message=("Created" if created else "Updated") + " product alias from historical import line.",
+        company=line.historical_import.company,
+    )
+    return alias
+
+
+@transaction.atomic
+def remember_quotation_line_alias(line, actor):
+    line = QuotationLine.objects.select_for_update().select_related("quotation__company", "product").get(pk=line.pk)
+    if not line.product_id:
+        raise ValidationError("Select a product before remembering this alias.")
+    alias_text = line.inquiry_line.raw_name if line.inquiry_line_id else line.item_name_snapshot
+    alias, created = create_product_alias(
+        alias_text=alias_text,
+        product=line.product,
+        company=line.quotation.company,
+        actor=actor,
+        notes=f"Remembered from quotation line {line.pk}.",
+    )
+    line.match_reason = f"Matched company alias '{alias.alias}'."
+    line.save(update_fields=["match_reason", "updated_at"])
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_UPDATED,
+        alias,
+        message=("Created" if created else "Updated") + " product alias from quotation line.",
+        company=line.quotation.company,
+        quotation=line.quotation,
+    )
+    return alias
+
+
+@transaction.atomic
 def create_quotation_from_inquiry(inquiry, actor):
     inquiry = Inquiry.objects.select_for_update().select_related("company").get(pk=inquiry.pk)
     existing = (
@@ -457,13 +633,16 @@ def create_quotation_from_inquiry(inquiry, actor):
         created_by=actor if getattr(actor, "is_authenticated", False) else None,
     )
 
-    for index, line in enumerate(inquiry.lines.select_related("matched_quote_item").order_by("sort_order", "id")):
+    for index, line in enumerate(inquiry.lines.select_related("matched_quote_item", "matched_product").order_by("sort_order", "id")):
         quote_item = line.matched_quote_item
-        item_name = quote_item.name if quote_item else line.raw_name
+        product = line.matched_product
+        item_name = product.name if product else quote_item.name if quote_item else line.raw_name
         QuotationLine.objects.create(
             quotation=quotation,
             inquiry_line=line,
             quote_item=quote_item,
+            product=product,
+            match_reason=line.match_reason,
             item_name_snapshot=item_name,
             quantity=line.quantity or Decimal("1.000"),
             unit=line.unit,
@@ -489,8 +668,8 @@ def _validate_line_for_finalization(line):
         return
     if line.match_status != QuotationLine.MATCH_CONFIRMED:
         raise ValidationError(f"Line '{line.item_name_snapshot}' has an unresolved item match.")
-    if not line.quote_item_id:
-        raise ValidationError(f"Line '{line.item_name_snapshot}' must be linked to a quote item.")
+    if not line.product_id and not line.quote_item_id:
+        raise ValidationError(f"Line '{line.item_name_snapshot}' must be linked to a product/item.")
     if line.quantity is None or line.quantity <= 0:
         raise ValidationError(f"Line '{line.item_name_snapshot}' must have a valid quantity.")
     if line.unit_price is None or line.unit_price <= 0:
@@ -502,7 +681,7 @@ def finalize_quotation(quotation, actor):
     quotation = (
         Quotation.objects.select_for_update()
         .select_related("company")
-        .prefetch_related("lines__quote_item")
+        .prefetch_related("lines__quote_item", "lines__product")
         .get(pk=quotation.pk)
     )
     if quotation.status not in {
@@ -512,7 +691,7 @@ def finalize_quotation(quotation, actor):
     }:
         raise ValidationError("Only draft, pending review, or approved quotations can be finalized.")
 
-    lines = list(quotation.lines.select_related("quote_item").order_by("sort_order", "id"))
+    lines = list(quotation.lines.select_related("quote_item", "product").order_by("sort_order", "id"))
     if not lines:
         raise ValidationError("A quotation must have at least one line before finalization.")
 
@@ -533,6 +712,7 @@ def finalize_quotation(quotation, actor):
             defaults={
                 "company": quotation.company,
                 "quote_item": line.quote_item,
+                "product": line.product,
                 "quotation": quotation,
                 "unit_price": line.unit_price,
                 "currency": quotation.currency,
@@ -588,6 +768,8 @@ def revise_quotation(quotation, actor):
             quotation=revision,
             inquiry_line=line.inquiry_line,
             quote_item=line.quote_item,
+            product=line.product,
+            match_reason=line.match_reason,
             item_name_snapshot=line.item_name_snapshot,
             description=line.description,
             quantity=line.quantity,

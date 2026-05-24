@@ -69,6 +69,13 @@ class CompanyContact(models.Model):
 
 
 class QuoteItem(models.Model):
+    """
+    Deprecated compatibility model.
+
+    New quotation workflows use api.Product as the master item catalog. This
+    model/table is kept temporarily so older migrations and rollback paths stay
+    stable while production moves to product-backed quotations.
+    """
     product = models.ForeignKey(
         "api.Product",
         on_delete=models.SET_NULL,
@@ -104,6 +111,63 @@ class QuoteItem(models.Model):
 
     def save(self, *args, **kwargs):
         self.normalized_name = normalize_label(self.name)
+        super().save(*args, **kwargs)
+
+
+class ProductAlias(models.Model):
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="product_aliases",
+        help_text="Blank means a global alias. Company-specific aliases override global aliases.",
+    )
+    product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.CASCADE,
+        related_name="quotation_aliases",
+    )
+    alias = models.CharField(max_length=255)
+    normalized_alias = models.CharField(max_length=255, editable=False, db_index=True)
+    notes = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_product_aliases",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["company__name", "alias"]
+        indexes = [
+            models.Index(fields=["company", "normalized_alias"]),
+            models.Index(fields=["product"]),
+            models.Index(fields=["is_active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "normalized_alias"],
+                condition=models.Q(company__isnull=False),
+                name="uniq_company_product_alias",
+            ),
+            models.UniqueConstraint(
+                fields=["normalized_alias"],
+                condition=models.Q(company__isnull=True),
+                name="uniq_global_product_alias",
+            ),
+        ]
+
+    def __str__(self):
+        scope = self.company.name if self.company_id else "Global"
+        return f"{scope}: {self.alias} -> {self.product.name}"
+
+    def save(self, *args, **kwargs):
+        self.normalized_alias = normalize_label(self.alias)
         super().save(*args, **kwargs)
 
 
@@ -296,6 +360,14 @@ class InquiryLine(models.Model):
         blank=True,
         related_name="inquiry_lines",
     )
+    matched_product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_inquiry_lines",
+    )
+    match_reason = models.CharField(max_length=255, blank=True)
     match_status = models.CharField(
         max_length=30,
         choices=MATCH_STATUS_CHOICES,
@@ -313,6 +385,7 @@ class InquiryLine(models.Model):
             models.Index(fields=["inquiry", "sort_order"]),
             models.Index(fields=["match_status"]),
             models.Index(fields=["matched_quote_item"]),
+            models.Index(fields=["matched_product"]),
         ]
 
     def __str__(self):
@@ -423,6 +496,14 @@ class HistoricalPriceImportLine(models.Model):
         blank=True,
         related_name="historical_import_lines",
     )
+    product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="historical_import_lines",
+    )
+    match_reason = models.CharField(max_length=255, blank=True)
     raw_line = models.TextField(blank=True)
     item_name = models.CharField(max_length=255)
     normalized_item_name = models.CharField(max_length=255, db_index=True, editable=False)
@@ -449,6 +530,7 @@ class HistoricalPriceImportLine(models.Model):
         indexes = [
             models.Index(fields=["historical_import", "sort_order"]),
             models.Index(fields=["quote_item"]),
+            models.Index(fields=["product"]),
             models.Index(fields=["status"]),
             models.Index(fields=["normalized_item_name"]),
         ]
@@ -599,6 +681,14 @@ class QuotationLine(models.Model):
         blank=True,
         related_name="quotation_lines",
     )
+    product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_lines",
+    )
+    match_reason = models.CharField(max_length=255, blank=True)
     item_name_snapshot = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     quantity = models.DecimalField(
@@ -634,6 +724,7 @@ class QuotationLine(models.Model):
         indexes = [
             models.Index(fields=["quotation", "sort_order"]),
             models.Index(fields=["quote_item"]),
+            models.Index(fields=["product"]),
             models.Index(fields=["match_status"]),
         ]
 
@@ -641,7 +732,9 @@ class QuotationLine(models.Model):
         return f"{self.quotation} - {self.item_name_snapshot}"
 
     def save(self, *args, **kwargs):
-        if self.quote_item and not self.item_name_snapshot:
+        if self.product and not self.item_name_snapshot:
+            self.item_name_snapshot = self.product.name
+        elif self.quote_item and not self.item_name_snapshot:
             self.item_name_snapshot = self.quote_item.name
         if self.unit_price is None:
             self.line_subtotal = Decimal("0.00")
@@ -658,7 +751,20 @@ class QuotationLine(models.Model):
 
 class CompanyPriceHistory(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="price_history")
-    quote_item = models.ForeignKey(QuoteItem, on_delete=models.PROTECT, related_name="company_price_history")
+    quote_item = models.ForeignKey(
+        QuoteItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="company_price_history",
+    )
+    product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="company_price_history",
+    )
     quotation = models.ForeignKey(Quotation, on_delete=models.PROTECT, related_name="price_history_entries")
     quotation_line = models.OneToOneField(
         QuotationLine,
@@ -683,11 +789,13 @@ class CompanyPriceHistory(models.Model):
         ordering = ["-quoted_at", "-created_at"]
         indexes = [
             models.Index(fields=["company", "quote_item", "quoted_at"]),
+            models.Index(fields=["company", "product", "quoted_at"]),
             models.Index(fields=["quotation"]),
         ]
 
     def __str__(self):
-        return f"{self.company.name} - {self.quote_item.name} - {self.unit_price}"
+        item_name = self.product.name if self.product_id else (self.quote_item.name if self.quote_item_id else "Unknown item")
+        return f"{self.company.name} - {item_name} - {self.unit_price}"
 
 
 class QuotationAuditLog(models.Model):
