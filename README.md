@@ -79,7 +79,10 @@ source .venv/Scripts/activate   # Windows Git Bash
 
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env — fill in DATABASE_URL, DJANGO_SECRET_KEY, CLOUDINARY_URL, email credentials
+# Edit .env — use SQLite/local PostgreSQL for development and fill in local credentials
+#
+# Safe local default:
+# DATABASE_URL=sqlite:///db.sqlite3
 
 python manage.py migrate
 python manage.py seed_brochure_catalog   # Seeds 107 products from brochure data
@@ -281,15 +284,22 @@ Import images: `python manage.py import_brochure_images [--pdf path] [--force] [
 ### Backend (`backend/.env`)
 
 ```env
-DATABASE_URL=postgresql://...@neon.tech/...
+DATABASE_URL=sqlite:///db.sqlite3
 DJANGO_SECRET_KEY=...
-DEBUG=1
+DEBUG=True
 ALLOWED_HOSTS=127.0.0.1,localhost
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 CLOUDINARY_URL=cloudinary://...
 EMAIL_HOST_USER=...
 EMAIL_HOST_PASSWORD=...
 ```
+
+**Database safety:** Do not point local `backend/.env` at the production Neon
+`DATABASE_URL`. Local testing writes to whichever database is in `DATABASE_URL`.
+Use SQLite, local PostgreSQL, or a separate Neon development branch/database.
+The Django settings guard refuses to start with `DEBUG=True` against Neon unless
+`ALLOW_DEBUG_NEON_DATABASE=1` is explicitly set for a confirmed non-production
+Neon dev database.
 
 ### Frontend (`frontend/.env`)
 

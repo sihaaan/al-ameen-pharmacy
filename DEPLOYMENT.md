@@ -86,6 +86,10 @@ DJANGO_SECRET_KEY=your-secret-key-from-env-file
 # Database (use your Neon PostgreSQL URL)
 DATABASE_URL=postgresql://username:password@your-host.neon.tech/database?sslmode=require
 
+# Optional safety marker for production DB hosts. This helps local DEBUG mode
+# detect if someone accidentally copies the production Neon URL into backend/.env.
+PRODUCTION_DATABASE_HOSTS=your-host.neon.tech
+
 # Allowed Hosts (update after getting Railway domain)
 ALLOWED_HOSTS=*.up.railway.app,localhost,127.0.0.1
 
@@ -108,6 +112,12 @@ DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <your-email@gmail.com>
 **SECURITY NOTE:** Never commit actual credentials to git! Use the values from your `.env` file.
 
 **Important:** Images uploaded via admin panel will be stored on Cloudinary's CDN, so they persist across Railway deployments!
+
+**Database safety note:** Never use the production Neon `DATABASE_URL` in local
+`backend/.env`. The local Django server will write to whatever database URL is
+configured. For local work, use `DATABASE_URL=sqlite:///db.sqlite3`, local
+PostgreSQL, or a separate Neon development branch/database. Production should
+run with `DEBUG=0`; local `DEBUG=True` is guarded against accidental Neon use.
 
 ### Step 4: Deploy Backend
 

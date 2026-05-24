@@ -13,7 +13,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 import re
+from urllib.parse import urlparse
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 import cloudinary
 
@@ -22,10 +24,48 @@ load_dotenv()  # reads .env at project root
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_list(name):
+    return [item.strip().lower() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+
+def database_host(database_url):
+    if not database_url:
+        return ""
+    parsed = urlparse(database_url)
+    return (parsed.hostname or "").lower()
+
+
 # ---- security & debug from env ----
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only")
-DEBUG = bool(int(os.environ.get("DEBUG", "1")))
+DEBUG = env_bool("DEBUG", True)
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///db.sqlite3")
+
+# Safety guard: local DEBUG mode must not accidentally write to production Neon.
+# If you intentionally use a separate Neon development branch locally, set
+# ALLOW_DEBUG_NEON_DATABASE=1 in your local environment after confirming it is
+# not the production database.
+DATABASE_HOST = database_host(DATABASE_URL)
+PRODUCTION_DATABASE_HOSTS = env_list("PRODUCTION_DATABASE_HOSTS")
+ALLOW_DEBUG_NEON_DATABASE = env_bool("ALLOW_DEBUG_NEON_DATABASE", False)
+if DEBUG and DATABASE_HOST:
+    is_configured_production_host = DATABASE_HOST in PRODUCTION_DATABASE_HOSTS
+    is_neon_host = DATABASE_HOST.endswith(".neon.tech")
+    if is_configured_production_host or (is_neon_host and not ALLOW_DEBUG_NEON_DATABASE):
+        raise ImproperlyConfigured(
+            "Refusing to start with DEBUG=True while DATABASE_URL points to a Neon database host. "
+            "Local development should use SQLite, local PostgreSQL, or a separate Neon dev branch. "
+            "If this is intentionally a non-production Neon dev database, set ALLOW_DEBUG_NEON_DATABASE=1. "
+            "Do not point local backend/.env at production Neon."
+        )
 
 # ---- installed apps ----
 INSTALLED_APPS = [
@@ -84,7 +124,7 @@ WSGI_APPLICATION = 'pharmacy_api.wsgi.application'
 # Good for: production, learning real-world setup
 DATABASES = {
     "default": dj_database_url.parse(
-        os.environ.get("DATABASE_URL"),
+        DATABASE_URL,
         conn_max_age=600
     )
 }
