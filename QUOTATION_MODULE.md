@@ -378,6 +378,9 @@ Import endpoints:
 
 Historical import endpoints:
 - `POST /historical-imports/parse_file/` accepts a finalized quotation PDF, validates it, stores the source file in private quotation storage, parses known Al Ameen quotation table fields, and creates a staged `HistoricalPriceImport` with review lines.
+  - Duplicate detection runs before creating a new staged import. Exact SHA-256 re-uploads and same-company quotation-number matches return the existing import with `duplicate_check` metadata instead of silently creating another staged import.
+  - Similar date/totals/row fingerprints add a warning but still allow staff review.
+  - A deliberate future override can use `force_new_import=true`; the current UI prefers opening the existing import.
 - `PATCH /historical-imports/{id}/` updates reviewed company/date/metadata before commit.
 - `PATCH /historical-import-lines/{id}/` updates reviewed row fields, linked `Product`, notes, and row status.
 - `POST /historical-imports/{id}/bulk_create_quote_items/` is a backward-compatible endpoint name that now creates/links internal draft Products for selected rows and links deterministic existing Product matches instead of duplicating them.
@@ -424,6 +427,12 @@ Historical import bulk workflow:
 - Click `Create Products` to create/link internal draft Products for the selected rows. Exact deterministic matches are linked instead of duplicated.
 - Use `Mark Ready`, `Needs Review`, or `Skip` for selected rows. `Ready` requires company, quotation date, linked Product, quantity greater than zero, and unit price zero or more.
 - Commit from the sticky bottom bar. Only ready rows are committed into price history; skipped/needs-review/duplicate rows are ignored.
+
+Historical import duplicate behavior:
+- Re-uploading the exact same historical quotation PDF shows a duplicate warning and opens/resumes the existing staged or committed import.
+- Same-company quotation-number matches are treated as blocking duplicates by default.
+- Same date/totals with highly similar item rows is treated as a possible duplicate warning so staff can review before commit.
+- The commit service remains idempotent: duplicate ready rows are marked duplicate and do not append another `CompanyPriceHistory` record.
 
 `CompanySelectWithCreate` is the shared inline company selector/creator used by daily quotation workflows. Use it instead of a raw company `<select>` when staff are choosing a company for a quotation/inquiry/backfill task, so missing companies can be added without leaving the current screen.
 

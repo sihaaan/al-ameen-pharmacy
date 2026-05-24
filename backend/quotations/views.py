@@ -55,6 +55,7 @@ from .services import (
     create_imported_inquiry,
     create_quotation_from_inquiry,
     ensure_quotation_editable,
+    find_historical_import_duplicates,
     finalize_quotation,
     remember_historical_import_line_alias,
     remember_inquiry_line_alias,
@@ -576,16 +577,30 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def parse_file(self, request):
         try:
             preview = parse_historical_pdf_upload(request.FILES.get("file"))
-            duplicate_count = HistoricalPriceImport.objects.filter(source_sha256=preview["source_sha256"]).count()
-            if duplicate_count:
-                preview.setdefault("warnings", []).append(
-                    f"This source file hash already appears in {duplicate_count} historical import(s). Review before committing."
-                )
+            duplicate_check = find_historical_import_duplicates(preview)
+            force_new_import = str(request.data.get("force_new_import", "")).lower() in {"1", "true", "yes"}
+            if duplicate_check.get("is_duplicate"):
+                preview.setdefault("meta", {})["duplicate_check"] = duplicate_check
+                preview.setdefault("warnings", []).append(duplicate_check["message"])
+            if duplicate_check.get("blocking") and not force_new_import:
+                existing_id = duplicate_check["primary_match"]["id"]
+                existing_import = self.get_queryset().get(pk=existing_id)
+                serializer = self.get_serializer(existing_import)
+                data = dict(serializer.data)
+                data["duplicate_check"] = {
+                    **duplicate_check,
+                    "blocked_new_import": True,
+                    "opened_existing_import": True,
+                }
+                return Response(data, status=status.HTTP_200_OK)
             historical_import = create_historical_price_import(preview, request.user)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         serializer = self.get_serializer(historical_import)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        data = dict(serializer.data)
+        if duplicate_check.get("is_duplicate"):
+            data["duplicate_check"] = duplicate_check
+        return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def commit(self, request, pk=None):

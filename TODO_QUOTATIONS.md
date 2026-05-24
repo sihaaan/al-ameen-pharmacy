@@ -69,6 +69,7 @@
 - [x] Keep draft/internal Products usable in quotations while hidden from public product lists
 - [x] Add safe delete/archive behavior for quotation products that have business history
 - [x] Add safe delete/deactivate behavior for companies that have quotation history
+- [x] Add duplicate detection for historical finalized quotation re-uploads by source hash, same-company quotation number, and similar row/totals fingerprint
 
 ## Phase 1 Follow-Ups Before Phase 2
 
@@ -77,6 +78,7 @@
 - [ ] Have staff try the historical import bulk review flow with a real 20+ row PDF and confirm the toolbar wording is natural
 - [ ] Consider adding keyboard shortcuts for row selection/save only after staff confirm the bulk workflow is useful
 - [ ] Try `Quotations -> Historical Imports` with a batch of real old finalized PDF quotations and tune parser rules from reviewed failures
+- [ ] Decide whether staff need a guarded `Continue anyway` control for rare historical import duplicate false positives
 - [ ] Decide where durable private storage should live on Railway before relying on long-term historical source-file retention
 - [ ] Browser-verify quotation settings save/logo behavior on the deployed-like environment before merging
 - [ ] Add a safe `Download Sample PDF` action to Quotation Settings if staff want a preview without opening an existing quotation

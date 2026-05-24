@@ -85,6 +85,8 @@ const HistoricalImportManager = () => {
     };
   }, [selectedImport]);
 
+  const selectedDuplicateCheck = selectedImport?.duplicate_check || selectedImport?.parse_meta?.duplicate_check || null;
+
   const filteredRows = useMemo(() => {
     const term = rowSearch.trim().toLowerCase();
     return (selectedImport?.lines || []).filter((line) => {
@@ -121,16 +123,54 @@ const HistoricalImportManager = () => {
     formData.append('file', uploadFile);
     try {
       const response = await quotationAPI.historicalImports.parseFile(formData);
+      const duplicateCheck = response.data.duplicate_check || response.data.parse_meta?.duplicate_check || null;
       setSelectedImport(response.data);
       setHeaderDirty(false);
-      setNotice({ type: 'success', message: 'Historical quotation parsed. Review company, date, items, and prices before committing.' });
+      if (duplicateCheck?.blocked_new_import) {
+        setNotice({
+          type: 'warning',
+          message: `${duplicateCheck.message} Opened existing import #${duplicateCheck.primary_match?.id || response.data.id} instead of creating another staged import.`,
+        });
+      } else if (duplicateCheck?.is_duplicate) {
+        setNotice({
+          type: 'warning',
+          message: `${duplicateCheck.message} Review the duplicate warning before committing price history.`,
+        });
+      } else {
+        setNotice({ type: 'success', message: 'Historical quotation parsed. Review company, date, items, and prices before committing.' });
+      }
       await load();
+      setSelectedImport(response.data);
+      try {
+        const previewResponse = await quotationAPI.historicalImports.previewPage(response.data.id);
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        setPreviewUrl(URL.createObjectURL(previewResponse.data));
+      } catch {
+        setPreviewUrl('');
+      }
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse historical PDF', 'POST /quotations/historical-imports/parse_file/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const openDuplicateImport = async (importId) => {
+    if (!importId) return;
+    const existing = imports.find((entry) => entry.id === importId);
+    if (existing) {
+      await selectImport(existing);
+      return;
+    }
+    try {
+      const response = await quotationAPI.historicalImports.retrieve(importId);
+      await selectImport(response.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Open duplicate import', `GET /quotations/historical-imports/${importId}/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
     }
   };
 
@@ -463,6 +503,24 @@ const HistoricalImportManager = () => {
                   <div className="qm-notice">
                     <strong>Parser warnings:</strong>
                     <ul>{selectedImport.parse_meta.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+                  </div>
+                )}
+                {selectedDuplicateCheck?.is_duplicate && (
+                  <div className="qm-notice warning">
+                    <strong>Possible duplicate import</strong>
+                    <p>{selectedDuplicateCheck.message}</p>
+                    {(selectedDuplicateCheck.matches || []).slice(0, 3).map((match) => (
+                      <div key={match.id} className="qm-helper compact">
+                        Existing import #{match.id}: {match.company_name || match.suggested_company_name || 'Unknown company'} · {match.document_number || 'No quotation #'} · {match.document_date || 'No date'} · {match.status}
+                        {match.created_at ? ` · created ${match.created_at}` : ''}
+                        {match.committed_at ? ` · committed ${match.committed_at}` : ''}
+                      </div>
+                    ))}
+                    {selectedDuplicateCheck.primary_match?.id && selectedDuplicateCheck.primary_match.id !== selectedImport.id && (
+                      <button type="button" className="qm-secondary small" onClick={() => openDuplicateImport(selectedDuplicateCheck.primary_match.id)}>
+                        Open existing import
+                      </button>
+                    )}
                   </div>
                 )}
               </section>

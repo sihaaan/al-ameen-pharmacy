@@ -637,7 +637,14 @@ class HistoricalPriceImportTests(APITestCase):
         self.item_two = Product.objects.create(name="Gauze Pieces", price=Decimal("1.00"), pack_size="BOX", status="draft")
         self.client.force_authenticate(self.staff)
 
-    def make_historical_pdf_upload(self, name="ANCIENT BUILDERS CONSTN 21052026.pdf", encrypted=False):
+    def make_historical_pdf_upload(
+        self,
+        name="ANCIENT BUILDERS CONSTN 21052026.pdf",
+        encrypted=False,
+        document_number="QUOTATION-26052101",
+        document_date="21/05/2026",
+        extra_text="",
+    ):
         buffer = BytesIO()
         if encrypted:
             writer = PdfWriter()
@@ -668,8 +675,9 @@ class HistoricalPriceImportTests(APITestCase):
             )
             document.build(
                 [
-                    Paragraph("QUOTATION-26052101", styles["Title"]),
-                    Paragraph("DATE :21/05/2026", styles["Normal"]),
+                    Paragraph(document_number, styles["Title"]),
+                    Paragraph(f"DATE :{document_date}", styles["Normal"]),
+                    Paragraph(extra_text, styles["Normal"]) if extra_text else Spacer(1, 0),
                     Spacer(1, 16),
                     table,
                 ]
@@ -790,28 +798,92 @@ class HistoricalPriceImportTests(APITestCase):
                 )
 
         self.assertEqual(first.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
-        self.assertIn("already appears", str(second.data["parse_meta"].get("warnings", [])))
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertTrue(second.data["duplicate_check"]["blocked_new_import"])
+        self.assertIn("already been parsed", second.data["duplicate_check"]["message"])
+        self.assertEqual(HistoricalPriceImport.objects.filter(source_sha256=first.data["source_sha256"]).count(), 1)
 
-        for response in [first, second]:
-            import_id = response.data["id"]
-            self.client.patch(
-                reverse("quotation-historical-import-detail", args=[import_id]),
-                {"company": self.company.id},
-                format="json",
-            )
-            self.client.patch(
-                reverse("quotation-historical-import-line-detail", args=[response.data["lines"][0]["id"]]),
-                {"product": self.item_one.id, "status": HistoricalPriceImportLine.STATUS_READY},
-                format="json",
-            )
+        import_id = first.data["id"]
+        self.client.patch(
+            reverse("quotation-historical-import-detail", args=[import_id]),
+            {"company": self.company.id},
+            format="json",
+        )
+        self.client.patch(
+            reverse("quotation-historical-import-line-detail", args=[first.data["lines"][0]["id"]]),
+            {"product": self.item_one.id, "status": HistoricalPriceImportLine.STATUS_READY},
+            format="json",
+        )
 
-        first_commit = self.client.post(reverse("quotation-historical-import-commit", args=[first.data["id"]]))
-        second_commit = self.client.post(reverse("quotation-historical-import-commit", args=[second.data["id"]]))
+        first_commit = self.client.post(reverse("quotation-historical-import-commit", args=[import_id]))
+        third = self.client.post(
+            reverse("quotation-historical-import-parse-file"),
+            {"file": duplicate_upload()},
+            format="multipart",
+        )
 
         self.assertEqual(first_commit.status_code, status.HTTP_200_OK)
-        self.assertEqual(second_commit.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(third.status_code, status.HTTP_200_OK)
+        self.assertEqual(third.data["id"], import_id)
+        self.assertEqual(third.data["status"], HistoricalPriceImport.STATUS_COMMITTED)
         self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company, product=self.item_one).count(), 1)
+
+    def test_historical_import_same_company_document_number_opens_existing_import(self):
+        first = self.create_parsed_historical_import()
+        import_id = first.data["id"]
+        self.client.patch(
+            reverse("quotation-historical-import-detail", args=[import_id]),
+            {"company": self.company.id},
+            format="json",
+        )
+
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                second = self.client.post(
+                    reverse("quotation-historical-import-parse-file"),
+                    {
+                        "file": self.make_historical_pdf_upload(
+                            name="ANCIENT BUILDERS CONSTN 21052026 copy.pdf",
+                            extra_text="Resaved copy",
+                        )
+                    },
+                    format="multipart",
+                )
+
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["id"], import_id)
+        self.assertTrue(second.data["duplicate_check"]["blocked_new_import"])
+        self.assertIn("quotation number already exists", second.data["duplicate_check"]["message"].lower())
+
+    def test_historical_import_similar_rows_warns_but_allows_review(self):
+        first = self.create_parsed_historical_import()
+        self.client.patch(
+            reverse("quotation-historical-import-detail", args=[first.data["id"]]),
+            {"company": self.company.id},
+            format="json",
+        )
+
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                second = self.client.post(
+                    reverse("quotation-historical-import-parse-file"),
+                    {
+                        "file": self.make_historical_pdf_upload(
+                            name="ANCIENT BUILDERS CONSTN alternate.pdf",
+                            document_number="QUOTATION-26052101-ALT",
+                            extra_text="Alternate exported file with same rows",
+                        )
+                    },
+                    format="multipart",
+                )
+
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(second.data["id"], first.data["id"])
+        duplicate_check = second.data["duplicate_check"]
+        self.assertTrue(duplicate_check["is_duplicate"])
+        self.assertFalse(duplicate_check["blocking"])
+        self.assertIn("similar", duplicate_check["message"].lower())
 
     def test_encrypted_historical_pdf_is_rejected(self):
         response = self.client.post(

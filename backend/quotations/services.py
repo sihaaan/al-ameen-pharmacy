@@ -15,6 +15,7 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    normalize_label,
     Quotation,
     QuotationAuditLog,
     QuotationLine,
@@ -65,6 +66,246 @@ def _date_for_audit(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _historical_import_summary(historical_import):
+    company_name = historical_import.company.name if historical_import.company_id else historical_import.suggested_company_name
+    return {
+        "id": historical_import.id,
+        "source_filename": historical_import.source_filename,
+        "company": historical_import.company_id,
+        "company_name": company_name or "",
+        "suggested_company_name": historical_import.suggested_company_name,
+        "document_number": historical_import.document_number,
+        "document_date": _date_for_audit(historical_import.document_date),
+        "status": historical_import.status,
+        "created_at": _date_for_audit(historical_import.created_at),
+        "committed_at": _date_for_audit(historical_import.committed_at),
+        "created_quotation": historical_import.created_quotation_id,
+        "created_quotation_number": (
+            historical_import.created_quotation.quotation_number
+            if historical_import.created_quotation_id
+            else ""
+        ),
+        "line_count": historical_import.lines.count(),
+        "subtotal": str(historical_import.subtotal or ""),
+        "vat_total": str(historical_import.vat_total or ""),
+        "total": str(historical_import.total or ""),
+    }
+
+
+def _preview_company_key(preview_data):
+    return normalize_label(preview_data.get("suggested_company_name") or "")
+
+
+def _historical_import_company_key(historical_import):
+    if historical_import.company_id:
+        return normalize_label(historical_import.company.name)
+    return normalize_label(historical_import.suggested_company_name or "")
+
+
+def _company_keys_match(left, right):
+    if not left or not right:
+        return False
+    if left == right or left in right or right in left:
+        return True
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    return overlap >= 2 and overlap / min(len(left_tokens), len(right_tokens)) >= 0.67
+
+
+def _decimal_key(value):
+    if value in (None, ""):
+        return ""
+    try:
+        return str(Decimal(str(value)).quantize(Decimal("0.01")))
+    except Exception:
+        return str(value)
+
+
+def _quantity_key(value):
+    if value in (None, ""):
+        return ""
+    try:
+        return str(Decimal(str(value)).quantize(Decimal("0.001")))
+    except Exception:
+        return str(value)
+
+
+def _preview_line_fingerprints(lines):
+    fingerprints = set()
+    for line in lines or []:
+        item_name = normalize_label(line.get("item_name") or line.get("raw_line") or "")
+        if not item_name:
+            continue
+        fingerprints.add(
+            "|".join(
+                [
+                    item_name,
+                    _quantity_key(line.get("quantity")),
+                    normalize_label(line.get("unit") or ""),
+                    _decimal_key(line.get("unit_price")),
+                    _decimal_key(line.get("vat_amount")),
+                    _decimal_key(line.get("line_total")),
+                ]
+            )
+        )
+    return fingerprints
+
+
+def _import_line_fingerprints(historical_import):
+    fingerprints = set()
+    for line in historical_import.lines.all():
+        item_name = normalize_label(line.item_name or line.raw_line or "")
+        if not item_name:
+            continue
+        fingerprints.add(
+            "|".join(
+                [
+                    item_name,
+                    _quantity_key(line.quantity),
+                    normalize_label(line.unit or ""),
+                    _decimal_key(line.unit_price),
+                    _decimal_key(line.vat_amount),
+                    _decimal_key(line.line_total),
+                ]
+            )
+        )
+    return fingerprints
+
+
+def _same_company_identity(preview_data, historical_import):
+    preview_company = _preview_company_key(preview_data)
+    import_keys = [
+        _historical_import_company_key(historical_import),
+        normalize_label(historical_import.suggested_company_name or ""),
+    ]
+    return any(_company_keys_match(preview_company, key) for key in import_keys)
+
+
+def find_historical_import_duplicates(preview_data):
+    """Find existing historical imports that look like the same source document.
+
+    Exact file hashes and same-company document numbers are blocking by default,
+    because creating a second staged import for those cases is usually a mistake.
+    Date/totals/row similarity is advisory so staff can still review edge cases.
+    """
+    duplicate_check = {
+        "is_duplicate": False,
+        "blocking": False,
+        "duplicate_type": "",
+        "message": "",
+        "recommended_action": "",
+        "matches": [],
+    }
+    matches_by_id = {}
+
+    def add_match(kind, historical_import, message, *, blocking=False, similarity=None):
+        existing = matches_by_id.get(historical_import.id)
+        if existing:
+            if kind not in existing.get("kinds", []):
+                existing["kinds"].append(kind)
+            if message not in existing.get("messages", []):
+                existing["messages"].append(message)
+            existing["blocking"] = existing.get("blocking") or blocking
+            if similarity is not None:
+                existing["similarity"] = max(existing.get("similarity") or 0, similarity)
+            return
+        summary = _historical_import_summary(historical_import)
+        summary.update(
+            {
+                "kinds": [kind],
+                "messages": [message],
+                "blocking": blocking,
+                "similarity": similarity,
+            }
+        )
+        matches_by_id[historical_import.id] = summary
+
+    source_sha256 = (preview_data.get("source_sha256") or "").strip()
+    if source_sha256:
+        for historical_import in (
+            HistoricalPriceImport.objects.filter(source_sha256=source_sha256)
+            .select_related("company", "created_quotation")
+            .order_by("-updated_at", "-id")
+        ):
+            add_match(
+                "exact_file_hash",
+                historical_import,
+                "This PDF appears to have already been parsed.",
+                blocking=True,
+            )
+
+    document_number = (preview_data.get("document_number") or "").strip()
+    if document_number:
+        for historical_import in (
+            HistoricalPriceImport.objects.filter(document_number__iexact=document_number)
+            .select_related("company", "created_quotation")
+            .order_by("-updated_at", "-id")
+        ):
+            same_company = _same_company_identity(preview_data, historical_import)
+            add_match(
+                "same_document_number",
+                historical_import,
+                (
+                    "This quotation number already exists for this company."
+                    if same_company
+                    else "This quotation number already exists on another historical import."
+                ),
+                blocking=same_company,
+            )
+
+    document_date = preview_data.get("document_date")
+    subtotal = preview_data.get("subtotal")
+    vat_total = preview_data.get("vat_total")
+    total = preview_data.get("total")
+    preview_fingerprints = _preview_line_fingerprints(preview_data.get("lines", []))
+    if document_date and preview_fingerprints:
+        candidates = HistoricalPriceImport.objects.filter(document_date=document_date).select_related("company", "created_quotation")
+        if total not in (None, ""):
+            candidates = candidates.filter(total=total)
+        elif subtotal not in (None, "") or vat_total not in (None, ""):
+            if subtotal not in (None, ""):
+                candidates = candidates.filter(subtotal=subtotal)
+            if vat_total not in (None, ""):
+                candidates = candidates.filter(vat_total=vat_total)
+        for historical_import in candidates.prefetch_related("lines").order_by("-updated_at", "-id"):
+            existing_fingerprints = _import_line_fingerprints(historical_import)
+            if not existing_fingerprints:
+                continue
+            overlap = len(preview_fingerprints & existing_fingerprints)
+            denominator = max(1, min(len(preview_fingerprints), len(existing_fingerprints)))
+            similarity = overlap / denominator
+            if overlap >= 2 and similarity >= 0.60:
+                add_match(
+                    "similar_rows_totals",
+                    historical_import,
+                    "This looks similar to a previously imported quotation.",
+                    blocking=False,
+                    similarity=round(similarity, 2),
+                )
+
+    matches = list(matches_by_id.values())
+    if not matches:
+        return duplicate_check
+
+    matches.sort(key=lambda match: (not match.get("blocking", False), match["id"]))
+    primary = matches[0]
+    duplicate_check.update(
+        {
+            "is_duplicate": True,
+            "blocking": any(match.get("blocking") for match in matches),
+            "duplicate_type": primary["kinds"][0],
+            "message": primary["messages"][0],
+            "recommended_action": "open_existing_import" if primary.get("blocking") else "review_before_commit",
+            "primary_match": primary,
+            "matches": matches,
+        }
+    )
+    return duplicate_check
 
 
 @transaction.atomic
