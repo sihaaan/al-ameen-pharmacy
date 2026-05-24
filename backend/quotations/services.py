@@ -235,7 +235,7 @@ def find_historical_import_duplicates(preview_data):
             add_match(
                 "exact_file_hash",
                 historical_import,
-                "This PDF appears to have already been parsed.",
+                "This PDF has already been added before.",
                 blocking=True,
             )
 
@@ -251,7 +251,7 @@ def find_historical_import_duplicates(preview_data):
                 "same_document_number",
                 historical_import,
                 (
-                    "This quotation number already exists for this company."
+                    "This quotation already exists for this company."
                     if same_company
                     else "This quotation number already exists on another historical import."
                 ),
@@ -283,7 +283,7 @@ def find_historical_import_duplicates(preview_data):
                 add_match(
                     "similar_rows_totals",
                     historical_import,
-                    "This looks similar to a previously imported quotation.",
+                    "This looks similar to a previous import.",
                     blocking=False,
                     similarity=round(similarity, 2),
                 )

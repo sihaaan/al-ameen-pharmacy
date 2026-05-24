@@ -429,7 +429,8 @@ Historical import bulk workflow:
 - Commit from the sticky bottom bar. Only ready rows are committed into price history; skipped/needs-review/duplicate rows are ignored.
 
 Historical import duplicate behavior:
-- Re-uploading the exact same historical quotation PDF shows a duplicate warning and opens/resumes the existing staged or committed import.
+- Re-uploading the exact same historical quotation PDF shows `This PDF has already been added before.` and does not create a duplicate staged import.
+- Staff stay on the current upload/review screen. `View previous import` opens the existing staged or committed import only when clicked.
 - Same-company quotation-number matches are treated as blocking duplicates by default.
 - Same date/totals with highly similar item rows is treated as a possible duplicate warning so staff can review before commit.
 - The commit service remains idempotent: duplicate ready rows are marked duplicate and do not append another `CompanyPriceHistory` record.

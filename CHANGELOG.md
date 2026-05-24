@@ -37,7 +37,7 @@
 - Added `ProductAlias` for global and company-specific aliases, with company-specific aliases taking priority over global aliases and deterministic product matching.
 - Added row-level alias remembering from inquiry, quotation, and historical import lines.
 - Added safe delete/deactivate behavior for companies in the quotation module.
-- Added historical finalized quotation duplicate detection so exact re-uploads and same-company quotation-number matches open the existing import instead of creating another staged import.
+- Added historical finalized quotation duplicate detection so exact re-uploads and same-company quotation-number matches warn staff and avoid creating another staged import.
 
 ### Fixed
 - Corrected local frontend API targeting for quotation development so `/admin -> Quotations` calls the local Django API instead of undeployed Railway quotation routes.
@@ -81,6 +81,6 @@
 - Backend tests cover quotation settings permissions, defaults, update, invalid logo/stamp rejection, signature/stamp upload, image clearing permissions, logo layout PDF rendering, missing signature/stamp placeholders, invalid colors, and PDF generation with saved branding images.
 - Backend tests cover historical import staff-only access, encrypted PDF rejection, deterministic price-row parsing, private source refs, commit into price history, hidden historical quotation records, and duplicate import protection.
 - Backend tests cover historical import bulk permissions, duplicate-safe Product creation/linking, ready-status validation, bulk skip behavior, and commit exclusion of skipped rows.
-- Browser verification confirmed re-uploading the same historical quotation PDF warns, opens/resumes the existing import, and does not add duplicate price-history rows after commit.
+- Browser verification confirmed re-uploading the same historical quotation PDF warns without auto-opening the previous import, `View previous import` opens it on demand, and duplicate price-history rows are not added after commit.
 - Browser verification confirmed the historical import review header has aligned preview/details cards, suggested-company banner, inline company creation, no horizontal overflow, and the sticky commit bar remains available.
 - Browser verification captured historical import review states with the company form closed, open, and created/selected.

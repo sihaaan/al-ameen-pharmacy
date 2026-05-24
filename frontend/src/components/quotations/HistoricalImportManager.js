@@ -28,6 +28,7 @@ const HistoricalImportManager = () => {
   const [errorInfo, setErrorInfo] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [headerDirty, setHeaderDirty] = useState(false);
+  const [duplicateUploadWarning, setDuplicateUploadWarning] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -87,6 +88,12 @@ const HistoricalImportManager = () => {
 
   const selectedDuplicateCheck = selectedImport?.duplicate_check || selectedImport?.parse_meta?.duplicate_check || null;
 
+  const duplicateHelperText = (duplicateCheck) => {
+    if (!duplicateCheck?.is_duplicate) return '';
+    if (duplicateCheck.blocking || duplicateCheck.blocked_new_import) return 'No duplicate import was created.';
+    return 'Please review before continuing.';
+  };
+
   const filteredRows = useMemo(() => {
     const term = rowSearch.trim().toLowerCase();
     return (selectedImport?.lines || []).filter((line) => {
@@ -119,26 +126,25 @@ const HistoricalImportManager = () => {
     setUploading(true);
     setNotice(null);
     setErrorInfo(null);
+    setDuplicateUploadWarning(null);
     const formData = new FormData();
     formData.append('file', uploadFile);
     try {
       const response = await quotationAPI.historicalImports.parseFile(formData);
       const duplicateCheck = response.data.duplicate_check || response.data.parse_meta?.duplicate_check || null;
+      if (duplicateCheck?.blocked_new_import) {
+        setDuplicateUploadWarning(duplicateCheck);
+        setNotice({ type: 'warning', message: duplicateCheck.message });
+        await load();
+        return;
+      }
       setSelectedImport(response.data);
       setHeaderDirty(false);
-      if (duplicateCheck?.blocked_new_import) {
-        setNotice({
-          type: 'warning',
-          message: `${duplicateCheck.message} Opened existing import #${duplicateCheck.primary_match?.id || response.data.id} instead of creating another staged import.`,
-        });
-      } else if (duplicateCheck?.is_duplicate) {
-        setNotice({
-          type: 'warning',
-          message: `${duplicateCheck.message} Review the duplicate warning before committing price history.`,
-        });
-      } else {
-        setNotice({ type: 'success', message: 'Historical quotation parsed. Review company, date, items, and prices before committing.' });
-      }
+      setNotice(
+        duplicateCheck?.is_duplicate
+          ? { type: 'warning', message: `${duplicateCheck.message} ${duplicateHelperText(duplicateCheck)}` }
+          : { type: 'success', message: 'Historical quotation parsed. Review company, date, items, and prices before committing.' }
+      );
       await load();
       setSelectedImport(response.data);
       try {
@@ -159,6 +165,7 @@ const HistoricalImportManager = () => {
 
   const openDuplicateImport = async (importId) => {
     if (!importId) return;
+    setDuplicateUploadWarning(null);
     const existing = imports.find((entry) => entry.id === importId);
     if (existing) {
       await selectImport(existing);
@@ -413,6 +420,20 @@ const HistoricalImportManager = () => {
           </button>
         </div>
         <div className="qm-helper compact">This does not create a new customer quotation to send. It only stages old approved prices for staff review.</div>
+        {duplicateUploadWarning?.is_duplicate && (
+          <div className="qm-notice warning">
+            <strong>{duplicateUploadWarning.message}</strong>
+            <p>{duplicateHelperText(duplicateUploadWarning)}</p>
+            {duplicateUploadWarning.primary_match?.id && (
+              <p className="qm-helper compact">Previous import: #{duplicateUploadWarning.primary_match.id}</p>
+            )}
+            {duplicateUploadWarning.primary_match?.id && (
+              <button type="button" className="qm-secondary small" onClick={() => openDuplicateImport(duplicateUploadWarning.primary_match.id)}>
+                View previous import
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="qm-panel historical-imports-panel">
@@ -509,6 +530,7 @@ const HistoricalImportManager = () => {
                   <div className="qm-notice warning">
                     <strong>Possible duplicate import</strong>
                     <p>{selectedDuplicateCheck.message}</p>
+                    <p>{duplicateHelperText(selectedDuplicateCheck)}</p>
                     {(selectedDuplicateCheck.matches || []).slice(0, 3).map((match) => (
                       <div key={match.id} className="qm-helper compact">
                         Existing import #{match.id}: {match.company_name || match.suggested_company_name || 'Unknown company'} · {match.document_number || 'No quotation #'} · {match.document_date || 'No date'} · {match.status}
@@ -518,7 +540,7 @@ const HistoricalImportManager = () => {
                     ))}
                     {selectedDuplicateCheck.primary_match?.id && selectedDuplicateCheck.primary_match.id !== selectedImport.id && (
                       <button type="button" className="qm-secondary small" onClick={() => openDuplicateImport(selectedDuplicateCheck.primary_match.id)}>
-                        Open existing import
+                        View previous import
                       </button>
                     )}
                   </div>

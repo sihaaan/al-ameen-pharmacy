@@ -801,7 +801,7 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(second.data["id"], first.data["id"])
         self.assertTrue(second.data["duplicate_check"]["blocked_new_import"])
-        self.assertIn("already been parsed", second.data["duplicate_check"]["message"])
+        self.assertEqual(second.data["duplicate_check"]["message"], "This PDF has already been added before.")
         self.assertEqual(HistoricalPriceImport.objects.filter(source_sha256=first.data["source_sha256"]).count(), 1)
 
         import_id = first.data["id"]
@@ -854,7 +854,7 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertEqual(second.data["id"], import_id)
         self.assertTrue(second.data["duplicate_check"]["blocked_new_import"])
-        self.assertIn("quotation number already exists", second.data["duplicate_check"]["message"].lower())
+        self.assertEqual(second.data["duplicate_check"]["message"], "This quotation already exists for this company.")
 
     def test_historical_import_similar_rows_warns_but_allows_review(self):
         first = self.create_parsed_historical_import()
@@ -883,7 +883,7 @@ class HistoricalPriceImportTests(APITestCase):
         duplicate_check = second.data["duplicate_check"]
         self.assertTrue(duplicate_check["is_duplicate"])
         self.assertFalse(duplicate_check["blocking"])
-        self.assertIn("similar", duplicate_check["message"].lower())
+        self.assertEqual(duplicate_check["message"], "This looks similar to a previous import.")
 
     def test_encrypted_historical_pdf_is_rejected(self):
         response = self.client.post(
