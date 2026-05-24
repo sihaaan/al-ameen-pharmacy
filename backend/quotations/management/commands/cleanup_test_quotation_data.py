@@ -54,6 +54,11 @@ class Command(BaseCommand):
             help="Actually delete the allowlisted test quotation data in one transaction.",
         )
         parser.add_argument(
+            "--i-understand-this-targets-production-test-data",
+            action="store_true",
+            help="Required with --confirm to acknowledge this deletes allowlisted production test data.",
+        )
+        parser.add_argument(
             "--allow-non-production-target",
             action="store_true",
             help="Allow --confirm on a non-Neon/non-production-looking database target.",
@@ -64,6 +69,7 @@ class Command(BaseCommand):
             raise CommandError("Use either --dry-run or --confirm, not both.")
 
         confirmed = options["confirm"]
+        explicit_ack = options["i_understand_this_targets_production_test_data"]
         db_info = self.database_info()
         before_counts = self.model_counts()
         plan = self.build_plan()
@@ -78,6 +84,11 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("Dry-run only. No rows were deleted."))
             self.print_projected_counts(before_counts, plan)
             return
+
+        if not explicit_ack:
+            raise CommandError(
+                "--confirm requires --i-understand-this-targets-production-test-data."
+            )
 
         self.validate_confirm_target(db_info, options["allow_non_production_target"])
 
