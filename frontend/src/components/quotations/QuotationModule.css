@@ -14,6 +14,10 @@
   flex-wrap: wrap;
 }
 
+.qm-panel-heading + .qm-table-wrap {
+  margin-top: 12px;
+}
+
 .qm-header h2,
 .qm-editor-header h3,
 .qm-panel h3 {
@@ -248,17 +252,20 @@
 
 .qm-company-picker-grid {
   display: grid;
-  grid-template-columns: minmax(170px, 0.9fr) minmax(220px, 1.1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) max-content;
   gap: 8px;
   align-items: stretch;
+  max-width: 100%;
 }
 
 .qm-company-picker-grid.creating {
-  grid-template-columns: minmax(170px, 0.9fr) minmax(220px, 1.1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .qm-company-picker-grid button {
+  max-width: 100%;
   white-space: nowrap;
+  justify-self: start;
 }
 
 .qm-company-suggestion {
