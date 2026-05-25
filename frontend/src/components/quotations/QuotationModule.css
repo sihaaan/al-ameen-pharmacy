@@ -215,7 +215,7 @@
 .qm-company-picker {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -225,6 +225,12 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.qm-company-picker-label {
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .qm-link-button {
