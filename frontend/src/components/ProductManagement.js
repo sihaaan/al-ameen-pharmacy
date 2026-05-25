@@ -1,6 +1,7 @@
 // frontend/src/components/ProductManagement.js
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axiosInstance from '../utils/axios';
+import ProductFormModal from './ProductFormModal';
 
 const ProductManagement = ({ onUpdate }) => {
   const [products, setProducts] = useState([]);
@@ -26,24 +27,6 @@ const ProductManagement = ({ onUpdate }) => {
   const [sortField, setSortField] = useState('name');
   const [sortDirection, setSortDirection] = useState('asc');
 
-  // Product form state
-  const [formData, setFormData] = useState({
-    name: '',
-    short_description: '',
-    detailed_description: '',
-    price: '',
-    stock_quantity: '',
-    category: '',
-    brand: '',
-    dosage: '',
-    pack_size: '',
-    active_ingredient: '',
-    requires_prescription: false,
-    status: 'draft',
-    is_featured: false,
-    show_price: false,
-  });
-
   // Category form state
   const [categoryForm, setCategoryForm] = useState({
     name: '',
@@ -52,21 +35,6 @@ const ProductManagement = ({ onUpdate }) => {
     is_active: true,
     display_order: 0,
   });
-
-  // Multi-image state
-  const [productImages, setProductImages] = useState([]);
-  const [newImages, setNewImages] = useState([]);
-  const [imagesToDelete, setImagesToDelete] = useState([]);
-
-  // Brand creation state
-  const [newBrandName, setNewBrandName] = useState('');
-  const [isCreatingBrand, setIsCreatingBrand] = useState(false);
-  const [brandError, setBrandError] = useState('');
-
-  // New category creation inline
-  const [newCategoryName, setNewCategoryName] = useState('');
-  const [isCreatingCategory, setIsCreatingCategory] = useState(false);
-  const [categoryError, setCategoryError] = useState('');
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -101,15 +69,6 @@ const ProductManagement = ({ onUpdate }) => {
       setCategories(response.data);
     } catch (error) {
       console.error('Error fetching categories:', error);
-    }
-  };
-
-  const fetchBrands = async () => {
-    try {
-      const response = await axiosInstance.get('/brands/');
-      setBrands(response.data);
-    } catch (error) {
-      console.error('Error fetching brands:', error);
     }
   };
 
@@ -320,236 +279,25 @@ const ProductManagement = ({ onUpdate }) => {
 
   // ==================== PRODUCT HANDLERS ====================
 
-  const handleInputChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: type === 'checkbox' ? checked : value,
-    }));
+  const openNewProductModal = () => {
+    setEditingProduct(null);
+    setShowProductModal(true);
   };
 
-  const handleImagesChange = (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const filesArray = Array.from(e.target.files).map(file => ({
-        file,
-        preview: URL.createObjectURL(file),
-        isPrimary: newImages.length === 0 && productImages.length === 0,
-      }));
-      setNewImages(prev => [...prev, ...filesArray]);
-    }
+  const handleEditProduct = (product) => {
+    setEditingProduct(product);
+    setShowProductModal(true);
   };
 
-  const handleRemoveNewImage = (index) => {
-    setNewImages(prev => {
-      const updated = prev.filter((_, i) => i !== index);
-      if (prev[index]?.isPrimary && updated.length > 0) {
-        updated[0].isPrimary = true;
-      }
-      return updated;
-    });
+  const closeProductModal = () => {
+    setShowProductModal(false);
+    setEditingProduct(null);
   };
 
-  const handleDeleteExistingImage = (imageId) => {
-    setImagesToDelete(prev => [...prev, imageId]);
-    setProductImages(prev => prev.filter(img => img.id !== imageId));
-  };
-
-  const handleSetPrimary = async (imageId) => {
-    if (!editingProduct) return;
-    try {
-      await axiosInstance.patch(`/product-images/${imageId}/`, { is_primary: true });
-      setProductImages(prev => prev.map(img => ({
-        ...img,
-        is_primary: img.id === imageId
-      })));
-    } catch (error) {
-      console.error('Error setting primary image:', error);
-    }
-  };
-
-  const handleSetNewImagePrimary = (index) => {
-    setNewImages(prev => prev.map((img, i) => ({
-      ...img,
-      isPrimary: i === index
-    })));
-    setProductImages(prev => prev.map(img => ({
-      ...img,
-      is_primary: false
-    })));
-  };
-
-  const handleCreateBrand = async () => {
-    const trimmedName = newBrandName.trim();
-    if (!trimmedName) {
-      setBrandError('Brand name is required');
-      return;
-    }
-    const exists = brands.some(b => b.name.toLowerCase() === trimmedName.toLowerCase());
-    if (exists) {
-      setBrandError('This brand already exists');
-      return;
-    }
-    setIsCreatingBrand(true);
-    setBrandError('');
-    try {
-      const response = await axiosInstance.post('/brands/', { name: trimmedName });
-      await fetchBrands();
-      setFormData(prev => ({ ...prev, brand: response.data.id }));
-      setNewBrandName('');
-    } catch (error) {
-      setBrandError(error.response?.data?.name?.[0] || 'Failed to create brand');
-    } finally {
-      setIsCreatingBrand(false);
-    }
-  };
-
-  const handleCreateCategoryInline = async () => {
-    const trimmedName = newCategoryName.trim();
-    if (!trimmedName) {
-      setCategoryError('Category name is required');
-      return;
-    }
-    const exists = categories.some(c => c.name.toLowerCase() === trimmedName.toLowerCase());
-    if (exists) {
-      setCategoryError('This category already exists');
-      return;
-    }
-    setIsCreatingCategory(true);
-    setCategoryError('');
-    try {
-      const response = await axiosInstance.post('/categories/', { name: trimmedName, is_active: true });
-      await fetchCategories();
-      setFormData(prev => ({ ...prev, category: response.data.id }));
-      setNewCategoryName('');
-    } catch (error) {
-      setCategoryError(error.response?.data?.name?.[0] || 'Failed to create category');
-    } finally {
-      setIsCreatingCategory(false);
-    }
-  };
-
-  const handleProductSubmit = async (e) => {
-    e.preventDefault();
-    setSaving(true);
-
-    const data = new FormData();
-    const fieldsToSend = [
-      'name', 'short_description', 'detailed_description',
-      'price', 'stock_quantity', 'category', 'brand',
-      'dosage', 'pack_size', 'active_ingredient',
-      'requires_prescription', 'status', 'is_featured', 'show_price'
-    ];
-
-    fieldsToSend.forEach((key) => {
-      const value = formData[key];
-      if (value !== null && value !== '' && value !== undefined) {
-        data.append(key, typeof value === 'boolean' ? value.toString() : value);
-      }
-    });
-
-    const primaryNewImage = newImages.find(img => img.isPrimary);
-    if (primaryNewImage) {
-      data.append('image', primaryNewImage.file);
-    } else if (newImages.length > 0) {
-      data.append('image', newImages[0].file);
-    }
-
-    try {
-      let productId;
-
-      if (editingProduct) {
-        const response = await axiosInstance.put(`/products/${editingProduct.slug}/`, data, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
-        productId = response.data.id;
-
-        for (const imageId of imagesToDelete) {
-          try {
-            await axiosInstance.delete(`/product-images/${imageId}/`);
-          } catch (err) {
-            console.error('Error deleting image:', err);
-          }
-        }
-
-        const additionalImages = primaryNewImage
-          ? newImages.filter(img => !img.isPrimary)
-          : newImages.slice(1);
-
-        for (const img of additionalImages) {
-          const imgData = new FormData();
-          imgData.append('product', productId);
-          imgData.append('image', img.file);
-          imgData.append('is_primary', 'false');
-          await axiosInstance.post('/product-images/', imgData, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-          });
-        }
-      } else {
-        const response = await axiosInstance.post('/products/', data, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
-        productId = response.data.id;
-
-        const additionalImages = primaryNewImage
-          ? newImages.filter(img => !img.isPrimary)
-          : newImages.slice(1);
-
-        for (const img of additionalImages) {
-          const imgData = new FormData();
-          imgData.append('product', productId);
-          imgData.append('image', img.file);
-          imgData.append('is_primary', 'false');
-          await axiosInstance.post('/product-images/', imgData, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-          });
-        }
-      }
-
-      resetProductForm();
-      fetchProducts();
-      setShowProductModal(false);
-    } catch (error) {
-      console.error('Error saving product:', error);
-      alert('Error saving product: ' + (error.response?.data ? JSON.stringify(error.response.data) : error.message));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleEditProduct = async (product) => {
-    try {
-      const response = await axiosInstance.get(`/products/${product.slug}/`);
-      const fullProduct = response.data;
-
-      setEditingProduct(fullProduct);
-      setFormData({
-        name: fullProduct.name,
-        short_description: fullProduct.short_description || '',
-        detailed_description: fullProduct.detailed_description || '',
-        price: fullProduct.price,
-        stock_quantity: fullProduct.stock_quantity,
-        category: fullProduct.category || '',
-        brand: fullProduct.brand || '',
-        dosage: fullProduct.dosage || '',
-        pack_size: fullProduct.pack_size || '',
-        active_ingredient: fullProduct.active_ingredient || '',
-        requires_prescription: fullProduct.requires_prescription || false,
-        status: fullProduct.status || 'draft',
-        is_featured: fullProduct.is_featured || false,
-        show_price: fullProduct.show_price || false,
-      });
-      setProductImages(fullProduct.images || []);
-      setNewImages([]);
-      setImagesToDelete([]);
-      setNewBrandName('');
-      setBrandError('');
-      setNewCategoryName('');
-      setCategoryError('');
-      setShowProductModal(true);
-    } catch (error) {
-      console.error('Error fetching product details:', error);
-      alert('Error loading product details');
-    }
+  const handleProductSaved = async () => {
+    closeProductModal();
+    await fetchData();
+    if (onUpdate) onUpdate();
   };
 
   const handleDeleteProduct = async (product) => {
@@ -562,33 +310,6 @@ const ProductManagement = ({ onUpdate }) => {
         alert('Error deleting product');
       }
     }
-  };
-
-  const resetProductForm = () => {
-    setFormData({
-      name: '',
-      short_description: '',
-      detailed_description: '',
-      price: '',
-      stock_quantity: '',
-      category: '',
-      brand: '',
-      dosage: '',
-      pack_size: '',
-      active_ingredient: '',
-      requires_prescription: false,
-      status: 'draft',
-      is_featured: false,
-      show_price: false,
-    });
-    setEditingProduct(null);
-    setProductImages([]);
-    setNewImages([]);
-    setImagesToDelete([]);
-    setNewBrandName('');
-    setBrandError('');
-    setNewCategoryName('');
-    setCategoryError('');
   };
 
   // ==================== CATEGORY HANDLERS ====================
@@ -719,7 +440,7 @@ const ProductManagement = ({ onUpdate }) => {
           <div className="pm-header">
             <div className="pm-title-row">
               <h2>Products</h2>
-              <button className="btn-primary" onClick={() => { resetProductForm(); setShowProductModal(true); }}>
+              <button className="btn-primary" onClick={openNewProductModal}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <line x1="12" y1="5" x2="12" y2="19"></line>
                   <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -1048,231 +769,12 @@ const ProductManagement = ({ onUpdate }) => {
         </>
       )}
 
-      {/* Product Modal */}
-      {showProductModal && (
-        <div className="pm-modal-overlay" onClick={() => { setShowProductModal(false); resetProductForm(); }}>
-          <div className="pm-modal pm-modal-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="pm-modal-header">
-              <h2>{editingProduct ? 'Edit Product' : 'New Product'}</h2>
-              <button className="pm-modal-close" onClick={() => { setShowProductModal(false); resetProductForm(); }}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="18" y1="6" x2="6" y2="18"></line>
-                  <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-              </button>
-            </div>
-
-            <form onSubmit={handleProductSubmit} className="pm-modal-body">
-              <div className="pm-form-grid">
-                {/* Left Column */}
-                <div className="pm-form-column">
-                  <div className="pm-form-section">
-                    <h3>Basic Information</h3>
-
-                    <div className="pm-field">
-                      <label>Product Name <span className="required">*</span></label>
-                      <input type="text" name="name" value={formData.name} onChange={handleInputChange} required placeholder="Enter product name" />
-                    </div>
-
-                    <div className="pm-field">
-                      <label>Short Description <span className="required">*</span></label>
-                      <textarea name="short_description" value={formData.short_description} onChange={handleInputChange} rows="2" required placeholder="Brief description for product cards" />
-                    </div>
-
-                    <div className="pm-field">
-                      <label>Detailed Description</label>
-                      <textarea name="detailed_description" value={formData.detailed_description} onChange={handleInputChange} rows="4" placeholder="Usage instructions, warnings, ingredients..." />
-                    </div>
-                  </div>
-
-                  <div className="pm-form-section">
-                    <h3>Organization</h3>
-
-                    <div className="pm-field-row">
-                      <div className="pm-field">
-                        <label>Category</label>
-                        <select name="category" value={formData.category} onChange={handleInputChange}>
-                          <option value="">Select category</option>
-                          {categories.map((cat) => (
-                            <option key={cat.id} value={cat.id}>{cat.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div className="pm-field">
-                        <label>Brand</label>
-                        <select name="brand" value={formData.brand} onChange={handleInputChange}>
-                          <option value="">Select brand</option>
-                          {brands.map((brand) => (
-                            <option key={brand.id} value={brand.id}>{brand.name}</option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Quick create */}
-                    <div className="pm-quick-create">
-                      <div className="pm-quick-create-row">
-                        <input
-                          type="text"
-                          value={newCategoryName}
-                          onChange={(e) => { setNewCategoryName(e.target.value); setCategoryError(''); }}
-                          placeholder="New category name"
-                        />
-                        <button type="button" onClick={handleCreateCategoryInline} disabled={isCreatingCategory || !newCategoryName.trim()} className="pm-btn-sm">
-                          {isCreatingCategory ? '...' : '+ Category'}
-                        </button>
-                      </div>
-                      {categoryError && <span className="pm-error">{categoryError}</span>}
-
-                      <div className="pm-quick-create-row">
-                        <input
-                          type="text"
-                          value={newBrandName}
-                          onChange={(e) => { setNewBrandName(e.target.value); setBrandError(''); }}
-                          placeholder="New brand name"
-                        />
-                        <button type="button" onClick={handleCreateBrand} disabled={isCreatingBrand || !newBrandName.trim()} className="pm-btn-sm">
-                          {isCreatingBrand ? '...' : '+ Brand'}
-                        </button>
-                      </div>
-                      {brandError && <span className="pm-error">{brandError}</span>}
-                    </div>
-                  </div>
-
-                  <div className="pm-form-section">
-                    <h3>Pricing & Inventory</h3>
-
-                    <div className="pm-field-row">
-                      <div className="pm-field">
-                        <label>Price (AED) <span className="required">*</span></label>
-                        <input type="number" step="0.01" min="0" name="price" value={formData.price} onChange={handleInputChange} required placeholder="0.00" />
-                      </div>
-                      <div className="pm-field">
-                        <label>Stock Quantity <span className="required">*</span></label>
-                        <input type="number" min="0" name="stock_quantity" value={formData.stock_quantity} onChange={handleInputChange} required placeholder="0" />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pm-form-section">
-                    <h3>Pharmacy Details</h3>
-
-                    <div className="pm-field-row">
-                      <div className="pm-field">
-                        <label>Dosage</label>
-                        <input type="text" name="dosage" value={formData.dosage} onChange={handleInputChange} placeholder="e.g., 500mg" />
-                      </div>
-                      <div className="pm-field">
-                        <label>Pack Size</label>
-                        <input type="text" name="pack_size" value={formData.pack_size} onChange={handleInputChange} placeholder="e.g., 30 tablets" />
-                      </div>
-                    </div>
-
-                    <div className="pm-field">
-                      <label>Active Ingredient</label>
-                      <input type="text" name="active_ingredient" value={formData.active_ingredient} onChange={handleInputChange} placeholder="e.g., Paracetamol" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Right Column */}
-                <div className="pm-form-column">
-                  <div className="pm-form-section">
-                    <h3>Product Status</h3>
-
-                    <div className="pm-status-selector">
-                      {['draft', 'active', 'archived'].map((status) => {
-                        const config = getStatusConfig(status);
-                        return (
-                          <label key={status} className={`pm-status-option ${formData.status === status ? 'selected' : ''}`}>
-                            <input
-                              type="radio"
-                              name="status"
-                              value={status}
-                              checked={formData.status === status}
-                              onChange={handleInputChange}
-                            />
-                            <span className="pm-status-dot" style={{ backgroundColor: config.color }}></span>
-                            <span>{config.label}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                    <p className="pm-help-text">Only Active products are visible to customers</p>
-
-                    <div className="pm-toggles">
-                      <label className="pm-toggle">
-                        <input type="checkbox" name="requires_prescription" checked={formData.requires_prescription} onChange={handleInputChange} />
-                        <span className="pm-toggle-slider"></span>
-                        <span>Requires Prescription</span>
-                      </label>
-                      <label className="pm-toggle">
-                        <input type="checkbox" name="is_featured" checked={formData.is_featured} onChange={handleInputChange} />
-                        <span className="pm-toggle-slider"></span>
-                        <span>Featured Product</span>
-                      </label>
-                      <label className="pm-toggle pm-toggle--price">
-                        <input type="checkbox" name="show_price" checked={formData.show_price} onChange={handleInputChange} />
-                        <span className="pm-toggle-slider"></span>
-                        <span>Show Price Publicly</span>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="pm-form-section">
-                    <h3>Product Images</h3>
-
-                    <div className="pm-images-grid">
-                      {productImages.map((img) => (
-                        <div key={img.id} className={`pm-image-item ${img.is_primary ? 'primary' : ''}`}>
-                          <img src={img.image_url} alt="" />
-                          <div className="pm-image-overlay">
-                            {!img.is_primary && (
-                              <button type="button" onClick={() => handleSetPrimary(img.id)} className="pm-img-btn" title="Set as primary">★</button>
-                            )}
-                            {img.is_primary && <span className="pm-primary-tag">Primary</span>}
-                            <button type="button" onClick={() => handleDeleteExistingImage(img.id)} className="pm-img-btn delete" title="Delete">×</button>
-                          </div>
-                        </div>
-                      ))}
-                      {newImages.map((img, index) => (
-                        <div key={`new-${index}`} className={`pm-image-item new ${img.isPrimary ? 'primary' : ''}`}>
-                          <img src={img.preview} alt="" />
-                          <div className="pm-image-overlay">
-                            {!img.isPrimary && (
-                              <button type="button" onClick={() => handleSetNewImagePrimary(index)} className="pm-img-btn" title="Set as primary">★</button>
-                            )}
-                            {img.isPrimary && <span className="pm-primary-tag">Primary</span>}
-                            <button type="button" onClick={() => handleRemoveNewImage(index)} className="pm-img-btn delete" title="Remove">×</button>
-                          </div>
-                        </div>
-                      ))}
-                      <label className="pm-image-upload">
-                        <input type="file" accept="image/*" multiple onChange={handleImagesChange} />
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <line x1="12" y1="5" x2="12" y2="19"></line>
-                          <line x1="5" y1="12" x2="19" y2="12"></line>
-                        </svg>
-                        <span>Add Images</span>
-                      </label>
-                    </div>
-                    <p className="pm-help-text">Click ★ to set primary image. Recommended: 800×800px</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="pm-modal-footer">
-                <button type="button" className="pm-btn-secondary" onClick={() => { setShowProductModal(false); resetProductForm(); }}>
-                  Cancel
-                </button>
-                <button type="submit" className="pm-btn-primary" disabled={saving}>
-                  {saving ? 'Saving...' : (editingProduct ? 'Update Product' : 'Create Product')}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <ProductFormModal
+        isOpen={showProductModal}
+        product={editingProduct}
+        onClose={closeProductModal}
+        onSaved={handleProductSaved}
+      />
 
       {/* Category Modal */}
       {showCategoryModal && (
@@ -1339,3 +841,4 @@ const ProductManagement = ({ onUpdate }) => {
 };
 
 export default ProductManagement;
+

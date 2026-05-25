@@ -1,25 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import QuotationErrorNotice from './QuotationErrorNotice';
-
-const emptyItem = {
-  name: '',
-  sku: '',
-  barcode: '',
-  dosage: '',
-  pack_size: '',
-  active_ingredient: '',
-  short_description: '',
-  price: '0.01',
-  stock_quantity: '0',
-  status: 'draft',
-  show_price: false,
-};
+import ProductFormModal from '../ProductFormModal';
 
 const QuoteItemManager = () => {
   const [items, setItems] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
-  const [form, setForm] = useState(emptyItem);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [showProductModal, setShowProductModal] = useState(false);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -55,79 +43,46 @@ const QuoteItemManager = () => {
     );
   }, [items, search]);
 
-  const reset = () => {
-    setSelectedItem(null);
-    setForm(emptyItem);
+  const openNewProduct = () => {
+    setEditingProduct(null);
+    setShowProductModal(true);
   };
 
   const editItem = (item) => {
+    setEditingProduct(item);
     setSelectedItem(item);
     setNotice(null);
-    setForm({
-      name: item.name || '',
-      sku: item.sku || '',
-      barcode: item.barcode || '',
-      dosage: item.dosage || '',
-      pack_size: item.pack_size || '',
-      active_ingredient: item.active_ingredient || '',
-      short_description: item.short_description || '',
-      price: item.price || '0.01',
-      stock_quantity: item.stock_quantity ?? '0',
-      status: item.status || 'draft',
-      show_price: Boolean(item.show_price),
-    });
+    setShowProductModal(true);
   };
 
-  const saveItem = async (event) => {
-    event.preventDefault();
-    if (saving) return;
-    setSaving(true);
-    setNotice(null);
-    setErrorInfo(null);
-    const payload = {
-      ...form,
-      price: form.price || '0.01',
-      stock_quantity: form.stock_quantity || 0,
-    };
-    try {
-      if (selectedItem) {
-        await quotationAPI.items.update(selectedItem.id, payload);
-      } else {
-        await quotationAPI.items.create(payload);
-      }
-      setNotice({ type: 'success', message: selectedItem ? 'Product item updated.' : 'Internal quotation product created.' });
-      reset();
-      await load();
-    } catch (error) {
-      const details = await describeQuotationError(
-        error,
-        selectedItem ? 'Update quotation product' : 'Create quotation product',
-        selectedItem ? `PATCH /quotations/items/${selectedItem.id}/` : 'POST /quotations/items/'
-      );
-      setErrorInfo(details);
-      console.error(formatQuotationError(details), error);
-    } finally {
-      setSaving(false);
-    }
+  const closeProductModal = () => {
+    setShowProductModal(false);
+    setEditingProduct(null);
   };
 
-  const deleteOrArchive = async () => {
-    if (!selectedItem || saving) return;
-    if (!window.confirm(`Delete or archive "${selectedItem.name}"? Used products are archived so old quotations remain readable.`)) return;
+  const handleProductSaved = async (product) => {
+    setSelectedItem(product || null);
+    setNotice({ type: 'success', message: product?.status === 'active' ? 'Product saved and visible publicly.' : 'Draft/internal product saved for quotations.' });
+    await load();
+  };
+
+  const deleteOrArchive = async (item = selectedItem) => {
+    if (!item || saving) return;
+    if (!window.confirm(`Delete or archive "${item.name}"? Used products are archived so old quotations remain readable.`)) return;
     setSaving(true);
     setNotice(null);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.items.delete(selectedItem.id);
+      const response = await quotationAPI.items.delete(item.id);
       const archived = response.status === 200;
       setNotice({
         type: 'success',
         message: archived ? 'Product was archived because it has history.' : 'Unused product was deleted.',
       });
-      reset();
+      setSelectedItem(null);
       await load();
     } catch (error) {
-      const details = await describeQuotationError(error, 'Delete/archive quotation product', `DELETE /quotations/items/${selectedItem.id}/`);
+      const details = await describeQuotationError(error, 'Delete/archive quotation product', `DELETE /quotations/items/${item.id}/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -146,7 +101,10 @@ const QuoteItemManager = () => {
         <div className="qm-panel">
           <div className="qm-panel-heading">
             <h3>Products / Items</h3>
-            <input className="qm-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product items" />
+            <div className="qm-controls">
+              <input className="qm-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product items" />
+              <button type="button" className="qm-primary" onClick={openNewProduct}>Add Internal Product</button>
+            </div>
           </div>
           {loading ? (
             <div className="qm-loading">Loading products...</div>
@@ -160,16 +118,21 @@ const QuoteItemManager = () => {
                     <th>Dosage</th>
                     <th>Pack</th>
                     <th>Status</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredItems.map((item) => (
-                    <tr key={item.id} className={selectedItem?.id === item.id ? 'selected' : ''} onClick={() => editItem(item)}>
+                    <tr key={item.id} className={selectedItem?.id === item.id ? 'selected' : ''} onClick={() => setSelectedItem(item)}>
                       <td>{item.name}</td>
                       <td>{item.sku || '-'}</td>
                       <td>{item.dosage || '-'}</td>
                       <td>{item.pack_size || '-'}</td>
                       <td><span className={`qm-badge status-${item.status}`}>{item.status}</span></td>
+                      <td className="qm-row-actions" onClick={(event) => event.stopPropagation()}>
+                        <button type="button" className="qm-secondary small" onClick={() => editItem(item)}>Edit</button>
+                        <button type="button" className="qm-secondary small danger" disabled={saving} onClick={() => deleteOrArchive(item)}>Delete / Archive</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -181,42 +144,40 @@ const QuoteItemManager = () => {
         <div className="qm-panel">
           <div className="qm-panel-heading">
             <div>
-              <h3>{selectedItem ? 'Edit Product Item' : 'New Internal Product Item'}</h3>
-              <p>Use Draft for quotation-only/internal items. Use Active only when it should appear publicly.</p>
+              <h3>Product Actions</h3>
+              <p>Use the shared product form here. Draft products can be used in quotations but are hidden from the public website.</p>
             </div>
-            {selectedItem && <button type="button" className="qm-secondary" onClick={reset}>New</button>}
           </div>
-          <form onSubmit={saveItem} className="qm-form">
-            <label>Product Name<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
-            <div className="qm-grid-two">
-              <label>SKU<input value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} /></label>
-              <label>Barcode<input value={form.barcode} onChange={(event) => setForm({ ...form, barcode: event.target.value })} /></label>
-              <label>Dosage / Strength<input value={form.dosage} onChange={(event) => setForm({ ...form, dosage: event.target.value })} /></label>
-              <label>Pack / Unit<input value={form.pack_size} onChange={(event) => setForm({ ...form, pack_size: event.target.value })} /></label>
-              <label>Active Ingredient<input value={form.active_ingredient} onChange={(event) => setForm({ ...form, active_ingredient: event.target.value })} /></label>
-              <label>Status
-                <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>
-                  <option value="draft">Draft / Internal</option>
-                  <option value="active">Active / Public</option>
-                  <option value="archived">Archived</option>
-                </select>
-              </label>
-              <label>Base Public Price<input type="number" min="0.01" step="0.01" value={form.price} onChange={(event) => setForm({ ...form, price: event.target.value })} /></label>
-              <label>Stock<input type="number" min="0" step="1" value={form.stock_quantity} onChange={(event) => setForm({ ...form, stock_quantity: event.target.value })} /></label>
-            </div>
-            <label>Description<textarea rows="3" value={form.short_description} onChange={(event) => setForm({ ...form, short_description: event.target.value })} /></label>
-            <label className="qm-checkbox"><input type="checkbox" checked={form.show_price} onChange={(event) => setForm({ ...form, show_price: event.target.checked })} /> Show public price when active</label>
+          <div className="qm-subpanel">
+            {selectedItem ? (
+              <>
+                <h4>{selectedItem.name}</h4>
+                <p>{selectedItem.short_description || 'No short description entered.'}</p>
+                <div className="qm-action-row">
+                  <button type="button" className="qm-primary" onClick={() => editItem(selectedItem)}>Edit Product</button>
+                  <button type="button" className="qm-secondary danger" disabled={saving} onClick={deleteOrArchive}>
+                    {saving ? 'Working...' : 'Delete / Archive'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="qm-empty compact">Select a product to edit, or add a new internal product for quotation use.</div>
+            )}
             <div className="qm-action-row">
-              <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving...' : 'Save Product Item'}</button>
-              {selectedItem && (
-                <button type="button" className="qm-secondary danger" disabled={saving} onClick={deleteOrArchive}>
-                  Delete / Archive
-                </button>
-              )}
+              <button type="button" className="qm-secondary" onClick={openNewProduct}>Add Internal Product</button>
             </div>
-          </form>
+          </div>
         </div>
       </div>
+      <ProductFormModal
+        isOpen={showProductModal}
+        product={editingProduct}
+        onClose={closeProductModal}
+        onSaved={handleProductSaved}
+        defaultStatus="draft"
+        createTitle="Add Internal Product"
+        contextHelpText="Draft products can be used in quotations but are hidden from the public website. Change status to Active only when this product should appear publicly."
+      />
     </div>
   );
 };
