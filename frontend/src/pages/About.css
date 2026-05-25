@@ -103,7 +103,11 @@
 .about-brand-mark {
   display: flex;
   align-items: center;
-  gap: 36px;
+  justify-content: center;
+  gap: 0;
+  position: relative;
+  width: fit-content;
+  margin: 0 auto;
   animation: fadeSlideUp 1s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
 }
 
@@ -111,6 +115,10 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 36px);
+  transform: translateY(-50%);
 }
 
 .about-brand-icon-svg {
@@ -698,7 +706,11 @@
   }
 
   .about-brand-mark {
-    gap: 20px;
+    gap: 0;
+  }
+
+  .about-brand-icon {
+    right: calc(100% + 20px);
   }
 
   .about-brand-icon-svg {
@@ -731,6 +743,19 @@
   }
 }
 
+@media (max-width: 640px) {
+  .about-brand-mark {
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+
+  .about-brand-icon {
+    position: static;
+    transform: none;
+  }
+}
+
 @media (max-width: 480px) {
   .about-container .hero-section {
     padding: 100px 20px 80px;
@@ -745,6 +770,11 @@
     flex-direction: column;
     align-items: center;
     gap: 18px;
+  }
+
+  .about-brand-icon {
+    position: static;
+    transform: none;
   }
 
   .about-brand-text {
