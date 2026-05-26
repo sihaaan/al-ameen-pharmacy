@@ -228,6 +228,9 @@ class QuotationSettings(models.Model):
     show_license_number = models.BooleanField(default=True)
     show_signature_area = models.BooleanField(default=True)
     show_stamp_area = models.BooleanField(default=True)
+    ai_parsing_enabled = models.BooleanField(default=False)
+    ai_auto_cleanup_enabled = models.BooleanField(default=False)
+    ai_pdf_vision_enabled = models.BooleanField(default=False)
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -253,6 +256,74 @@ class QuotationSettings(models.Model):
     def get_solo(cls):
         settings_obj, _ = cls.objects.get_or_create(pk=1)
         return settings_obj
+
+
+class AIParseCache(models.Model):
+    MODE_TEXT = "text"
+    MODE_VISION = "vision"
+    MODE_CHOICES = [
+        (MODE_TEXT, "Text cleanup"),
+        (MODE_VISION, "Vision cleanup"),
+    ]
+
+    cache_key = models.CharField(max_length=64, unique=True, db_index=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    context_hash = models.CharField(max_length=64, db_index=True)
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES)
+    provider = models.CharField(max_length=40)
+    model = models.CharField(max_length=120)
+    result = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["source_sha256", "mode"]),
+            models.Index(fields=["provider", "model"]),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.model}:{self.mode}:{self.cache_key[:8]}"
+
+
+class AIParseLog(models.Model):
+    MODE_TEXT = AIParseCache.MODE_TEXT
+    MODE_VISION = AIParseCache.MODE_VISION
+    MODE_CHOICES = AIParseCache.MODE_CHOICES
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_ai_parse_logs",
+    )
+    provider = models.CharField(max_length=40)
+    model = models.CharField(max_length=120)
+    mode = models.CharField(max_length=20, choices=MODE_CHOICES)
+    source_type = models.CharField(max_length=40, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    context_hash = models.CharField(max_length=64, blank=True)
+    cache_hit = models.BooleanField(default=False)
+    text_length = models.PositiveIntegerField(default=0)
+    page_count = models.PositiveIntegerField(default=0)
+    image_count = models.PositiveIntegerField(default=0)
+    usage = models.JSONField(default=dict, blank=True)
+    success = models.BooleanField(default=False)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["provider", "model", "mode"]),
+            models.Index(fields=["success", "created_at"]),
+        ]
+
+    def __str__(self):
+        status = "success" if self.success else "failed"
+        return f"{self.provider}:{self.mode}:{status}:{self.created_at:%Y-%m-%d %H:%M}"
 
 
 class Inquiry(models.Model):

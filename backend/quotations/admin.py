@@ -4,6 +4,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    AIParseCache,
+    AIParseLog,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
     Inquiry,
@@ -98,6 +100,13 @@ class QuotationSettingsAdmin(admin.ModelAdmin):
                 "show_stamp_area",
             )
         }),
+        ("AI Parsing", {
+            "fields": (
+                "ai_parsing_enabled",
+                "ai_auto_cleanup_enabled",
+                "ai_pdf_vision_enabled",
+            )
+        }),
         ("Audit", {"fields": ("updated_by", "created_at", "updated_at")}),
     )
     readonly_fields = ["created_at", "updated_at"]
@@ -106,6 +115,50 @@ class QuotationSettingsAdmin(admin.ModelAdmin):
         return not QuotationSettings.objects.exists()
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AIParseCache)
+class AIParseCacheAdmin(admin.ModelAdmin):
+    list_display = ["cache_key", "provider", "model", "mode", "source_sha256", "updated_at"]
+    list_filter = ["provider", "model", "mode"]
+    search_fields = ["cache_key", "source_sha256", "context_hash"]
+    readonly_fields = ["cache_key", "source_sha256", "context_hash", "mode", "provider", "model", "result", "created_at", "updated_at"]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AIParseLog)
+class AIParseLogAdmin(admin.ModelAdmin):
+    list_display = ["created_at", "provider", "model", "mode", "source_type", "cache_hit", "success", "actor"]
+    list_filter = ["provider", "model", "mode", "cache_hit", "success"]
+    search_fields = ["source_sha256", "context_hash", "error", "actor__username"]
+    readonly_fields = [
+        "actor",
+        "provider",
+        "model",
+        "mode",
+        "source_type",
+        "source_sha256",
+        "context_hash",
+        "cache_hit",
+        "text_length",
+        "page_count",
+        "image_count",
+        "usage",
+        "success",
+        "error",
+        "created_at",
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
         return False
 
 

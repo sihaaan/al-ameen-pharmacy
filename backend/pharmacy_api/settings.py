@@ -173,6 +173,20 @@ QUOTATION_IMPORT_OCR_PROVIDER = os.environ.get("QUOTATION_IMPORT_OCR_PROVIDER", 
 QUOTATION_LOGO_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_LOGO_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 
+# ---- quotation AI-assisted parsing ----
+# API keys stay in environment variables. Daily enable/disable controls live in
+# Quotation Settings so staff can decide when AI cleanup is allowed.
+QUOTATION_AI_PARSE_GLOBAL_ENABLED = env_bool("QUOTATION_AI_PARSE_GLOBAL_ENABLED", True)
+QUOTATION_AI_PARSE_PROVIDER = os.environ.get("QUOTATION_AI_PARSE_PROVIDER", "openai").strip().lower()
+QUOTATION_AI_PARSE_TEXT_MODEL = os.environ.get("QUOTATION_AI_PARSE_TEXT_MODEL", "gpt-4.1-mini")
+QUOTATION_AI_PARSE_VISION_MODEL = os.environ.get("QUOTATION_AI_PARSE_VISION_MODEL", "gpt-4.1-mini")
+QUOTATION_AI_PARSE_MAX_TEXT_CHARS = int(os.environ.get("QUOTATION_AI_PARSE_MAX_TEXT_CHARS", "20000"))
+QUOTATION_AI_PARSE_MAX_PDF_PAGES = int(os.environ.get("QUOTATION_AI_PARSE_MAX_PDF_PAGES", "10"))
+QUOTATION_AI_PARSE_MAX_RENDERED_PAGES = int(os.environ.get("QUOTATION_AI_PARSE_MAX_RENDERED_PAGES", "3"))
+QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION = int(os.environ.get("QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", "1400"))
+QUOTATION_AI_PARSE_IMAGE_SCALE = float(os.environ.get("QUOTATION_AI_PARSE_IMAGE_SCALE", "1.4"))
+QUOTATION_AI_PARSE_TIMEOUT_SECONDS = int(os.environ.get("QUOTATION_AI_PARSE_TIMEOUT_SECONDS", "60"))
+
 # ---- Cloudinary Configuration (Cloud Image Storage) ----
 # Images will be stored on Cloudinary CDN instead of local filesystem
 

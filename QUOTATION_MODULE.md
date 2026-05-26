@@ -17,6 +17,7 @@ Included:
 - Product-backed quotation item catalog. `Product` is now the master item identity; draft/internal products stay hidden from the public website but remain usable in quotations.
 - Manual inquiry creation and inquiry lines
 - Safe inquiry import preview for pasted text, `.xlsx`, and digitally generated `.pdf`
+- Optional AI-assisted import parsing cleanup for messy text/PDF extraction, controlled from `Quotations -> Settings` and always gated by staff review
 - Manual review/edit before saving imported inquiry lines
 - Quotation creation and line editing
 - Company-specific previous price history
@@ -27,7 +28,7 @@ Included:
 - Historical finalized quotation PDF import for reviewed company price-history backfill
 
 Not included in Phase 1:
-- AI matching
+- AI product matching or pricing decisions
 - OpenAI embeddings
 - pgvector migrations
 - Gmail API import
@@ -72,6 +73,7 @@ Completed:
   - pasted text preview
   - Excel `.xlsx`, `.xlsb`, and `.xls` preview through deterministic header/row parsing
   - digitally generated PDF preview through PyMuPDF, `pypdf`, and `pdfplumber`
+  - optional AI Clean Parse candidate rows for messy imported text/PDF extraction
   - reviewed imported inquiry save endpoint
   - no automatic quotation creation from uploaded content
   - no persistent uploaded binary storage
@@ -105,7 +107,15 @@ Completed:
   - `ProductAlias` supports global aliases and company-specific aliases
   - deterministic matching checks company aliases first, then global aliases, then conservative product-name/SKU/barcode matches
   - finalized quotations and historical imports write price history against Products
-  - used Products are archived instead of deleted; used Companies are deactivated instead of deleted
+- used Products are archived instead of deleted; used Companies are deactivated instead of deleted
+- AI-assisted parsing cleanup:
+  - `Quotations -> Settings` controls `Enable AI Parsing`, `Enable Auto AI Cleanup`, and `Enable Vision AI for PDFs`
+  - provider keys and hard safety limits stay in environment variables
+  - deterministic parsing always runs first
+  - staff can click `AI Clean Parse` or `AI Clean Rows` to create candidate rows
+  - AI candidate rows must be applied by staff before they replace deterministic review rows
+  - AI parsing does not match Products, create Products, create aliases, create price history, finalize quotations, or bypass review
+  - missing Product matches never trigger AI cleanup and do not lower parse confidence
 
 Partially completed:
 - None
@@ -187,7 +197,10 @@ Import limitations:
 - Uploaded source files are stored as private source-file refs after a successful parse; they are not exposed through public URLs.
 - PDF import supports selectable text/tables only.
 - Scanned/image-only PDFs show: `No selectable text detected. OCR is not enabled in this environment.`
-- OCR, Gmail import, AI matching, and background workers are intentionally not part of this implementation.
+- AI Clean Parse can help clean messy extracted rows when enabled, including capped vision cleanup for PDFs. It still produces review candidates only.
+- OCR, Gmail import, AI product matching, and background workers are intentionally not part of this implementation.
+- No AI API calls happen when `Enable AI Parsing` is off in `Quotations -> Settings` or the global environment kill switch is disabled.
+- Missing Product matches never trigger AI cleanup. Parse confidence describes extraction quality only.
 
 Backfill historical finalized quotation prices:
 - Go to `Quotations -> Historical Imports`
@@ -388,6 +401,14 @@ Historical import endpoints:
 - `POST /historical-imports/{id}/bulk_skip_rows/` marks selected rows skipped so they remain visible but are excluded from commit.
 - `POST /historical-imports/{id}/commit/` atomically creates hidden finalized historical quotation/line records and appends non-duplicate `CompanyPriceHistory` rows only for reviewed `ready` lines.
 - `GET /historical-imports/{id}/preview_page/` streams a staff-only first-page PNG preview from private storage when PyMuPDF is available.
+- `POST /historical-imports/{id}/ai_clean_rows/` returns AI-cleaned candidate price rows for staff review when AI parsing is enabled.
+- `POST /historical-imports/{id}/apply_ai_clean_rows/` replaces staged historical import rows with explicitly approved AI-cleaned rows and leaves them `needs_review`.
+
+AI parsing endpoints:
+- `POST /inquiries/ai_clean_parse/` accepts the deterministic inquiry preview JSON and returns AI-cleaned candidate rows. It does not save an inquiry.
+- `POST /historical-imports/{id}/ai_clean_rows/` accepts a staged historical import and returns candidate rows. It does not mutate rows.
+- AI cleanup responses include `result_source` (`ai_text_cleanup` or `ai_vision_cleanup`), provider/model metadata, cache-hit flag, warnings, and validated rows.
+- AI parse calls are staff-only and backend-only; API keys are never exposed to React.
 
 Settings endpoints:
 - `GET /api/quotations/settings/` returns the singleton quotation PDF branding settings, creating a default settings row if one does not exist.
@@ -1118,15 +1139,21 @@ Completed:
 - Browser verification confirmed the polished historical import header, inline company creation form, no horizontal overflow, and sticky commit bar presence
 - Historical import company creation UX was refined so `+ New Company` opens the collapsed form, `Create Company` submits it, selected companies show a badge, and the document preview card stretches with the import details card
 - Browser verification captured form-closed, form-open, and company-created/selected states at normal zoom with no horizontal overflow
+- Optional AI-assisted import parsing cleanup added behind `QuotationSettings` toggles, backend provider abstraction, strict JSON validation, DB cache/log tables, staff-only AI endpoints, inquiry/historical candidate review panels, and settings UI controls
+- `python manage.py check` passed after AI-assisted parsing
+- `python manage.py test quotations --keepdb` passed 69 tests after AI-assisted parsing on a clean temporary SQLite database
+- `npm run build` passed after AI-assisted parsing with only pre-existing non-quotation hook dependency warnings and the existing Browserslist notice
 
 Partially completed:
 - Native file-picker automation was not available in the Browser plugin, so the actual `.xlsx` upload parse was verified with a staff JWT against the real DRF endpoint rather than through the browser file chooser
 - Historical import inline company creation was browser-verified up to opening the inline create form with the suggested company name prefilled. Creating and saving a real new company should still be done by staff during manual acceptance with a non-temporary company.
+- AI-assisted parsing has automated backend/build verification only in this session. A manual browser pass should still verify the `AI Clean Parse`, `AI Clean Rows`, and settings toggles with a configured provider key.
 
 Next:
 - Have staff try `Quotations -> Inquiries -> Import Inquiry` with real company files and confirm the compact review table labels feel clear
 - Have staff click-test inline company creation in all company selection spots and confirm the search/create wording feels natural
 - Have staff try `Quotations -> Historical Imports` with several real old finalized quotation PDFs. The parser is intentionally tuned for Al Ameen quotation tables first; reviewed failures should drive the next parser rule updates.
+- Configure `OPENAI_API_KEY` and enable AI Parsing in `Quotations -> Settings`, then manually test pasted messy text and a visually tabular PDF with `AI Clean Parse`
 - Confirm the Railway private storage plan before relying on historical source PDFs being retained long term
 - Have Dad/staff manually repeat create/edit/finalize/PDF workflow in `/admin -> Quotations` with real-ish sample data
 - Add real company/item data
@@ -1139,6 +1166,8 @@ Warnings:
 - Do not expose uploaded inquiry or historical source files through Cloudinary public URLs; use private storage refs only
 - Railway production needs a durable private storage plan before relying on long-term source-file retention
 - Do not add DOCX-to-PDF conversion unless Railway deployment has an explicit, supported conversion path
-- Do not implement AI, Gmail API, pgvector, aliases, OCR, broad free-form document parsing, reporting, or background workers in Phase 1
+- Do not implement AI Product matching, Gmail API, pgvector, OCR, broad automatic document processing, reporting, or background workers in this cleanup scope
+- AI parsing is review-only. It must not create Products, aliases, price history, quotations, or pricing decisions automatically.
+- No AI calls happen unless the environment has a provider key and staff enable AI Parsing in `Quotations -> Settings`.
 - Do not break product catalog, cart, checkout, orders, admin product management, admin order management, or JWT auth flows
 - Current frontend build still has pre-existing hook dependency warnings in `OrderManagement.js` and `ProductDetail.js`; quotation-specific build warnings were fixed

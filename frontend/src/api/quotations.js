@@ -89,6 +89,7 @@ const quotationAPI = {
     parseFile: (formData) => axiosInstance.post('/quotations/inquiries/parse_file/', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
+    aiCleanParse: (data) => axiosInstance.post('/quotations/inquiries/ai_clean_parse/', data),
     createImported: (data) => axiosInstance.post('/quotations/inquiries/create_imported/', data),
     createQuote: (id) => axiosInstance.post(`/quotations/inquiries/${id}/create_quote/`),
   },
@@ -109,6 +110,8 @@ const quotationAPI = {
     bulkCreateQuoteItems: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_create_quote_items/`, data),
     bulkUpdateRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_update_rows/`, data),
     bulkSkipRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_skip_rows/`, data),
+    aiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/ai_clean_rows/`, data),
+    applyAiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/apply_ai_clean_rows/`, data),
     previewPage: (id) => axiosInstance.get(`/quotations/historical-imports/${id}/preview_page/`, { responseType: 'blob' }),
   },
   historicalImportLines: {

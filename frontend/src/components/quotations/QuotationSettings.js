@@ -26,6 +26,15 @@ const emptySettings = {
   show_license_number: true,
   show_signature_area: true,
   show_stamp_area: true,
+  ai_parsing_enabled: false,
+  ai_auto_cleanup_enabled: false,
+  ai_pdf_vision_enabled: false,
+  ai_available: false,
+  ai_unavailable_reason: '',
+  ai_provider: '',
+  ai_text_model: '',
+  ai_vision_model: '',
+  ai_global_enabled: true,
   logo_url: '',
   signature_image_url: '',
   stamp_image_url: '',
@@ -37,6 +46,9 @@ const booleanFields = new Set([
   'show_license_number',
   'show_signature_area',
   'show_stamp_area',
+  'ai_parsing_enabled',
+  'ai_auto_cleanup_enabled',
+  'ai_pdf_vision_enabled',
 ]);
 
 const isValidHexColor = (value) => /^#[0-9A-Fa-f]{6}$/.test(value || '');
@@ -124,6 +136,12 @@ const QuotationSettings = () => {
           'updated_by',
           'created_at',
           'updated_at',
+          'ai_available',
+          'ai_unavailable_reason',
+          'ai_provider',
+          'ai_text_model',
+          'ai_vision_model',
+          'ai_global_enabled',
         ].includes(key)) return;
         formData.append(key, booleanFields.has(key) ? (value ? 'true' : 'false') : (value ?? ''));
       });
@@ -288,6 +306,56 @@ const QuotationSettings = () => {
             <label className="qm-checkbox"><input type="checkbox" checked={settings.show_arabic_name} onChange={(event) => updateField('show_arabic_name', event.target.checked)} /> Show Arabic name</label>
             <label className="qm-checkbox"><input type="checkbox" checked={settings.show_trn} onChange={(event) => updateField('show_trn', event.target.checked)} /> Show TRN</label>
             <label className="qm-checkbox"><input type="checkbox" checked={settings.show_license_number} onChange={(event) => updateField('show_license_number', event.target.checked)} /> Show license number</label>
+          </div>
+
+          <div className="qm-subpanel">
+            <h4>AI Import Parsing</h4>
+            <p className="qm-helper compact">
+              AI cleanup is only used to clean messy extracted rows for staff review. It does not match Products, create aliases, create prices, or save imports by itself.
+            </p>
+            {!settings.ai_global_enabled && (
+              <div className="qm-notice warning compact"><strong>AI unavailable:</strong> globally disabled by environment.</div>
+            )}
+            {settings.ai_global_enabled && !settings.ai_available && (
+              <div className="qm-notice warning compact"><strong>AI unavailable:</strong> {settings.ai_unavailable_reason || 'missing API key or model configuration.'}</div>
+            )}
+            {settings.ai_available && !settings.ai_parsing_enabled && (
+              <div className="qm-notice compact"><strong>AI disabled in settings.</strong> Turn on Enable AI Parsing to allow staff-triggered cleanup.</div>
+            )}
+            <div className="qm-checkbox-stack">
+              <label className="qm-checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.ai_parsing_enabled}
+                  onChange={(event) => updateField('ai_parsing_enabled', event.target.checked)}
+                />
+                Enable AI Parsing
+              </label>
+              <label className="qm-checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.ai_auto_cleanup_enabled}
+                  disabled={!settings.ai_parsing_enabled}
+                  onChange={(event) => updateField('ai_auto_cleanup_enabled', event.target.checked)}
+                />
+                Enable Auto AI Cleanup for weak deterministic parses
+              </label>
+              <label className="qm-checkbox">
+                <input
+                  type="checkbox"
+                  checked={settings.ai_pdf_vision_enabled}
+                  disabled={!settings.ai_parsing_enabled}
+                  onChange={(event) => updateField('ai_pdf_vision_enabled', event.target.checked)}
+                />
+                Enable Vision AI for PDFs
+              </label>
+            </div>
+            <div className="qm-meta-grid compact">
+              <div className="qm-meta-item"><span>Provider</span><strong>{settings.ai_provider || '-'}</strong></div>
+              <div className="qm-meta-item"><span>Text model</span><strong>{settings.ai_text_model || '-'}</strong></div>
+              <div className="qm-meta-item"><span>Vision model</span><strong>{settings.ai_vision_model || '-'}</strong></div>
+            </div>
+            <p className="qm-helper compact">No AI API calls happen when AI Parsing is off. Missing Product matches never trigger AI cleanup.</p>
           </div>
         </div>
       </form>

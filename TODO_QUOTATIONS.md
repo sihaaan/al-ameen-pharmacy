@@ -70,6 +70,10 @@
 - [x] Add safe delete/archive behavior for quotation products that have business history
 - [x] Add safe delete/deactivate behavior for companies that have quotation history
 - [x] Add duplicate detection for historical finalized quotation re-uploads by source hash, same-company quotation number, and similar row/totals fingerprint
+- [x] Add optional AI-assisted import parsing cleanup controlled from `Quotations -> Settings`
+- [x] Add staff-only AI cleanup endpoints for inquiry previews and staged historical imports
+- [x] Add AI candidate review/apply UI so deterministic rows are not replaced until staff approve
+- [x] Keep AI parsing separate from Product matching and price-history commit decisions
 
 ## Phase 1 Follow-Ups Before Phase 2
 
@@ -89,6 +93,8 @@
 - [ ] Consider draft PDF watermarking if staff might accidentally send draft quotations
 - [ ] Prototype static PDF/image background templates with ReportLab overlays before considering DOCX-to-PDF conversion
 - [ ] Tune import parser rules with real company LPO samples after staff review
+- [ ] Configure production AI provider env vars and manually verify `AI Clean Parse` / `AI Clean Rows` with a real messy PDF before enabling auto cleanup
+- [ ] Review AI parse logs/cost after a few staff trials and adjust page/text/image limits if needed
 - [ ] Do one human browser pass with the native file picker because Browser automation could not attach a file to the upload input directly
 - [ ] Configure durable private object storage/persistent private storage for Railway before relying on long-term inquiry/historical source-file retention
 - [ ] Review PyMuPDF licensing/deployment implications before production launch if the app will be used beyond internal operations
@@ -103,7 +109,7 @@
 - [ ] Fuzzy matching
 - [ ] Confirmed-match learning
 - [ ] Optional `pg_trgm` support
-- [ ] AI-assisted match suggestions
+- [ ] AI-assisted Product match suggestions
 - [ ] Embeddings and pgvector evaluation
 - [ ] OCR/scanned LPO parsing if a Railway-safe approach is chosen
 

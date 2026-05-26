@@ -38,6 +38,10 @@
 - Added row-level alias remembering from inquiry, quotation, and historical import lines.
 - Added safe delete/deactivate behavior for companies in the quotation module.
 - Added historical finalized quotation duplicate detection so exact re-uploads and same-company quotation-number matches warn staff and avoid creating another staged import.
+- Added optional AI-assisted import parsing cleanup for pasted inquiry text, inquiry file previews, and staged historical imports.
+- Added `QuotationSettings` controls for `Enable AI Parsing`, `Enable Auto AI Cleanup`, and `Enable Vision AI for PDFs`, while provider keys and hard limits remain environment-managed.
+- Added staff-only AI cleanup endpoints that return candidate rows, plus explicit apply behavior for historical imports so AI output cannot bypass review.
+- Added AI parse cache/log models for provider/model/mode metadata, cache hits, text/page/image counts, success/failure, and usage data when returned by the provider.
 
 ### Fixed
 - Corrected local frontend API targeting for quotation development so `/admin -> Quotations` calls the local Django API instead of undeployed Railway quotation routes.
@@ -63,12 +67,14 @@
 - Prevented accidental duplicate historical import staging from exact same-file uploads while keeping row-level commit idempotency as a second safety net.
 - Improved quotation/LPO PDF and pasted-text parsing so real table columns like `Material Description`, `Req Quantity`, `unit`, `u price`, and `total` are mapped into item, quantity, unit, price, and total fields instead of being folded into the item name.
 - Skipped common quotation PDF metadata/header/footer rows such as date, seller/buyer blocks, tender numbers, table headers, contact text, and totals from inquiry import item rows.
+- Kept parse confidence separate from Product matching confidence so unmatched Products do not trigger AI cleanup or make clean parsed rows look weak.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.
 - OCR/scanned PDF extraction remains deferred. The PDF importer only handles selectable text/tables and returns a clear warning when no selectable text is found.
 - Full template upload/editor support remains deferred. The recommended future direction is static PDF/image background templates overlaid with ReportLab dynamic quotation data.
 - Historical finalized quotation import currently supports text-based Al Ameen quotation PDFs first. Word/Excel historical finalized quotation backfill and broad third-party layouts remain deferred until real samples prove the needed parser shape.
+- AI Product matching, embeddings, automatic alias creation, automatic Product creation, and automatic price-history writes remain deferred. AI parsing is cleanup-only.
 
 ### Verified
 - Home products, product card images, product quick view, product detail, and product gallery still work after the product performance fix.
@@ -86,3 +92,5 @@
 - Browser verification confirmed re-uploading the same historical quotation PDF warns without auto-opening the previous import, `View previous import` opens it on demand, and duplicate price-history rows are not added after commit.
 - Browser verification confirmed the historical import review header has aligned preview/details cards, suggested-company banner, inline company creation, no horizontal overflow, and the sticky commit bar remains available.
 - Browser verification captured historical import review states with the company form closed, open, and created/selected.
+- Backend tests cover AI settings serialization, disabled/unavailable behavior, mocked text cleanup, mocked PDF vision cleanup, invalid AI output rejection, auto-cleanup gating, historical candidate apply, and no Product/alias/price-history/quotation side effects.
+- `python manage.py check` and `python manage.py test quotations --keepdb` passed after AI-assisted parsing changes; `npm run build` passed with existing non-quotation warnings.

@@ -60,6 +60,8 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [importNotice, setImportNotice] = useState(null);
   const [expandedRawRows, setExpandedRawRows] = useState({});
   const [selectedImportRows, setSelectedImportRows] = useState([]);
+  const [aiCleaning, setAiCleaning] = useState(false);
+  const [aiCandidate, setAiCandidate] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
   const load = async () => {
@@ -195,8 +197,11 @@ const InquiryManager = ({ onOpenQuote }) => {
     setImportNotice(null);
     setExpandedRawRows({});
     setSelectedImportRows([]);
+    const candidate = preview.ai_candidate || null;
+    setAiCandidate(candidate);
     setImportPreview({
       ...preview,
+      result_source: preview.result_source || 'deterministic_parse',
       lines: (preview.lines || []).map((line) => ({
         ...newImportLine(),
         ...line,
@@ -204,6 +209,63 @@ const InquiryManager = ({ onOpenQuote }) => {
         parse_confidence: Number(line.parse_confidence || 0),
       })),
     });
+  };
+
+  const aiSourceLabel = (source) => {
+    if (source === 'ai_vision_cleanup') return 'AI vision cleanup used';
+    if (source === 'ai_text_cleanup') return 'AI text cleanup used';
+    if (source === 'ai_failed_using_original_parse') return 'AI failed, using original parse';
+    return 'Deterministic parse';
+  };
+
+  const runAiCleanParse = async () => {
+    if (!importPreview || aiCleaning) return;
+    setAiCleaning(true);
+    setErrorInfo(null);
+    setImportNotice(null);
+    try {
+      const response = await quotationAPI.inquiries.aiCleanParse({
+        preview: importPreview,
+        company: importForm.company || null,
+        mode: 'auto',
+      });
+      setAiCandidate(response.data);
+      setImportNotice({ type: 'success', message: `${aiSourceLabel(response.data.result_source)}. Review the candidate rows before applying them.` });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'AI clean inquiry parse', 'POST /quotations/inquiries/ai_clean_parse/');
+      setErrorInfo(details);
+      setImportNotice({ type: 'warning', message: 'AI failed, using original parse.' });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setAiCleaning(false);
+    }
+  };
+
+  const applyAiCandidate = () => {
+    if (!aiCandidate) return;
+    setSavedImportedInquiry(null);
+    setExpandedRawRows({});
+    setSelectedImportRows([]);
+    setImportPreview({
+      ...importPreview,
+      ...aiCandidate,
+      result_source: aiCandidate.result_source,
+      ai_status: aiCandidate.ai_status,
+      ai_status_label: aiCandidate.ai_status_label,
+      lines: (aiCandidate.lines || []).map((line) => ({
+        ...newImportLine(),
+        ...line,
+        raw_line: line.raw_line || line.raw_source_line || '',
+        parse_confidence: Number(line.parse_confidence || 0),
+      })),
+    });
+    setAiCandidate(null);
+    setImportNotice({ type: 'success', message: 'AI cleaned rows applied. Review and edit before saving the inquiry.' });
+  };
+
+  const keepOriginalRows = () => {
+    setAiCandidate(null);
+    setImportNotice({ type: 'success', message: 'Kept deterministic parser rows.' });
   };
 
   const parsePastedText = async () => {
@@ -466,6 +528,10 @@ const InquiryManager = ({ onOpenQuote }) => {
               </div>
             </div>
             <div className="qm-preview-meta">
+              <span className={`qm-source-badge source-${importPreview.result_source || 'deterministic_parse'}`}>
+                {aiSourceLabel(importPreview.result_source)}
+              </span>
+              {importPreview.ai_status_label && <span>{importPreview.ai_status_label}</span>}
               <span>Total lines: {importPreview.lines.length}</span>
               <span>Selected: {selectedImportRows.length}</span>
               {(importPreview.meta?.selected_sheets || []).map((sheet) => (
@@ -475,6 +541,9 @@ const InquiryManager = ({ onOpenQuote }) => {
             </div>
             <div className="qm-bulk-toolbar compact">
               <strong>{selectedImportRows.length} rows selected</strong>
+              <button type="button" className="qm-secondary small" disabled={aiCleaning || !importPreview.lines.length} onClick={runAiCleanParse}>
+                {aiCleaning ? 'Cleaning...' : 'AI Clean Parse'}
+              </button>
               <button type="button" className="qm-secondary small" disabled={!importPreview.lines.length} onClick={toggleAllImportRows}>
                 {selectedImportRows.length === importPreview.lines.length ? 'Deselect All' : 'Select All'}
               </button>
@@ -485,6 +554,34 @@ const InquiryManager = ({ onOpenQuote }) => {
               <div className="qm-notice">
                 <strong>Review warnings:</strong>
                 <ul>{importPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+              </div>
+            )}
+            {aiCandidate && (
+              <div className="qm-ai-candidate">
+                <div>
+                  <strong>{aiSourceLabel(aiCandidate.result_source)}</strong>
+                  <p>These are AI-cleaned candidate rows. They do not replace the current review rows until you apply them.</p>
+                </div>
+                <div className="qm-ai-candidate-summary">
+                  <span>{aiCandidate.lines?.length || 0} candidate rows</span>
+                  <span>Provider: {aiCandidate.provider || '-'}</span>
+                  <span>Model: {aiCandidate.model || '-'}</span>
+                  {aiCandidate.cache_hit && <span>Cached result</span>}
+                </div>
+                <div className="qm-ai-candidate-preview">
+                  {(aiCandidate.lines || []).slice(0, 5).map((line, index) => (
+                    <div key={`${line.raw_name}-${index}`}>
+                      <strong>{line.raw_name}</strong>
+                      <span>{line.quantity || '-'} {line.unit || ''}</span>
+                      {line.unit_price && <span>Price {line.unit_price}</span>}
+                      <em>{Math.round(Number(line.parse_confidence || 0) * 100)}%</em>
+                    </div>
+                  ))}
+                </div>
+                <div className="qm-action-row">
+                  <button type="button" className="qm-primary small" onClick={applyAiCandidate}>Apply AI Cleaned Rows</button>
+                  <button type="button" className="qm-secondary small" onClick={keepOriginalRows}>Keep Original</button>
+                </div>
               </div>
             )}
             <div className="qm-table-wrap">

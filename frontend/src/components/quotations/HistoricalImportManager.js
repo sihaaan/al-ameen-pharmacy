@@ -29,6 +29,9 @@ const HistoricalImportManager = () => {
   const [previewUrl, setPreviewUrl] = useState('');
   const [headerDirty, setHeaderDirty] = useState(false);
   const [duplicateUploadWarning, setDuplicateUploadWarning] = useState(null);
+  const [aiCleaning, setAiCleaning] = useState(false);
+  const [applyingAiRows, setApplyingAiRows] = useState(false);
+  const [aiCandidate, setAiCandidate] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -72,6 +75,7 @@ const HistoricalImportManager = () => {
     setExpandedRawRows({});
     setRowFilter('all');
     setRowSearch('');
+    setAiCandidate(null);
   }, [selectedImport?.id]);
 
   const selectedSummary = useMemo(() => {
@@ -139,9 +143,12 @@ const HistoricalImportManager = () => {
         return;
       }
       setSelectedImport(response.data);
+      setAiCandidate(response.data.ai_candidate || null);
       setHeaderDirty(false);
       setNotice(
-        duplicateCheck?.is_duplicate
+        response.data.ai_candidate
+          ? { type: 'success', message: 'Historical quotation parsed. AI cleaned candidate rows are available for review before applying.' }
+          : duplicateCheck?.is_duplicate
           ? { type: 'warning', message: `${duplicateCheck.message} ${duplicateHelperText(duplicateCheck)}` }
           : { type: 'success', message: 'Historical quotation parsed. Review company, date, items, and prices before committing.' }
       );
@@ -185,6 +192,7 @@ const HistoricalImportManager = () => {
     setNotice(null);
     setErrorInfo(null);
     setSelectedImport(entry);
+    setAiCandidate(null);
     setHeaderDirty(false);
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
@@ -375,6 +383,59 @@ const HistoricalImportManager = () => {
       console.error(formatQuotationError(details), error);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const aiSourceLabel = (source) => {
+    if (source === 'ai_vision_cleanup') return 'AI vision cleanup used';
+    if (source === 'ai_text_cleanup') return 'AI text cleanup used';
+    return 'AI cleaned rows';
+  };
+
+  const runAiCleanRows = async () => {
+    if (!selectedImport || aiCleaning || selectedImport.status === 'committed') return;
+    setAiCleaning(true);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.historicalImports.aiCleanRows(selectedImport.id, { mode: 'auto' });
+      setAiCandidate(response.data);
+      setNotice({ type: 'success', message: `${aiSourceLabel(response.data.result_source)}. Review the candidate rows before applying them.` });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'AI clean historical import rows', `POST /quotations/historical-imports/${selectedImport.id}/ai_clean_rows/`);
+      setErrorInfo(details);
+      setNotice({ type: 'warning', message: 'AI failed, using original rows.' });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setAiCleaning(false);
+    }
+  };
+
+  const applyAiCleanRows = async () => {
+    if (!selectedImport || !aiCandidate || applyingAiRows) return;
+    if (!window.confirm('Replace the current staged rows with these AI-cleaned rows? Staff review is still required before committing.')) return;
+    setApplyingAiRows(true);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.historicalImports.applyAiCleanRows(selectedImport.id, {
+        lines: aiCandidate.lines || [],
+        result_source: aiCandidate.result_source || '',
+        provider: aiCandidate.provider || '',
+        model: aiCandidate.model || '',
+        cache_hit: Boolean(aiCandidate.cache_hit),
+      });
+      setSelectedImport(response.data);
+      setAiCandidate(null);
+      setSelectedRowIds([]);
+      setNotice({ type: 'success', message: 'AI cleaned rows applied. Review matches and mark rows ready before committing.' });
+      await load();
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Apply AI cleaned historical rows', `POST /quotations/historical-imports/${selectedImport.id}/apply_ai_clean_rows/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setApplyingAiRows(false);
     }
   };
 
@@ -585,6 +646,9 @@ const HistoricalImportManager = () => {
                 <button type="button" className="qm-primary" disabled={saving || selectedImport.status === 'committed'} onClick={saveImportDetails}>
                   {saving ? 'Saving...' : 'Save Import Details'}
                 </button>
+                <button type="button" className="qm-secondary" disabled={aiCleaning || selectedImport.status === 'committed'} onClick={runAiCleanRows}>
+                  {aiCleaning ? 'Cleaning...' : 'AI Clean Rows'}
+                </button>
                 <span className="qm-helper compact">Save company/date/header details before committing price rows.</span>
               </section>
             </div>
@@ -600,6 +664,37 @@ const HistoricalImportManager = () => {
               <p>Select rows, bulk create/link missing Products, fix anything marked needs review, then commit only ready rows.</p>
             </div>
           </div>
+          {aiCandidate && (
+            <div className="qm-ai-candidate">
+              <div>
+                <strong>{aiSourceLabel(aiCandidate.result_source)}</strong>
+                <p>AI candidate rows are waiting. They will not replace current rows until you apply them.</p>
+              </div>
+              <div className="qm-ai-candidate-summary">
+                <span>{aiCandidate.lines?.length || 0} candidate rows</span>
+                <span>Provider: {aiCandidate.provider || '-'}</span>
+                <span>Model: {aiCandidate.model || '-'}</span>
+                {aiCandidate.cache_hit && <span>Cached result</span>}
+              </div>
+              <div className="qm-ai-candidate-preview">
+                {(aiCandidate.lines || []).slice(0, 6).map((line, index) => (
+                  <div key={`${line.item_name}-${index}`}>
+                    <strong>{line.item_name}</strong>
+                    <span>{line.quantity || '-'} {line.unit || ''}</span>
+                    {line.unit_price && <span>Price {line.unit_price}</span>}
+                    {line.line_total && <span>Total {line.line_total}</span>}
+                    <em>{Math.round(Number(line.parse_confidence || 0) * 100)}%</em>
+                  </div>
+                ))}
+              </div>
+              <div className="qm-action-row">
+                <button type="button" className="qm-primary small" disabled={applyingAiRows} onClick={applyAiCleanRows}>
+                  {applyingAiRows ? 'Applying...' : 'Apply AI Cleaned Rows'}
+                </button>
+                <button type="button" className="qm-secondary small" disabled={applyingAiRows} onClick={() => setAiCandidate(null)}>Keep Original</button>
+              </div>
+            </div>
+          )}
           <div className="qm-row-review-controls">
             <div className="qm-controls">
               <input className="qm-input" value={rowSearch} onChange={(event) => setRowSearch(event.target.value)} placeholder="Search imported or product item" />

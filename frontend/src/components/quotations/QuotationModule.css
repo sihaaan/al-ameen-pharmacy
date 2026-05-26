@@ -927,6 +927,62 @@
   font-weight: 800;
 }
 
+.qm-source-badge.source-ai_text_cleanup,
+.qm-source-badge.source-ai_vision_cleanup {
+  background: #ecfeff;
+  color: #0e7490;
+  border: 1px solid #a5f3fc;
+}
+
+.qm-ai-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+  background: #f0f9ff;
+}
+
+.qm-ai-candidate p {
+  margin: 4px 0 0;
+  color: #475569;
+}
+
+.qm-ai-candidate-summary,
+.qm-ai-candidate-preview {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.qm-ai-candidate-summary span,
+.qm-ai-candidate-preview div {
+  padding: 7px 9px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-ai-candidate-preview div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.qm-ai-candidate-preview strong {
+  color: #0f172a;
+}
+
+.qm-ai-candidate-preview em {
+  color: #0e7490;
+  font-style: normal;
+}
+
 .qm-review-import-panel {
   padding: 16px;
 }

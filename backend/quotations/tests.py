@@ -1,6 +1,7 @@
 from decimal import Decimal
 from io import BytesIO
 import tempfile
+from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
@@ -22,6 +23,8 @@ from api.models import Product
 
 from .import_rules import detect_header_row, parse_inquiry_line, parse_text_lines, split_quantity_unit
 from .models import (
+    AIParseCache,
+    AIParseLog,
     Company,
     CompanyContact,
     CompanyPriceHistory,
@@ -1190,6 +1193,354 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company).count(), 1)
         skipped_line = HistoricalPriceImportLine.objects.get(pk=lines[1]["id"])
         self.assertEqual(skipped_line.status, HistoricalPriceImportLine.STATUS_SKIPPED)
+
+
+class MockAIProvider:
+    def __init__(self, result=None):
+        self.result = result or {
+            "rows": [
+                {
+                    "item_name": "Electrorush 21gm sache for 1 Ltr solution",
+                    "quantity": "50",
+                    "unit": "carton",
+                    "unit_price": "375",
+                    "line_total": "",
+                    "pack_info": "1 box = 10 sachets",
+                    "notes": "",
+                    "raw_source_text": "1 box 10 sachets 50 box cartoon price : 375 per cartoon",
+                    "page_number": "",
+                    "confidence": 85,
+                    "parse_status": "parsed",
+                    "reason": "Detected order quantity and price per carton.",
+                },
+                {
+                    "item_name": "Zest Ors 21 gm sachet for 1 Ltr solution",
+                    "quantity": "",
+                    "unit": "box",
+                    "unit_price": "18",
+                    "line_total": "",
+                    "pack_info": "25 sachet per box",
+                    "notes": "",
+                    "raw_source_text": "25 sachet per box price 18 per box",
+                    "page_number": "",
+                    "confidence": 65,
+                    "parse_status": "needs_review",
+                    "reason": "Price per box detected, but order quantity is unclear.",
+                },
+                {
+                    "item_name": "",
+                    "quantity": "",
+                    "unit": "",
+                    "unit_price": "",
+                    "line_total": "",
+                    "pack_info": "",
+                    "notes": "",
+                    "raw_source_text": "DATE: 21/05/2026",
+                    "page_number": "",
+                    "confidence": 95,
+                    "parse_status": "ignored",
+                    "reason": "Document metadata.",
+                },
+            ],
+            "warnings": [],
+            "document_notes": "Cleaned rows for staff review.",
+        }
+        self.calls = []
+
+    def clean_rows(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result, {"input_tokens": 10, "output_tokens": 20}
+
+
+class AIImportParsingTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="ai_staff", password="pass", is_staff=True)
+        self.customer = User.objects.create_user(username="ai_customer", password="pass")
+        self.company = Company.objects.create(name="AI Company")
+        self.client.force_authenticate(self.staff)
+
+    def enable_ai(self, *, auto=False, vision=False):
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.ai_parsing_enabled = True
+        settings_obj.ai_auto_cleanup_enabled = auto
+        settings_obj.ai_pdf_vision_enabled = vision
+        settings_obj.save()
+        return settings_obj
+
+    def preview_payload(self):
+        return {
+            "source_type": Inquiry.SOURCE_TYPE_PASTED_TEXT,
+            "source_filename": "",
+            "source_mime_type": "text/plain",
+            "source_sha256": "b" * 64,
+            "source_file_ref": "",
+            "parse_method": "deterministic_text_v2",
+            "original_text": "messy text",
+            "warnings": [],
+            "meta": {},
+            "lines": [
+                {
+                    "raw_name": "Electrorush 21gm sache for 1 Ltr solution 50 carton price 375",
+                    "raw_line": "Electrorush 21gm sache for 1 Ltr solution 50 carton price 375",
+                    "parse_status": InquiryLine.PARSE_NEEDS_REVIEW,
+                    "parse_confidence": 0.4,
+                }
+            ],
+        }
+
+    def make_pdf_upload(self):
+        buffer = BytesIO()
+        pdf = canvas.Canvas(buffer)
+        pdf.drawString(72, 740, "Material Description Req Quantity unit u price total")
+        pdf.drawString(72, 720, "Deep Heat Spray 150ml 5 No 12 60")
+        pdf.save()
+        return SimpleUploadedFile("ai-test.pdf", buffer.getvalue(), content_type="application/pdf")
+
+    def test_ai_settings_defaults_and_update(self):
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-settings"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["ai_parsing_enabled"])
+        self.assertIn("ai_available", response.data)
+
+        update = self.client.patch(
+            reverse("quotation-settings"),
+            {
+                "ai_parsing_enabled": True,
+                "ai_auto_cleanup_enabled": True,
+                "ai_pdf_vision_enabled": True,
+            },
+            format="json",
+        )
+        self.assertEqual(update.status_code, status.HTTP_200_OK)
+        settings_obj = QuotationSettings.get_solo()
+        self.assertTrue(settings_obj.ai_parsing_enabled)
+        self.assertTrue(settings_obj.ai_auto_cleanup_enabled)
+        self.assertTrue(settings_obj.ai_pdf_vision_enabled)
+
+    def test_ai_clean_parse_staff_only(self):
+        url = reverse("quotation-inquiry-ai-clean-parse")
+        payload = {"preview": self.preview_payload()}
+
+        self.client.force_authenticate(None)
+        anonymous = self.client.post(url, payload, format="json")
+        self.assertIn(anonymous.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+        self.client.force_authenticate(self.customer)
+        non_staff = self.client.post(url, payload, format="json")
+        self.assertEqual(non_staff.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_ai_disabled_returns_clear_response_without_provider_call(self):
+        provider = MockAIProvider()
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-inquiry-ai-clean-parse"),
+                {"preview": self.preview_payload()},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("AI disabled in settings", response.data["detail"])
+        self.assertEqual(provider.calls, [])
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+        QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_text_ai_valid_json_returns_candidate_rows_without_side_effects(self):
+        self.enable_ai()
+        provider = MockAIProvider()
+
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-inquiry-ai-clean-parse"),
+                {"preview": self.preview_payload(), "company": self.company.id},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result_source"], "ai_text_cleanup")
+        self.assertEqual(response.data["lines"][0]["raw_name"], "Electrorush 21gm sache for 1 Ltr solution")
+        self.assertEqual(response.data["lines"][0]["quantity"], "50")
+        self.assertEqual(response.data["lines"][0]["unit_price"], "375")
+        self.assertEqual(response.data["lines"][1]["parse_status"], InquiryLine.PARSE_NEEDS_REVIEW)
+        self.assertFalse(response.data["lines"][0]["matched_product"])
+        self.assertGreaterEqual(response.data["lines"][0]["parse_confidence"], 0.85)
+        self.assertEqual(Product.objects.count(), 0)
+        self.assertEqual(ProductAlias.objects.count(), 0)
+        self.assertEqual(CompanyPriceHistory.objects.count(), 0)
+        self.assertEqual(Quotation.objects.count(), 0)
+        self.assertEqual(AIParseLog.objects.filter(success=True).count(), 1)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_invalid_ai_json_is_rejected_safely(self):
+        self.enable_ai()
+        provider = MockAIProvider(result={"not_rows": []})
+
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-inquiry-ai-clean-parse"),
+                {"preview": self.preview_payload()},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["ai_status"], "ai_failed_using_original_parse")
+        self.assertEqual(Inquiry.objects.count(), 0)
+        self.assertEqual(AIParseLog.objects.filter(success=False).count(), 1)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+        QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model",
+        QUOTATION_PRIVATE_STORAGE_ROOT=None,
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_vision_ai_path_for_pdf_when_enabled(self):
+        self.enable_ai(vision=True)
+        provider = MockAIProvider()
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                parsed = self.client.post(
+                    reverse("quotation-inquiry-parse-file"),
+                    {"file": self.make_pdf_upload()},
+                    format="multipart",
+                )
+                self.assertEqual(parsed.status_code, status.HTTP_200_OK)
+                with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+                    response = self.client.post(
+                        reverse("quotation-inquiry-ai-clean-parse"),
+                        {"preview": parsed.data, "mode": "vision"},
+                        format="json",
+                    )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result_source"], "ai_vision_cleanup")
+        self.assertEqual(provider.calls[0]["mode"], "vision")
+        self.assertGreaterEqual(len(provider.calls[0]["image_data_urls"]), 1)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+        QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_vision_ai_blocked_when_setting_disabled(self):
+        self.enable_ai(vision=False)
+        response = self.client.post(
+            reverse("quotation-inquiry-ai-clean-parse"),
+            {"preview": {**self.preview_payload(), "source_type": Inquiry.SOURCE_TYPE_PDF}, "mode": "vision"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("vision cleanup is disabled", response.data["detail"])
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_auto_ai_triggers_only_for_poor_parse_not_missing_product_match(self):
+        self.enable_ai(auto=True)
+        provider = MockAIProvider()
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            poor = self.client.post(
+                reverse("quotation-inquiry-parse-text"),
+                {"raw_text": "DATE: 21/05/2026\nFrom(Seller): Al Ameen Pharmacy"},
+                format="json",
+            )
+        self.assertEqual(poor.status_code, status.HTTP_200_OK)
+        self.assertIn("ai_candidate", poor.data)
+        self.assertEqual(len(provider.calls), 1)
+
+        provider.calls.clear()
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            good_unmatched = self.client.post(
+                reverse("quotation-inquiry-parse-text"),
+                {"raw_text": "Unknown Private Medicine - 10 boxes", "company": self.company.id},
+                format="json",
+            )
+        self.assertEqual(good_unmatched.status_code, status.HTTP_200_OK)
+        self.assertNotIn("ai_candidate", good_unmatched.data)
+        self.assertEqual(provider.calls, [])
+        self.assertFalse(good_unmatched.data["lines"][0].get("matched_product"))
+        self.assertGreaterEqual(good_unmatched.data["lines"][0]["parse_confidence"], 0.8)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_historical_ai_candidate_requires_apply_before_replacing_rows(self):
+        self.enable_ai()
+        historical_import = HistoricalPriceImport.objects.create(
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="old-quotation.pdf",
+            source_sha256="c" * 64,
+            parse_method="deterministic_test",
+            document_number="QT-AI-1",
+            document_date="2026-05-21",
+            created_by=self.staff,
+        )
+        HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="Messy AI Row 10 box price 5",
+            raw_line="Messy AI Row 10 box price 5",
+            quantity=Decimal("10.000"),
+            unit="box",
+            unit_price=Decimal("5.00"),
+            parse_confidence=0.4,
+        )
+        original_line_count = historical_import.lines.count()
+        provider = MockAIProvider()
+
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            clean_response = self.client.post(
+                reverse("quotation-historical-import-ai-clean-rows", args=[historical_import.id]),
+                {"mode": "text"},
+                format="json",
+            )
+
+        self.assertEqual(clean_response.status_code, status.HTTP_200_OK)
+        historical_import.refresh_from_db()
+        self.assertEqual(historical_import.lines.count(), original_line_count)
+        self.assertEqual(Product.objects.count(), 0)
+
+        apply_response = self.client.post(
+            reverse("quotation-historical-import-apply-ai-clean-rows", args=[historical_import.id]),
+            {
+                "lines": clean_response.data["lines"],
+                "result_source": clean_response.data["result_source"],
+                "provider": clean_response.data["provider"],
+                "model": clean_response.data["model"],
+            },
+            format="json",
+        )
+
+        self.assertEqual(apply_response.status_code, status.HTTP_200_OK)
+        historical_import.refresh_from_db()
+        self.assertEqual(historical_import.lines.count(), 2)
+        self.assertTrue(all(line.status == HistoricalPriceImportLine.STATUS_NEEDS_REVIEW for line in historical_import.lines.all()))
+        self.assertEqual(Product.objects.count(), 0)
+        self.assertEqual(ProductAlias.objects.count(), 0)
+        self.assertEqual(CompanyPriceHistory.objects.count(), 0)
 
 
 class QuotationSettingsTests(APITestCase):

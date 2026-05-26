@@ -9,6 +9,13 @@ from rest_framework.response import Response
 
 from api.models import Product
 
+from .ai_parsing import (
+    AIParseError,
+    apply_ai_rows_to_historical_import,
+    clean_historical_import_with_ai,
+    clean_preview_with_ai,
+    maybe_attach_auto_ai_candidate,
+)
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
 from .matching import apply_match_to_preview_line
@@ -284,6 +291,7 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return Response({"detail": "Paste inquiry text before extracting lines."}, status=status.HTTP_400_BAD_REQUEST)
         preview = parse_text_preview(raw_text)
         self._apply_product_matches(preview, request.data.get("company"))
+        maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=False)
         return Response(preview)
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
@@ -293,6 +301,7 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         self._apply_product_matches(preview, request.data.get("company"))
+        maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
         return Response(preview)
 
     def _apply_product_matches(self, preview, company_id):
@@ -309,6 +318,31 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         inquiry = create_imported_inquiry(serializer.validated_data, request.user)
         response_serializer = InquirySerializer(inquiry, context={"request": request})
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"])
+    def ai_clean_parse(self, request):
+        preview = request.data.get("preview") or {}
+        if not isinstance(preview, dict):
+            return Response({"detail": "A deterministic preview object is required."}, status=status.HTTP_400_BAD_REQUEST)
+        requested_mode = request.data.get("mode") or "auto"
+        try:
+            candidate = clean_preview_with_ai(
+                preview,
+                actor=request.user,
+                requested_mode=requested_mode,
+                allow_vision=True,
+            )
+        except AIParseError as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "ai_status": "ai_failed_using_original_parse",
+                    "ai_status_label": "AI failed, using original parse.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        self._apply_product_matches(candidate, request.data.get("company"))
+        return Response(candidate)
 
     @action(detail=True, methods=["post"])
     def create_quote(self, request, pk=None):
@@ -594,12 +628,17 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 }
                 return Response(data, status=status.HTTP_200_OK)
             historical_import = create_historical_price_import(preview, request.user)
+            maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         serializer = self.get_serializer(historical_import)
         data = dict(serializer.data)
         if duplicate_check.get("is_duplicate"):
             data["duplicate_check"] = duplicate_check
+        if preview.get("ai_candidate"):
+            data["ai_candidate"] = preview["ai_candidate"]
+            data["ai_status"] = preview.get("ai_status")
+            data["ai_status_label"] = preview.get("ai_status_label")
         return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
@@ -666,6 +705,47 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         return self._bulk_response(historical_import, summary)
+
+    @action(detail=True, methods=["post"])
+    def ai_clean_rows(self, request, pk=None):
+        historical_import = self.get_object()
+        requested_mode = request.data.get("mode") or "auto"
+        try:
+            candidate = clean_historical_import_with_ai(
+                historical_import,
+                actor=request.user,
+                requested_mode=requested_mode,
+            )
+        except AIParseError as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "ai_status": "ai_failed_using_original_parse",
+                    "ai_status_label": "AI failed, using original parse.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(candidate)
+
+    @action(detail=True, methods=["post"])
+    def apply_ai_clean_rows(self, request, pk=None):
+        historical_import = self.get_object()
+        try:
+            historical_import = apply_ai_rows_to_historical_import(
+                historical_import,
+                request.data.get("lines") or [],
+                actor=request.user,
+                ai_meta={
+                    "result_source": request.data.get("result_source", ""),
+                    "provider": request.data.get("provider", ""),
+                    "model": request.data.get("model", ""),
+                    "cache_hit": bool(request.data.get("cache_hit", False)),
+                },
+            )
+        except (DjangoValidationError, AIParseError) as exc:
+            return self.handle_workflow_error(exc)
+        serializer = self.get_serializer(historical_import)
+        return Response(serializer.data)
 
     @action(detail=True, methods=["get"])
     def preview_page(self, request, pk=None):

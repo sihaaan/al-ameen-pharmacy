@@ -152,6 +152,12 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
     logo_url = serializers.SerializerMethodField()
     signature_image_url = serializers.SerializerMethodField()
     stamp_image_url = serializers.SerializerMethodField()
+    ai_available = serializers.SerializerMethodField()
+    ai_unavailable_reason = serializers.SerializerMethodField()
+    ai_provider = serializers.SerializerMethodField()
+    ai_text_model = serializers.SerializerMethodField()
+    ai_vision_model = serializers.SerializerMethodField()
+    ai_global_enabled = serializers.SerializerMethodField()
     clear_logo = serializers.BooleanField(write_only=True, required=False, default=False)
     clear_signature_image = serializers.BooleanField(write_only=True, required=False, default=False)
     clear_stamp_image = serializers.BooleanField(write_only=True, required=False, default=False)
@@ -192,6 +198,15 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
             "show_license_number",
             "show_signature_area",
             "show_stamp_area",
+            "ai_parsing_enabled",
+            "ai_auto_cleanup_enabled",
+            "ai_pdf_vision_enabled",
+            "ai_available",
+            "ai_unavailable_reason",
+            "ai_provider",
+            "ai_text_model",
+            "ai_vision_model",
+            "ai_global_enabled",
             "updated_by",
             "created_at",
             "updated_at",
@@ -201,6 +216,12 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
             "logo_url",
             "signature_image_url",
             "stamp_image_url",
+            "ai_available",
+            "ai_unavailable_reason",
+            "ai_provider",
+            "ai_text_model",
+            "ai_vision_model",
+            "ai_global_enabled",
             "updated_by",
             "created_at",
             "updated_at",
@@ -214,6 +235,29 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
 
     def get_stamp_image_url(self, obj):
         return self._get_image_url(obj.stamp_image)
+
+    def _ai_availability(self):
+        from .ai_parsing import get_ai_parse_availability
+
+        return get_ai_parse_availability()
+
+    def get_ai_available(self, obj):
+        return self._ai_availability()["available"]
+
+    def get_ai_unavailable_reason(self, obj):
+        return self._ai_availability()["reason"]
+
+    def get_ai_provider(self, obj):
+        return self._ai_availability()["provider"]
+
+    def get_ai_text_model(self, obj):
+        return self._ai_availability()["text_model"]
+
+    def get_ai_vision_model(self, obj):
+        return self._ai_availability()["vision_model"]
+
+    def get_ai_global_enabled(self, obj):
+        return self._ai_availability()["global_enabled"]
 
     def _get_image_url(self, image):
         if not image:
