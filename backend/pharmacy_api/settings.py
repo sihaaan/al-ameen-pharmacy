@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     'cloudinary',
     'api',
     'quotations',
+    'accounting',
 ]
 
 # ---- middleware (CORS FIRST) ----
@@ -186,6 +187,9 @@ QUOTATION_AI_PARSE_MAX_RENDERED_PAGES = int(os.environ.get("QUOTATION_AI_PARSE_M
 QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION = int(os.environ.get("QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", "1400"))
 QUOTATION_AI_PARSE_IMAGE_SCALE = float(os.environ.get("QUOTATION_AI_PARSE_IMAGE_SCALE", "1.4"))
 QUOTATION_AI_PARSE_TIMEOUT_SECONDS = int(os.environ.get("QUOTATION_AI_PARSE_TIMEOUT_SECONDS", "60"))
+
+# ---- accounting overdue statement imports ----
+ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 # ---- Cloudinary Configuration (Cloud Image Storage) ----
 # Images will be stored on Cloudinary CDN instead of local filesystem

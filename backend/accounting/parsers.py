@@ -1,0 +1,372 @@
+import csv
+import hashlib
+import io
+import re
+import zipfile
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+from openpyxl import load_workbook
+
+
+SUPPORTED_OUTSTANDING_EXTENSIONS = {".csv", ".xlsx"}
+SUPPORTED_CATEGORY_EXTENSIONS = {".xlsx"}
+REPORT_DATE_RE = re.compile(r"as\s+on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.IGNORECASE)
+HEADER_ALIASES = {
+    "code": "code",
+    "party": "party",
+    "place": "place",
+    "bill no": "bill_no",
+    "bill no.": "bill_no",
+    "date": "date",
+    "amount": "amount",
+    "0-30": "bucket_0_30",
+    "0 - 30": "bucket_0_30",
+    "30-60": "bucket_30_60",
+    "30 - 60": "bucket_30_60",
+    "60-90": "bucket_60_90",
+    "60 - 90": "bucket_60_90",
+    "over 90": "bucket_over_90",
+    "total": "total",
+    "days": "days",
+}
+CATEGORY_VALUES = {
+    "credit": "credit",
+    "insurance": "insurance",
+    "clinic": "clinic",
+    "branch": "branch",
+    "card": "card",
+    "misc": "misc",
+}
+
+
+@dataclass
+class ParsedInvoiceRow:
+    source_row_number: int
+    customer_code: str
+    customer_name: str
+    place: str
+    bill_number: str
+    invoice_date: date | None
+    amount: Decimal
+    bucket_0_30: Decimal
+    bucket_30_60: Decimal
+    bucket_60_90: Decimal
+    bucket_over_90: Decimal
+    total: Decimal
+    days: int
+    raw_data: dict
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ParsedOutstanding:
+    filename: str
+    sha256: str
+    size: int
+    report_date: date | None
+    rows: list[ParsedInvoiceRow]
+    skipped_row_count: int
+    warnings: list[str]
+    parse_meta: dict
+
+
+@dataclass
+class ParsedCategoryMap:
+    filename: str
+    sha256: str
+    entries: dict[str, str]
+    warnings: list[str]
+    parse_meta: dict
+
+
+def max_upload_bytes():
+    return int(getattr(settings, "ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+
+
+def normalize_customer_name(value):
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_header(value):
+    text = str(value or "").strip().lower()
+    text = text.replace(".", "")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if re.fullmatch(r"0\s*30", text):
+        return "0-30"
+    if re.fullmatch(r"30\s*60", text):
+        return "30-60"
+    if re.fullmatch(r"60\s*90", text):
+        return "60-90"
+    return text
+
+
+def read_upload(uploaded_file, allowed_extensions):
+    if not uploaded_file:
+        raise ValidationError("Upload a file.")
+    filename = Path(uploaded_file.name or "upload").name
+    extension = Path(filename).suffix.lower()
+    if extension not in allowed_extensions:
+        allowed = ", ".join(sorted(allowed_extensions))
+        raise ValidationError(f"Unsupported file type. Upload {allowed} only.")
+    data = uploaded_file.read()
+    if len(data) > max_upload_bytes():
+        raise ValidationError(f"File is too large. Maximum size is {max_upload_bytes() // (1024 * 1024)} MB.")
+    if extension == ".xlsx" and (not data.startswith(b"PK") or not zipfile.is_zipfile(io.BytesIO(data))):
+        raise ValidationError("Invalid Excel file. Upload a valid .xlsx workbook.")
+    if extension == ".csv" and data.startswith(b"PK"):
+        raise ValidationError("Invalid CSV file.")
+    return filename, extension, data, hashlib.sha256(data).hexdigest()
+
+
+def parse_date(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d"):
+        try:
+            parsed = timezone.datetime.strptime(text, fmt).date()
+            if parsed.year < 1950:
+                parsed = parsed.replace(year=parsed.year + 100)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def parse_report_date(cells):
+    for cell in cells:
+        match = REPORT_DATE_RE.search(str(cell or ""))
+        if match:
+            return parse_date(match.group(1))
+    return None
+
+
+def parse_decimal(value):
+    text = str(value or "").strip()
+    if not text or text in {"-", "--"}:
+        return Decimal("0.00")
+    negative = text.startswith("(") or text.endswith("-")
+    text = text.replace("AED", "").replace(",", "").replace("(", "").replace(")", "").replace("-", "")
+    text = re.sub(r"[^0-9.]", "", text)
+    if not text:
+        return Decimal("0.00")
+    try:
+        number = Decimal(text).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        raise ValueError(f"Invalid amount: {value}")
+    return -number if negative else number
+
+
+def parse_int(value):
+    try:
+        return int(parse_decimal(value))
+    except Exception:
+        return 0
+
+
+def find_data_start(row):
+    normalized = [normalize_header(cell) for cell in row]
+    for index in range(0, max(1, len(normalized) - 10)):
+        window = normalized[index : index + 12]
+        roles = [HEADER_ALIASES.get(item, item) for item in window]
+        if roles[:6] == ["code", "party", "place", "bill_no", "date", "amount"] and "days" in roles:
+            return index + 12
+    return None
+
+
+def clean_row(row):
+    return ["" if cell is None else str(cell).strip() for cell in row]
+
+
+def row_is_trailer(row, data_start):
+    if data_start is None or len(row) <= data_start:
+        return True
+    text = " ".join(str(cell or "").strip().lower() for cell in row[data_start : data_start + 12])
+    if not text:
+        return True
+    return text.startswith("cus total") or text.startswith("grand total")
+
+
+def parse_invoice_row(row, row_number, report_date):
+    row = clean_row(row)
+    data_start = find_data_start(row)
+    if data_start is None:
+        return None, "No invoice header/data section detected."
+    if len(row) < data_start + 12 or row_is_trailer(row, data_start):
+        return None, "Skipped non-invoice row."
+
+    cells = row[data_start : data_start + 12]
+    customer_code, customer_name, place, bill_number, invoice_date_raw = cells[:5]
+    if not customer_code and not customer_name:
+        return None, "Missing customer."
+    if not bill_number and normalize_header(customer_code) == "code":
+        return None, "Skipped repeated header."
+
+    warnings = []
+    invoice_date = parse_date(invoice_date_raw)
+    if not invoice_date:
+        warnings.append("Invalid or missing invoice date.")
+
+    try:
+        amount = parse_decimal(cells[5])
+        bucket_0_30 = parse_decimal(cells[6])
+        bucket_30_60 = parse_decimal(cells[7])
+        bucket_60_90 = parse_decimal(cells[8])
+        bucket_over_90 = parse_decimal(cells[9])
+        total = parse_decimal(cells[10])
+    except ValueError as exc:
+        return None, str(exc)
+
+    days = parse_int(cells[11])
+    if days == 0 and invoice_date:
+        anchor = report_date or timezone.localdate()
+        days = max((anchor - invoice_date).days, 0)
+        if not report_date:
+            warnings.append("Report date missing; calculated days using upload date.")
+    elif not cells[11]:
+        warnings.append("Days column missing; calculated days if invoice date was available.")
+
+    return ParsedInvoiceRow(
+        source_row_number=row_number,
+        customer_code=customer_code.strip(),
+        customer_name=customer_name.strip(),
+        place=place.strip(),
+        bill_number=bill_number.strip(),
+        invoice_date=invoice_date,
+        amount=amount,
+        bucket_0_30=bucket_0_30,
+        bucket_30_60=bucket_30_60,
+        bucket_60_90=bucket_60_90,
+        bucket_over_90=bucket_over_90,
+        total=total,
+        days=days,
+        raw_data={
+            "source_row": row_number,
+            "metadata": row[:data_start],
+            "invoice": cells,
+            "trailing": row[data_start + 12 :],
+        },
+        warnings=warnings,
+    ), ""
+
+
+def parse_csv_rows(data):
+    text = data.decode("utf-8-sig", errors="replace")
+    return list(csv.reader(io.StringIO(text)))
+
+
+def parse_xlsx_rows(data):
+    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    rows = []
+    for sheet in workbook.worksheets:
+        for row in sheet.iter_rows(values_only=True):
+            rows.append(list(row))
+    return rows
+
+
+def parse_outstanding_upload(uploaded_file):
+    filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_OUTSTANDING_EXTENSIONS)
+    rows = parse_csv_rows(data) if extension == ".csv" else parse_xlsx_rows(data)
+    report_date = None
+    parsed_rows = []
+    warnings = []
+    skip_reasons = Counter()
+
+    for row_number, row in enumerate(rows, start=1):
+        if report_date is None:
+            report_date = parse_report_date(row)
+        parsed, reason = parse_invoice_row(row, row_number, report_date)
+        if parsed:
+            parsed_rows.append(parsed)
+        else:
+            skip_reasons[reason or "Skipped row."] += 1
+
+    if not parsed_rows:
+        raise ValidationError("No usable invoice rows were found in this file.")
+    if report_date is None:
+        report_date = timezone.localdate()
+        warnings.append("Report date was not found; upload date was used.")
+
+    for reason, count in skip_reasons.most_common(8):
+        if reason and reason not in {"Skipped non-invoice row.", "No invoice header/data section detected."}:
+            warnings.append(f"{count} rows skipped: {reason}")
+
+    return ParsedOutstanding(
+        filename=filename,
+        sha256=sha256,
+        size=len(data),
+        report_date=report_date,
+        rows=parsed_rows,
+        skipped_row_count=sum(skip_reasons.values()),
+        warnings=warnings,
+        parse_meta={
+            "extension": extension,
+            "total_input_rows": len(rows),
+            "skip_reasons": dict(skip_reasons.most_common(20)),
+        },
+    )
+
+
+def normalize_category(value):
+    text = normalize_customer_name(value)
+    return CATEGORY_VALUES.get(text, "unknown")
+
+
+def parse_category_upload(uploaded_file):
+    if not uploaded_file:
+        return None
+    filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_CATEGORY_EXTENSIONS)
+    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    entries = {}
+    warnings = []
+    sheet_meta = []
+
+    for sheet in workbook.worksheets:
+        rows = list(sheet.iter_rows(values_only=True))
+        header_row = None
+        name_index = None
+        category_index = None
+        for index, row in enumerate(rows[:30]):
+            normalized = [normalize_header(cell) for cell in row]
+            for col, header in enumerate(normalized):
+                if header in {"cust name", "customer name", "name", "party"}:
+                    name_index = col
+                if header in {"cat", "category", "type"}:
+                    category_index = col
+            if name_index is not None and category_index is not None:
+                header_row = index
+                break
+        if header_row is None:
+            sheet_meta.append({"sheet": sheet.title, "selected": False, "reason": "No customer/category header."})
+            continue
+        selected_count = 0
+        for row in rows[header_row + 1 :]:
+            name = row[name_index] if len(row) > name_index else ""
+            category = row[category_index] if len(row) > category_index else ""
+            normalized_name = normalize_customer_name(name)
+            normalized_category = normalize_category(category)
+            if not normalized_name:
+                continue
+            if normalized_category == "unknown":
+                warnings.append(f"Unknown category '{category}' for {name}.")
+            entries[normalized_name] = normalized_category
+            selected_count += 1
+        sheet_meta.append({"sheet": sheet.title, "selected": True, "header_row": header_row + 1, "rows": selected_count})
+
+    return ParsedCategoryMap(
+        filename=filename,
+        sha256=sha256,
+        entries=entries,
+        warnings=warnings[:50],
+        parse_meta={"sheets": sheet_meta, "entry_count": len(entries), "extension": extension},
+    )

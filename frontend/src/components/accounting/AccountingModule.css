@@ -1,0 +1,251 @@
+.accounting-module {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.accounting-header,
+.accounting-panel-heading,
+.accounting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.accounting-header h2,
+.accounting-panel h3,
+.accounting-detail h3 {
+  margin: 0;
+  color: #111827;
+}
+
+.accounting-header p,
+.accounting-panel p,
+.accounting-detail p {
+  margin: 4px 0 0;
+  color: #6b7280;
+}
+
+.accounting-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.accounting-panel,
+.accounting-detail {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.accounting-form {
+  display: grid;
+  gap: 12px;
+}
+
+.accounting-form label,
+.accounting-edit-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.accounting-form input,
+.accounting-form select,
+.accounting-edit-grid input,
+.accounting-edit-grid select,
+.accounting-edit-grid textarea,
+.accounting-filter-row input,
+.accounting-filter-row select {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #ffffff;
+  font: inherit;
+}
+
+.accounting-filter-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 160px 160px 160px;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.accounting-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.accounting-stat {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f9fafb;
+}
+
+.accounting-stat span {
+  display: block;
+  color: #0f766e;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.accounting-stat p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b7280;
+  text-transform: uppercase;
+}
+
+.accounting-table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.accounting-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 780px;
+}
+
+.accounting-table th,
+.accounting-table td {
+  border-bottom: 1px solid #e5e7eb;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 13px;
+}
+
+.accounting-table th {
+  background: #f9fafb;
+  color: #374151;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.accounting-table tr.active-row {
+  background: #ecfdf5;
+}
+
+.accounting-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.accounting-badge.due {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.accounting-badge.ready {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.accounting-badge.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.accounting-primary,
+.accounting-secondary,
+.accounting-danger {
+  border: 0;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.accounting-primary {
+  background: #0d9488;
+  color: #ffffff;
+}
+
+.accounting-secondary {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.accounting-danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.accounting-primary:disabled,
+.accounting-secondary:disabled,
+.accounting-danger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.accounting-notice {
+  border: 1px solid #99f6e4;
+  background: #ecfdf5;
+  color: #115e59;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.accounting-warning {
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.accounting-error {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.accounting-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.accounting-email-preview {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.accounting-muted {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+@media (max-width: 980px) {
+  .accounting-grid,
+  .accounting-filter-row,
+  .accounting-edit-grid {
+    grid-template-columns: 1fr;
+  }
+}

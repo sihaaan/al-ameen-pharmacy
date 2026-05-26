@@ -6,6 +6,7 @@ import axiosInstance from '../utils/axios';
 import ProductManagement from '../components/ProductManagement';
 import OrderManagement from '../components/OrderManagement';
 import QuotationModule from '../components/quotations/QuotationModule';
+import AccountingModule from '../components/accounting/AccountingModule';
 import '../styles/Dashboard.css';
 
 const AdminDashboard = () => {
@@ -20,6 +21,7 @@ const AdminDashboard = () => {
   });
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState('');
+  const canAccessAccounting = !!(user?.is_superuser || user?.can_access_accounting);
 
   // Check if user is admin
   useEffect(() => {
@@ -94,6 +96,14 @@ const AdminDashboard = () => {
         >
           Quotations
         </button>
+        {canAccessAccounting && (
+          <button
+            className={`tab-button ${activeTab === 'accounting' ? 'active' : ''}`}
+            onClick={() => setActiveTab('accounting')}
+          >
+            Accounting
+          </button>
+        )}
       </div>
 
       <div className="admin-content">
@@ -158,6 +168,15 @@ const AdminDashboard = () => {
                   <span>QT</span>
                   Manage Quotations
                 </button>
+                {canAccessAccounting && (
+                  <button
+                    className="action-button"
+                    onClick={() => setActiveTab('accounting')}
+                  >
+                    <span>AC</span>
+                    Prepare Statements
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -166,6 +185,10 @@ const AdminDashboard = () => {
         {activeTab === 'products' && <ProductManagement onUpdate={fetchStats} />}
         {activeTab === 'orders' && <OrderManagement onUpdate={fetchStats} />}
         {activeTab === 'quotations' && <QuotationModule />}
+        {activeTab === 'accounting' && canAccessAccounting && <AccountingModule />}
+        {activeTab === 'accounting' && !canAccessAccounting && (
+          <div className="admin-error">You do not have permission to access Accounting.</div>
+        )}
       </div>
     </div>
   );
