@@ -29,6 +29,17 @@ from .services import (
 )
 
 
+def chunked(items, size):
+    size = max(int(size or 1), 1)
+    for index in range(0, len(items), size):
+        yield index // size + 1, items[index : index + size]
+
+
+def write_statement_zip(archive, customers, style):
+    for customer in customers:
+        archive.writestr(statement_filename(customer, style=style), build_statement_pdf(customer, style=style))
+
+
 def validation_error_response(exc):
     message = getattr(exc, "messages", None)
     if message:
@@ -130,28 +141,31 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
         )
         if customer_ids:
             customers = customers.filter(id__in=customer_ids)
-        customer_count = customers.count()
-        sync_limit = int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
+        customers = list(customers)
+        customer_count = len(customers)
+        batch_size = int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
         if customer_count == 0:
             return Response({"detail": "No due, non-ignored customers are available for this ZIP."}, status=status.HTTP_400_BAD_REQUEST)
-        if customer_count > sync_limit:
-            return Response(
-                {
-                    "detail": (
-                        f"This ZIP would include {customer_count} statements and may take too long to prepare. "
-                        f"Select up to {sync_limit} customers, ignore customers that do not need statements, or download individual PDFs."
-                    ),
-                    "statement_count": customer_count,
-                    "sync_limit": sync_limit,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         buffer = BytesIO()
+        is_batched = not customer_ids and customer_count > batch_size
         with ZipFile(buffer, "w", ZIP_STORED) as archive:
-            for customer in customers:
-                archive.writestr(statement_filename(customer, style=style), build_statement_pdf(customer, style=style))
+            if is_batched:
+                for part_number, batch in chunked(customers, batch_size):
+                    part_buffer = BytesIO()
+                    with ZipFile(part_buffer, "w", ZIP_STORED) as part_archive:
+                        write_statement_zip(part_archive, batch, style)
+                    archive.writestr(
+                        f"accounting-statements-{style}-{import_record.id}-part-{part_number:03d}.zip",
+                        part_buffer.getvalue(),
+                    )
+            else:
+                write_statement_zip(archive, customers, style)
         response = HttpResponse(buffer.getvalue(), content_type="application/zip")
-        response["Content-Disposition"] = f'attachment; filename="accounting-statements-{style}-{import_record.id}.zip"'
+        suffix = "batched" if is_batched else "selected" if customer_ids else "all"
+        response["Content-Disposition"] = f'attachment; filename="accounting-statements-{style}-{import_record.id}-{suffix}.zip"'
+        response["X-Accounting-Zip-Batched"] = "true" if is_batched else "false"
+        response["X-Accounting-Statement-Count"] = str(customer_count)
+        response["X-Accounting-Zip-Batch-Size"] = str(batch_size)
         return response
 
 

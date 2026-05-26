@@ -301,7 +301,7 @@ const AccountingModule = () => {
   };
 
   const zipLimit = filteredImport?.zip_sync_limit || 75;
-  const largeZipGuarded = !!filteredImport && filteredImport.due_customer_count > zipLimit;
+  const largeZipBatched = !!filteredImport && filteredImport.due_customer_count > zipLimit;
   const visibleSelectableIds = customers.filter((customer) => customer.is_due && !customer.is_ignored).map((customer) => customer.id);
   const allVisibleSelected = visibleSelectableIds.length > 0 && visibleSelectableIds.every((id) => selectedCustomerIds.includes(id));
 
@@ -318,9 +318,11 @@ const AccountingModule = () => {
     setSelectedCustomerIds((current) => (
       current.includes(customer.id)
         ? current.filter((id) => id !== customer.id)
-        : [...current, customer.id]
+            : [...current, customer.id]
     ));
   };
+
+  const clearSelection = () => setSelectedCustomerIds([]);
 
   return (
     <div className="accounting-module">
@@ -331,11 +333,11 @@ const AccountingModule = () => {
         </div>
         {filteredImport && (
           <div className="accounting-actions">
-            <button type="button" className="accounting-primary" onClick={() => downloadZip('professional')} disabled={largeZipGuarded || downloading === 'zip-professional'}>
-              {downloading === 'zip-professional' ? 'Preparing ZIP...' : 'Download ZIP Professional'}
+            <button type="button" className="accounting-primary" onClick={() => downloadZip('professional')} disabled={downloading === 'zip-professional'}>
+              {downloading === 'zip-professional' ? 'Preparing all due...' : 'Download All Due - Professional'}
             </button>
-            <button type="button" className="accounting-secondary" onClick={() => downloadZip('classic')} disabled={largeZipGuarded || downloading === 'zip-classic'}>
-              ZIP Classic
+            <button type="button" className="accounting-secondary" onClick={() => downloadZip('classic')} disabled={downloading === 'zip-classic'}>
+              {downloading === 'zip-classic' ? 'Preparing...' : 'All Due - Classic'}
             </button>
           </div>
         )}
@@ -346,9 +348,9 @@ const AccountingModule = () => {
       </div>
       {notice && <div className="accounting-notice">{notice}</div>}
       {error && <div className="accounting-error">{error}</div>}
-      {largeZipGuarded && (
+      {largeZipBatched && (
         <div className="accounting-warning">
-          This import has {filteredImport.due_customer_count} due customers. Full ZIP generation is limited to {zipLimit} statements at a time so the request does not hang. Select rows below and use a selected ZIP download, or ignore customers that do not need statements.
+          This import has {filteredImport.due_customer_count} due customers. Full ZIP downloads are automatically split into batches of {zipLimit} statements inside one download. Use Ignore to exclude customers, or select visible rows for a smaller ZIP.
         </div>
       )}
 
@@ -459,6 +461,9 @@ const AccountingModule = () => {
           <button type="button" className="accounting-secondary" onClick={toggleVisibleSelection} disabled={visibleSelectableIds.length === 0}>
             {allVisibleSelected ? 'Clear Visible' : 'Select Visible'}
           </button>
+          <button type="button" className="accounting-secondary" onClick={clearSelection} disabled={selectedCustomerIds.length === 0}>
+            Clear Selection
+          </button>
           <button type="button" className="accounting-primary" onClick={() => downloadZip('professional', true)} disabled={selectedCustomerIds.length === 0 || downloading === 'zip-selected-professional'}>
             {downloading === 'zip-selected-professional' ? 'Preparing...' : 'Download Selected Professional ZIP'}
           </button>
@@ -568,6 +573,13 @@ const AccountingModule = () => {
               <button type="button" className="accounting-secondary" onClick={() => downloadStatement(selectedCustomer, 'classic')} disabled={downloading === `classic-${selectedCustomer.id}`}>
                 Download Classic PDF
               </button>
+            </div>
+
+            <div className="accounting-drawer-summary">
+              <div><span>Total Outstanding</span><strong>{formatMoney(selectedCustomer.total_outstanding)}</strong></div>
+              <div><span>Overdue &gt; 30 Days</span><strong>{formatMoney(selectedCustomer.overdue_amount)}</strong></div>
+              <div><span>Max Days</span><strong>{selectedCustomer.max_days}</strong></div>
+              <div><span>Email Status</span><strong>{selectedCustomer.email ? 'Ready' : 'Missing'}</strong></div>
             </div>
 
             <div className="accounting-edit-grid">

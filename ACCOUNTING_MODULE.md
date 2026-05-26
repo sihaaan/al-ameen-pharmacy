@@ -76,9 +76,9 @@ If `Days` is missing or invalid, the parser calculates days from invoice date to
 
 The parser splits raw POS bill numbers for display:
 
-- `570170-284750-0-` -> `Invoice No. 570170`, `LPO / Reference No. 284750-0-`
+- `570170-284750-0-` -> `Invoice No. 570170`, `LPO / Reference No. 284750-0`
 - `320815--` -> `Invoice No. 320815`, blank `LPO / Reference No.`
-- `571920-UA3IJ2-` -> `Invoice No. 571920`, `LPO / Reference No. UA3IJ2-`
+- `571920-UA3IJ2-` -> `Invoice No. 571920`, `LPO / Reference No. UA3IJ2`
 
 ## Statement Output
 
@@ -93,7 +93,7 @@ Both styles show customer-facing information only: branding/contact details, sta
 
 ZIP downloads default to the Professional style and include due, non-ignored customers from the selected import. The UI also offers a Classic ZIP download.
 
-Large imports are guarded in V1. Full ZIP generation is limited by `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default `75`) so the request does not sit silently for minutes or time out on Railway. For larger imports, staff can select visible due customers and download a selected Professional or Classic ZIP. Ignored customers are always excluded.
+Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default `75`) is used as the batch size. If an import has more due customers than the batch size, `Download All Due` returns one protected ZIP containing smaller part ZIPs, each with up to that many statement PDFs. This keeps the accountant's workflow close to one-click while avoiding a single huge flat archive. Staff can still select visible rows for a smaller selected ZIP, and ignored customers are always excluded.
 
 ## Security And Storage
 
@@ -115,7 +115,7 @@ Large imports are guarded in V1. Full ZIP generation is limited by `ACCOUNTING_S
 - AI parsing or fuzzy customer matching.
 - Accounting payment reconciliation.
 - Delete/retest import workflow.
-- Background/cached full-import ZIP generation for hundreds of customers.
+- Cached/background ZIP generation if full-import statement generation still feels too slow after batched ZIP output.
 
 ## Continuation Notes
 

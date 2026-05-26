@@ -181,13 +181,14 @@ def split_bill_reference(value):
     text = str(value or "").strip()
     if not text:
         return "", ""
-    match = re.match(r"^(\d{6})(?:-(.*))?$", text)
+    match = re.match(r"^(\d{6})(.*)$", text)
     if not match:
-        return text, ""
+        return re.sub(r"-+", "-", text).strip("- "), ""
     invoice_number = match.group(1)
     reference = (match.group(2) or "").strip()
-    if not reference or set(reference) <= {"-"}:
-        return invoice_number, ""
+    reference = re.sub(r"^-+", "", reference)
+    reference = re.sub(r"-+", "-", reference)
+    reference = reference.strip("- ")
     return invoice_number, reference
 
 
