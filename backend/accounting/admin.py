@@ -1,6 +1,70 @@
 from django.contrib import admin
+from django.contrib.admin.sites import NotRegistered
+from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.forms import UserChangeForm
+from django.contrib.auth.models import User
+from django import forms
 
 from .models import AccountCustomer, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
+from .permissions import set_user_accounting_access, user_has_accounting_access
+
+
+class AccountingUserChangeForm(UserChangeForm):
+    accounting_access = forms.BooleanField(
+        label="Accounting access",
+        required=False,
+        help_text=(
+            "Allows a staff user to open Admin -> Accounting and use protected "
+            "accounting APIs. Superusers always have access."
+        ),
+    )
+
+    class Meta(UserChangeForm.Meta):
+        model = User
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        user = self.instance
+        if user and user.pk:
+            self.fields["accounting_access"].initial = user_has_accounting_access(user)
+            if user.is_superuser:
+                self.fields["accounting_access"].initial = True
+                self.fields["accounting_access"].disabled = True
+
+
+class AccountingAccessUserAdmin(UserAdmin):
+    form = AccountingUserChangeForm
+    fieldsets = (
+        (None, {"fields": ("username", "password")}),
+        ("Personal info", {"fields": ("first_name", "last_name", "email")}),
+        (
+            "Permissions",
+            {
+                "fields": (
+                    "is_active",
+                    "is_staff",
+                    "is_superuser",
+                    "accounting_access",
+                    "groups",
+                    "user_permissions",
+                )
+            },
+        ),
+        ("Important dates", {"fields": ("last_login", "date_joined")}),
+    )
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        if "accounting_access" in form.cleaned_data and not form.instance.is_superuser:
+            set_user_accounting_access(form.instance, form.cleaned_data["accounting_access"])
+
+
+try:
+    admin.site.unregister(User)
+except NotRegistered:
+    pass
+admin.site.register(User, AccountingAccessUserAdmin)
 
 
 @admin.register(AccountCustomer)

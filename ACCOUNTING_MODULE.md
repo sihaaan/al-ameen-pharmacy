@@ -30,6 +30,8 @@ Accounting is separate from quotation access.
 - Staff users with `accounting.view_accounting_module` can access Accounting.
 - Normal staff without Accounting access cannot see the tab or use the API.
 - Anonymous users are blocked.
+- Django Admin user edit pages include an `Accounting access` checkbox. Checking it adds the user to the Accounting access path behind the scenes; unchecking it removes only Accounting-specific access and leaves unrelated groups/permissions alone.
+- Users still need `Staff status` to open the React Admin Dashboard. Superusers always have Accounting access regardless of the checkbox.
 
 Custom permissions:
 

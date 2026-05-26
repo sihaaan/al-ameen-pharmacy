@@ -11,6 +11,7 @@ from rest_framework.test import APITestCase
 
 from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
 from .parsers import parse_outstanding_upload
+from .permissions import accounting_permissions_queryset, set_user_accounting_access
 
 
 def make_agewise_row(code, party, bill_no, invoice_date, amount, b0, b30, b60, b90, total, days):
@@ -134,6 +135,55 @@ class AccountingAPITests(APITestCase):
         group_user.groups.add(group)
         self.client.force_authenticate(group_user)
         self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 200)
+
+    def test_accounting_access_toggle_manages_only_accounting_access(self):
+        user = User.objects.create_user(username="toggle_user", password="pass", is_staff=True)
+        unrelated_group = Group.objects.create(name="Inventory")
+        unrelated_permission = Permission.objects.filter(codename="view_user").first()
+        user.groups.add(unrelated_group)
+        if unrelated_permission:
+            user.user_permissions.add(unrelated_permission)
+
+        self.client.force_authenticate(user)
+        self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 403)
+
+        set_user_accounting_access(user, True)
+        user = User.objects.get(pk=user.pk)
+        self.client.force_authenticate(user)
+        self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 200)
+
+        set_user_accounting_access(user, False)
+        user = User.objects.get(pk=user.pk)
+        self.client.force_authenticate(user)
+        self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 403)
+        self.assertTrue(user.groups.filter(name="Inventory").exists())
+        if unrelated_permission:
+            self.assertTrue(user.user_permissions.filter(pk=unrelated_permission.pk).exists())
+        self.assertFalse(user.groups.filter(name="Accounting").exists())
+        self.assertFalse(user.user_permissions.filter(pk__in=accounting_permissions_queryset().values("pk")).exists())
+
+    def test_existing_permission_group_still_allows_accounting(self):
+        user = User.objects.create_user(username="custom_group_user", password="pass", is_staff=True)
+        group = Group.objects.create(name="Finance Team")
+        group.permissions.add(Permission.objects.get(codename="view_accounting_module", content_type__app_label="accounting"))
+        user.groups.add(group)
+        self.client.force_authenticate(User.objects.get(pk=user.pk))
+        self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 200)
+
+    def test_accounting_access_still_requires_staff_unless_superuser(self):
+        user = User.objects.create_user(username="nonstaff_accounting", password="pass", is_staff=False)
+        set_user_accounting_access(user, True)
+        self.client.force_authenticate(User.objects.get(pk=user.pk))
+        self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 403)
+
+        self.client.force_authenticate(self.superuser)
+        self.assertEqual(self.client.get(reverse("accounting-dashboard")).status_code, 200)
+
+    def test_django_user_admin_shows_accounting_access_checkbox(self):
+        self.client.force_login(self.superuser)
+        response = self.client.get(reverse("admin:auth_user_change", args=[self.staff.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Accounting access")
 
     def test_upload_groups_customers_matches_categories_and_persists_email(self):
         response = self.upload_import()

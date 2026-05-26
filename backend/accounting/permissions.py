@@ -1,7 +1,15 @@
+from django.contrib.auth.models import Group, Permission
 from rest_framework.permissions import BasePermission
 
 
 ACCOUNTING_GROUP_NAME = "Accounting"
+ACCOUNTING_PERMISSION_CODENAMES = {
+    "view_accounting_module",
+    "upload_accounting_statement",
+    "generate_accounting_statement",
+    "edit_accounting_customer",
+    "download_accounting_statement",
+}
 
 ACTION_PERMISSIONS = {
     "upload": "upload_accounting_statement",
@@ -10,6 +18,37 @@ ACTION_PERMISSIONS = {
     "statement_pdf": "download_accounting_statement",
     "statements_zip": "download_accounting_statement",
 }
+
+
+def accounting_permissions_queryset():
+    return Permission.objects.filter(
+        content_type__app_label="accounting",
+        codename__in=ACCOUNTING_PERMISSION_CODENAMES,
+    )
+
+
+def ensure_accounting_group():
+    group, _ = Group.objects.get_or_create(name=ACCOUNTING_GROUP_NAME)
+    permissions = list(accounting_permissions_queryset())
+    if permissions:
+        group.permissions.add(*permissions)
+    return group
+
+
+def set_user_accounting_access(user, enabled):
+    group = ensure_accounting_group()
+    if enabled:
+        user.groups.add(group)
+        return
+
+    user.groups.remove(group)
+    accounting_permissions = list(accounting_permissions_queryset())
+    if accounting_permissions:
+        user.user_permissions.remove(*accounting_permissions)
+
+    for cache_name in ("_perm_cache", "_user_perm_cache", "_group_perm_cache"):
+        if hasattr(user, cache_name):
+            delattr(user, cache_name)
 
 
 def user_has_accounting_access(user, codename="view_accounting_module"):
