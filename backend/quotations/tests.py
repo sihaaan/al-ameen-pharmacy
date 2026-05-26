@@ -14,7 +14,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -392,6 +392,57 @@ class InquiryImportTests(APITestCase):
             data = buffer.getvalue()
         return SimpleUploadedFile(name, data, content_type="application/pdf")
 
+    def make_material_description_pdf_upload(self, name="244047.pdf"):
+        buffer = BytesIO()
+        styles = getSampleStyleSheet()
+        document = SimpleDocTemplate(buffer, pagesize=A4)
+        metadata_table = Table(
+            [
+                ["DATE: 023/05/2026", ""],
+                [
+                    "From(Seller):\nAl Ameen Pharmacy LLC\nE-Mail: pharmacydxb@gmail.com",
+                    "To (The Buyer):\nKind Attn:\nTROJAN 244047",
+                ],
+            ],
+            colWidths=[250, 250],
+        )
+        rows = [
+            ["", "Tender No. : 244047", "", "", "", ""],
+            ["", "Material Description", "Req Quantity", "unit", "u price", "total"],
+            ["", "Deep Heat Spray 150ml", "5", "No", "12", "60"],
+            ["", "Band Aid waterproof -\nBrand : Broplast (1x100)", "5", "Boxes", "8", "40"],
+            ["", "Triangular Bandage", "30", "No", "3", "90"],
+            ["", "Hand wash Liquid Dettol\n200ml", "10", "No", "8", "80"],
+            ["", "Panadol Extra (1x48)", "5", "No", "30", "150"],
+        ]
+        continuation_rows = [
+            ["", "Face mask Earloop\n(1x50) (Surgical mask)\nBrand :Biogreen", "5", "Pkts", "6", "30"],
+            ["", "Alcohol swab (200/box)", "10", "No", "8", "80"],
+        ]
+        table_style = TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 1), (-1, 1), colors.lightgrey),
+                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+        first_table = Table(rows, colWidths=[22, 245, 76, 55, 55, 55])
+        first_table.setStyle(table_style)
+        continuation_table = Table(continuation_rows, colWidths=[22, 245, 76, 55, 55, 55])
+        continuation_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        document.build(
+            [
+                Paragraph("QUOTATION", styles["Title"]),
+                metadata_table,
+                Spacer(1, 14),
+                first_table,
+                PageBreak(),
+                continuation_table,
+            ]
+        )
+        return SimpleUploadedFile(name, buffer.getvalue(), content_type="application/pdf")
+
     def test_import_actions_are_staff_only(self):
         actions = [
             ("post", reverse("quotation-inquiry-parse-text"), {"raw_text": "Panadol 500mg - 10 boxes"}, "json"),
@@ -557,6 +608,71 @@ class InquiryImportTests(APITestCase):
         self.assertGreaterEqual(len(response.data["lines"]), 2)
         self.assertIn("Panadol 500mg", response.data["lines"][0]["raw_name"])
 
+    def test_pdf_material_description_table_splits_price_columns_and_skips_metadata(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_material_description_pdf_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["warnings"], [])
+        names = [line["raw_name"] for line in response.data["lines"]]
+        self.assertNotIn("DATE: 023/05/2026", names)
+        self.assertNotIn("Tender No.", names)
+        self.assertFalse(any("Material Description" in name for name in names))
+
+        first_line = response.data["lines"][0]
+        self.assertEqual(first_line["raw_name"], "Deep Heat Spray 150ml")
+        self.assertEqual(first_line["quantity"], "5")
+        self.assertEqual(first_line["unit"], "No")
+        self.assertEqual(first_line["unit_price"], "12")
+        self.assertEqual(first_line["line_total"], "60")
+        self.assertEqual(first_line["parse_status"], InquiryLine.PARSE_PARSED)
+
+        band_aid = response.data["lines"][1]
+        self.assertEqual(band_aid["raw_name"], "Band Aid waterproof - Brand : Broplast (1x100)")
+        self.assertEqual(band_aid["quantity"], "5")
+        self.assertEqual(band_aid["unit"], "Boxes")
+        self.assertEqual(band_aid["unit_price"], "8")
+        self.assertEqual(band_aid["line_total"], "40")
+
+        continuation = next(line for line in response.data["lines"] if line["raw_name"].startswith("Face mask Earloop"))
+        self.assertEqual(continuation["quantity"], "5")
+        self.assertEqual(continuation["unit_price"], "6")
+
+    def test_pasted_email_price_text_extracts_item_price_and_ambiguous_quantity(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-text"),
+            {
+                "raw_text": "\n".join(
+                    [
+                        "Electrorush 21gm sache for 1 Ltr solution",
+                        "1 box 10 sachets 50 box cartoon price : 375 per cartoon",
+                        "",
+                        "Zest Ors 21 gm sachet per for 1 Ltr solution, 25 sachet per box price 18 per box",
+                    ]
+                )
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["lines"]), 2)
+        electrorush = response.data["lines"][0]
+        self.assertEqual(electrorush["raw_name"], "Electrorush 21gm sache for 1 Ltr solution")
+        self.assertEqual(electrorush["quantity"], "50")
+        self.assertEqual(electrorush["unit"], "carton")
+        self.assertEqual(electrorush["unit_price"], "375")
+        self.assertIn("1 box 10 sachets", electrorush["notes"])
+
+        zest = response.data["lines"][1]
+        self.assertEqual(zest["raw_name"], "Zest Ors 21 gm sachet per for 1 Ltr solution")
+        self.assertIsNone(zest["quantity"])
+        self.assertEqual(zest["unit"], "box")
+        self.assertEqual(zest["unit_price"], "18")
+        self.assertEqual(zest["parse_status"], InquiryLine.PARSE_NEEDS_REVIEW)
+
     def test_pdf_no_selectable_text_returns_warning(self):
         response = self.client.post(
             reverse("quotation-inquiry-parse-file"),
@@ -685,6 +801,47 @@ class HistoricalPriceImportTests(APITestCase):
             data = buffer.getvalue()
         return SimpleUploadedFile(name, data, content_type="application/pdf")
 
+    def make_material_description_historical_pdf_upload(self, name="244047.pdf"):
+        buffer = BytesIO()
+        styles = getSampleStyleSheet()
+        document = SimpleDocTemplate(buffer, pagesize=A4)
+        rows = [
+            ["", "Tender No. : 244047", "", "", "", ""],
+            ["", "Material Description", "Req Quantity", "unit", "u price", "total"],
+            ["", "Deep Heat Spray 150ml", "5", "No", "12", "60"],
+            ["", "Band Aid waterproof -\nBrand : Broplast (1x100)", "5", "Boxes", "8", "40"],
+            ["", "Triangular Bandage", "30", "No", "3", "90"],
+            ["", "Hand wash Liquid Dettol\n200ml", "10", "No", "8", "80"],
+            ["", "Panadol Extra (1x48)", "5", "No", "30", "150"],
+        ]
+        continuation_rows = [
+            ["", "Face mask Earloop\n(1x50) (Surgical mask)\nBrand :Biogreen", "5", "Pkts", "6", "30"],
+            ["", "Alcohol swab (200/box)", "10", "No", "8", "80"],
+        ]
+        table_style = TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 1), (-1, 1), colors.lightgrey),
+                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+        first_table = Table(rows, colWidths=[22, 245, 76, 55, 55, 55])
+        first_table.setStyle(table_style)
+        continuation_table = Table(continuation_rows, colWidths=[22, 245, 76, 55, 55, 55])
+        continuation_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        document.build(
+            [
+                Paragraph("QUOTATION", styles["Title"]),
+                Paragraph("DATE: 023/05/2026", styles["Normal"]),
+                Spacer(1, 12),
+                first_table,
+                PageBreak(),
+                continuation_table,
+            ]
+        )
+        return SimpleUploadedFile(name, buffer.getvalue(), content_type="application/pdf")
+
     def parse_historical_import(self):
         return self.client.post(
             reverse("quotation-historical-import-parse-file"),
@@ -739,6 +896,34 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(first_line["quantity"], "1.000")
         self.assertEqual(first_line["unit_price"], "5.00")
         self.assertEqual(first_line["status"], HistoricalPriceImportLine.STATUS_NEEDS_REVIEW)
+
+    def test_historical_pdf_material_description_table_parses_price_rows(self):
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                response = self.client.post(
+                    reverse("quotation-historical-import-parse-file"),
+                    {"file": self.make_material_description_historical_pdf_upload()},
+                    format="multipart",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["document_number"], "244047")
+        self.assertEqual(response.data["document_date"], "2026-05-23")
+        self.assertEqual(len(response.data["lines"]), 7)
+
+        first_line = response.data["lines"][0]
+        self.assertEqual(first_line["item_name"], "Deep Heat Spray 150ml")
+        self.assertEqual(first_line["quantity"], "5.000")
+        self.assertEqual(first_line["unit"], "No")
+        self.assertEqual(first_line["unit_price"], "12.00")
+        self.assertEqual(first_line["line_total"], "60.00")
+
+        band_aid = response.data["lines"][1]
+        self.assertEqual(band_aid["item_name"], "Band Aid waterproof - Brand : Broplast (1x100)")
+        self.assertEqual(band_aid["quantity"], "5.000")
+        self.assertEqual(band_aid["unit"], "Boxes")
+        self.assertEqual(band_aid["unit_price"], "8.00")
+        self.assertEqual(band_aid["line_total"], "40.00")
 
     def test_historical_import_commit_appends_price_history_and_hides_backfill_quote(self):
         response = self.create_parsed_historical_import()

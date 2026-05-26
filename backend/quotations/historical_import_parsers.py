@@ -19,13 +19,13 @@ HISTORICAL_PARSE_METHOD = "al_ameen_pdf_price_table_v1"
 
 HEADER_ALIASES = {
     "serial_no": {"sn", "s n", "sl no", "sr no", "serial", "serial no", "#"},
-    "item_name": {"item description", "description", "item", "items", "particulars"},
+    "item_name": {"material description", "item description", "description", "item", "items", "particulars"},
     "unit": {"uom", "unit", "u o m"},
-    "quantity": {"qty", "quantity", "qnty"},
-    "unit_price": {"u p", "up", "u/p", "unit price", "rate", "price"},
-    "amount": {"amount", "subtotal", "value"},
+    "quantity": {"qty", "quantity", "qnty", "req quantity", "requested quantity", "required quantity"},
+    "unit_price": {"u p", "up", "u/p", "u price", "unit price", "rate", "price"},
+    "amount": {"amount", "net price", "subtotal", "value"},
     "vat_amount": {"vat", "vat amount"},
-    "line_total": {"total", "net total", "gross total"},
+    "line_total": {"g total", "grand total", "total", "net total", "gross total"},
 }
 
 UNIT_WORD_SET = {unit.lower().rstrip(".") for unit in UNIT_WORDS}
@@ -205,18 +205,25 @@ def _extract_pdf_text(data):
 
 def _extract_document_number(text):
     match = re.search(r"\b(QUOTATION\s*[-:]\s*[A-Z0-9/-]+)", text or "", re.IGNORECASE)
-    if not match:
-        return ""
-    return re.sub(r"\s+", "", match.group(1)).replace(":", "-").upper()
+    if match:
+        return re.sub(r"\s+", "", match.group(1)).replace(":", "-").upper()
+    match = re.search(r"\b(?:Tender\s+No\.?|Tender\s+Number)\s*:?\s*([A-Z0-9/-]+)", text or "", re.IGNORECASE)
+    if match:
+        return normalize_import_line(match.group(1)).upper()
+    return ""
 
 
 def _extract_document_date(text):
-    match = re.search(r"\bDATE\s*:?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})", text or "", re.IGNORECASE)
+    match = re.search(r"\bDATE\s*:?\s*(\d{1,3}[/-]\d{1,2}[/-]\d{4})", text or "", re.IGNORECASE)
     if not match:
         return None
+    raw_date = match.group(1)
+    date_parts = re.split(r"([/-])", raw_date, maxsplit=1)
+    if date_parts and date_parts[0].isdigit() and len(date_parts[0]) > 2:
+        raw_date = str(int(date_parts[0])) + "".join(date_parts[1:])
     for date_format in ("%d/%m/%Y", "%d-%m-%Y"):
         try:
-            return datetime.strptime(match.group(1), date_format).date()
+            return datetime.strptime(raw_date, date_format).date()
         except ValueError:
             continue
     return None

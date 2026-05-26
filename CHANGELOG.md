@@ -61,6 +61,8 @@
 - Added safe archive-on-delete behavior for Products used by quotations, company price history, aliases, carts, or orders.
 - Referenced quotation companies are deactivated instead of destructively deleted.
 - Prevented accidental duplicate historical import staging from exact same-file uploads while keeping row-level commit idempotency as a second safety net.
+- Improved quotation/LPO PDF and pasted-text parsing so real table columns like `Material Description`, `Req Quantity`, `unit`, `u price`, and `total` are mapped into item, quantity, unit, price, and total fields instead of being folded into the item name.
+- Skipped common quotation PDF metadata/header/footer rows such as date, seller/buyer blocks, tender numbers, table headers, contact text, and totals from inquiry import item rows.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.

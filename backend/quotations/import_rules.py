@@ -51,6 +51,8 @@ UNIT_WORDS = [
     "nos",
     "number",
     "numbers",
+    "cartoon",
+    "cartoons",
 ]
 UNIT_PATTERN = r"(?:{})".format("|".join(re.escape(unit) for unit in sorted(UNIT_WORDS, key=len, reverse=True)))
 
@@ -71,6 +73,7 @@ HEADER_ALIASES = {
         "item name",
         "items",
         "material",
+        "material description",
         "medicine",
         "particulars",
         "product",
@@ -81,6 +84,7 @@ HEADER_ALIASES = {
         "qnty",
         "qty",
         "quantity",
+        "req quantity",
         "requested qty",
         "requested quantity",
         "required qty",
@@ -91,6 +95,32 @@ HEADER_ALIASES = {
         "unit",
         "uom",
     },
+    "unit_price": {
+        "rate",
+        "price",
+        "u p",
+        "up",
+        "u price",
+        "u/p",
+        "unit price",
+    },
+    "amount": {
+        "amount",
+        "net price",
+        "subtotal",
+        "value",
+    },
+    "vat_amount": {
+        "vat",
+        "vat amount",
+    },
+    "line_total": {
+        "g total",
+        "grand total",
+        "gross total",
+        "net total",
+        "total",
+    },
 }
 
 HEADER_ROLE_LABELS = {
@@ -98,18 +128,36 @@ HEADER_ROLE_LABELS = {
     "requested_item_name": "Item",
     "quantity": "Quantity",
     "unit": "Unit",
+    "unit_price": "Unit Price",
+    "amount": "Amount",
+    "vat_amount": "VAT",
+    "line_total": "Total",
 }
 
 NOISE_PATTERNS = [
     re.compile(r"^\s*$"),
     re.compile(r"^\s*(page|p\.)\s*\d+(\s+of\s+\d+)?\s*$", re.IGNORECASE),
     re.compile(r"^\s*(quotation|quote|inquiry|lpo|local purchase order)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(date|tender no|tender number|quote no|quotation no)\s*:?\s*[-\w/ .]*$", re.IGNORECASE),
+    re.compile(r"^\s*(from\s*\(?seller\)?|to\s*\(?the buyer\)?|kind attn|buyer|seller)\b", re.IGNORECASE),
+    re.compile(r"^\s*(tel|fax|e-?mail|email|p\s*o\s*box|website|www\.|https?://)\b", re.IGNORECASE),
+    re.compile(r"^\s*[\w.+-]+@[\w.-]+\.\w+\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(procurement officer|procurement|contact person|yours truly|for al ameen)\b", re.IGNORECASE),
     re.compile(r"^\s*(subtotal|total|vat|amount|grand total)\b", re.IGNORECASE),
     re.compile(r"^\s*(prepared by|approved by|signature|stamp)\b", re.IGNORECASE),
 ]
 
 SERIAL_PREFIX_RE = re.compile(r"^\s*(?P<serial>\d{1,5})(?:\s*[\).\-/|:]\s*|\s+)(?P<rest>.+)$")
 PUNCT_NOISE_TRANS = str.maketrans({char: " " for char in string.punctuation if char not in {"/", "#"}})
+PRICE_RE = re.compile(
+    rf"\bprice\s*:?\s*(?P<price>\d+(?:[.,]\d+)?)\s*(?:per\s+(?P<unit>{UNIT_PATTERN}))?",
+    re.IGNORECASE,
+)
+TERMINAL_PRICE_ROW_RE = re.compile(
+    rf"^(?P<name>.+?)\s+(?P<qty>\d+(?:[.,]\d+)?)\s+(?P<unit>{UNIT_PATTERN})\s+"
+    r"(?P<unit_price>\d+(?:[.,]\d+)?)\s+(?P<total>\d+(?:[.,]\d+)?)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -132,6 +180,14 @@ def normalize_header(value):
     value = re.sub(r"[:|]+", " ", value)
     value = value.translate(PUNCT_NOISE_TRANS)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def normalize_unit(value):
+    unit = normalize_import_line(value)
+    lowered = unit.lower().rstrip(".")
+    if lowered in {"cartoon", "cartoons"}:
+        return "carton"
+    return unit[:50]
 
 
 def _cell_text(value):
@@ -201,7 +257,9 @@ def _row_roles(row):
 
 def is_header_like_row(row):
     roles, _ = _row_roles(row)
-    return "requested_item_name" in roles and bool({"quantity", "unit", "serial_no"} & set(roles))
+    return "requested_item_name" in roles and bool(
+        {"quantity", "unit", "serial_no", "unit_price", "amount", "vat_amount", "line_total"} & set(roles)
+    )
 
 
 def parse_decimal(value):
@@ -232,7 +290,7 @@ def decimal_to_preview(value):
 
 def split_quantity_unit(quantity_value, unit_value=""):
     quantity_text = _cell_text(quantity_value)
-    unit_text = _cell_text(unit_value)[:50]
+    unit_text = normalize_unit(_cell_text(unit_value))
     quantity = parse_decimal(quantity_text)
 
     if quantity is not None and unit_text:
@@ -245,11 +303,11 @@ def split_quantity_unit(quantity_value, unit_value=""):
     for pattern in patterns:
         match = pattern.search(quantity_text)
         if match:
-            return parse_decimal(match.group("qty")), normalize_import_line(match.group("unit"))[:50]
+            return parse_decimal(match.group("qty")), normalize_unit(match.group("unit"))
 
     unit_match = re.search(rf"\b(?P<unit>{UNIT_PATTERN})\b", unit_text, re.IGNORECASE)
     if quantity is not None and unit_match:
-        return quantity, normalize_import_line(unit_match.group("unit"))[:50]
+        return quantity, normalize_unit(unit_match.group("unit"))
 
     return quantity, unit_text
 
@@ -279,6 +337,8 @@ def _data_row_score(row, columns):
     item_index = columns.get("requested_item_name")
     quantity_index = columns.get("quantity")
     unit_index = columns.get("unit")
+    unit_price_index = columns.get("unit_price")
+    total_index = columns.get("line_total")
     if item_index is None or item_index >= len(row):
         return 0
     item = clean_item_name(_cell_text(row[item_index]))
@@ -292,6 +352,12 @@ def _data_row_score(row, columns):
         score += 1
     if unit:
         score += 0.5
+    unit_price_value = _cell_text(row[unit_price_index]) if unit_price_index is not None and unit_price_index < len(row) else ""
+    total_value = _cell_text(row[total_index]) if total_index is not None and total_index < len(row) else ""
+    if parse_decimal(unit_price_value) is not None:
+        score += 0.75
+    if parse_decimal(total_value) is not None:
+        score += 0.75
     return score
 
 
@@ -303,7 +369,7 @@ def detect_header_row(rows, *, start_row_number=1, max_scan_rows=20):
         roles, labels = _row_roles(row)
         if "requested_item_name" not in roles:
             continue
-        if not bool({"quantity", "unit", "serial_no"} & set(roles)):
+        if not bool({"quantity", "unit", "serial_no", "unit_price", "amount", "vat_amount", "line_total"} & set(roles)):
             continue
 
         base_score = 0
@@ -314,6 +380,14 @@ def detect_header_row(rows, *, start_row_number=1, max_scan_rows=20):
         if "quantity" in roles:
             base_score += 3
         if "unit" in roles:
+            base_score += 2
+        if "unit_price" in roles:
+            base_score += 2
+        if "amount" in roles:
+            base_score += 1
+        if "vat_amount" in roles:
+            base_score += 1
+        if "line_total" in roles:
             base_score += 2
 
         lookahead = rows[offset + 1 : offset + 6]
@@ -387,6 +461,35 @@ def make_preview_line(
     return payload
 
 
+def _money_note(label, value):
+    preview = decimal_to_preview(value)
+    return f"{label}: {preview}" if preview is not None else ""
+
+
+def _price_notes(*, unit_price=None, amount=None, vat_amount=None, line_total=None, price_unit="", pack_info=""):
+    notes = []
+    if unit_price is not None:
+        price_text = _money_note("Unit price", unit_price)
+        if price_text and price_unit:
+            price_text = f"{price_text} per {price_unit}"
+        if price_text:
+            notes.append(price_text)
+    for label, value in [("Amount", amount), ("VAT", vat_amount), ("Total", line_total)]:
+        note = _money_note(label, value)
+        if note:
+            notes.append(note)
+    if pack_info:
+        notes.append(f"Pack info: {pack_info}")
+    return "; ".join(notes)
+
+
+def _cell_by_role(row, columns, role):
+    index = columns.get(role)
+    if index is None or index >= len(row):
+        return ""
+    return _cell_text(row[index])
+
+
 def parse_structured_row(row, header, *, source_sheet="", source_row=None, source_page=None, base_confidence=0.85):
     raw_line = row_to_text(row)
     if not raw_line or is_title_row(row) or is_header_like_row(row):
@@ -405,11 +508,14 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
     serial_index = columns.get("serial_no")
     serial_no = _cell_text(row[serial_index]) if serial_index is not None and serial_index < len(row) else serial_from_item
 
-    quantity_index = columns.get("quantity")
-    unit_index = columns.get("unit")
-    quantity_value = _cell_text(row[quantity_index]) if quantity_index is not None and quantity_index < len(row) else ""
-    unit_value = _cell_text(row[unit_index]) if unit_index is not None and unit_index < len(row) else ""
+    quantity_value = _cell_by_role(row, columns, "quantity")
+    unit_value = _cell_by_role(row, columns, "unit")
     quantity, unit = split_quantity_unit(quantity_value, unit_value)
+    unit = normalize_unit(unit)
+    unit_price = parse_decimal(_cell_by_role(row, columns, "unit_price"))
+    amount = parse_decimal(_cell_by_role(row, columns, "amount"))
+    vat_amount = parse_decimal(_cell_by_role(row, columns, "vat_amount"))
+    line_total = parse_decimal(_cell_by_role(row, columns, "line_total"))
 
     confidence = float(base_confidence)
     if header and header.data_score:
@@ -417,6 +523,10 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
     if quantity is not None and unit:
         confidence += 0.05
     if stripped_serial or serial_no:
+        confidence += 0.03
+    if unit_price is not None:
+        confidence += 0.03
+    if line_total is not None:
         confidence += 0.03
     if quantity is None:
         confidence -= 0.10
@@ -432,8 +542,13 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         raw_name=item_name,
         quantity=quantity,
         unit=unit,
+        notes=_price_notes(unit_price=unit_price, amount=amount, vat_amount=vat_amount, line_total=line_total),
         parse_status=confidence_status(confidence),
         parse_confidence=confidence,
+        unit_price=decimal_to_preview(unit_price),
+        amount=decimal_to_preview(amount),
+        vat_amount=decimal_to_preview(vat_amount),
+        line_total=decimal_to_preview(line_total),
         source_sheet=source_sheet,
         sheet_name=source_sheet,
         source_row=source_row,
@@ -442,6 +557,123 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         page_number=source_page,
         serial_no=serial_no,
     ), None
+
+
+def _find_quantity_before_price(before_price, price_unit=""):
+    text = normalize_import_line(before_price)
+    if not text:
+        return None, normalize_unit(price_unit), ""
+    unit_pattern = UNIT_PATTERN
+    candidates = list(re.finditer(rf"\b(?P<qty>\d+(?:[.,]\d+)?)\s+(?P<context>(?:\w+\s+){{0,3}}?)(?P<unit>{unit_pattern})\b", text, re.IGNORECASE))
+    if price_unit:
+        normalized_price_unit = normalize_unit(price_unit)
+        matching = [
+            candidate
+            for candidate in candidates
+            if normalize_unit(candidate.group("unit")).lower() == normalized_price_unit.lower()
+            and "per" not in normalize_import_line(candidate.group("context")).lower().split()
+        ]
+        if matching:
+            chosen = matching[-1]
+            pack_info = normalize_import_line(text[: chosen.start()])
+            return parse_decimal(chosen.group("qty")), normalized_price_unit, pack_info
+        pack_pattern = re.compile(rf"\b\d+(?:[.,]\d+)?\s+{UNIT_PATTERN}\s+per\s+{re.escape(price_unit)}\b", re.IGNORECASE)
+        pack_matches = list(pack_pattern.finditer(text))
+        if pack_matches:
+            return None, normalized_price_unit, normalize_import_line(pack_matches[-1].group(0))
+        trailing_qty = list(re.finditer(r"\b(?P<qty>\d+(?:[.,]\d+)?)\b", text))
+        if trailing_qty:
+            chosen = trailing_qty[-1]
+            pack_info = normalize_import_line(text[: chosen.start()])
+            return parse_decimal(chosen.group("qty")), normalized_price_unit, pack_info
+        return None, normalized_price_unit, text
+    if candidates:
+        chosen = candidates[-1]
+        pack_info = normalize_import_line(text[: chosen.start()])
+        return parse_decimal(chosen.group("qty")), normalize_unit(chosen.group("unit")), pack_info
+    return None, "", text
+
+
+def _parse_price_rich_line(stripped, raw_line, *, base_confidence=0.55, serial_no="", stripped_serial=False, **source_meta):
+    price_match = PRICE_RE.search(stripped)
+    if not price_match:
+        terminal_match = TERMINAL_PRICE_ROW_RE.match(stripped)
+        if not terminal_match:
+            return None
+        quantity, unit = split_quantity_unit(terminal_match.group("qty"), terminal_match.group("unit"))
+        unit_price = parse_decimal(terminal_match.group("unit_price"))
+        line_total = parse_decimal(terminal_match.group("total"))
+        confidence = 0.82
+        if quantity is not None and unit and unit_price is not None and line_total is not None:
+            confidence += 0.08
+        return make_preview_line(
+            raw_line=raw_line,
+            raw_name=terminal_match.group("name"),
+            quantity=quantity,
+            unit=unit,
+            notes=_price_notes(unit_price=unit_price, line_total=line_total),
+            parse_status=confidence_status(confidence),
+            parse_confidence=min(confidence, 0.95),
+            unit_price=decimal_to_preview(unit_price),
+            line_total=decimal_to_preview(line_total),
+            serial_no=serial_no,
+            **source_meta,
+        )
+
+    before_price = normalize_import_line(stripped[: price_match.start()].rstrip(" ,;:-"))
+    unit_price = parse_decimal(price_match.group("price"))
+    price_unit = normalize_unit(price_match.group("unit") or "")
+    quantity, unit, pack_info = _find_quantity_before_price(before_price, price_unit)
+
+    name = before_price
+    if pack_info and quantity is not None:
+        name = pack_info
+    name = re.sub(rf"[,;]?\s*\d+(?:[.,]\d+)?\s+{UNIT_PATTERN}\s+per\s+{UNIT_PATTERN}\s*$", "", name, flags=re.IGNORECASE)
+    name = re.sub(rf"[,;]?\s*\d+(?:[.,]\d+)?\s+{UNIT_PATTERN}\s*$", "", name, flags=re.IGNORECASE)
+    name = normalize_import_line(name.rstrip(" ,;:-"))
+
+    confidence = max(base_confidence, 0.62)
+    if unit_price is not None:
+        confidence += 0.08
+    if quantity is not None and unit:
+        confidence += 0.12
+    else:
+        confidence -= 0.05
+    if stripped_serial:
+        confidence += 0.03
+
+    return make_preview_line(
+        raw_line=raw_line,
+        raw_name=name or before_price or stripped,
+        quantity=quantity,
+        unit=unit,
+        notes=_price_notes(unit_price=unit_price, price_unit=price_unit or unit, pack_info=pack_info if pack_info != name else ""),
+        parse_status=confidence_status(confidence),
+        parse_confidence=min(confidence, 0.90),
+        unit_price=decimal_to_preview(unit_price),
+        price_unit=price_unit or unit,
+        serial_no=serial_no,
+        **source_meta,
+    )
+
+
+def parse_inquiry_paragraph(raw_lines, *, base_confidence=0.55, **source_meta):
+    normalized_lines = [normalize_import_line(line) for line in raw_lines if normalize_import_line(line)]
+    if not normalized_lines:
+        return None
+    paragraph = normalize_import_line(" ".join(normalized_lines))
+    if not PRICE_RE.search(paragraph):
+        return parse_inquiry_line(paragraph, base_confidence=base_confidence, **source_meta)
+
+    first_line = normalized_lines[0]
+    if len(normalized_lines) > 1 and not PRICE_RE.search(first_line):
+        details = normalize_import_line(" ".join(normalized_lines[1:]))
+        parsed = _parse_price_rich_line(details, paragraph, base_confidence=base_confidence, **source_meta)
+        if parsed:
+            parsed["raw_name"] = clean_item_name(first_line)
+            parsed["requested_item_name"] = parsed["raw_name"]
+        return parsed
+    return _parse_price_rich_line(paragraph, paragraph, base_confidence=base_confidence, **source_meta)
 
 
 def parse_inquiry_line(raw_line, *, base_confidence=0.55, **source_meta):
@@ -454,6 +686,17 @@ def parse_inquiry_line(raw_line, *, base_confidence=0.55, **source_meta):
     stripped, serial_no, stripped_serial = strip_serial_prefix(raw_line)
     if _looks_like_request_title(stripped):
         return None
+
+    price_parsed = _parse_price_rich_line(
+        stripped,
+        raw_line,
+        base_confidence=base_confidence,
+        serial_no=serial_no,
+        stripped_serial=stripped_serial,
+        **source_meta,
+    )
+    if price_parsed:
+        return price_parsed
 
     patterns = [
         (
@@ -519,22 +762,47 @@ def parse_inquiry_line(raw_line, *, base_confidence=0.55, **source_meta):
 def parse_text_lines(raw_text, **source_meta):
     lines = []
     skipped = 0
+    paragraph = []
+    paragraph_start = 1
+
+    def flush_paragraph():
+        nonlocal paragraph, paragraph_start, skipped
+        if not paragraph:
+            return
+        if len(paragraph) > 1 and any(PRICE_RE.search(line) for line in paragraph):
+            parsed = parse_inquiry_paragraph(paragraph, source_line=paragraph_start, row_number=paragraph_start, **source_meta)
+            if parsed:
+                lines.append(parsed)
+            else:
+                skipped += len(paragraph)
+            paragraph = []
+            return
+        for local_offset, paragraph_line in enumerate(paragraph):
+            parsed = parse_inquiry_line(paragraph_line, source_line=paragraph_start + local_offset, row_number=paragraph_start + local_offset, **source_meta)
+            if parsed:
+                lines.append(parsed)
+            else:
+                skipped += 1
+        paragraph = []
+
     for index, raw_line in enumerate(str(raw_text or "").splitlines(), start=1):
         normalized = normalize_import_line(raw_line)
         if not normalized:
+            flush_paragraph()
             continue
         if is_noise_line(normalized) or _looks_like_request_title(normalized):
+            flush_paragraph()
             skipped += 1
             continue
         cells = [part.strip() for part in re.split(r"\s*\|\s*", normalized)]
         if len(cells) > 1 and is_header_like_row(cells):
+            flush_paragraph()
             skipped += 1
             continue
-        parsed = parse_inquiry_line(normalized, source_line=index, row_number=index, **source_meta)
-        if parsed:
-            lines.append(parsed)
-        else:
-            skipped += 1
+        if not paragraph:
+            paragraph_start = index
+        paragraph.append(normalized)
+    flush_paragraph()
     return lines, skipped
 
 

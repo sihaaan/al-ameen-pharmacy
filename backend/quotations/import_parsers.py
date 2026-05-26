@@ -1,4 +1,5 @@
 import hashlib
+import re
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -28,6 +29,7 @@ from .import_rules import (
     parse_structured_row,
     parse_text_lines,
     row_to_text,
+    is_noise_line,
     summarize_lines,
 )
 from .ocr import OCRProviderUnavailable, get_ocr_provider
@@ -437,11 +439,36 @@ def _extract_pymupdf_text(data):
     return text_chunks, page_metadata
 
 
+def _looks_like_pdf_metadata_table(rows):
+    if not rows or len(rows) > 8:
+        return False
+    texts = [row_to_text(row) for _, row in rows]
+    texts = [text for text in texts if text]
+    if not texts:
+        return True
+    if any(re.search(r"\b(qty|quantity|req quantity|u\s*price|unit price|total|amount)\b", text, re.IGNORECASE) for text in texts):
+        return False
+    metadata_hits = 0
+    for text in texts:
+        if is_noise_line(text):
+            metadata_hits += 1
+        elif re.search(r"^[\w.+-]+@[\w.-]+\.\w+$", text, re.IGNORECASE):
+            metadata_hits += 1
+        elif re.search(r"^[\w.-]+\.(com|ae|net|org)$", text, re.IGNORECASE):
+            metadata_hits += 1
+        elif re.search(r"\b(procurement|officer|manager|buyer|seller|contact)\b", text, re.IGNORECASE):
+            metadata_hits += 1
+        elif len(text.split()) <= 4 and not re.search(r"\d", text):
+            metadata_hits += 1
+    return metadata_hits >= max(1, len(texts) - 1)
+
+
 def _parse_pdfplumber_tables(data):
     lines = []
     page_metadata = []
     table_rows_seen = 0
     skipped_count = 0
+    current_header = None
     with pdfplumber.open(BytesIO(data)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
             page_tables_seen = 0
@@ -451,6 +478,7 @@ def _parse_pdfplumber_tables(data):
                 rows = [(index + 1, tuple(row or [])) for index, row in enumerate(table)]
                 header = detect_header_row([row for _, row in rows], max_scan_rows=10)
                 if header and header.data_score > 0:
+                    current_header = header
                     for row_number, row in rows[header.row_offset + 1 :]:
                         parsed, skipped_reason = parse_structured_row(
                             row,
@@ -463,7 +491,23 @@ def _parse_pdfplumber_tables(data):
                             lines.append(parsed)
                         elif skipped_reason:
                             skipped_count += 1
+                elif current_header and rows and len(rows[0][1]) >= max(current_header.columns.values(), default=0) + 1:
+                    for row_number, row in rows:
+                        parsed, skipped_reason = parse_structured_row(
+                            row,
+                            current_header,
+                            source_page=page_index,
+                            source_row=row_number,
+                            base_confidence=0.78,
+                        )
+                        if parsed:
+                            lines.append(parsed)
+                        elif skipped_reason:
+                            skipped_count += 1
                 else:
+                    if _looks_like_pdf_metadata_table(rows):
+                        skipped_count += len(rows)
+                        continue
                     for row_number, row in rows:
                         raw_line = row_to_text(row)
                         if not raw_line:

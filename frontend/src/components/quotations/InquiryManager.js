@@ -548,6 +548,9 @@ const InquiryManager = ({ onOpenQuote }) => {
                               {line.row_number && <span>Row: {line.row_number}</span>}
                               {line.page_number && <span>Page: {line.page_number}</span>}
                               {line.serial_no && <span>Serial: {line.serial_no}</span>}
+                              {line.unit_price && <span>Unit price: {line.unit_price}</span>}
+                              {line.line_total && <span>Total: {line.line_total}</span>}
+                              {line.notes && <span>Notes: {line.notes}</span>}
                             </div>
                           </td>
                         </tr>
