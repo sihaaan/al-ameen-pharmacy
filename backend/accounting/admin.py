@@ -81,6 +81,8 @@ class AccountingInvoiceRowInline(admin.TabularInline):
     readonly_fields = (
         "source_row_number",
         "bill_number",
+        "invoice_number",
+        "lpo_reference",
         "invoice_date",
         "amount",
         "bucket_0_30",
@@ -131,6 +133,6 @@ class AccountingImportAdmin(admin.ModelAdmin):
 
 @admin.register(AccountingInvoiceRow)
 class AccountingInvoiceRowAdmin(admin.ModelAdmin):
-    list_display = ("customer_name", "bill_number", "invoice_date", "total", "days")
+    list_display = ("customer_name", "invoice_number", "lpo_reference", "bill_number", "invoice_date", "total", "days")
     list_filter = ("invoice_date",)
-    search_fields = ("customer_name", "customer_code", "bill_number")
+    search_fields = ("customer_name", "customer_code", "bill_number", "invoice_number", "lpo_reference")

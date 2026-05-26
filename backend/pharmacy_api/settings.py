@@ -190,6 +190,7 @@ QUOTATION_AI_PARSE_TIMEOUT_SECONDS = int(os.environ.get("QUOTATION_AI_PARSE_TIME
 
 # ---- accounting overdue statement imports ----
 ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT = int(os.environ.get("ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", "75"))
 
 # ---- Cloudinary Configuration (Cloud Image Storage) ----
 # Images will be stored on Cloudinary CDN instead of local filesystem

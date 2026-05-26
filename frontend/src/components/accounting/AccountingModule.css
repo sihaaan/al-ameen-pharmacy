@@ -48,7 +48,16 @@
   gap: 12px;
 }
 
+.accounting-inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 14px;
+}
+
 .accounting-form label,
+.accounting-inline-form label,
 .accounting-edit-grid label {
   display: flex;
   flex-direction: column;
@@ -60,11 +69,13 @@
 
 .accounting-form input,
 .accounting-form select,
+.accounting-inline-form input,
 .accounting-edit-grid input,
 .accounting-edit-grid select,
 .accounting-edit-grid textarea,
 .accounting-filter-row input,
-.accounting-filter-row select {
+.accounting-filter-row select,
+.accounting-email-cell input {
   width: 100%;
   border: 1px solid #d1d5db;
   border-radius: 6px;
@@ -75,7 +86,7 @@
 
 .accounting-filter-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 160px 160px 160px;
+  grid-template-columns: minmax(220px, 1fr) 150px 150px 170px 150px auto;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -113,10 +124,31 @@
   margin-top: 12px;
 }
 
+.accounting-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.accounting-selection-bar span {
+  color: #374151;
+  font-weight: 800;
+}
+
 .accounting-table {
   width: 100%;
   border-collapse: collapse;
   min-width: 780px;
+}
+
+.accounting-customers-table {
+  min-width: 1280px;
 }
 
 .accounting-table th,
@@ -242,10 +274,48 @@
   font-size: 13px;
 }
 
+.accounting-email-cell {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 260px;
+}
+
+.accounting-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.accounting-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(17, 24, 39, 0.38);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.accounting-drawer {
+  width: min(980px, 92vw);
+  height: 100vh;
+  overflow-y: auto;
+  background: #ffffff;
+  box-shadow: -18px 0 40px rgba(15, 23, 42, 0.22);
+  padding: 22px;
+}
+
 @media (max-width: 980px) {
   .accounting-grid,
+  .accounting-inline-form,
   .accounting-filter-row,
   .accounting-edit-grid {
     grid-template-columns: 1fr;
+  }
+
+  .accounting-drawer {
+    width: 100vw;
   }
 }

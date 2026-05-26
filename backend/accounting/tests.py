@@ -4,9 +4,10 @@ from zipfile import ZipFile
 
 from django.contrib.auth.models import Group, Permission, User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from openpyxl import Workbook
+from pypdf import PdfReader
 from rest_framework.test import APITestCase
 
 from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
@@ -72,6 +73,18 @@ def make_category_upload():
     return SimpleUploadedFile("ageoutcode may 2026.xlsx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+def make_code_category_upload():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "cat"
+    sheet.append(["Customer Code", "Cust Name", "Cat"])
+    sheet.append(["A01", "DUPLICATE NAME LLC", "Credit"])
+    sheet.append(["B02", "DUPLICATE NAME LLC", "Card"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return SimpleUploadedFile("categories-by-code.xlsx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 class AccountingParserTests(TestCase):
     def test_parse_sample_style_csv_and_accounting_negatives(self):
         parsed = parse_outstanding_upload(make_agewise_upload())
@@ -80,8 +93,14 @@ class AccountingParserTests(TestCase):
         first = parsed.rows[0]
         self.assertEqual(first.customer_code, "083")
         self.assertEqual(first.customer_name, "MILLENNIUM AIRPORT HOTEL")
+        self.assertEqual(first.bill_number, "571920-UA3IJ2-")
+        self.assertEqual(first.invoice_number, "571920")
+        self.assertEqual(first.lpo_reference, "UA3IJ2-")
         self.assertEqual(first.days, 80)
         self.assertEqual(str(first.bucket_60_90), "1557.70")
+        second = parsed.rows[1]
+        self.assertEqual(second.invoice_number, "571921")
+        self.assertEqual(second.lpo_reference, "")
         credit = parsed.rows[2]
         self.assertEqual(str(credit.total), "-126.00")
 
@@ -217,6 +236,50 @@ class AccountingAPITests(APITestCase):
             "accounts@hotel.example",
         )
 
+    def test_duplicate_upload_can_apply_category_workbook_to_existing_import(self):
+        self.client.force_authenticate(self.accountant)
+        first = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(AccountCustomer.objects.get(customer_code="083").category, "unknown")
+
+        second = self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": make_agewise_upload(), "category_file": make_category_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.data["duplicate"])
+        self.assertEqual(AccountingImport.objects.count(), 1)
+        self.assertGreaterEqual(second.data["category_update"]["matched"], 2)
+        self.assertIn("unchanged", second.data["category_update"])
+        self.assertEqual(AccountCustomer.objects.get(customer_code="083").category, "credit")
+        self.assertEqual(AccountingImportCustomer.objects.get(customer__customer_code="084").category, "card")
+
+        third = self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": make_agewise_upload(), "category_file": make_category_upload()},
+            format="multipart",
+        )
+        self.assertEqual(third.status_code, 200)
+        self.assertEqual(third.data["category_update"]["updated"], 0)
+        self.assertGreaterEqual(third.data["category_update"]["unchanged"], 2)
+        self.assertIn("already up to date", third.data["category_update_message"])
+
+    def test_category_workbook_can_be_applied_to_existing_import(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+        self.assertEqual(response.status_code, 201)
+
+        apply_response = self.client.post(
+            reverse("accounting-import-apply-categories", args=[response.data["id"]]),
+            {"category_file": make_category_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertEqual(AccountCustomer.objects.get(customer_code="083").category, "credit")
+
     def test_same_customer_name_with_different_codes_stays_separate(self):
         buffer = StringIO()
         writer = csv.writer(buffer)
@@ -232,6 +295,24 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(AccountCustomer.objects.filter(name="DUPLICATE NAME LLC").count(), 2)
         self.assertEqual(AccountingImportCustomer.objects.count(), 2)
 
+    def test_category_matching_uses_customer_code_before_name(self):
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(make_agewise_row("A01", "DUPLICATE NAME LLC", "INV-1", "03/02/2026", "10.00", "0.00", "10.00", "0.00", "0.00", "10.00", "80"))
+        writer.writerow(make_agewise_row("B02", "DUPLICATE NAME LLC", "INV-2", "03/02/2026", "20.00", "0.00", "20.00", "0.00", "0.00", "20.00", "80"))
+        upload = SimpleUploadedFile("duplicate-names.csv", buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": upload, "category_file": make_code_category_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(AccountCustomer.objects.get(customer_code="A01").category, "credit")
+        self.assertEqual(AccountCustomer.objects.get(customer_code="B02").category, "card")
+
     def test_duplicate_upload_returns_previous_import_without_creating_another(self):
         first = self.upload_import()
         self.assertEqual(first.status_code, 201)
@@ -240,7 +321,7 @@ class AccountingAPITests(APITestCase):
         self.assertTrue(second.data["duplicate"])
         self.assertEqual(AccountingImport.objects.count(), 1)
 
-    def test_statement_pdf_and_zip_download_are_staff_only_and_do_not_send_email(self):
+    def test_statement_pdfs_and_zip_download_are_staff_only_and_customer_facing(self):
         response = self.upload_import()
         import_id = response.data["id"]
         summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
@@ -249,13 +330,83 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id])).status_code, 403)
 
         self.client.force_authenticate(self.accountant)
-        pdf = self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id]))
-        self.assertEqual(pdf.status_code, 200)
-        self.assertEqual(pdf["Content-Type"], "application/pdf")
-        self.assertGreater(len(pdf.content), 500)
+        for style in ("classic", "professional"):
+            pdf = self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id]), {"style": style})
+            self.assertEqual(pdf.status_code, 200)
+            self.assertEqual(pdf["Content-Type"], "application/pdf")
+            self.assertGreater(len(pdf.content), 500)
+            text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
+            self.assertIn("Invoice No.", text)
+            self.assertIn("LPO / Reference No.", text)
+            self.assertIn("571920", text)
+            self.assertIn("UA3IJ2-", text)
+            self.assertNotIn("Email missing", text)
+            self.assertNotIn("Category", text)
 
         zip_response = self.client.get(reverse("accounting-import-statements-zip", args=[import_id]))
         self.assertEqual(zip_response.status_code, 200)
         self.assertEqual(zip_response["Content-Type"], "application/zip")
         with ZipFile(BytesIO(zip_response.content)) as archive:
             self.assertGreaterEqual(len(archive.namelist()), 1)
+
+    def test_ignored_customers_are_excluded_from_statement_zip(self):
+        response = self.upload_import()
+        import_id = response.data["id"]
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
+        self.client.force_authenticate(self.accountant)
+        self.client.patch(
+            reverse("accounting-import-customer-detail", args=[summary.id]),
+            {"is_ignored": True},
+            format="json",
+        )
+
+        zip_response = self.client.get(reverse("accounting-import-statements-zip", args=[import_id]))
+        self.assertEqual(zip_response.status_code, 200)
+        with ZipFile(BytesIO(zip_response.content)) as archive:
+            names = archive.namelist()
+        self.assertFalse(any("MILLENNIUM" in name for name in names))
+
+    @override_settings(ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT=1)
+    def test_large_statement_zip_is_guarded_and_selected_zip_still_works(self):
+        response = self.upload_import()
+        import_id = response.data["id"]
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
+        self.client.force_authenticate(self.accountant)
+
+        guarded = self.client.get(reverse("accounting-import-statements-zip", args=[import_id]))
+        self.assertEqual(guarded.status_code, 400)
+        self.assertIn("may take too long", guarded.data["detail"])
+
+        selected = self.client.get(
+            reverse("accounting-import-statements-zip", args=[import_id]),
+            {"customer_ids": str(summary.id), "style": "professional"},
+        )
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual(selected["Content-Type"], "application/zip")
+        with ZipFile(BytesIO(selected.content)) as archive:
+            names = archive.namelist()
+        self.assertEqual(len(names), 1)
+        self.assertTrue(any("MILLENNIUM" in name for name in names))
+
+    def test_ageing_filters_and_ordering(self):
+        self.upload_import()
+        self.client.force_authenticate(self.accountant)
+        list_url = reverse("accounting-import-customer-list")
+
+        over_60 = self.client.get(list_url, {"ageing": "over_60"})
+        self.assertEqual(over_60.status_code, 200)
+        self.assertGreaterEqual(len(over_60.data), 1)
+        self.assertTrue(all(item["max_days"] > 60 for item in over_60.data))
+
+        over_90 = self.client.get(list_url, {"ageing": "over_90"})
+        self.assertEqual(over_90.status_code, 200)
+        self.assertTrue(all(item["max_days"] > 90 for item in over_90.data))
+
+        has_60_90 = self.client.get(list_url, {"ageing": "has_60_90"})
+        self.assertEqual(has_60_90.status_code, 200)
+        self.assertTrue(all(float(item["bucket_60_90"]) > 0 for item in has_60_90.data))
+
+        ordered = self.client.get(list_url, {"ordering": "-max_days"})
+        self.assertEqual(ordered.status_code, 200)
+        max_days = [item["max_days"] for item in ordered.data]
+        self.assertEqual(max_days, sorted(max_days, reverse=True))

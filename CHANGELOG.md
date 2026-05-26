@@ -5,6 +5,10 @@
 ### Added
 - Added a simple `Accounting access` checkbox to Django User admin so superusers can grant/revoke Accounting module access without manually managing groups and permissions.
 - Added protected `Admin Dashboard -> Accounting` overdue statement workflow for accounting staff to upload monthly POS agewise outstanding exports, review due customers, persist customer emails/categories, and download statement PDFs or a ZIP of due statements without sending emails.
+- Added Classic and Professional Accounting statement PDF styles, with split `Invoice No.` and `LPO / Reference No.` columns for POS bill references.
+- Added Accounting category workbook re-apply support so category mappings can be applied to an existing import, including duplicate outstanding uploads that include a category workbook.
+- Added inline email editing, a customer detail drawer, ageing filters, and sorting to the Accounting Due Customers workflow.
+- Added selected-customer Accounting ZIP downloads and a full-ZIP guard for large imports to avoid long synchronous requests.
 - Started Phase 1 quotation module implementation for the existing admin dashboard.
 - Added dedicated quotation module documentation and future-work tracking.
 - Added backend `quotations` app with staff-only APIs, workflow services, audit logs, PDF generation, and tests.
@@ -70,6 +74,9 @@
 - Improved quotation/LPO PDF and pasted-text parsing so real table columns like `Material Description`, `Req Quantity`, `unit`, `u price`, and `total` are mapped into item, quantity, unit, price, and total fields instead of being folded into the item name.
 - Skipped common quotation PDF metadata/header/footer rows such as date, seller/buyer blocks, tender numbers, table headers, contact text, and totals from inquiry import item rows.
 - Kept parse confidence separate from Product matching confidence so unmatched Products do not trigger AI cleanup or make clean parsed rows look weak.
+- Improved Accounting statement PDFs so customer-facing documents omit internal-only fields like email-missing state, unknown category, parser warnings, ignored status, and system status.
+- Improved Accounting category matching to prefer customer code when a category workbook provides one, then exact normalized customer name.
+- Improved Accounting category upload messages to show matched, updated, already-up-to-date, and unmatched counts.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.

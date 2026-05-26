@@ -53,6 +53,8 @@ class ParsedInvoiceRow:
     customer_name: str
     place: str
     bill_number: str
+    invoice_number: str
+    lpo_reference: str
     invoice_date: date | None
     amount: Decimal
     bucket_0_30: Decimal
@@ -82,6 +84,7 @@ class ParsedCategoryMap:
     filename: str
     sha256: str
     entries: dict[str, str]
+    code_entries: dict[str, str]
     warnings: list[str]
     parse_meta: dict
 
@@ -174,6 +177,20 @@ def parse_int(value):
         return 0
 
 
+def split_bill_reference(value):
+    text = str(value or "").strip()
+    if not text:
+        return "", ""
+    match = re.match(r"^(\d{6})(?:-(.*))?$", text)
+    if not match:
+        return text, ""
+    invoice_number = match.group(1)
+    reference = (match.group(2) or "").strip()
+    if not reference or set(reference) <= {"-"}:
+        return invoice_number, ""
+    return invoice_number, reference
+
+
 def find_data_start(row):
     normalized = [normalize_header(cell) for cell in row]
     for index in range(0, max(1, len(normalized) - 10)):
@@ -211,6 +228,7 @@ def parse_invoice_row(row, row_number, report_date):
         return None, "Missing customer."
     if not bill_number and normalize_header(customer_code) == "code":
         return None, "Skipped repeated header."
+    invoice_number, lpo_reference = split_bill_reference(bill_number)
 
     warnings = []
     invoice_date = parse_date(invoice_date_raw)
@@ -242,6 +260,8 @@ def parse_invoice_row(row, row_number, report_date):
         customer_name=customer_name.strip(),
         place=place.strip(),
         bill_number=bill_number.strip(),
+        invoice_number=invoice_number,
+        lpo_reference=lpo_reference,
         invoice_date=invoice_date,
         amount=amount,
         bucket_0_30=bucket_0_30,
@@ -328,17 +348,21 @@ def parse_category_upload(uploaded_file):
     filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_CATEGORY_EXTENSIONS)
     workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     entries = {}
+    code_entries = {}
     warnings = []
     sheet_meta = []
 
     for sheet in workbook.worksheets:
         rows = list(sheet.iter_rows(values_only=True))
         header_row = None
+        code_index = None
         name_index = None
         category_index = None
         for index, row in enumerate(rows[:30]):
             normalized = [normalize_header(cell) for cell in row]
             for col, header in enumerate(normalized):
+                if header in {"code", "customer code", "cust code", "account code"}:
+                    code_index = col
                 if header in {"cust name", "customer name", "name", "party"}:
                     name_index = col
                 if header in {"cat", "category", "type"}:
@@ -351,15 +375,20 @@ def parse_category_upload(uploaded_file):
             continue
         selected_count = 0
         for row in rows[header_row + 1 :]:
+            code = row[code_index] if code_index is not None and len(row) > code_index else ""
             name = row[name_index] if len(row) > name_index else ""
             category = row[category_index] if len(row) > category_index else ""
+            normalized_code = str(code or "").strip().lower()
             normalized_name = normalize_customer_name(name)
             normalized_category = normalize_category(category)
-            if not normalized_name:
+            if not normalized_name and not normalized_code:
                 continue
             if normalized_category == "unknown":
                 warnings.append(f"Unknown category '{category}' for {name}.")
-            entries[normalized_name] = normalized_category
+            if normalized_code:
+                code_entries[normalized_code] = normalized_category
+            if normalized_name:
+                entries[normalized_name] = normalized_category
             selected_count += 1
         sheet_meta.append({"sheet": sheet.title, "selected": True, "header_row": header_row + 1, "rows": selected_count})
 
@@ -367,6 +396,12 @@ def parse_category_upload(uploaded_file):
         filename=filename,
         sha256=sha256,
         entries=entries,
+        code_entries=code_entries,
         warnings=warnings[:50],
-        parse_meta={"sheets": sheet_meta, "entry_count": len(entries), "extension": extension},
+        parse_meta={
+            "sheets": sheet_meta,
+            "entry_count": len(entries),
+            "code_entry_count": len(code_entries),
+            "extension": extension,
+        },
     )

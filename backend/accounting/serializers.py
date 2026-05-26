@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 
 from .models import AccountCustomer, AccountingCategory, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
@@ -33,6 +34,7 @@ class AccountingImportSerializer(serializers.ModelSerializer):
     uploaded_by_name = serializers.CharField(source="uploaded_by.username", read_only=True, default="")
     duplicate = serializers.BooleanField(read_only=True, default=False)
     duplicate_message = serializers.CharField(read_only=True, default="")
+    zip_sync_limit = serializers.SerializerMethodField()
 
     class Meta:
         model = AccountingImport
@@ -55,10 +57,14 @@ class AccountingImportSerializer(serializers.ModelSerializer):
             "parse_meta",
             "duplicate",
             "duplicate_message",
+            "zip_sync_limit",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_zip_sync_limit(self, obj):
+        return int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
 
 
 class AccountingInvoiceRowSerializer(serializers.ModelSerializer):
@@ -71,6 +77,8 @@ class AccountingInvoiceRowSerializer(serializers.ModelSerializer):
             "customer_name",
             "place",
             "bill_number",
+            "invoice_number",
+            "lpo_reference",
             "invoice_date",
             "amount",
             "bucket_0_30",
@@ -87,6 +95,7 @@ class AccountingInvoiceRowSerializer(serializers.ModelSerializer):
 class AccountingImportCustomerSerializer(serializers.ModelSerializer):
     customer_profile_id = serializers.IntegerField(source="customer_id", read_only=True)
     email_preview = serializers.SerializerMethodField()
+    customer_notes = serializers.CharField(source="customer.notes", read_only=True, default="")
 
     class Meta:
         model = AccountingImportCustomer
@@ -111,6 +120,7 @@ class AccountingImportCustomerSerializer(serializers.ModelSerializer):
             "status",
             "warnings",
             "email_preview",
+            "customer_notes",
             "created_at",
             "updated_at",
         ]
@@ -132,6 +142,7 @@ class AccountingImportCustomerSerializer(serializers.ModelSerializer):
             "status",
             "warnings",
             "email_preview",
+            "customer_notes",
             "created_at",
             "updated_at",
         ]

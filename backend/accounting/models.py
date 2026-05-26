@@ -167,6 +167,8 @@ class AccountingInvoiceRow(models.Model):
     customer_name = models.CharField(max_length=255)
     place = models.CharField(max_length=255, blank=True)
     bill_number = models.CharField(max_length=120, blank=True, db_index=True)
+    invoice_number = models.CharField(max_length=30, blank=True, db_index=True)
+    lpo_reference = models.CharField(max_length=120, blank=True, db_index=True)
     invoice_date = models.DateField(null=True, blank=True, db_index=True)
     amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     bucket_0_30 = models.DecimalField(max_digits=14, decimal_places=2, default=0)

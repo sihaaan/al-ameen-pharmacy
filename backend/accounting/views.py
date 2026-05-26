@@ -1,6 +1,7 @@
 from io import BytesIO
 from zipfile import ZIP_STORED, ZipFile
 
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 from django.http import HttpResponse
@@ -19,7 +20,13 @@ from .serializers import (
     AccountingImportCustomerSerializer,
     AccountingImportSerializer,
 )
-from .services import create_accounting_import, statement_filename, update_import_customer
+from .services import (
+    apply_category_upload_to_import,
+    category_update_message,
+    create_accounting_import,
+    statement_filename,
+    update_import_customer,
+)
 
 
 def validation_error_response(exc):
@@ -88,22 +95,63 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
         data["duplicate"] = bool(meta.get("duplicate"))
         data["duplicate_message"] = meta.get("message", "")
         data["previous_import_id"] = meta.get("previous_import_id")
+        data["category_update"] = meta.get("category_update", {})
+        data["category_update_message"] = meta.get("category_update_message", "")
         return Response(data, status=status.HTTP_200_OK if meta.get("duplicate") else status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def apply_categories(self, request, pk=None):
+        import_record = self.get_object()
+        category_file = request.FILES.get("category_file")
+        try:
+            result = apply_category_upload_to_import(import_record=import_record, category_file=category_file)
+        except DjangoValidationError as exc:
+            return Response(validation_error_response(exc), status=status.HTTP_400_BAD_REQUEST)
+        serializer = self.get_serializer(import_record)
+        data = dict(serializer.data)
+        data["category_update"] = result
+        data["category_update_message"] = category_update_message(result)
+        data["message"] = data["category_update_message"]
+        return Response(data)
 
     @action(detail=True, methods=["get"])
     def statements_zip(self, request, pk=None):
         import_record = self.get_object()
+        style = request.query_params.get("style", "professional")
+        customer_ids = [
+            int(item)
+            for item in request.query_params.get("customer_ids", "").replace(" ", "").split(",")
+            if item.isdigit()
+        ]
         customers = (
             import_record.customers.filter(is_due=True, is_ignored=False)
             .prefetch_related("invoice_rows")
             .order_by("customer_name")
         )
+        if customer_ids:
+            customers = customers.filter(id__in=customer_ids)
+        customer_count = customers.count()
+        sync_limit = int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
+        if customer_count == 0:
+            return Response({"detail": "No due, non-ignored customers are available for this ZIP."}, status=status.HTTP_400_BAD_REQUEST)
+        if customer_count > sync_limit:
+            return Response(
+                {
+                    "detail": (
+                        f"This ZIP would include {customer_count} statements and may take too long to prepare. "
+                        f"Select up to {sync_limit} customers, ignore customers that do not need statements, or download individual PDFs."
+                    ),
+                    "statement_count": customer_count,
+                    "sync_limit": sync_limit,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         buffer = BytesIO()
         with ZipFile(buffer, "w", ZIP_STORED) as archive:
             for customer in customers:
-                archive.writestr(statement_filename(customer), build_statement_pdf(customer))
+                archive.writestr(statement_filename(customer, style=style), build_statement_pdf(customer, style=style))
         response = HttpResponse(buffer.getvalue(), content_type="application/zip")
-        response["Content-Disposition"] = f'attachment; filename="accounting-statements-{import_record.id}.zip"'
+        response["Content-Disposition"] = f'attachment; filename="accounting-statements-{style}-{import_record.id}.zip"'
         return response
 
 
@@ -126,6 +174,8 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
         search = self.request.query_params.get("search", "").strip()
         email_missing = self.request.query_params.get("email_missing", "").strip().lower()
         due_only = self.request.query_params.get("due_only", "").strip().lower()
+        ageing_filter = self.request.query_params.get("ageing", "").strip().lower()
+        ordering = self.request.query_params.get("ordering", "-overdue_amount").strip()
         if import_id:
             queryset = queryset.filter(accounting_import_id=import_id)
         if status_filter:
@@ -136,9 +186,28 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(email="")
         if due_only in {"1", "true", "yes"}:
             queryset = queryset.filter(is_due=True, is_ignored=False)
+        if ageing_filter == "over_30":
+            queryset = queryset.filter(max_days__gt=30)
+        elif ageing_filter == "over_60":
+            queryset = queryset.filter(max_days__gt=60)
+        elif ageing_filter == "over_90":
+            queryset = queryset.filter(max_days__gt=90)
+        elif ageing_filter == "has_30_60":
+            queryset = queryset.filter(bucket_30_60__gt=0)
+        elif ageing_filter == "has_60_90":
+            queryset = queryset.filter(bucket_60_90__gt=0)
+        elif ageing_filter == "has_over_90":
+            queryset = queryset.filter(bucket_over_90__gt=0)
         if search:
             queryset = queryset.filter(Q(customer_name__icontains=search) | Q(customer_code__icontains=search) | Q(email__icontains=search))
-        return queryset.order_by("-overdue_amount", "customer_name")
+        allowed_ordering = {
+            "company": "customer_name",
+            "-total_outstanding": "-total_outstanding",
+            "-overdue_amount": "-overdue_amount",
+            "-max_days": "-max_days",
+            "-invoice_count": "-invoice_count",
+        }
+        return queryset.order_by(allowed_ordering.get(ordering, "-overdue_amount"), "customer_name")
 
     def partial_update(self, request, *args, **kwargs):
         import_customer = self.get_object()
@@ -157,7 +226,8 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def statement_pdf(self, request, pk=None):
         import_customer = self.get_object()
-        pdf_bytes = build_statement_pdf(import_customer)
+        style = request.query_params.get("style", "professional")
+        pdf_bytes = build_statement_pdf(import_customer, style=style)
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
-        response["Content-Disposition"] = f'attachment; filename="{statement_filename(import_customer)}"'
+        response["Content-Disposition"] = f'attachment; filename="{statement_filename(import_customer, style=style)}"'
         return response

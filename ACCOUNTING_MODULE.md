@@ -18,6 +18,8 @@ The Accounting module prepares those monthly overdue statement files inside the 
 - Generate one protected statement PDF per due customer.
 - Generate a ZIP of all due, non-ignored statement PDFs.
 - Show read-only email preview text and attachment filename.
+- Support Classic and Professional customer-facing statement PDF styles.
+- Split POS `Bill No.` values into `Invoice No.` and `LPO / Reference No.` while retaining the raw bill value internally.
 
 V1 does **not** send emails.
 
@@ -49,9 +51,9 @@ Custom permissions:
 4. Optionally upload/update the category workbook.
 5. Review parsed row count, customer count, due customer count, and warnings.
 6. Filter due customers, missing emails, categories, ignored customers, or all rows.
-7. Open a customer detail.
+7. Save missing customer emails directly from the Due Customers table, or open the customer detail drawer for deeper review.
 8. Save email/category/ignored status if needed.
-9. Download an individual statement PDF or the ZIP of due statements.
+9. Download an individual Classic or Professional statement PDF, or download the ZIP of due statements.
 10. Manually attach statement files to emails outside the system.
 
 ## Parser Notes
@@ -68,13 +70,30 @@ Customer matching priority:
 
 No aggressive fuzzy matching is used in V1.
 
+Category workbook matching uses the same conservative approach. If the category workbook includes a customer code column, customer code is used before customer name. Category uploads can also be applied to an existing import after the outstanding file was already parsed. If a duplicate outstanding file is uploaded with a category workbook, no duplicate import is created, but the category workbook is applied to the existing import/customer profiles.
+
 If `Days` is missing or invalid, the parser calculates days from invoice date to report date. If report date is missing, upload date is used with a warning.
+
+The parser splits raw POS bill numbers for display:
+
+- `570170-284750-0-` -> `Invoice No. 570170`, `LPO / Reference No. 284750-0-`
+- `320815--` -> `Invoice No. 320815`, blank `LPO / Reference No.`
+- `571920-UA3IJ2-` -> `Invoice No. 571920`, `LPO / Reference No. UA3IJ2-`
 
 ## Statement Output
 
 Statement PDFs are generated on demand from database rows. Generated PDFs are not stored permanently in V1.
 
-ZIP downloads include due, non-ignored customers from the selected import.
+Two PDF styles are available:
+
+- **Classic Statement PDF**: compact accounting-style output for practical ledger review.
+- **Professional Statement PDF**: polished customer-facing statement using visual patterns from the quotation PDF, with cleaner header, customer info, ageing summary, totals, and payment reminder sections.
+
+Both styles show customer-facing information only: branding/contact details, statement date, customer name/code, invoice rows, ageing totals, total outstanding, overdue amount, and payment reminder text. Internal-only fields such as parser warnings, `Email missing`, `Category Unknown`, ignored status, and system status are not printed on the customer statement.
+
+ZIP downloads default to the Professional style and include due, non-ignored customers from the selected import. The UI also offers a Classic ZIP download.
+
+Large imports are guarded in V1. Full ZIP generation is limited by `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default `75`) so the request does not sit silently for minutes or time out on Railway. For larger imports, staff can select visible due customers and download a selected Professional or Classic ZIP. Ignored customers are always excluded.
 
 ## Security And Storage
 
@@ -83,6 +102,7 @@ ZIP downloads include due, non-ignored customers from the selected import.
 - Uploaded source files are parsed and discarded.
 - Generated statement PDFs and ZIPs are streamed through protected backend endpoints.
 - Accounting data is not exposed through public product, cart, order, or quotation APIs.
+- Source files are not stored permanently in V1. The system keeps filename, SHA-256 hash, parsed invoice rows, metadata, and warnings only.
 
 ## Deferred
 
@@ -94,6 +114,8 @@ ZIP downloads include due, non-ignored customers from the selected import.
 - Private long-term storage of uploaded source files.
 - AI parsing or fuzzy customer matching.
 - Accounting payment reconciliation.
+- Delete/retest import workflow.
+- Background/cached full-import ZIP generation for hundreds of customers.
 
 ## Continuation Notes
 
