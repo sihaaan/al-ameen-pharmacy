@@ -97,14 +97,14 @@ def build_statement_pdf(import_customer):
     for invoice in import_customer.invoice_rows.all():
         rows.append(
             [
-                Paragraph(invoice.bill_number or "-", styles["Cell"]),
+                invoice.bill_number or "-",
                 short_date(invoice.invoice_date),
-                Paragraph(money(invoice.amount), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_0_30), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_30_60), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_60_90), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_over_90), styles["CellRight"]),
-                Paragraph(money(invoice.total), styles["CellRight"]),
+                money(invoice.amount),
+                money(invoice.bucket_0_30),
+                money(invoice.bucket_30_60),
+                money(invoice.bucket_60_90),
+                money(invoice.bucket_over_90),
+                money(invoice.total),
                 str(invoice.days),
             ]
         )

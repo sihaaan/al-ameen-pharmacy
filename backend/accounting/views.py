@@ -1,5 +1,5 @@
 from io import BytesIO
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_STORED, ZipFile
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
@@ -99,7 +99,7 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
             .order_by("customer_name")
         )
         buffer = BytesIO()
-        with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        with ZipFile(buffer, "w", ZIP_STORED) as archive:
             for customer in customers:
                 archive.writestr(statement_filename(customer), build_statement_pdf(customer))
         response = HttpResponse(buffer.getvalue(), content_type="application/zip")

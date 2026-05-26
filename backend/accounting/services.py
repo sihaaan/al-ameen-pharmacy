@@ -26,7 +26,9 @@ def find_or_create_customer(row, category_map=None):
     if row.customer_code:
         customer = AccountCustomer.objects.filter(customer_code__iexact=row.customer_code.strip()).first()
     if customer is None and normalized_name:
-        customer = AccountCustomer.objects.filter(normalized_name=normalized_name).first()
+        name_match = AccountCustomer.objects.filter(normalized_name=normalized_name).first()
+        if name_match and (not row.customer_code or not name_match.customer_code):
+            customer = name_match
 
     mapped_category = (category_map or {}).get(normalized_name)
     if customer is None:
@@ -243,7 +245,9 @@ def email_preview_for_import_customer(import_customer):
 
 
 def statement_filename(import_customer):
-    safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in import_customer.customer_name)
-    safe_name = "_".join(part for part in safe_name.split("_") if part)[:80] or "statement"
+    name_parts = [import_customer.customer_code, import_customer.customer_name]
+    raw_name = "_".join(part for part in name_parts if part)
+    safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw_name)
+    safe_name = "_".join(part for part in safe_name.split("_") if part)[:90] or f"statement_{import_customer.id}"
     report_date = import_customer.accounting_import.report_date.isoformat() if import_customer.accounting_import.report_date else "statement"
     return f"{safe_name}_{report_date}.pdf"

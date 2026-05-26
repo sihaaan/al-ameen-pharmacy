@@ -167,6 +167,21 @@ class AccountingAPITests(APITestCase):
             "accounts@hotel.example",
         )
 
+    def test_same_customer_name_with_different_codes_stays_separate(self):
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(make_agewise_row("A01", "DUPLICATE NAME LLC", "INV-1", "03/02/2026", "10.00", "0.00", "10.00", "0.00", "0.00", "10.00", "80"))
+        writer.writerow(make_agewise_row("B02", "DUPLICATE NAME LLC", "INV-2", "03/02/2026", "20.00", "0.00", "20.00", "0.00", "0.00", "20.00", "80"))
+        upload = SimpleUploadedFile("duplicate-names.csv", buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(reverse("accounting-import-upload"), {"file": upload}, format="multipart")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["customer_count"], 2)
+        self.assertEqual(AccountCustomer.objects.filter(name="DUPLICATE NAME LLC").count(), 2)
+        self.assertEqual(AccountingImportCustomer.objects.count(), 2)
+
     def test_duplicate_upload_returns_previous_import_without_creating_another(self):
         first = self.upload_import()
         self.assertEqual(first.status_code, 201)
