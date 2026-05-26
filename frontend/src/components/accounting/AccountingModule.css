@@ -289,6 +289,35 @@
   margin: 14px 0;
 }
 
+.accounting-drawer-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 12px 0 16px;
+}
+
+.accounting-drawer-summary div {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  padding: 10px 12px;
+}
+
+.accounting-drawer-summary span {
+  display: block;
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.accounting-drawer-summary strong {
+  display: block;
+  margin-top: 4px;
+  color: #0f766e;
+  font-size: 15px;
+}
+
 .accounting-drawer-backdrop {
   position: fixed;
   inset: 0;

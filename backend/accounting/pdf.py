@@ -67,11 +67,12 @@ def make_styles(config):
     primary = primary_color(config)
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="BrandName", parent=styles["Title"], fontSize=17, leading=21, textColor=primary))
-    styles.add(ParagraphStyle(name="DocTitle", parent=styles["Title"], fontSize=18, leading=22, alignment=TA_RIGHT, textColor=TEXT))
+    styles.add(ParagraphStyle(name="DocTitle", parent=styles["Title"], fontSize=12.5, leading=15, alignment=TA_RIGHT, textColor=TEXT))
     styles.add(ParagraphStyle(name="DocSubtitle", parent=styles["Normal"], fontSize=8, leading=11, alignment=TA_RIGHT, textColor=MUTED))
     styles.add(ParagraphStyle(name="SmallMuted", parent=styles["Normal"], fontSize=8, leading=11, textColor=MUTED))
     styles.add(ParagraphStyle(name="SmallMutedRight", parent=styles["SmallMuted"], alignment=TA_RIGHT))
-    styles.add(ParagraphStyle(name="ContactLine", parent=styles["SmallMuted"], fontSize=7.5, leading=9, alignment=TA_CENTER))
+    styles.add(ParagraphStyle(name="ContactLine", parent=styles["SmallMuted"], fontSize=7.3, leading=8.8, alignment=TA_CENTER))
+    styles.add(ParagraphStyle(name="FooterNote", parent=styles["SmallMuted"], fontSize=7, leading=8.4, alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="Cell", parent=styles["Normal"], fontSize=7.6, leading=9.5, textColor=TEXT))
     styles.add(ParagraphStyle(name="CellRight", parent=styles["Cell"], alignment=TA_RIGHT))
     styles.add(ParagraphStyle(name="TableHeader", parent=styles["Normal"], fontSize=7.5, leading=9, textColor=colors.white, alignment=TA_CENTER))
@@ -87,20 +88,23 @@ def logo_flowable(config, max_width=70 * mm, max_height=24 * mm):
 
 
 def build_header(config, styles, *, subtitle="Overdue Payment Statement", classic=False):
-    logo = logo_flowable(config, max_width=52 * mm if classic else 76 * mm, max_height=20 * mm if classic else 26 * mm)
+    logo = logo_flowable(config, max_width=46 * mm if classic else 64 * mm, max_height=17 * mm if classic else 22 * mm)
     company_name = config_value(config, "company_name", "Al Ameen Pharmacy")
-    left = logo or Paragraph(f"<b>{_text(company_name)}</b>", styles["BrandName"])
-    right = [
+    brand = logo or Paragraph(f"<b>{_text(company_name)}</b>", styles["BrandName"])
+    title_block = [
         Paragraph("<b>STATEMENT OF ACCOUNT</b>", styles["DocTitle"]),
         Paragraph(_text(subtitle), styles["DocSubtitle"]),
     ]
-    header = Table([[left, right]], colWidths=[110 * mm, 62 * mm])
+    header = Table([["", brand, title_block]], colWidths=[52 * mm, 68 * mm, 52 * mm])
     header.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("ALIGN", (1, 0), (1, 0), "CENTER"),
+                ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
             ]
         )
     )
@@ -108,19 +112,31 @@ def build_header(config, styles, *, subtitle="Overdue Payment Statement", classi
     if not contact:
         return header
     contact_line = Table([[Paragraph(" | ".join(_text(part, "") for part in contact), styles["ContactLine"])]], colWidths=[172 * mm])
-    contact_line.setStyle(TableStyle([("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 0)]))
+    contact_line.setStyle(TableStyle([("BOTTOMPADDING", (0, 0), (-1, -1), 7), ("TOPPADDING", (0, 0), (-1, -1), 0)]))
     return Table([[header], [contact_line]], colWidths=[172 * mm])
 
 
-def footer(canvas, doc):
-    canvas.saveState()
-    canvas.setStrokeColor(BORDER)
-    canvas.setLineWidth(0.3)
-    canvas.line(doc.leftMargin, 12 * mm, A4[0] - doc.rightMargin, 12 * mm)
-    canvas.setFont("Helvetica", 8)
-    canvas.setFillColor(MUTED)
-    canvas.drawCentredString(A4[0] / 2, 8 * mm, f"Page {doc.page}")
-    canvas.restoreState()
+def make_footer(config):
+    footer_note = config_value(config, "footer_note", "") or "Al Ameen Pharmacy LLC"
+    contact = " | ".join(contact_parts(config))
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setStrokeColor(BORDER)
+        canvas.setLineWidth(0.35)
+        line_y = 14 * mm
+        canvas.line(doc.leftMargin, line_y, A4[0] - doc.rightMargin, line_y)
+        canvas.setFont("Helvetica", 7.2)
+        canvas.setFillColor(MUTED)
+        if contact:
+            canvas.drawCentredString(A4[0] / 2, 10 * mm, contact[:135])
+            canvas.setFont("Helvetica", 6.8)
+            canvas.drawCentredString(A4[0] / 2, 6.8 * mm, f"{footer_note[:115]} | Page {doc.page}")
+        else:
+            canvas.drawCentredString(A4[0] / 2, 8 * mm, f"{footer_note[:115]} | Page {doc.page}")
+        canvas.restoreState()
+
+    return footer
 
 
 def customer_info_table(import_customer, styles, professional=True):
@@ -241,7 +257,19 @@ def note_block(styles, professional=True):
             "and clear the outstanding amount at the earliest to keep in line with the agreed payment terms. "
             "If payment has recently been made, please accept our thanks and ignore this reminder."
         )
-    return Paragraph(text, styles["SmallMuted"])
+    if not professional:
+        return Paragraph(text, styles["SmallMuted"])
+    note = Table([[Paragraph(text, styles["SmallMuted"])]], colWidths=[172 * mm])
+    note.setStyle(
+        TableStyle(
+            [
+                ("BOX", (0, 0), (-1, -1), 0.25, LIGHT_BORDER),
+                ("BACKGROUND", (0, 0), (-1, -1), SOFT),
+                ("PADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    return note
 
 
 def build_classic_statement_pdf(import_customer):
@@ -267,7 +295,8 @@ def build_classic_statement_pdf(import_customer):
         Spacer(1, 10),
         note_block(styles, professional=False),
     ]
-    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    page_footer = make_footer(config)
+    document.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
     return buffer.getvalue()
 
 
@@ -294,7 +323,8 @@ def build_professional_statement_pdf(import_customer):
         Spacer(1, 12),
         note_block(styles, professional=True),
     ]
-    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    page_footer = make_footer(config)
+    document.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
     return buffer.getvalue()
 
 

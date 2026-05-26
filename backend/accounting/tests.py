@@ -11,7 +11,7 @@ from pypdf import PdfReader
 from rest_framework.test import APITestCase
 
 from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
-from .parsers import parse_outstanding_upload
+from .parsers import parse_outstanding_upload, split_bill_reference
 from .permissions import accounting_permissions_queryset, set_user_accounting_access
 
 
@@ -95,7 +95,7 @@ class AccountingParserTests(TestCase):
         self.assertEqual(first.customer_name, "MILLENNIUM AIRPORT HOTEL")
         self.assertEqual(first.bill_number, "571920-UA3IJ2-")
         self.assertEqual(first.invoice_number, "571920")
-        self.assertEqual(first.lpo_reference, "UA3IJ2-")
+        self.assertEqual(first.lpo_reference, "UA3IJ2")
         self.assertEqual(first.days, 80)
         self.assertEqual(str(first.bucket_60_90), "1557.70")
         second = parsed.rows[1]
@@ -103,6 +103,17 @@ class AccountingParserTests(TestCase):
         self.assertEqual(second.lpo_reference, "")
         credit = parsed.rows[2]
         self.assertEqual(str(credit.total), "-126.00")
+
+    def test_bill_number_reference_split_is_clean(self):
+        examples = {
+            "570170-284750-0-": ("570170", "284750-0"),
+            "320815--": ("320815", ""),
+            "571920-UA3IJ2-": ("571920", "UA3IJ2"),
+            "571921-": ("571921", ""),
+        }
+        for raw, expected in examples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(split_bill_reference(raw), expected)
 
 
 class AccountingAPITests(APITestCase):
@@ -339,7 +350,7 @@ class AccountingAPITests(APITestCase):
             self.assertIn("Invoice No.", text)
             self.assertIn("LPO / Reference No.", text)
             self.assertIn("571920", text)
-            self.assertIn("UA3IJ2-", text)
+            self.assertIn("UA3IJ2", text)
             self.assertNotIn("Email missing", text)
             self.assertNotIn("Category", text)
 
@@ -367,15 +378,22 @@ class AccountingAPITests(APITestCase):
         self.assertFalse(any("MILLENNIUM" in name for name in names))
 
     @override_settings(ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT=1)
-    def test_large_statement_zip_is_guarded_and_selected_zip_still_works(self):
+    def test_large_statement_zip_is_batched_and_selected_zip_still_works(self):
         response = self.upload_import()
         import_id = response.data["id"]
         summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
         self.client.force_authenticate(self.accountant)
 
-        guarded = self.client.get(reverse("accounting-import-statements-zip", args=[import_id]))
-        self.assertEqual(guarded.status_code, 400)
-        self.assertIn("may take too long", guarded.data["detail"])
+        batched = self.client.get(reverse("accounting-import-statements-zip", args=[import_id]))
+        self.assertEqual(batched.status_code, 200)
+        self.assertEqual(batched["X-Accounting-Zip-Batched"], "true")
+        with ZipFile(BytesIO(batched.content)) as archive:
+            part_names = archive.namelist()
+            self.assertGreaterEqual(len(part_names), 2)
+            self.assertTrue(all(name.endswith(".zip") for name in part_names))
+            first_part = archive.read(part_names[0])
+        with ZipFile(BytesIO(first_part)) as part_archive:
+            self.assertEqual(len(part_archive.namelist()), 1)
 
         selected = self.client.get(
             reverse("accounting-import-statements-zip", args=[import_id]),

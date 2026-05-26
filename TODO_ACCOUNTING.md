@@ -10,7 +10,8 @@
 - [ ] Verify totals for several known customers against the old POS software.
 - [ ] Enter missing customer emails.
 - [ ] Download both Classic and Professional statement PDFs for several customers.
-- [ ] For large imports, select a manageable batch of due customers and download a selected ZIP.
+- [ ] Use `Download All Due - Professional` for the monthly due-customer ZIP. Large imports are split into part ZIPs inside the download automatically.
+- [ ] Optionally use `Select Visible`, untick/ignore exceptions, and download a selected ZIP for a smaller batch.
 - [ ] Download a ZIP and manually inspect several generated PDFs.
 - [ ] Mark internal branch/customers as ignored where statements are not required.
 
@@ -27,5 +28,5 @@
 - [ ] Add dashboard export to CSV/XLSX.
 - [ ] Add statement style setting if accountants settle on one default.
 - [ ] Add import delete/retest workflow only after clear production data retention rules.
-- [ ] Add cached/background full-import ZIP generation if accountants need one-click ZIPs for hundreds of customers.
+- [ ] Add cached/background ZIP generation if batched on-demand ZIP downloads still feel slow for very large months.
 
