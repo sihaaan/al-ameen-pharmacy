@@ -5,6 +5,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 from django.http import HttpResponse
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -25,8 +26,15 @@ from .services import (
     category_update_message,
     create_accounting_import,
     statement_filename,
+    statement_ledger,
     update_import_customer,
 )
+
+
+def parse_accounting_date_range(request):
+    date_from = parse_date(request.query_params.get("date_from", "") or "")
+    date_to = parse_date(request.query_params.get("date_to", "") or "")
+    return date_from, date_to
 
 
 def chunked(items, size):
@@ -35,9 +43,12 @@ def chunked(items, size):
         yield index // size + 1, items[index : index + size]
 
 
-def write_statement_zip(archive, customers, style):
+def write_statement_zip(archive, customers, style, *, date_from=None, date_to=None):
     for customer in customers:
-        archive.writestr(statement_filename(customer, style=style), build_statement_pdf(customer, style=style))
+        archive.writestr(
+            statement_filename(customer, style=style),
+            build_statement_pdf(customer, style=style, date_from=date_from, date_to=date_to),
+        )
 
 
 def validation_error_response(exc):
@@ -129,6 +140,7 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
     def statements_zip(self, request, pk=None):
         import_record = self.get_object()
         style = request.query_params.get("style", "professional")
+        date_from, date_to = parse_accounting_date_range(request)
         customer_ids = [
             int(item)
             for item in request.query_params.get("customer_ids", "").replace(" ", "").split(",")
@@ -142,6 +154,13 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
         if customer_ids:
             customers = customers.filter(id__in=customer_ids)
         customers = list(customers)
+        if date_from or date_to:
+            filtered_customers = []
+            for customer in customers:
+                ledger = statement_ledger(customer, date_from=date_from, date_to=date_to)
+                if ledger["invoice_count"] > 0 and ledger["is_due"]:
+                    filtered_customers.append(customer)
+            customers = filtered_customers
         customer_count = len(customers)
         batch_size = int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
         if customer_count == 0:
@@ -153,16 +172,16 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
                 for part_number, batch in chunked(customers, batch_size):
                     part_buffer = BytesIO()
                     with ZipFile(part_buffer, "w", ZIP_STORED) as part_archive:
-                        write_statement_zip(part_archive, batch, style)
+                        write_statement_zip(part_archive, batch, style, date_from=date_from, date_to=date_to)
                     archive.writestr(
-                        f"accounting-statements-{style}-{import_record.id}-part-{part_number:03d}.zip",
+                        f"accounting-statements-{import_record.id}-part-{part_number:03d}.zip",
                         part_buffer.getvalue(),
                     )
             else:
-                write_statement_zip(archive, customers, style)
+                write_statement_zip(archive, customers, style, date_from=date_from, date_to=date_to)
         response = HttpResponse(buffer.getvalue(), content_type="application/zip")
         suffix = "batched" if is_batched else "selected" if customer_ids else "all"
-        response["Content-Disposition"] = f'attachment; filename="accounting-statements-{style}-{import_record.id}-{suffix}.zip"'
+        response["Content-Disposition"] = f'attachment; filename="accounting-statements-{import_record.id}-{suffix}.zip"'
         response["X-Accounting-Zip-Batched"] = "true" if is_batched else "false"
         response["X-Accounting-Statement-Count"] = str(customer_count)
         response["X-Accounting-Zip-Batch-Size"] = str(batch_size)
@@ -180,6 +199,12 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
             return AccountingImportCustomerDetailSerializer
         return AccountingImportCustomerSerializer
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        date_from, date_to = parse_accounting_date_range(self.request)
+        context.update({"date_from": date_from, "date_to": date_to})
+        return context
+
     def get_queryset(self):
         queryset = super().get_queryset()
         import_id = self.request.query_params.get("import_id")
@@ -190,16 +215,27 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
         due_only = self.request.query_params.get("due_only", "").strip().lower()
         ageing_filter = self.request.query_params.get("ageing", "").strip().lower()
         ordering = self.request.query_params.get("ordering", "-overdue_amount").strip()
+        date_from, date_to = parse_accounting_date_range(self.request)
+        has_date_range = bool(date_from or date_to)
         if import_id:
             queryset = queryset.filter(accounting_import_id=import_id)
-        if status_filter:
+        if status_filter and not has_date_range:
             queryset = queryset.filter(status=status_filter)
         if category:
             queryset = queryset.filter(category=category)
         if email_missing in {"1", "true", "yes"}:
             queryset = queryset.filter(email="")
-        if due_only in {"1", "true", "yes"}:
+        if search:
+            queryset = queryset.filter(Q(customer_name__icontains=search) | Q(customer_code__icontains=search) | Q(email__icontains=search))
+        if due_only in {"1", "true", "yes"} and not has_date_range:
             queryset = queryset.filter(is_due=True, is_ignored=False)
+        if has_date_range:
+            queryset = queryset.filter(invoice_rows__invoice_date__isnull=False)
+            if date_from:
+                queryset = queryset.filter(invoice_rows__invoice_date__gte=date_from)
+            if date_to:
+                queryset = queryset.filter(invoice_rows__invoice_date__lte=date_to)
+            return queryset.distinct().order_by("customer_name")
         if ageing_filter == "over_30":
             queryset = queryset.filter(max_days__gt=30)
         elif ageing_filter == "over_60":
@@ -212,8 +248,6 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(bucket_60_90__gt=0)
         elif ageing_filter == "has_over_90":
             queryset = queryset.filter(bucket_over_90__gt=0)
-        if search:
-            queryset = queryset.filter(Q(customer_name__icontains=search) | Q(customer_code__icontains=search) | Q(email__icontains=search))
         allowed_ordering = {
             "company": "customer_name",
             "-total_outstanding": "-total_outstanding",
@@ -222,6 +256,54 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
             "-invoice_count": "-invoice_count",
         }
         return queryset.order_by(allowed_ordering.get(ordering, "-overdue_amount"), "customer_name")
+
+    def list(self, request, *args, **kwargs):
+        date_from, date_to = parse_accounting_date_range(request)
+        if not (date_from or date_to):
+            return super().list(request, *args, **kwargs)
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        items = list(serializer.data)
+        status_filter = request.query_params.get("status", "").strip()
+        due_only = request.query_params.get("due_only", "").strip().lower()
+        ageing_filter = request.query_params.get("ageing", "").strip().lower()
+        ordering = request.query_params.get("ordering", "-overdue_amount").strip()
+
+        def as_float(item, key):
+            try:
+                return float(item.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        if due_only in {"1", "true", "yes"}:
+            items = [item for item in items if item.get("is_due") and not item.get("is_ignored")]
+        if status_filter:
+            items = [item for item in items if item.get("status") == status_filter]
+        if ageing_filter == "over_30":
+            items = [item for item in items if item.get("max_days", 0) > 30]
+        elif ageing_filter == "over_60":
+            items = [item for item in items if item.get("max_days", 0) > 60]
+        elif ageing_filter == "over_90":
+            items = [item for item in items if item.get("max_days", 0) > 90]
+        elif ageing_filter == "has_30_60":
+            items = [item for item in items if as_float(item, "bucket_30_60") > 0]
+        elif ageing_filter == "has_60_90":
+            items = [item for item in items if as_float(item, "bucket_60_90") > 0]
+        elif ageing_filter == "has_over_90":
+            items = [item for item in items if as_float(item, "bucket_over_90") > 0]
+
+        reverse = ordering.startswith("-")
+        sort_key = ordering[1:] if reverse else ordering
+        sort_fields = {
+            "overdue_amount": lambda item: as_float(item, "overdue_amount"),
+            "total_outstanding": lambda item: as_float(item, "total_outstanding"),
+            "max_days": lambda item: item.get("max_days", 0),
+            "invoice_count": lambda item: item.get("invoice_count", 0),
+            "company": lambda item: (item.get("customer_name") or "").lower(),
+        }
+        key_func = sort_fields.get(sort_key, sort_fields["overdue_amount"])
+        items.sort(key=lambda item: (key_func(item), (item.get("customer_name") or "").lower()), reverse=reverse)
+        return Response(items)
 
     def partial_update(self, request, *args, **kwargs):
         import_customer = self.get_object()
@@ -241,7 +323,8 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
     def statement_pdf(self, request, pk=None):
         import_customer = self.get_object()
         style = request.query_params.get("style", "professional")
-        pdf_bytes = build_statement_pdf(import_customer, style=style)
+        date_from, date_to = parse_accounting_date_range(request)
+        pdf_bytes = build_statement_pdf(import_customer, style=style, date_from=date_from, date_to=date_to)
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{statement_filename(import_customer, style=style)}"'
         return response

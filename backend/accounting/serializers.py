@@ -3,7 +3,11 @@ from rest_framework import serializers
 
 from .models import AccountCustomer, AccountingCategory, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
 from .parsers import normalize_customer_name
-from .services import email_preview_for_import_customer
+from .services import email_preview_for_import_customer, statement_ledger
+
+
+def money_string(value):
+    return f"{value or 0:.2f}"
 
 
 class AccountCustomerSerializer(serializers.ModelSerializer):
@@ -156,9 +160,67 @@ class AccountingImportCustomerSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Invalid category.")
         return value
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        date_from = self.context.get("date_from")
+        date_to = self.context.get("date_to")
+        if date_from or date_to:
+            ledger = statement_ledger(instance, date_from=date_from, date_to=date_to)
+            data.update(
+                {
+                    "total_outstanding": money_string(ledger["total_outstanding"]),
+                    "bucket_0_30": money_string(ledger["bucket_0_30"]),
+                    "bucket_30_60": money_string(ledger["bucket_30_60"]),
+                    "bucket_60_90": money_string(ledger["bucket_60_90"]),
+                    "bucket_over_90": money_string(ledger["bucket_over_90"]),
+                    "overdue_amount": money_string(ledger["overdue_amount"]),
+                    "max_days": ledger["max_days"],
+                    "invoice_count": ledger["invoice_count"],
+                    "is_due": ledger["is_due"],
+                    "status": ledger["status"],
+                }
+            )
+        return data
+
 
 class AccountingImportCustomerDetailSerializer(AccountingImportCustomerSerializer):
-    invoice_rows = AccountingInvoiceRowSerializer(many=True, read_only=True)
+    invoice_rows = serializers.SerializerMethodField()
+    ledger_rows = serializers.SerializerMethodField()
+    statement_period = serializers.SerializerMethodField()
 
     class Meta(AccountingImportCustomerSerializer.Meta):
-        fields = AccountingImportCustomerSerializer.Meta.fields + ["invoice_rows"]
+        fields = AccountingImportCustomerSerializer.Meta.fields + ["invoice_rows", "ledger_rows", "statement_period"]
+
+    def get_invoice_rows(self, obj):
+        date_from = self.context.get("date_from")
+        date_to = self.context.get("date_to")
+        rows = [line["row"] for line in statement_ledger(obj, date_from=date_from, date_to=date_to)["lines"]]
+        return AccountingInvoiceRowSerializer(rows, many=True).data
+
+    def get_ledger_rows(self, obj):
+        date_from = self.context.get("date_from")
+        date_to = self.context.get("date_to")
+        lines = statement_ledger(obj, date_from=date_from, date_to=date_to)["lines"]
+        return [
+            {
+                "id": line["row"].id,
+                "invoice_date": line["row"].invoice_date,
+                "doc_type": line["doc_type"],
+                "invoice_number": line["row"].invoice_number or line["row"].bill_number,
+                "lpo_reference": line["row"].lpo_reference,
+                "debit": money_string(line["debit"]),
+                "credit": money_string(line["credit"]),
+                "pdc": money_string(line["pdc"]),
+                "balance": money_string(line["balance"]),
+                "days": line["row"].days,
+            }
+            for line in lines
+        ]
+
+    def get_statement_period(self, obj):
+        date_from = self.context.get("date_from")
+        date_to = self.context.get("date_to")
+        return {
+            "from": date_from.isoformat() if date_from else "",
+            "to": date_to.isoformat() if date_to else "",
+        }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import accountingAPI, { describeAccountingError } from '../../api/accounting';
 import './AccountingModule.css';
 
@@ -74,10 +74,17 @@ const AccountingModule = () => {
   const [emailDrafts, setEmailDrafts] = useState({});
   const [selectedCustomerIds, setSelectedCustomerIds] = useState([]);
   const [filters, setFilters] = useState({ search: '', status: 'due', category: '', ageing: '', ordering: '-overdue_amount' });
+  const [dateRange, setDateRange] = useState({ from: '', to: '' });
+  const [appliedDateRange, setAppliedDateRange] = useState({ from: '', to: '' });
   const [editForm, setEditForm] = useState({ email: '', category: 'unknown', is_ignored: false, notes: '' });
+  const customerLoadSeq = useRef(0);
 
   const selectedImportId = selectedImport?.id;
   const filteredImport = useMemo(() => selectedImport || imports[0] || null, [selectedImport, imports]);
+  const statementParams = () => ({
+    ...(appliedDateRange.from ? { date_from: appliedDateRange.from } : {}),
+    ...(appliedDateRange.to ? { date_to: appliedDateRange.to } : {}),
+  });
 
   const loadImports = async () => {
     const [dashboardRes, importsRes] = await Promise.all([
@@ -93,11 +100,16 @@ const AccountingModule = () => {
 
   const loadCustomers = async () => {
     if (!selectedImportId) {
+      customerLoadSeq.current += 1;
       setCustomers([]);
       return;
     }
+    const requestId = customerLoadSeq.current + 1;
+    customerLoadSeq.current = requestId;
     setLoading(true);
     setError('');
+    setCustomers([]);
+    setSelectedCustomerIds([]);
     try {
       const params = { import_id: selectedImportId };
       if (filters.search) params.search = filters.search;
@@ -107,7 +119,9 @@ const AccountingModule = () => {
       if (filters.category) params.category = filters.category;
       if (filters.ageing) params.ageing = filters.ageing;
       if (filters.ordering) params.ordering = filters.ordering;
+      Object.assign(params, statementParams());
       const response = await accountingAPI.importCustomers.list(params);
+      if (requestId !== customerLoadSeq.current) return;
       setCustomers(response.data);
       setSelectedCustomerIds((current) => current.filter((id) => response.data.some((customer) => customer.id === id)));
       setEmailDrafts((current) => {
@@ -118,9 +132,12 @@ const AccountingModule = () => {
         return next;
       });
     } catch (err) {
+      if (requestId !== customerLoadSeq.current) return;
       setError((await describeAccountingError(err, 'Load accounting customers', 'GET /accounting/import-customers/')).detail);
     } finally {
-      setLoading(false);
+      if (requestId === customerLoadSeq.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -134,7 +151,7 @@ const AccountingModule = () => {
   useEffect(() => {
     loadCustomers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedImportId, filters.status, filters.category, filters.ageing, filters.ordering]);
+  }, [selectedImportId, filters.status, filters.category, filters.ageing, filters.ordering, appliedDateRange.from, appliedDateRange.to]);
 
   useEffect(() => {
     if (!selectedCustomer) return;
@@ -208,7 +225,7 @@ const AccountingModule = () => {
   const openCustomer = async (customer) => {
     setError('');
     try {
-      const response = await accountingAPI.importCustomers.retrieve(customer.id);
+      const response = await accountingAPI.importCustomers.retrieve(customer.id, statementParams());
       setSelectedCustomer(response.data);
     } catch (err) {
       setError((await describeAccountingError(err, 'Load accounting customer detail', `GET /accounting/import-customers/${customer.id}/`)).detail);
@@ -222,7 +239,8 @@ const AccountingModule = () => {
     setError('');
     try {
       const response = await accountingAPI.importCustomers.update(selectedCustomer.id, editForm);
-      setSelectedCustomer(response.data);
+      const detailResponse = await accountingAPI.importCustomers.retrieve(response.data.id, statementParams());
+      setSelectedCustomer(detailResponse.data);
       setEmailDrafts((current) => ({ ...current, [response.data.id]: response.data.email || '' }));
       setNotice('Customer accounting details saved.');
       await loadCustomers();
@@ -240,7 +258,10 @@ const AccountingModule = () => {
     try {
       const response = await accountingAPI.importCustomers.update(customer.id, { email: emailDrafts[customer.id] || '' });
       setNotice(`Email saved for ${customer.customer_name}.`);
-      if (selectedCustomer?.id === customer.id) setSelectedCustomer(response.data);
+      if (selectedCustomer?.id === customer.id) {
+        const detailResponse = await accountingAPI.importCustomers.retrieve(response.data.id, statementParams());
+        setSelectedCustomer(detailResponse.data);
+      }
       await loadCustomers();
       await loadImports();
     } catch (err) {
@@ -265,14 +286,15 @@ const AccountingModule = () => {
     }
   };
 
-  const downloadStatement = async (customer = selectedCustomer, style = 'professional') => {
+  const downloadStatement = async (customer = selectedCustomer) => {
     if (!customer) return;
-    setDownloading(`${style}-${customer.id}`);
+    setDownloading(`statement-${customer.id}`);
     setError('');
     try {
-      const response = await accountingAPI.importCustomers.statementPdf(customer.id, style);
+      const response = await accountingAPI.importCustomers.statementPdf(customer.id, 'statement', statementParams());
       const baseName = customer.email_preview?.attachment_filename || `${customer.customer_name || 'statement'}.pdf`;
-      const filename = baseName.replace(/(_classic|_professional)?\.pdf$/i, `_${style}.pdf`);
+      const periodSuffix = appliedDateRange.from || appliedDateRange.to ? '_filtered' : '';
+      const filename = baseName.replace(/(_classic|_professional)?\.pdf$/i, `${periodSuffix}.pdf`);
       saveBlob(response.data, filename);
     } catch (err) {
       setError((await describeAccountingError(err, 'Download statement PDF', `GET /accounting/import-customers/${customer.id}/statement_pdf/`)).detail);
@@ -281,18 +303,19 @@ const AccountingModule = () => {
     }
   };
 
-  const downloadZip = async (style = 'professional', selectedOnly = false) => {
+  const downloadZip = async (selectedOnly = false) => {
     if (!filteredImport) return;
     const customerIds = selectedOnly ? selectedCustomerIds : [];
     if (selectedOnly && customerIds.length === 0) {
       setError('Select at least one due customer before downloading a selected ZIP.');
       return;
     }
-    setDownloading(`${selectedOnly ? 'zip-selected' : 'zip'}-${style}`);
+    setDownloading(selectedOnly ? 'zip-selected' : 'zip');
     setError('');
     try {
-      const response = await accountingAPI.imports.statementsZip(filteredImport.id, style, customerIds);
-      saveBlob(response.data, `accounting-statements-${selectedOnly ? 'selected-' : ''}${style}-${filteredImport.id}.zip`);
+      const response = await accountingAPI.imports.statementsZip(filteredImport.id, 'statement', customerIds, statementParams());
+      const periodSuffix = appliedDateRange.from || appliedDateRange.to ? '-filtered' : '';
+      saveBlob(response.data, `accounting-statements-${selectedOnly ? 'selected-' : ''}${filteredImport.id}${periodSuffix}.zip`);
     } catch (err) {
       setError((await describeAccountingError(err, 'Download accounting statements ZIP', `GET /accounting/imports/${filteredImport.id}/statements_zip/`)).detail);
     } finally {
@@ -324,6 +347,25 @@ const AccountingModule = () => {
 
   const clearSelection = () => setSelectedCustomerIds([]);
 
+  const applyDateFilter = async () => {
+    customerLoadSeq.current += 1;
+    setAppliedDateRange({ ...dateRange });
+    if (selectedCustomer) {
+      setSelectedCustomer(null);
+    }
+  };
+
+  const clearDateFilter = async () => {
+    customerLoadSeq.current += 1;
+    setDateRange({ from: '', to: '' });
+    setAppliedDateRange({ from: '', to: '' });
+    if (selectedCustomer) {
+      setSelectedCustomer(null);
+    }
+  };
+
+  const hasDateFilter = !!(appliedDateRange.from || appliedDateRange.to);
+
   return (
     <div className="accounting-module">
       <div className="accounting-header">
@@ -333,11 +375,8 @@ const AccountingModule = () => {
         </div>
         {filteredImport && (
           <div className="accounting-actions">
-            <button type="button" className="accounting-primary" onClick={() => downloadZip('professional')} disabled={downloading === 'zip-professional'}>
-              {downloading === 'zip-professional' ? 'Preparing all due...' : 'Download All Due - Professional'}
-            </button>
-            <button type="button" className="accounting-secondary" onClick={() => downloadZip('classic')} disabled={downloading === 'zip-classic'}>
-              {downloading === 'zip-classic' ? 'Preparing...' : 'All Due - Classic'}
+            <button type="button" className="accounting-primary" onClick={() => downloadZip(false)} disabled={downloading === 'zip'}>
+              {downloading === 'zip' ? 'Preparing all due...' : 'Download All Due Statements'}
             </button>
           </div>
         )}
@@ -350,7 +389,7 @@ const AccountingModule = () => {
       {error && <div className="accounting-error">{error}</div>}
       {largeZipBatched && (
         <div className="accounting-warning">
-          This import has {filteredImport.due_customer_count} due customers. Full ZIP downloads are automatically split into batches of {zipLimit} statements inside one download. Use Ignore to exclude customers, or select visible rows for a smaller ZIP.
+          This import has {filteredImport.due_customer_count} due customers. Full ZIP downloads are automatically split into batches of {zipLimit} statements inside one download. Use Ignore to exclude customers, select visible rows for a smaller ZIP, or apply a statement date range first.
         </div>
       )}
 
@@ -456,6 +495,17 @@ const AccountingModule = () => {
           </select>
           <button type="button" className="accounting-secondary" onClick={loadCustomers}>Search</button>
         </div>
+        <div className="accounting-date-filter">
+          <div>
+            <strong>Statement invoice date range</strong>
+            <p>Limits customer totals, detail rows, PDFs, and ZIP statements to invoice dates in this period.</p>
+          </div>
+          <label>From date<input type="date" value={dateRange.from} onChange={(event) => setDateRange((current) => ({ ...current, from: event.target.value }))} /></label>
+          <label>To date<input type="date" value={dateRange.to} onChange={(event) => setDateRange((current) => ({ ...current, to: event.target.value }))} /></label>
+          <button type="button" className="accounting-primary" onClick={applyDateFilter}>Apply filter</button>
+          <button type="button" className="accounting-secondary" onClick={clearDateFilter} disabled={!dateRange.from && !dateRange.to && !hasDateFilter}>Clear filter</button>
+          {hasDateFilter && <span className="accounting-badge ready">Filtered statement period active</span>}
+        </div>
         <div className="accounting-selection-bar">
           <span>{selectedCustomerIds.length} selected</span>
           <button type="button" className="accounting-secondary" onClick={toggleVisibleSelection} disabled={visibleSelectableIds.length === 0}>
@@ -464,11 +514,8 @@ const AccountingModule = () => {
           <button type="button" className="accounting-secondary" onClick={clearSelection} disabled={selectedCustomerIds.length === 0}>
             Clear Selection
           </button>
-          <button type="button" className="accounting-primary" onClick={() => downloadZip('professional', true)} disabled={selectedCustomerIds.length === 0 || downloading === 'zip-selected-professional'}>
-            {downloading === 'zip-selected-professional' ? 'Preparing...' : 'Download Selected Professional ZIP'}
-          </button>
-          <button type="button" className="accounting-secondary" onClick={() => downloadZip('classic', true)} disabled={selectedCustomerIds.length === 0 || downloading === 'zip-selected-classic'}>
-            Selected Classic ZIP
+          <button type="button" className="accounting-primary" onClick={() => downloadZip(true)} disabled={selectedCustomerIds.length === 0 || downloading === 'zip-selected'}>
+            {downloading === 'zip-selected' ? 'Preparing...' : 'Download Selected Statements ZIP'}
           </button>
         </div>
         <div className="accounting-table-wrap">
@@ -538,11 +585,8 @@ const AccountingModule = () => {
                   <td><span className={`accounting-badge ${customer.is_due ? 'due' : 'ready'}`}>{customer.status}</span></td>
                   <td className="accounting-actions">
                     <button type="button" className="accounting-secondary" onClick={() => openCustomer(customer)}>View</button>
-                    <button type="button" className="accounting-secondary" onClick={() => downloadStatement(customer, 'professional')} disabled={downloading === `professional-${customer.id}`}>
-                      Pro PDF
-                    </button>
-                    <button type="button" className="accounting-secondary" onClick={() => downloadStatement(customer, 'classic')} disabled={downloading === `classic-${customer.id}`}>
-                      Classic
+                    <button type="button" className="accounting-secondary" onClick={() => downloadStatement(customer)} disabled={downloading === `statement-${customer.id}`}>
+                      Statement PDF
                     </button>
                     <button type="button" className={customer.is_ignored ? 'accounting-secondary' : 'accounting-danger'} onClick={() => toggleIgnored(customer)} disabled={savingEmailId === customer.id}>
                       {customer.is_ignored ? 'Unignore' : 'Ignore'}
@@ -567,11 +611,8 @@ const AccountingModule = () => {
             </div>
 
             <div className="accounting-detail-actions">
-              <button type="button" className="accounting-primary" onClick={() => downloadStatement(selectedCustomer, 'professional')} disabled={downloading === `professional-${selectedCustomer.id}`}>
-                Download Professional PDF
-              </button>
-              <button type="button" className="accounting-secondary" onClick={() => downloadStatement(selectedCustomer, 'classic')} disabled={downloading === `classic-${selectedCustomer.id}`}>
-                Download Classic PDF
+              <button type="button" className="accounting-primary" onClick={() => downloadStatement(selectedCustomer)} disabled={downloading === `statement-${selectedCustomer.id}`}>
+                Download Statement PDF
               </button>
             </div>
 
@@ -581,6 +622,11 @@ const AccountingModule = () => {
               <div><span>Max Days</span><strong>{selectedCustomer.max_days}</strong></div>
               <div><span>Email Status</span><strong>{selectedCustomer.email ? 'Ready' : 'Missing'}</strong></div>
             </div>
+            {hasDateFilter && (
+              <div className="accounting-notice">
+                Statement period: {appliedDateRange.from || 'start'} to {appliedDateRange.to || 'end'}
+              </div>
+            )}
 
             <div className="accounting-edit-grid">
               <label>Email<input value={editForm.email} onChange={(event) => setEditForm((current) => ({ ...current, email: event.target.value }))} /></label>
@@ -610,29 +656,27 @@ const AccountingModule = () => {
                 <thead>
                   <tr>
                     <th>Invoice No.</th>
+                    <th>Doc Type</th>
                     <th>LPO / Reference No.</th>
-                    <th>Date</th>
-                    <th>Amount</th>
-                    <th>0-30</th>
-                    <th>30-60</th>
-                    <th>60-90</th>
-                    <th>Over 90</th>
-                    <th>Total</th>
+                    <th>Invoice Date</th>
+                    <th>Debit</th>
+                    <th>Credit</th>
+                    <th>PDC</th>
+                    <th>Balance</th>
                     <th>Days</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {selectedCustomer.invoice_rows?.map((invoice) => (
+                  {selectedCustomer.ledger_rows?.map((invoice) => (
                     <tr key={invoice.id}>
-                      <td>{invoice.invoice_number || invoice.bill_number}</td>
+                      <td>{invoice.invoice_number}</td>
+                      <td>{invoice.doc_type}</td>
                       <td>{invoice.lpo_reference || '-'}</td>
                       <td>{invoice.invoice_date || '-'}</td>
-                      <td>{formatMoney(invoice.amount)}</td>
-                      <td>{formatMoney(invoice.bucket_0_30)}</td>
-                      <td>{formatMoney(invoice.bucket_30_60)}</td>
-                      <td>{formatMoney(invoice.bucket_60_90)}</td>
-                      <td>{formatMoney(invoice.bucket_over_90)}</td>
-                      <td>{formatMoney(invoice.total)}</td>
+                      <td>{formatMoney(invoice.debit)}</td>
+                      <td>{formatMoney(invoice.credit)}</td>
+                      <td>{formatMoney(invoice.pdc)}</td>
+                      <td>{formatMoney(invoice.balance)}</td>
                       <td>{invoice.days}</td>
                     </tr>
                   ))}

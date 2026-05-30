@@ -15,10 +15,10 @@ The Accounting module prepares those monthly overdue statement files inside the 
 - Group invoices by accounting customer.
 - Persist customer category, email, ignored status, and notes.
 - Identify customers due by invoice `Days > 30` or balances in `30-60`, `60-90`, or `Over 90`.
-- Generate one protected statement PDF per due customer.
+- Generate one protected ledger-style statement PDF per due customer.
 - Generate a ZIP of all due, non-ignored statement PDFs.
 - Show read-only email preview text and attachment filename.
-- Support Classic and Professional customer-facing statement PDF styles.
+- Support one customer-facing Statement of Account PDF style.
 - Split POS `Bill No.` values into `Invoice No.` and `LPO / Reference No.` while retaining the raw bill value internally.
 
 V1 does **not** send emails.
@@ -52,9 +52,10 @@ Custom permissions:
 5. Review parsed row count, customer count, due customer count, and warnings.
 6. Filter due customers, missing emails, categories, ignored customers, or all rows.
 7. Save missing customer emails directly from the Due Customers table, or open the customer detail drawer for deeper review.
-8. Save email/category/ignored status if needed.
-9. Download an individual Classic or Professional statement PDF, or download the ZIP of due statements.
-10. Manually attach statement files to emails outside the system.
+8. Apply an optional invoice date range if the customer statement should exclude older or newer invoices.
+9. Save email/category/ignored status if needed.
+10. Download an individual Statement of Account PDF, or download the ZIP of due statements.
+11. Manually attach statement files to emails outside the system.
 
 ## Parser Notes
 
@@ -84,14 +85,26 @@ The parser splits raw POS bill numbers for display:
 
 Statement PDFs are generated on demand from database rows. Generated PDFs are not stored permanently in V1.
 
-Two PDF styles are available:
+The customer-facing PDF is now a ledger-style Statement of Account. The main table intentionally does not print ageing buckets. Instead it shows:
 
-- **Classic Statement PDF**: compact accounting-style output for practical ledger review.
-- **Professional Statement PDF**: polished customer-facing statement using visual patterns from the quotation PDF, with cleaner header, customer info, ageing summary, totals, and payment reminder sections.
+- Invoice Date
+- Doc Type
+- Invoice No.
+- LPO / Reference No.
+- Debit
+- Credit
+- PDC
+- Balance
 
-Both styles show customer-facing information only: branding/contact details, statement date, customer name/code, invoice rows, ageing totals, total outstanding, overdue amount, and payment reminder text. Internal-only fields such as parser warnings, `Email missing`, `Category Unknown`, ignored status, and system status are not printed on the customer statement.
+Rows are sorted by invoice date ascending, then invoice/reference order. `Balance` is a cumulative running balance calculated as previous balance + debit - credit. Credit and PDC are shown as AED 0.00 unless the parsed POS export row is a negative/credit value or future payment data is added.
 
-ZIP downloads default to the Professional style and include due, non-ignored customers from the selected import. The UI also offers a Classic ZIP download.
+The summary section shows Total Debit, Total Credit, PDC Value, Net Value / Total Outstanding, and Final Balance. Internal-only fields such as parser warnings, `Email missing`, `Category Unknown`, ignored status, and system status are not printed on the customer statement.
+
+The Accounting dashboard still keeps ageing buckets internally for due calculations, filters, and review. Ageing data is not removed from the database or internal UI.
+
+If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF, and ZIP-generated PDFs use only invoice rows in that date range. The PDF prints the statement period clearly.
+
+ZIP downloads include due, non-ignored customers from the selected import.
 
 Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default `75`) is used as the batch size. If an import has more due customers than the batch size, `Download All Due` returns one protected ZIP containing smaller part ZIPs, each with up to that many statement PDFs. This keeps the accountant's workflow close to one-click while avoiding a single huge flat archive. Staff can still select visible rows for a smaller selected ZIP, and ignored customers are always excluded.
 

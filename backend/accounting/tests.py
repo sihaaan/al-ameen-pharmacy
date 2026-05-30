@@ -59,6 +59,16 @@ def make_agewise_upload(name="ageoutcode test.csv", marker=""):
     return SimpleUploadedFile(name, buffer.getvalue().encode("utf-8"), content_type="text/csv")
 
 
+def make_ledger_upload(name="ledger.csv"):
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(make_agewise_row("083", "MILLENNIUM AIRPORT HOTEL", "570170-PO-100-", "01/01/2026", "100.00", "0.00", "100.00", "0.00", "0.00", "100.00", "145"))
+    writer.writerow(make_agewise_row("083", "MILLENNIUM AIRPORT HOTEL", "570171-PO-200-", "15/02/2026", "500.00", "0.00", "0.00", "500.00", "0.00", "500.00", "99"))
+    writer.writerow(make_agewise_row("083", "MILLENNIUM AIRPORT HOTEL", "570172-CN-25-", "20/02/2026", "(25.00", "0.00", "0.00", "(25.00", "0.00", "(25.00", "94"))
+    writer.writerow(make_agewise_row("084", "CARD CUSTOMER", "571921-", "20/05/2026", "100.00", "100.00", "0.00", "0.00", "0.00", "100.00", "5"))
+    return SimpleUploadedFile(name, buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+
 def make_category_upload():
     workbook = Workbook()
     sheet = workbook.active
@@ -139,6 +149,14 @@ class AccountingAPITests(APITestCase):
         return self.client.post(
             reverse("accounting-import-upload"),
             {"file": make_agewise_upload(), "category_file": make_category_upload()},
+            format="multipart",
+        )
+
+    def upload_ledger_import(self):
+        self.client.force_authenticate(self.accountant)
+        return self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": make_ledger_upload(), "category_file": make_category_upload()},
             format="multipart",
         )
 
@@ -341,24 +359,81 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id])).status_code, 403)
 
         self.client.force_authenticate(self.accountant)
-        for style in ("classic", "professional"):
-            pdf = self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id]), {"style": style})
-            self.assertEqual(pdf.status_code, 200)
-            self.assertEqual(pdf["Content-Type"], "application/pdf")
-            self.assertGreater(len(pdf.content), 500)
-            text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
-            self.assertIn("Invoice No.", text)
-            self.assertIn("LPO / Reference No.", text)
-            self.assertIn("571920", text)
-            self.assertIn("UA3IJ2", text)
-            self.assertNotIn("Email missing", text)
-            self.assertNotIn("Category", text)
+        pdf = self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id]))
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf["Content-Type"], "application/pdf")
+        self.assertGreater(len(pdf.content), 500)
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
+        self.assertIn("Invoice No.", text)
+        self.assertIn("LPO / Reference No.", text)
+        self.assertIn("Debit", text)
+        self.assertIn("Credit", text)
+        self.assertIn("PDC", text)
+        self.assertIn("Balance", text)
+        self.assertIn("571920", text)
+        self.assertIn("UA3IJ2", text)
+        self.assertNotIn("0-30", text)
+        self.assertNotIn("30-60", text)
+        self.assertNotIn("60-90", text)
+        self.assertNotIn("Over 90", text)
+        self.assertNotIn("Email missing", text)
+        self.assertNotIn("Category", text)
 
         zip_response = self.client.get(reverse("accounting-import-statements-zip", args=[import_id]))
         self.assertEqual(zip_response.status_code, 200)
         self.assertEqual(zip_response["Content-Type"], "application/zip")
         with ZipFile(BytesIO(zip_response.content)) as archive:
             self.assertGreaterEqual(len(archive.namelist()), 1)
+
+    def test_ledger_running_balance_and_date_range_outputs(self):
+        response = self.upload_ledger_import()
+        import_id = response.data["id"]
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
+        self.client.force_authenticate(self.accountant)
+
+        detail = self.client.get(reverse("accounting-import-customer-detail", args=[summary.id]))
+        self.assertEqual(detail.status_code, 200)
+        balances = [row["balance"] for row in detail.data["ledger_rows"]]
+        self.assertEqual(balances, ["100.00", "600.00", "575.00"])
+        self.assertEqual(detail.data["total_outstanding"], "575.00")
+
+        filtered_detail = self.client.get(
+            reverse("accounting-import-customer-detail", args=[summary.id]),
+            {"date_from": "2026-02-01", "date_to": "2026-02-28"},
+        )
+        self.assertEqual(filtered_detail.status_code, 200)
+        self.assertEqual(len(filtered_detail.data["ledger_rows"]), 2)
+        self.assertEqual(filtered_detail.data["ledger_rows"][-1]["balance"], "475.00")
+        self.assertEqual(filtered_detail.data["total_outstanding"], "475.00")
+
+        filtered_list = self.client.get(
+            reverse("accounting-import-customer-list"),
+            {"import_id": import_id, "date_from": "2026-02-01", "date_to": "2026-02-28", "due_only": "true"},
+        )
+        self.assertEqual(filtered_list.status_code, 200)
+        hotel = next(item for item in filtered_list.data if item["customer_code"] == "083")
+        self.assertEqual(hotel["invoice_count"], 2)
+        self.assertEqual(hotel["total_outstanding"], "475.00")
+
+        pdf = self.client.get(
+            reverse("accounting-import-customer-statement-pdf", args=[summary.id]),
+            {"date_from": "2026-02-01", "date_to": "2026-02-28"},
+        )
+        self.assertEqual(pdf.status_code, 200)
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
+        self.assertIn("2026-02-01 to 2026-02-28", text)
+        self.assertIn("570171", text)
+        self.assertIn("570172", text)
+        self.assertNotIn("570170", text)
+        self.assertIn("AED 475.00", text)
+
+        zip_response = self.client.get(
+            reverse("accounting-import-statements-zip", args=[import_id]),
+            {"date_from": "2026-02-01", "date_to": "2026-02-28"},
+        )
+        self.assertEqual(zip_response.status_code, 200)
+        with ZipFile(BytesIO(zip_response.content)) as archive:
+            self.assertTrue(any("MILLENNIUM" in name for name in archive.namelist()))
 
     def test_ignored_customers_are_excluded_from_statement_zip(self):
         response = self.upload_import()

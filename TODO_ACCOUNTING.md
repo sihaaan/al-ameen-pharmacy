@@ -9,8 +9,9 @@
 - [ ] Upload the latest customer category workbook.
 - [ ] Verify totals for several known customers against the old POS software.
 - [ ] Enter missing customer emails.
-- [ ] Download both Classic and Professional statement PDFs for several customers.
-- [ ] Use `Download All Due - Professional` for the monthly due-customer ZIP. Large imports are split into part ZIPs inside the download automatically.
+- [ ] Download Statement of Account PDFs for several customers and confirm the ledger balance column matches the POS/customer expectation.
+- [ ] Use the invoice date range filter when older records should be excluded from the monthly statement.
+- [ ] Use `Download All Due Statements` for the monthly due-customer ZIP. Large imports are split into part ZIPs inside the download automatically.
 - [ ] Optionally use `Select Visible`, untick/ignore exceptions, and download a selected ZIP for a smaller batch.
 - [ ] Download a ZIP and manually inspect several generated PDFs.
 - [ ] Mark internal branch/customers as ignored where statements are not required.
@@ -26,7 +27,7 @@
 - [ ] Add a private object storage option for source files if long-term retention becomes necessary.
 - [ ] Add conservative customer alias mapping for category/customer name cleanup.
 - [ ] Add dashboard export to CSV/XLSX.
-- [ ] Add statement style setting if accountants settle on one default.
+- [ ] Add payment/bank detail settings for the statement footer if accountant wants bank instructions printed.
 - [ ] Add import delete/retest workflow only after clear production data retention rules.
 - [ ] Add cached/background ZIP generation if batched on-demand ZIP downloads still feel slow for very large months.
 

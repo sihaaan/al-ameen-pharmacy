@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
@@ -304,7 +305,7 @@ def refresh_import_counts(import_record):
 
 def email_preview_for_import_customer(import_customer):
     company = import_customer.customer_name
-    filename = statement_filename(import_customer, style="professional")
+    filename = statement_filename(import_customer)
     return {
         "ready": bool(import_customer.email and import_customer.is_due and not import_customer.is_ignored),
         "email": import_customer.email,
@@ -329,5 +330,88 @@ def statement_filename(import_customer, style="professional"):
     safe_name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw_name)
     safe_name = "_".join(part for part in safe_name.split("_") if part)[:90] or f"statement_{import_customer.id}"
     report_date = import_customer.accounting_import.report_date.isoformat() if import_customer.accounting_import.report_date else "statement"
-    suffix = "classic" if style == "classic" else "professional"
-    return f"{safe_name}_{report_date}_{suffix}.pdf"
+    return f"{safe_name}_{report_date}_statement.pdf"
+
+
+def filter_invoice_rows_for_period(import_customer, *, date_from=None, date_to=None):
+    rows = list(import_customer.invoice_rows.all())
+    if date_from:
+        rows = [row for row in rows if row.invoice_date and row.invoice_date >= date_from]
+    if date_to:
+        rows = [row for row in rows if row.invoice_date and row.invoice_date <= date_to]
+    return sorted(
+        rows,
+        key=lambda row: (
+            row.invoice_date or date.min,
+            row.invoice_number or row.bill_number or "",
+            row.source_row_number,
+            row.id or 0,
+        ),
+    )
+
+
+def statement_ledger(import_customer, *, date_from=None, date_to=None):
+    rows = filter_invoice_rows_for_period(import_customer, date_from=date_from, date_to=date_to)
+    running_balance = Decimal("0.00")
+    lines = []
+    total_debit = Decimal("0.00")
+    total_credit = Decimal("0.00")
+    pdc_total = Decimal("0.00")
+    for row in rows:
+        row_value = row.total if row.total is not None else row.amount
+        if row_value >= 0:
+            debit = row_value
+            credit = Decimal("0.00")
+        else:
+            debit = Decimal("0.00")
+            credit = abs(row_value)
+        pdc = Decimal("0.00")
+        running_balance += debit - credit
+        total_debit += debit
+        total_credit += credit
+        pdc_total += pdc
+        lines.append(
+            {
+                "row": row,
+                "doc_type": "Invoice" if debit else "Credit",
+                "debit": debit,
+                "credit": credit,
+                "pdc": pdc,
+                "balance": running_balance,
+            }
+        )
+
+    bucket_0_30 = sum((row.bucket_0_30 for row in rows), Decimal("0.00"))
+    bucket_30_60 = sum((row.bucket_30_60 for row in rows), Decimal("0.00"))
+    bucket_60_90 = sum((row.bucket_60_90 for row in rows), Decimal("0.00"))
+    bucket_over_90 = sum((row.bucket_over_90 for row in rows), Decimal("0.00"))
+    overdue_amount = bucket_30_60 + bucket_60_90 + bucket_over_90
+    max_days = max((row.days for row in rows), default=0)
+    net_value = total_debit - total_credit
+    is_due = overdue_amount != 0 or max_days > 30 or any(invoice_is_due(row) for row in rows)
+    if import_customer.is_ignored:
+        status = AccountingImportCustomer.STATUS_IGNORED
+        is_due = False
+    else:
+        status = AccountingImportCustomer.STATUS_DUE if is_due else AccountingImportCustomer.STATUS_NOT_DUE
+
+    return {
+        "lines": lines,
+        "invoice_count": len(rows),
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "pdc_total": pdc_total,
+        "net_value": net_value,
+        "final_balance": running_balance,
+        "total_outstanding": net_value,
+        "bucket_0_30": bucket_0_30,
+        "bucket_30_60": bucket_30_60,
+        "bucket_60_90": bucket_60_90,
+        "bucket_over_90": bucket_over_90,
+        "overdue_amount": overdue_amount,
+        "max_days": max_days,
+        "is_due": is_due,
+        "status": status,
+        "date_from": date_from,
+        "date_to": date_to,
+    }

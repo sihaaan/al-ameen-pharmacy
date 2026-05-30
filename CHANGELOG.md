@@ -5,10 +5,11 @@
 ### Added
 - Added a simple `Accounting access` checkbox to Django User admin so superusers can grant/revoke Accounting module access without manually managing groups and permissions.
 - Added protected `Admin Dashboard -> Accounting` overdue statement workflow for accounting staff to upload monthly POS agewise outstanding exports, review due customers, persist customer emails/categories, and download statement PDFs or a ZIP of due statements without sending emails.
-- Added Classic and Professional Accounting statement PDF styles, with split `Invoice No.` and `LPO / Reference No.` columns for POS bill references.
+- Added Accounting statement PDF output with split `Invoice No.` and `LPO / Reference No.` columns for POS bill references.
 - Added Accounting category workbook re-apply support so category mappings can be applied to an existing import, including duplicate outstanding uploads that include a category workbook.
 - Added inline email editing, a customer detail drawer, ageing filters, and sorting to the Accounting Due Customers workflow.
 - Added selected-customer Accounting ZIP downloads and automatic part-ZIP batching for large full-import statement downloads.
+- Added Accounting statement invoice date range filtering that carries into customer summaries, detail rows, PDFs, and ZIP-generated statements.
 - Started Phase 1 quotation module implementation for the existing admin dashboard.
 - Added dedicated quotation module documentation and future-work tracking.
 - Added backend `quotations` app with staff-only APIs, workflow services, audit logs, PDF generation, and tests.
@@ -77,8 +78,9 @@
 - Improved Accounting statement PDFs so customer-facing documents omit internal-only fields like email-missing state, unknown category, parser warnings, ignored status, and system status.
 - Improved Accounting category matching to prefer customer code when a category workbook provides one, then exact normalized customer name.
 - Improved Accounting category upload messages to show matched, updated, already-up-to-date, and unmatched counts.
-- Improved Accounting statement PDF header/footer styling so the Professional style better matches the quotation document hierarchy, with centered branding, right-side title block, and cleaner footer/page numbering.
+- Updated Accounting statement PDFs to a single polished ledger-style statement aligned with the quotation document hierarchy, including centered branding, right-side title block, cleaner footer/page numbering, and customer-facing debit/credit/PDC/balance columns.
 - Cleaned Accounting POS bill-reference splitting so trailing/repeated dashes are removed from `LPO / Reference No.` and existing migrated rows are normalized.
+- Changed customer-facing Accounting PDFs from ageing-bucket reports to ledger-style Statements of Account with Debit, Credit, PDC, and cumulative Balance columns.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.

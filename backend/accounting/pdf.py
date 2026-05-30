@@ -8,6 +8,8 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .services import statement_ledger
+
 try:
     from quotations.pdf import _image as quotation_image
     from quotations.pdf_config import get_quotation_pdf_config
@@ -139,17 +141,29 @@ def make_footer(config):
     return footer
 
 
-def customer_info_table(import_customer, styles, professional=True):
+def statement_period_text(ledger):
+    date_from = ledger.get("date_from")
+    date_to = ledger.get("date_to")
+    if date_from and date_to:
+        return f"{date_from.isoformat()} to {date_to.isoformat()}"
+    if date_from:
+        return f"From {date_from.isoformat()}"
+    if date_to:
+        return f"Up to {date_to.isoformat()}"
+    return "All invoice dates in this import"
+
+
+def customer_info_table(import_customer, styles, ledger):
     data = [
         ["Customer", import_customer.customer_name, "Statement Date", short_date(import_customer.accounting_import.report_date)],
         ["Account No.", import_customer.customer_code or "-", "Currency", "AED"],
-        ["Total Outstanding", money(import_customer.total_outstanding), "Overdue > 30 Days", money(import_customer.overdue_amount)],
+        ["Statement Period", statement_period_text(ledger), "Final Balance", money(ledger["final_balance"])],
     ]
     table = Table(data, colWidths=[30 * mm, 68 * mm, 35 * mm, 39 * mm])
     table.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.25, LIGHT_BORDER if professional else BORDER),
+                ("GRID", (0, 0), (-1, -1), 0.25, LIGHT_BORDER),
                 ("BACKGROUND", (0, 0), (0, -1), SOFT),
                 ("BACKGROUND", (2, 0), (2, -1), SOFT),
                 ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
@@ -163,51 +177,50 @@ def customer_info_table(import_customer, styles, professional=True):
     return table
 
 
-def invoice_rows(import_customer, styles):
+def ledger_rows(ledger, styles):
     rows = [[
+        Paragraph("Invoice Date", styles["TableHeader"]),
+        Paragraph("Doc Type", styles["TableHeader"]),
         Paragraph("Invoice&nbsp;No.", styles["TableHeader"]),
         Paragraph("LPO / Reference No.", styles["TableHeader"]),
-        Paragraph("Date", styles["TableHeader"]),
-        Paragraph("Amount", styles["TableHeader"]),
-        Paragraph("0-30", styles["TableHeader"]),
-        Paragraph("30-60", styles["TableHeader"]),
-        Paragraph("60-90", styles["TableHeader"]),
-        Paragraph("Over 90", styles["TableHeader"]),
-        Paragraph("Total", styles["TableHeader"]),
-        Paragraph("Days", styles["TableHeader"]),
+        Paragraph("Debit", styles["TableHeader"]),
+        Paragraph("Credit", styles["TableHeader"]),
+        Paragraph("PDC", styles["TableHeader"]),
+        Paragraph("Balance", styles["TableHeader"]),
     ]]
-    for invoice in import_customer.invoice_rows.all():
+    for line in ledger["lines"]:
+        invoice = line["row"]
         rows.append(
             [
+                short_date(invoice.invoice_date),
+                Paragraph(_text(line["doc_type"]), styles["Cell"]),
                 Paragraph(_text(invoice.invoice_number or invoice.bill_number), styles["Cell"]),
                 Paragraph(_text(invoice.lpo_reference, "-"), styles["Cell"]),
-                short_date(invoice.invoice_date),
-                Paragraph(money(invoice.amount), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_0_30), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_30_60), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_60_90), styles["CellRight"]),
-                Paragraph(money(invoice.bucket_over_90), styles["CellRight"]),
-                Paragraph(money(invoice.total), styles["CellRight"]),
-                str(invoice.days),
+                Paragraph(money(line["debit"]), styles["CellRight"]),
+                Paragraph(money(line["credit"]), styles["CellRight"]),
+                Paragraph(money(line["pdc"]), styles["CellRight"]),
+                Paragraph(money(line["balance"]), styles["CellRight"]),
             ]
         )
+    if len(rows) == 1:
+        rows.append([Paragraph("No invoice rows found for this statement period.", styles["Cell"]), "", "", "", "", "", "", ""])
     return rows
 
 
-def invoice_table(import_customer, styles, config, *, classic=False):
-    widths = [21 * mm, 30 * mm, 16 * mm, 17 * mm, 16 * mm, 16 * mm, 16 * mm, 18 * mm, 18 * mm, 10 * mm]
-    table = Table(invoice_rows(import_customer, styles), repeatRows=1, colWidths=widths)
+def ledger_table(ledger, styles, config):
+    widths = [24 * mm, 18 * mm, 24 * mm, 35 * mm, 23 * mm, 23 * mm, 20 * mm, 27 * mm]
+    table = Table(ledger_rows(ledger, styles), repeatRows=1, colWidths=widths)
     table.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), primary_color(config)),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 7 if classic else 7.4),
-                ("GRID", (0, 0), (-1, -1), 0.25, BORDER if classic else LIGHT_BORDER),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.2),
+                ("GRID", (0, 0), (-1, -1), 0.25, LIGHT_BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
-                ("PADDING", (0, 0), (-1, -1), 3.5 if classic else 4),
+                ("ALIGN", (4, 1), (-1, -1), "RIGHT"),
+                ("PADDING", (0, 0), (-1, -1), 4),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
             ]
         )
@@ -215,17 +228,16 @@ def invoice_table(import_customer, styles, config, *, classic=False):
     return table
 
 
-def totals_table(import_customer, config):
+def totals_table(ledger, config):
     totals = Table(
         [
-            ["Total Outstanding", money(import_customer.total_outstanding)],
-            ["Overdue > 30 Days", money(import_customer.overdue_amount)],
-            ["0-30", money(import_customer.bucket_0_30)],
-            ["30-60", money(import_customer.bucket_30_60)],
-            ["60-90", money(import_customer.bucket_60_90)],
-            ["Over 90", money(import_customer.bucket_over_90)],
+            ["Total Debit", money(ledger["total_debit"])],
+            ["Total Credit", money(ledger["total_credit"])],
+            ["PDC Value", money(ledger["pdc_total"])],
+            ["Net Value / Total Outstanding", money(ledger["net_value"])],
+            ["Final Balance", money(ledger["final_balance"])],
         ],
-        colWidths=[48 * mm, 40 * mm],
+        colWidths=[58 * mm, 40 * mm],
         hAlign="RIGHT",
     )
     totals.setStyle(
@@ -233,9 +245,9 @@ def totals_table(import_customer, config):
             [
                 ("GRID", (0, 0), (-1, -1), 0.25, BORDER),
                 ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
-                ("BACKGROUND", (0, 1), (-1, 1), SUCCESS_SOFT),
-                ("TEXTCOLOR", (0, 1), (-1, 1), primary_color(config)),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+                ("BACKGROUND", (0, -1), (-1, -1), SUCCESS_SOFT),
+                ("TEXTCOLOR", (0, -1), (-1, -1), primary_color(config)),
                 ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("FONTSIZE", (0, 0), (-1, -1), 8),
                 ("PADDING", (0, 0), (-1, -1), 5),
@@ -272,37 +284,10 @@ def note_block(styles, professional=True):
     return note
 
 
-def build_classic_statement_pdf(import_customer):
+def build_statement_pdf(import_customer, style="professional", *, date_from=None, date_to=None):
     config = company_config()
     styles = make_styles(config)
-    buffer = BytesIO()
-    document = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=12 * mm,
-        leftMargin=12 * mm,
-        topMargin=12 * mm,
-        bottomMargin=16 * mm,
-        title=f"Statement - {import_customer.customer_name}",
-    )
-    story = [
-        build_header(config, styles, classic=True),
-        customer_info_table(import_customer, styles, professional=False),
-        Spacer(1, 8),
-        invoice_table(import_customer, styles, config, classic=True),
-        Spacer(1, 8),
-        totals_table(import_customer, config),
-        Spacer(1, 10),
-        note_block(styles, professional=False),
-    ]
-    page_footer = make_footer(config)
-    document.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
-    return buffer.getvalue()
-
-
-def build_professional_statement_pdf(import_customer):
-    config = company_config()
-    styles = make_styles(config)
+    ledger = statement_ledger(import_customer, date_from=date_from, date_to=date_to)
     buffer = BytesIO()
     document = SimpleDocTemplate(
         buffer,
@@ -315,20 +300,14 @@ def build_professional_statement_pdf(import_customer):
     )
     story = [
         build_header(config, styles),
-        customer_info_table(import_customer, styles, professional=True),
+        customer_info_table(import_customer, styles, ledger),
         Spacer(1, 10),
-        invoice_table(import_customer, styles, config),
+        ledger_table(ledger, styles, config),
         Spacer(1, 10),
-        totals_table(import_customer, config),
+        totals_table(ledger, config),
         Spacer(1, 12),
         note_block(styles, professional=True),
     ]
     page_footer = make_footer(config)
     document.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
     return buffer.getvalue()
-
-
-def build_statement_pdf(import_customer, style="professional"):
-    if style == "classic":
-        return build_classic_statement_pdf(import_customer)
-    return build_professional_statement_pdf(import_customer)
