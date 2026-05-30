@@ -352,11 +352,13 @@ def filter_invoice_rows_for_period(import_customer, *, date_from=None, date_to=N
 
 def statement_ledger(import_customer, *, date_from=None, date_to=None):
     rows = filter_invoice_rows_for_period(import_customer, date_from=date_from, date_to=date_to)
+    invoice_dates = [row.invoice_date for row in rows if row.invoice_date]
+    period_start = date_from or (min(invoice_dates) if invoice_dates else None)
+    period_end = date_to or (max(invoice_dates) if invoice_dates else None)
     running_balance = Decimal("0.00")
     lines = []
     total_debit = Decimal("0.00")
     total_credit = Decimal("0.00")
-    pdc_total = Decimal("0.00")
     for row in rows:
         row_value = row.total if row.total is not None else row.amount
         if row_value >= 0:
@@ -365,18 +367,15 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
         else:
             debit = Decimal("0.00")
             credit = abs(row_value)
-        pdc = Decimal("0.00")
         running_balance += debit - credit
         total_debit += debit
         total_credit += credit
-        pdc_total += pdc
         lines.append(
             {
                 "row": row,
                 "doc_type": "Invoice" if debit else "Credit",
                 "debit": debit,
                 "credit": credit,
-                "pdc": pdc,
                 "balance": running_balance,
             }
         )
@@ -400,7 +399,6 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
         "invoice_count": len(rows),
         "total_debit": total_debit,
         "total_credit": total_credit,
-        "pdc_total": pdc_total,
         "net_value": net_value,
         "final_balance": running_balance,
         "total_outstanding": net_value,
@@ -414,4 +412,6 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
         "status": status,
         "date_from": date_from,
         "date_to": date_to,
+        "period_start": period_start,
+        "period_end": period_end,
     }

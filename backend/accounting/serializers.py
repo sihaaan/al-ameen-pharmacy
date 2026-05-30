@@ -210,7 +210,6 @@ class AccountingImportCustomerDetailSerializer(AccountingImportCustomerSerialize
                 "lpo_reference": line["row"].lpo_reference,
                 "debit": money_string(line["debit"]),
                 "credit": money_string(line["credit"]),
-                "pdc": money_string(line["pdc"]),
                 "balance": money_string(line["balance"]),
                 "days": line["row"].days,
             }
@@ -220,7 +219,12 @@ class AccountingImportCustomerDetailSerializer(AccountingImportCustomerSerialize
     def get_statement_period(self, obj):
         date_from = self.context.get("date_from")
         date_to = self.context.get("date_to")
+        ledger = statement_ledger(obj, date_from=date_from, date_to=date_to)
+        period_start = ledger.get("period_start")
+        period_end = ledger.get("period_end")
         return {
             "from": date_from.isoformat() if date_from else "",
             "to": date_to.isoformat() if date_to else "",
+            "display_from": period_start.isoformat() if period_start else "",
+            "display_to": period_end.isoformat() if period_end else "",
         }

@@ -42,6 +42,13 @@ const sortOptions = [
 
 const categoryLabel = (value) => categories.find((option) => option.value === value)?.label || value || '-';
 const formatMoney = (value) => `AED ${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const statementPeriodText = (customer) => {
+  const period = customer?.statement_period || {};
+  const start = period.display_from || period.from;
+  const end = period.display_to || period.to;
+  if (start && end) return start === end ? start : `${start} to ${end}`;
+  return start || end || 'No invoice rows';
+};
 
 const saveBlob = (blob, filename) => {
   const url = window.URL.createObjectURL(blob);
@@ -544,7 +551,13 @@ const AccountingModule = () => {
             </thead>
             <tbody>
               {loading && <tr><td colSpan="11">Loading customers...</td></tr>}
-              {!loading && customers.length === 0 && <tr><td colSpan="11">No customers match this filter.</td></tr>}
+              {!loading && customers.length === 0 && (
+                <tr>
+                  <td colSpan="11">
+                    {hasDateFilter ? 'No customers found for this date range.' : 'No customers match this filter.'}
+                  </td>
+                </tr>
+              )}
               {customers.map((customer) => (
                 <tr key={customer.id} className={selectedCustomer?.id === customer.id ? 'active-row' : ''}>
                   <td>
@@ -622,11 +635,9 @@ const AccountingModule = () => {
               <div><span>Max Days</span><strong>{selectedCustomer.max_days}</strong></div>
               <div><span>Email Status</span><strong>{selectedCustomer.email ? 'Ready' : 'Missing'}</strong></div>
             </div>
-            {hasDateFilter && (
-              <div className="accounting-notice">
-                Statement period: {appliedDateRange.from || 'start'} to {appliedDateRange.to || 'end'}
-              </div>
-            )}
+            <div className="accounting-notice">
+              Statement period: {statementPeriodText(selectedCustomer)}
+            </div>
 
             <div className="accounting-edit-grid">
               <label>Email<input value={editForm.email} onChange={(event) => setEditForm((current) => ({ ...current, email: event.target.value }))} /></label>
@@ -661,7 +672,6 @@ const AccountingModule = () => {
                     <th>Invoice Date</th>
                     <th>Debit</th>
                     <th>Credit</th>
-                    <th>PDC</th>
                     <th>Balance</th>
                     <th>Days</th>
                   </tr>
@@ -675,7 +685,6 @@ const AccountingModule = () => {
                       <td>{invoice.invoice_date || '-'}</td>
                       <td>{formatMoney(invoice.debit)}</td>
                       <td>{formatMoney(invoice.credit)}</td>
-                      <td>{formatMoney(invoice.pdc)}</td>
                       <td>{formatMoney(invoice.balance)}</td>
                       <td>{invoice.days}</td>
                     </tr>
