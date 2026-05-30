@@ -78,9 +78,10 @@
 - Improved Accounting statement PDFs so customer-facing documents omit internal-only fields like email-missing state, unknown category, parser warnings, ignored status, and system status.
 - Improved Accounting category matching to prefer customer code when a category workbook provides one, then exact normalized customer name.
 - Improved Accounting category upload messages to show matched, updated, already-up-to-date, and unmatched counts.
-- Updated Accounting statement PDFs to a single polished ledger-style statement aligned with the quotation document hierarchy, including centered branding, right-side title block, cleaner footer/page numbering, and customer-facing debit/credit/PDC/balance columns.
+- Updated Accounting statement PDFs to a single polished ledger-style statement aligned with the quotation document hierarchy, including centered branding, right-side title block, cleaner footer/page numbering, and customer-facing debit/credit/balance columns.
 - Cleaned Accounting POS bill-reference splitting so trailing/repeated dashes are removed from `LPO / Reference No.` and existing migrated rows are normalized.
-- Changed customer-facing Accounting PDFs from ageing-bucket reports to ledger-style Statements of Account with Debit, Credit, PDC, and cumulative Balance columns.
+- Removed PDC from customer-facing Accounting statements and made statement periods always show concrete invoice date ranges.
+- Changed customer-facing Accounting PDFs from ageing-bucket reports to ledger-style Statements of Account with Debit, Credit, and cumulative Balance columns.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.

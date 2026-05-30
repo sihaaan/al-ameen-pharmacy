@@ -93,16 +93,15 @@ The customer-facing PDF is now a ledger-style Statement of Account. The main tab
 - LPO / Reference No.
 - Debit
 - Credit
-- PDC
 - Balance
 
-Rows are sorted by invoice date ascending, then invoice/reference order. `Balance` is a cumulative running balance calculated as previous balance + debit - credit. Credit and PDC are shown as AED 0.00 unless the parsed POS export row is a negative/credit value or future payment data is added.
+Rows are sorted by invoice date ascending, then invoice/reference order. `Balance` is a cumulative running balance calculated as previous balance + debit - credit. Positive values appear as Debit. Negative values appear as Credit using the absolute value.
 
-The summary section shows Total Debit, Total Credit, PDC Value, Net Value / Total Outstanding, and Final Balance. Internal-only fields such as parser warnings, `Email missing`, `Category Unknown`, ignored status, and system status are not printed on the customer statement.
+The summary section shows Total Debit, Total Credit, Net Value / Total Outstanding, and Final Balance. Internal-only fields such as parser warnings, `Email missing`, `Category Unknown`, ignored status, and system status are not printed on the customer statement.
 
 The Accounting dashboard still keeps ageing buckets internally for due calculations, filters, and review. Ageing data is not removed from the database or internal UI.
 
-If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF, and ZIP-generated PDFs use only invoice rows in that date range. The PDF prints the statement period clearly.
+If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF, and ZIP-generated PDFs use only invoice rows in that date range. The PDF prints the selected statement period clearly. If no date range is applied, the statement period is calculated from the minimum and maximum invoice dates included for that customer.
 
 ZIP downloads include due, non-ignored customers from the selected import.
 

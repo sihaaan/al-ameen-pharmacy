@@ -368,8 +368,9 @@ class AccountingAPITests(APITestCase):
         self.assertIn("LPO / Reference No.", text)
         self.assertIn("Debit", text)
         self.assertIn("Credit", text)
-        self.assertIn("PDC", text)
         self.assertIn("Balance", text)
+        self.assertNotIn("PDC", text)
+        self.assertNotIn("PDC Value", text)
         self.assertIn("571920", text)
         self.assertIn("UA3IJ2", text)
         self.assertNotIn("0-30", text)
@@ -395,7 +396,18 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(detail.status_code, 200)
         balances = [row["balance"] for row in detail.data["ledger_rows"]]
         self.assertEqual(balances, ["100.00", "600.00", "575.00"])
+        self.assertEqual(detail.data["ledger_rows"][-1]["credit"], "25.00")
         self.assertEqual(detail.data["total_outstanding"], "575.00")
+        self.assertEqual(detail.data["statement_period"]["display_from"], "2026-01-01")
+        self.assertEqual(detail.data["statement_period"]["display_to"], "2026-02-20")
+
+        full_pdf = self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id]))
+        self.assertEqual(full_pdf.status_code, 200)
+        full_text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(full_pdf.content)).pages)
+        self.assertIn("2026-01-01 to 2026-02-20", full_text)
+        self.assertIn("Credit", full_text)
+        self.assertIn("AED 25.00", full_text)
+        self.assertNotIn("PDC", full_text)
 
         filtered_detail = self.client.get(
             reverse("accounting-import-customer-detail", args=[summary.id]),
@@ -405,15 +417,27 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(len(filtered_detail.data["ledger_rows"]), 2)
         self.assertEqual(filtered_detail.data["ledger_rows"][-1]["balance"], "475.00")
         self.assertEqual(filtered_detail.data["total_outstanding"], "475.00")
+        self.assertEqual(filtered_detail.data["statement_period"]["display_from"], "2026-02-01")
+        self.assertEqual(filtered_detail.data["statement_period"]["display_to"], "2026-02-28")
+
+        one_day_detail = self.client.get(
+            reverse("accounting-import-customer-detail", args=[summary.id]),
+            {"date_from": "2026-02-15", "date_to": "2026-02-15"},
+        )
+        self.assertEqual(one_day_detail.status_code, 200)
+        self.assertEqual(len(one_day_detail.data["ledger_rows"]), 1)
+        self.assertEqual(one_day_detail.data["statement_period"]["display_from"], "2026-02-15")
+        self.assertEqual(one_day_detail.data["statement_period"]["display_to"], "2026-02-15")
 
         filtered_list = self.client.get(
             reverse("accounting-import-customer-list"),
-            {"import_id": import_id, "date_from": "2026-02-01", "date_to": "2026-02-28", "due_only": "true"},
+            {"import_id": import_id, "date_from": "01/02/2026", "date_to": "28/02/2026", "due_only": "true"},
         )
         self.assertEqual(filtered_list.status_code, 200)
         hotel = next(item for item in filtered_list.data if item["customer_code"] == "083")
         self.assertEqual(hotel["invoice_count"], 2)
         self.assertEqual(hotel["total_outstanding"], "475.00")
+        self.assertEqual(hotel["overdue_amount"], "475.00")
 
         pdf = self.client.get(
             reverse("accounting-import-customer-statement-pdf", args=[summary.id]),
@@ -426,6 +450,7 @@ class AccountingAPITests(APITestCase):
         self.assertIn("570172", text)
         self.assertNotIn("570170", text)
         self.assertIn("AED 475.00", text)
+        self.assertNotIn("PDC", text)
 
         zip_response = self.client.get(
             reverse("accounting-import-statements-zip", args=[import_id]),
@@ -434,6 +459,14 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(zip_response.status_code, 200)
         with ZipFile(BytesIO(zip_response.content)) as archive:
             self.assertTrue(any("MILLENNIUM" in name for name in archive.namelist()))
+            pdf_text = "\n".join(
+                page.extract_text() or ""
+                for page in PdfReader(BytesIO(archive.read(next(name for name in archive.namelist() if "MILLENNIUM" in name)))).pages
+            )
+        self.assertIn("2026-02-01 to 2026-02-28", pdf_text)
+        self.assertIn("570171", pdf_text)
+        self.assertNotIn("570170", pdf_text)
+        self.assertNotIn("PDC", pdf_text)
 
     def test_ignored_customers_are_excluded_from_statement_zip(self):
         response = self.upload_import()

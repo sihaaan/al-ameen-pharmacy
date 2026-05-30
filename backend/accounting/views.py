@@ -1,9 +1,12 @@
 from io import BytesIO
+from datetime import datetime
+from decimal import Decimal
 from zipfile import ZIP_STORED, ZipFile
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Q
+from django.db.models import Count, DecimalField, Max, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
@@ -32,9 +35,28 @@ from .services import (
 
 
 def parse_accounting_date_range(request):
-    date_from = parse_date(request.query_params.get("date_from", "") or "")
-    date_to = parse_date(request.query_params.get("date_to", "") or "")
+    date_from = parse_accounting_date(request.query_params.get("date_from", "") or "")
+    date_to = parse_accounting_date(request.query_params.get("date_to", "") or "")
     return date_from, date_to
+
+
+def parse_accounting_date(value):
+    value = (value or "").strip()
+    if not value:
+        return None
+    parsed = parse_date(value)
+    if parsed:
+        return parsed
+    for date_format in ("%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, date_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def money_string(value):
+    return f"{value or Decimal('0.00'):.2f}"
 
 
 def chunked(items, size):
@@ -230,12 +252,7 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
         if due_only in {"1", "true", "yes"} and not has_date_range:
             queryset = queryset.filter(is_due=True, is_ignored=False)
         if has_date_range:
-            queryset = queryset.filter(invoice_rows__invoice_date__isnull=False)
-            if date_from:
-                queryset = queryset.filter(invoice_rows__invoice_date__gte=date_from)
-            if date_to:
-                queryset = queryset.filter(invoice_rows__invoice_date__lte=date_to)
-            return queryset.distinct().order_by("customer_name")
+            return queryset.order_by("customer_name")
         if ageing_filter == "over_30":
             queryset = queryset.filter(max_days__gt=30)
         elif ageing_filter == "over_60":
@@ -261,13 +278,60 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
         date_from, date_to = parse_accounting_date_range(request)
         if not (date_from or date_to):
             return super().list(request, *args, **kwargs)
-        queryset = self.filter_queryset(self.get_queryset())
-        serializer = self.get_serializer(queryset, many=True)
-        items = list(serializer.data)
+        queryset = self.filter_queryset(self.get_queryset()).prefetch_related(None)
         status_filter = request.query_params.get("status", "").strip()
         due_only = request.query_params.get("due_only", "").strip().lower()
         ageing_filter = request.query_params.get("ageing", "").strip().lower()
         ordering = request.query_params.get("ordering", "-overdue_amount").strip()
+        date_q = Q(invoice_rows__invoice_date__isnull=False)
+        if date_from:
+            date_q &= Q(invoice_rows__invoice_date__gte=date_from)
+        if date_to:
+            date_q &= Q(invoice_rows__invoice_date__lte=date_to)
+        decimal_field = DecimalField(max_digits=14, decimal_places=2)
+        queryset = queryset.annotate(
+            filtered_total=Coalesce(Sum("invoice_rows__total", filter=date_q), Value(Decimal("0.00")), output_field=decimal_field),
+            filtered_0_30=Coalesce(Sum("invoice_rows__bucket_0_30", filter=date_q), Value(Decimal("0.00")), output_field=decimal_field),
+            filtered_30_60=Coalesce(Sum("invoice_rows__bucket_30_60", filter=date_q), Value(Decimal("0.00")), output_field=decimal_field),
+            filtered_60_90=Coalesce(Sum("invoice_rows__bucket_60_90", filter=date_q), Value(Decimal("0.00")), output_field=decimal_field),
+            filtered_over_90=Coalesce(Sum("invoice_rows__bucket_over_90", filter=date_q), Value(Decimal("0.00")), output_field=decimal_field),
+            filtered_max_days=Coalesce(Max("invoice_rows__days", filter=date_q), Value(0)),
+            filtered_invoice_count=Count("invoice_rows", filter=date_q),
+        )
+        items = []
+        for item in queryset:
+            overdue_amount = item.filtered_30_60 + item.filtered_60_90 + item.filtered_over_90
+            is_due = bool((overdue_amount != 0 or item.filtered_max_days > 30) and not item.is_ignored)
+            status = AccountingImportCustomer.STATUS_IGNORED if item.is_ignored else (
+                AccountingImportCustomer.STATUS_DUE if is_due else AccountingImportCustomer.STATUS_NOT_DUE
+            )
+            items.append(
+                {
+                    "id": item.id,
+                    "accounting_import": item.accounting_import_id,
+                    "customer_profile_id": item.customer_id,
+                    "customer_code": item.customer_code,
+                    "customer_name": item.customer_name,
+                    "category": item.category,
+                    "email": item.email,
+                    "total_outstanding": money_string(item.filtered_total),
+                    "bucket_0_30": money_string(item.filtered_0_30),
+                    "bucket_30_60": money_string(item.filtered_30_60),
+                    "bucket_60_90": money_string(item.filtered_60_90),
+                    "bucket_over_90": money_string(item.filtered_over_90),
+                    "overdue_amount": money_string(overdue_amount),
+                    "max_days": item.filtered_max_days,
+                    "invoice_count": item.filtered_invoice_count,
+                    "is_due": is_due,
+                    "is_ignored": item.is_ignored,
+                    "status": status,
+                    "warnings": item.warnings,
+                    "customer_notes": getattr(item.customer, "notes", ""),
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                }
+            )
+        items = [item for item in items if item["invoice_count"] > 0]
 
         def as_float(item, key):
             try:

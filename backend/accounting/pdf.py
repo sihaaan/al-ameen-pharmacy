@@ -142,15 +142,17 @@ def make_footer(config):
 
 
 def statement_period_text(ledger):
-    date_from = ledger.get("date_from")
-    date_to = ledger.get("date_to")
-    if date_from and date_to:
-        return f"{date_from.isoformat()} to {date_to.isoformat()}"
-    if date_from:
-        return f"From {date_from.isoformat()}"
-    if date_to:
-        return f"Up to {date_to.isoformat()}"
-    return "All invoice dates in this import"
+    period_start = ledger.get("period_start")
+    period_end = ledger.get("period_end")
+    if period_start and period_end:
+        if period_start == period_end:
+            return period_start.isoformat()
+        return f"{period_start.isoformat()} to {period_end.isoformat()}"
+    if period_start:
+        return period_start.isoformat()
+    if period_end:
+        return period_end.isoformat()
+    return "No invoice rows"
 
 
 def customer_info_table(import_customer, styles, ledger):
@@ -185,7 +187,6 @@ def ledger_rows(ledger, styles):
         Paragraph("LPO / Reference No.", styles["TableHeader"]),
         Paragraph("Debit", styles["TableHeader"]),
         Paragraph("Credit", styles["TableHeader"]),
-        Paragraph("PDC", styles["TableHeader"]),
         Paragraph("Balance", styles["TableHeader"]),
     ]]
     for line in ledger["lines"]:
@@ -198,17 +199,16 @@ def ledger_rows(ledger, styles):
                 Paragraph(_text(invoice.lpo_reference, "-"), styles["Cell"]),
                 Paragraph(money(line["debit"]), styles["CellRight"]),
                 Paragraph(money(line["credit"]), styles["CellRight"]),
-                Paragraph(money(line["pdc"]), styles["CellRight"]),
                 Paragraph(money(line["balance"]), styles["CellRight"]),
             ]
         )
     if len(rows) == 1:
-        rows.append([Paragraph("No invoice rows found for this statement period.", styles["Cell"]), "", "", "", "", "", "", ""])
+        rows.append([Paragraph("No invoice rows found for this statement period.", styles["Cell"]), "", "", "", "", "", ""])
     return rows
 
 
 def ledger_table(ledger, styles, config):
-    widths = [24 * mm, 18 * mm, 24 * mm, 35 * mm, 23 * mm, 23 * mm, 20 * mm, 27 * mm]
+    widths = [26 * mm, 20 * mm, 25 * mm, 39 * mm, 25 * mm, 25 * mm, 32 * mm]
     table = Table(ledger_rows(ledger, styles), repeatRows=1, colWidths=widths)
     table.setStyle(
         TableStyle(
@@ -233,7 +233,6 @@ def totals_table(ledger, config):
         [
             ["Total Debit", money(ledger["total_debit"])],
             ["Total Credit", money(ledger["total_credit"])],
-            ["PDC Value", money(ledger["pdc_total"])],
             ["Net Value / Total Outstanding", money(ledger["net_value"])],
             ["Final Balance", money(ledger["final_balance"])],
         ],
