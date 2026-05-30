@@ -1,0 +1,6 @@
+[settings]
+# Railway/Nixpacks uses mise to install Python during the image build.
+# Python 3.12.8 does not currently publish GitHub artifact attestations in
+# the format mise expects, so keep checksum verification but disable the
+# attestation requirement for this runtime install.
+python.github_attestations = false
