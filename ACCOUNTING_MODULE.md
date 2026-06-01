@@ -76,7 +76,7 @@ Category workbook matching uses the same conservative approach. If the category 
 
 If `Days` is missing or invalid, the parser calculates days from invoice date to report date. If report date is missing, upload date is used with a warning.
 
-Parser safeguards reject unsupported files, malformed Excel workbooks, CSV rows with unexpected column explosions, and files above the configured row/size limits with clear validation errors instead of server errors. The newer POS export format `Agewise Outstanding from ... to ...` is supported and uses the final `to` date as the report date.
+Parser safeguards reject unsupported files, malformed Excel workbooks, CSV rows with unexpected column explosions, and files above the configured row/size limits with clear validation errors instead of server errors. The newer POS export format `Agewise Outstanding from ... to ...` is supported and uses the final `to` date as the report date. To keep large imports fast on Neon, invoice rows store compact source trace metadata rather than repeating the POS report header/footer cells for every row.
 
 The parser splits raw POS bill numbers for display:
 
@@ -128,7 +128,6 @@ Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default 
 - Gmail/SMTP integration.
 - Reminder send logs and duplicate-send prevention.
 - Scheduled monthly jobs.
-- Excel statement output.
 - Private long-term storage of uploaded source files.
 - AI parsing or fuzzy customer matching.
 - Accounting payment reconciliation.

@@ -14,6 +14,7 @@
 - Improved Accounting Excel statements with a customer-facing branded layout, styled ledger table, clearer totals block, print-ready page setup, freeze panes, and filters.
 - Changed Accounting landing behavior so prior imports remain in import history but customer rows only load after staff explicitly opens an import.
 - Hardened Accounting CSV upload handling for the newer repeated-header POS export format and added parser row/column safeguards with clean validation errors.
+- Optimized large Accounting import saves by batching invoice-summary and row inserts and storing compact row trace metadata instead of repeated POS report headers on every invoice line.
 - Started Phase 1 quotation module implementation for the existing admin dashboard.
 - Added dedicated quotation module documentation and future-work tracking.
 - Added backend `quotations` app with staff-only APIs, workflow services, audit logs, PDF generation, and tests.

@@ -1,5 +1,6 @@
 import csv
 from io import BytesIO, StringIO
+from unittest.mock import patch
 from zipfile import ZipFile
 
 from django.contrib.auth.models import Group, Permission, User
@@ -461,10 +462,12 @@ class AccountingAPITests(APITestCase):
     def test_duplicate_upload_returns_previous_import_without_creating_another(self):
         first = self.upload_import()
         self.assertEqual(first.status_code, 201)
-        second = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+        with patch("accounting.services.parse_outstanding_upload") as parse_mock:
+            second = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
         self.assertEqual(second.status_code, 200)
         self.assertTrue(second.data["duplicate"])
         self.assertEqual(AccountingImport.objects.count(), 1)
+        parse_mock.assert_not_called()
 
     def test_statement_pdfs_and_zip_download_are_staff_only_and_customer_facing(self):
         response = self.upload_import()

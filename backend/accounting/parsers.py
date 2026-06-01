@@ -301,9 +301,7 @@ def parse_invoice_row(row, row_number, report_date):
         days=days,
         raw_data={
             "source_row": row_number,
-            "metadata": row[:data_start],
-            "invoice": cells,
-            "trailing": row[data_start + 12 :],
+            "raw_bill_number": bill_number,
         },
         warnings=warnings,
     ), ""

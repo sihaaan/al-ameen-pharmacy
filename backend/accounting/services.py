@@ -132,6 +132,29 @@ def category_update_message(result):
     )
 
 
+def build_invoice_row(import_customer, row):
+    return AccountingInvoiceRow(
+        import_customer=import_customer,
+        source_row_number=row.source_row_number,
+        customer_code=row.customer_code,
+        customer_name=row.customer_name,
+        place=row.place,
+        bill_number=row.bill_number,
+        invoice_number=row.invoice_number,
+        lpo_reference=row.lpo_reference,
+        invoice_date=row.invoice_date,
+        amount=row.amount,
+        bucket_0_30=row.bucket_0_30,
+        bucket_30_60=row.bucket_30_60,
+        bucket_60_90=row.bucket_60_90,
+        bucket_over_90=row.bucket_over_90,
+        total=row.total,
+        days=row.days,
+        raw_data=row.raw_data,
+        warnings=row.warnings,
+    )
+
+
 @transaction.atomic
 def create_accounting_import(*, outstanding_file, category_file=None, actor=None):
     source = read_outstanding_source(outstanding_file)
@@ -185,6 +208,8 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
 
     due_count = 0
     invoice_count = 0
+    summary_records = []
+    invoice_rows_by_summary = []
     for rows in grouped.values():
         first = rows[0]
         customer = find_or_create_customer(first, category_map, category_code_map)
@@ -199,7 +224,7 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
         if is_due and not customer.is_ignored:
             due_count += 1
 
-        import_customer = AccountingImportCustomer.objects.create(
+        import_customer = AccountingImportCustomer(
             accounting_import=import_record,
             customer=customer,
             customer_code=customer.customer_code or first.customer_code,
@@ -219,32 +244,28 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
             status=status,
             warnings=[warning for row in rows for warning in row.warnings][:25],
         )
-        AccountingInvoiceRow.objects.bulk_create(
-            [
-                AccountingInvoiceRow(
-                    import_customer=import_customer,
-                    source_row_number=row.source_row_number,
-                    customer_code=row.customer_code,
-                    customer_name=row.customer_name,
-                    place=row.place,
-                    bill_number=row.bill_number,
-                    invoice_number=row.invoice_number,
-                    lpo_reference=row.lpo_reference,
-                    invoice_date=row.invoice_date,
-                    amount=row.amount,
-                    bucket_0_30=row.bucket_0_30,
-                    bucket_30_60=row.bucket_30_60,
-                    bucket_60_90=row.bucket_60_90,
-                    bucket_over_90=row.bucket_over_90,
-                    total=row.total,
-                    days=row.days,
-                    raw_data=row.raw_data,
-                    warnings=row.warnings,
-                )
-                for row in rows
-            ]
-        )
+        summary_records.append(import_customer)
+        invoice_rows_by_summary.append((import_customer, rows))
         invoice_count += len(rows)
+
+    AccountingImportCustomer.objects.bulk_create(summary_records, batch_size=1000)
+
+    if any(summary.id is None for summary in summary_records):
+        summaries_by_customer_id = {
+            item.customer_id: item
+            for item in AccountingImportCustomer.objects.filter(accounting_import=import_record)
+        }
+        invoice_rows_by_summary = [
+            (summaries_by_customer_id[summary.customer_id], rows)
+            for summary, rows in invoice_rows_by_summary
+        ]
+
+    invoice_records = [
+        build_invoice_row(import_customer, row)
+        for import_customer, rows in invoice_rows_by_summary
+        for row in rows
+    ]
+    AccountingInvoiceRow.objects.bulk_create(invoice_records, batch_size=5000)
 
     import_record.due_customer_count = due_count
     import_record.generated_statement_count = due_count
