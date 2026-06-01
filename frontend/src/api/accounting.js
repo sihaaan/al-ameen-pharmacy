@@ -20,6 +20,10 @@ const accountingAPI = {
       params: { style, customer_ids: customerIds.join(','), ...extraParams },
       responseType: 'blob',
     }),
+    statementsExcelZip: (id, customerIds = [], extraParams = {}) => axiosInstance.get(`/accounting/imports/${id}/statements_excel_zip/`, {
+      params: { customer_ids: customerIds.join(','), ...extraParams },
+      responseType: 'blob',
+    }),
   },
   importCustomers: {
     list: (params = {}) => axiosInstance.get('/accounting/import-customers/', { params }),
@@ -27,6 +31,10 @@ const accountingAPI = {
     update: (id, data) => axiosInstance.patch(`/accounting/import-customers/${id}/`, data),
     statementPdf: (id, style = 'professional', extraParams = {}) => axiosInstance.get(`/accounting/import-customers/${id}/statement_pdf/`, {
       params: { style, ...extraParams },
+      responseType: 'blob',
+    }),
+    statementExcel: (id, extraParams = {}) => axiosInstance.get(`/accounting/import-customers/${id}/statement_excel/`, {
+      params: { ...extraParams },
       responseType: 'blob',
     }),
   },

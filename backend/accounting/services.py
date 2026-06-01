@@ -245,7 +245,15 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
     import_record.generated_statement_count = due_count
     import_record.parsed_row_count = invoice_count
     import_record.save(update_fields=["due_customer_count", "generated_statement_count", "parsed_row_count", "updated_at"])
-    return import_record, {"duplicate": False, "message": "Accounting import parsed successfully."}
+
+    category_meta = apply_category_map_to_import(import_record, parsed_category) if parsed_category else {}
+    category_message = category_update_message(category_meta)
+    return import_record, {
+        "duplicate": False,
+        "message": "Accounting import parsed successfully." + (f" {category_message}" if category_message else ""),
+        "category_update": category_meta,
+        "category_update_message": category_message,
+    }
 
 
 @transaction.atomic

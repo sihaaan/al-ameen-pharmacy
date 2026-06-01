@@ -310,6 +310,23 @@ const AccountingModule = () => {
     }
   };
 
+  const downloadStatementExcel = async (customer = selectedCustomer) => {
+    if (!customer) return;
+    setDownloading(`excel-${customer.id}`);
+    setError('');
+    try {
+      const response = await accountingAPI.importCustomers.statementExcel(customer.id, statementParams());
+      const baseName = customer.email_preview?.attachment_filename || `${customer.customer_name || 'statement'}.pdf`;
+      const periodSuffix = appliedDateRange.from || appliedDateRange.to ? '_filtered' : '';
+      const filename = baseName.replace(/\.pdf$/i, `${periodSuffix}.xlsx`);
+      saveBlob(response.data, filename);
+    } catch (err) {
+      setError((await describeAccountingError(err, 'Download statement Excel', `GET /accounting/import-customers/${customer.id}/statement_excel/`)).detail);
+    } finally {
+      setDownloading('');
+    }
+  };
+
   const downloadZip = async (selectedOnly = false) => {
     if (!filteredImport) return;
     const customerIds = selectedOnly ? selectedCustomerIds : [];
@@ -325,6 +342,26 @@ const AccountingModule = () => {
       saveBlob(response.data, `accounting-statements-${selectedOnly ? 'selected-' : ''}${filteredImport.id}${periodSuffix}.zip`);
     } catch (err) {
       setError((await describeAccountingError(err, 'Download accounting statements ZIP', `GET /accounting/imports/${filteredImport.id}/statements_zip/`)).detail);
+    } finally {
+      setDownloading('');
+    }
+  };
+
+  const downloadExcelZip = async (selectedOnly = false) => {
+    if (!filteredImport) return;
+    const customerIds = selectedOnly ? selectedCustomerIds : [];
+    if (selectedOnly && customerIds.length === 0) {
+      setError('Select at least one due customer before downloading a selected Excel ZIP.');
+      return;
+    }
+    setDownloading(selectedOnly ? 'excel-zip-selected' : 'excel-zip');
+    setError('');
+    try {
+      const response = await accountingAPI.imports.statementsExcelZip(filteredImport.id, customerIds, statementParams());
+      const periodSuffix = appliedDateRange.from || appliedDateRange.to ? '-filtered' : '';
+      saveBlob(response.data, `accounting-excel-statements-${selectedOnly ? 'selected-' : ''}${filteredImport.id}${periodSuffix}.zip`);
+    } catch (err) {
+      setError((await describeAccountingError(err, 'Download accounting Excel statements ZIP', `GET /accounting/imports/${filteredImport.id}/statements_excel_zip/`)).detail);
     } finally {
       setDownloading('');
     }
@@ -384,6 +421,9 @@ const AccountingModule = () => {
           <div className="accounting-actions">
             <button type="button" className="accounting-primary" onClick={() => downloadZip(false)} disabled={downloading === 'zip'}>
               {downloading === 'zip' ? 'Preparing all due...' : 'Download All Due Statements'}
+            </button>
+            <button type="button" className="accounting-secondary" onClick={() => downloadExcelZip(false)} disabled={downloading === 'excel-zip'}>
+              {downloading === 'excel-zip' ? 'Preparing Excel...' : 'Download All Due Excel'}
             </button>
           </div>
         )}
@@ -524,6 +564,9 @@ const AccountingModule = () => {
           <button type="button" className="accounting-primary" onClick={() => downloadZip(true)} disabled={selectedCustomerIds.length === 0 || downloading === 'zip-selected'}>
             {downloading === 'zip-selected' ? 'Preparing...' : 'Download Selected Statements ZIP'}
           </button>
+          <button type="button" className="accounting-secondary" onClick={() => downloadExcelZip(true)} disabled={selectedCustomerIds.length === 0 || downloading === 'excel-zip-selected'}>
+            {downloading === 'excel-zip-selected' ? 'Preparing Excel...' : 'Download Selected Excel ZIP'}
+          </button>
         </div>
         <div className="accounting-table-wrap">
           <table className="accounting-table accounting-customers-table">
@@ -601,6 +644,9 @@ const AccountingModule = () => {
                     <button type="button" className="accounting-secondary" onClick={() => downloadStatement(customer)} disabled={downloading === `statement-${customer.id}`}>
                       Statement PDF
                     </button>
+                    <button type="button" className="accounting-secondary" onClick={() => downloadStatementExcel(customer)} disabled={downloading === `excel-${customer.id}`}>
+                      Statement Excel
+                    </button>
                     <button type="button" className={customer.is_ignored ? 'accounting-secondary' : 'accounting-danger'} onClick={() => toggleIgnored(customer)} disabled={savingEmailId === customer.id}>
                       {customer.is_ignored ? 'Unignore' : 'Ignore'}
                     </button>
@@ -626,6 +672,9 @@ const AccountingModule = () => {
             <div className="accounting-detail-actions">
               <button type="button" className="accounting-primary" onClick={() => downloadStatement(selectedCustomer)} disabled={downloading === `statement-${selectedCustomer.id}`}>
                 Download Statement PDF
+              </button>
+              <button type="button" className="accounting-secondary" onClick={() => downloadStatementExcel(selectedCustomer)} disabled={downloading === `excel-${selectedCustomer.id}`}>
+                Download Statement Excel
               </button>
             </div>
 

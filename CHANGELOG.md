@@ -10,6 +10,7 @@
 - Added inline email editing, a customer detail drawer, ageing filters, and sorting to the Accounting Due Customers workflow.
 - Added selected-customer Accounting ZIP downloads and automatic part-ZIP batching for large full-import statement downloads.
 - Added Accounting statement invoice date range filtering that carries into customer summaries, detail rows, PDFs, and ZIP-generated statements.
+- Added protected Accounting statement Excel workbook downloads for individual customers, selected customers, and all due customers.
 - Started Phase 1 quotation module implementation for the existing admin dashboard.
 - Added dedicated quotation module documentation and future-work tracking.
 - Added backend `quotations` app with staff-only APIs, workflow services, audit logs, PDF generation, and tests.
@@ -82,6 +83,7 @@
 - Cleaned Accounting POS bill-reference splitting so trailing/repeated dashes are removed from `LPO / Reference No.` and existing migrated rows are normalized.
 - Removed PDC from customer-facing Accounting statements and made statement periods always show concrete invoice date ranges.
 - Changed customer-facing Accounting PDFs from ageing-bucket reports to ledger-style Statements of Account with Debit, Credit, and cumulative Balance columns.
+- Hardened Accounting category workbook parsing so bad `.xlsx` uploads return a clear validation error instead of a server error.
 
 ### Deferred
 - Word-template-based PDF customization was investigated and deferred. Filling DOCX templates is reasonable with `python-docx` or `docxtpl`, but reliable DOCX-to-PDF conversion on Railway/Linux would require LibreOffice/headless conversion or an external service, which is outside the Phase 1 hardening scope.

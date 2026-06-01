@@ -15,8 +15,8 @@ The Accounting module prepares those monthly overdue statement files inside the 
 - Group invoices by accounting customer.
 - Persist customer category, email, ignored status, and notes.
 - Identify customers due by invoice `Days > 30` or balances in `30-60`, `60-90`, or `Over 90`.
-- Generate one protected ledger-style statement PDF per due customer.
-- Generate a ZIP of all due, non-ignored statement PDFs.
+- Generate one protected ledger-style statement PDF or Excel workbook per due customer.
+- Generate a ZIP of all due, non-ignored statement PDFs or Excel workbooks.
 - Show read-only email preview text and attachment filename.
 - Support one customer-facing Statement of Account PDF style.
 - Split POS `Bill No.` values into `Invoice No.` and `LPO / Reference No.` while retaining the raw bill value internally.
@@ -54,7 +54,7 @@ Custom permissions:
 7. Save missing customer emails directly from the Due Customers table, or open the customer detail drawer for deeper review.
 8. Apply an optional invoice date range if the customer statement should exclude older or newer invoices.
 9. Save email/category/ignored status if needed.
-10. Download an individual Statement of Account PDF, or download the ZIP of due statements.
+10. Download an individual Statement of Account PDF/Excel workbook, or download the ZIP of due statements.
 11. Manually attach statement files to emails outside the system.
 
 ## Parser Notes
@@ -83,7 +83,7 @@ The parser splits raw POS bill numbers for display:
 
 ## Statement Output
 
-Statement PDFs are generated on demand from database rows. Generated PDFs are not stored permanently in V1.
+Statement PDFs and Excel workbooks are generated on demand from database rows. Generated files are not stored permanently in V1.
 
 The customer-facing PDF is now a ledger-style Statement of Account. The main table intentionally does not print ageing buckets. Instead it shows:
 
@@ -105,7 +105,7 @@ If a statement date range is applied, the dashboard customer list, detail drawer
 
 ZIP downloads include due, non-ignored customers from the selected import.
 
-Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default `75`) is used as the batch size. If an import has more due customers than the batch size, `Download All Due` returns one protected ZIP containing smaller part ZIPs, each with up to that many statement PDFs. This keeps the accountant's workflow close to one-click while avoiding a single huge flat archive. Staff can still select visible rows for a smaller selected ZIP, and ignored customers are always excluded.
+Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default `75`) is used as the batch size. If an import has more due customers than the batch size, `Download All Due` returns one protected ZIP containing smaller part ZIPs, each with up to that many statement PDFs or Excel workbooks. This keeps the accountant's workflow close to one-click while avoiding a single huge flat archive. Staff can still select visible rows for a smaller selected ZIP, and ignored customers are always excluded.
 
 ## Security And Storage
 
@@ -113,6 +113,7 @@ Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default 
 - All Accounting APIs require Accounting permission.
 - Uploaded source files are parsed and discarded.
 - Generated statement PDFs and ZIPs are streamed through protected backend endpoints.
+- Generated statement Excel workbooks and Excel ZIPs are streamed through protected backend endpoints.
 - Accounting data is not exposed through public product, cart, order, or quotation APIs.
 - Source files are not stored permanently in V1. The system keeps filename, SHA-256 hash, parsed invoice rows, metadata, and warnings only.
 

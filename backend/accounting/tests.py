@@ -6,7 +6,7 @@ from django.contrib.auth.models import Group, Permission, User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from pypdf import PdfReader
 from rest_framework.test import APITestCase
 
@@ -342,6 +342,40 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(AccountCustomer.objects.get(customer_code="A01").category, "credit")
         self.assertEqual(AccountCustomer.objects.get(customer_code="B02").category, "card")
 
+    def test_csv_outstanding_and_category_workbook_upload_paths_do_not_500(self):
+        self.client.force_authenticate(self.accountant)
+        upload_response = self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": make_agewise_upload("monthly.csv"), "category_file": make_category_upload()},
+            format="multipart",
+        )
+        self.assertEqual(upload_response.status_code, 201)
+        self.assertEqual(upload_response.data["category_update"]["matched"], 2)
+        self.assertEqual(upload_response.data["category_update"]["unchanged"], 2)
+        self.assertEqual(upload_response.data["category_update"]["updated"], 0)
+        self.assertIn("Category workbook applied.", upload_response.data["category_update_message"])
+        self.assertEqual(AccountCustomer.objects.get(customer_code="083").category, "credit")
+
+        apply_response = self.client.post(
+            reverse("accounting-import-apply-categories", args=[upload_response.data["id"]]),
+            {"category_file": make_category_upload()},
+            format="multipart",
+        )
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertIn("category_update", apply_response.data)
+
+        bad_workbook = SimpleUploadedFile(
+            "bad-category.xlsx",
+            b"not a real xlsx file",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        bad_response = self.client.post(
+            reverse("accounting-import-apply-categories", args=[upload_response.data["id"]]),
+            {"category_file": bad_workbook},
+            format="multipart",
+        )
+        self.assertEqual(bad_response.status_code, 400)
+
     def test_duplicate_upload_returns_previous_import_without_creating_another(self):
         first = self.upload_import()
         self.assertEqual(first.status_code, 201)
@@ -467,6 +501,27 @@ class AccountingAPITests(APITestCase):
         self.assertIn("570171", pdf_text)
         self.assertNotIn("570170", pdf_text)
         self.assertNotIn("PDC", pdf_text)
+
+        excel = self.client.get(
+            reverse("accounting-import-customer-statement-excel", args=[summary.id]),
+            {"date_from": "2026-02-01", "date_to": "2026-02-28"},
+        )
+        self.assertEqual(excel.status_code, 200)
+        workbook = load_workbook(BytesIO(excel.content), data_only=True)
+        sheet = workbook.active
+        header_values = [sheet.cell(8, column).value for column in range(1, 8)]
+        self.assertEqual(header_values, ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance"])
+        self.assertNotIn("PDC", [cell.value for row in sheet.iter_rows() for cell in row])
+        self.assertIn("2026-02-01 to 2026-02-28", [cell.value for row in sheet.iter_rows() for cell in row])
+
+        excel_zip = self.client.get(
+            reverse("accounting-import-statements-excel-zip", args=[import_id]),
+            {"date_from": "2026-02-01", "date_to": "2026-02-28"},
+        )
+        self.assertEqual(excel_zip.status_code, 200)
+        with ZipFile(BytesIO(excel_zip.content)) as archive:
+            excel_names = archive.namelist()
+            self.assertTrue(any(name.endswith(".xlsx") and "MILLENNIUM" in name for name in excel_names))
 
     def test_ignored_customers_are_excluded_from_statement_zip(self):
         response = self.upload_import()

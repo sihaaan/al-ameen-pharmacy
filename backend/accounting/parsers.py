@@ -13,6 +13,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 
 SUPPORTED_OUTSTANDING_EXTENSIONS = {".csv", ".xlsx"}
@@ -287,12 +288,19 @@ def parse_csv_rows(data):
 
 
 def parse_xlsx_rows(data):
-    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    workbook = load_xlsx_workbook(data)
     rows = []
     for sheet in workbook.worksheets:
         for row in sheet.iter_rows(values_only=True):
             rows.append(list(row))
     return rows
+
+
+def load_xlsx_workbook(data):
+    try:
+        return load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except (InvalidFileException, KeyError, OSError, zipfile.BadZipFile) as exc:
+        raise ValidationError("Invalid Excel workbook. Please upload a valid .xlsx file.") from exc
 
 
 def parse_outstanding_upload(uploaded_file):
@@ -347,7 +355,7 @@ def parse_category_upload(uploaded_file):
     if not uploaded_file:
         return None
     filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_CATEGORY_EXTENSIONS)
-    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    workbook = load_xlsx_workbook(data)
     entries = {}
     code_entries = {}
     warnings = []

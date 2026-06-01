@@ -10,9 +10,10 @@
 - [ ] Verify totals for several known customers against the old POS software.
 - [ ] Enter missing customer emails.
 - [ ] Download Statement of Account PDFs for several customers and confirm the ledger balance column matches the POS/customer expectation.
+- [ ] Download Statement of Account Excel workbooks for several customers and confirm the ledger balance column matches the PDF/POS expectation.
 - [ ] Use the invoice date range filter when older records should be excluded from the monthly statement.
-- [ ] Use `Download All Due Statements` for the monthly due-customer ZIP. Large imports are split into part ZIPs inside the download automatically.
-- [ ] Optionally use `Select Visible`, untick/ignore exceptions, and download a selected ZIP for a smaller batch.
+- [ ] Use `Download All Due Statements` or `Download All Due Excel` for the monthly due-customer ZIP. Large imports are split into part ZIPs inside the download automatically.
+- [ ] Optionally use `Select Visible`, untick/ignore exceptions, and download a selected PDF or Excel ZIP for a smaller batch.
 - [ ] Download a ZIP and manually inspect several generated PDFs.
 - [ ] Mark internal branch/customers as ignored where statements are not required.
 

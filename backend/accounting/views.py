@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
+from .excel import build_statement_workbook, statement_excel_filename
 from .pdf import build_statement_pdf
 from .permissions import IsAccountingUser
 from .serializers import (
@@ -70,6 +71,14 @@ def write_statement_zip(archive, customers, style, *, date_from=None, date_to=No
         archive.writestr(
             statement_filename(customer, style=style),
             build_statement_pdf(customer, style=style, date_from=date_from, date_to=date_to),
+        )
+
+
+def write_statement_excel_zip(archive, customers, *, date_from=None, date_to=None):
+    for customer in customers:
+        archive.writestr(
+            statement_excel_filename(customer),
+            build_statement_workbook(customer, date_from=date_from, date_to=date_to),
         )
 
 
@@ -204,6 +213,57 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
         response = HttpResponse(buffer.getvalue(), content_type="application/zip")
         suffix = "batched" if is_batched else "selected" if customer_ids else "all"
         response["Content-Disposition"] = f'attachment; filename="accounting-statements-{import_record.id}-{suffix}.zip"'
+        response["X-Accounting-Zip-Batched"] = "true" if is_batched else "false"
+        response["X-Accounting-Statement-Count"] = str(customer_count)
+        response["X-Accounting-Zip-Batch-Size"] = str(batch_size)
+        return response
+
+    @action(detail=True, methods=["get"])
+    def statements_excel_zip(self, request, pk=None):
+        import_record = self.get_object()
+        date_from, date_to = parse_accounting_date_range(request)
+        customer_ids = [
+            int(item)
+            for item in request.query_params.get("customer_ids", "").replace(" ", "").split(",")
+            if item.isdigit()
+        ]
+        customers = (
+            import_record.customers.filter(is_due=True, is_ignored=False)
+            .prefetch_related("invoice_rows")
+            .order_by("customer_name")
+        )
+        if customer_ids:
+            customers = customers.filter(id__in=customer_ids)
+        customers = list(customers)
+        if date_from or date_to:
+            customers = [
+                customer
+                for customer in customers
+                if (lambda ledger: ledger["invoice_count"] > 0 and ledger["is_due"])(
+                    statement_ledger(customer, date_from=date_from, date_to=date_to)
+                )
+            ]
+        customer_count = len(customers)
+        batch_size = int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
+        if customer_count == 0:
+            return Response({"detail": "No due, non-ignored customers are available for this Excel ZIP."}, status=status.HTTP_400_BAD_REQUEST)
+        buffer = BytesIO()
+        is_batched = not customer_ids and customer_count > batch_size
+        with ZipFile(buffer, "w", ZIP_STORED) as archive:
+            if is_batched:
+                for part_number, batch in chunked(customers, batch_size):
+                    part_buffer = BytesIO()
+                    with ZipFile(part_buffer, "w", ZIP_STORED) as part_archive:
+                        write_statement_excel_zip(part_archive, batch, date_from=date_from, date_to=date_to)
+                    archive.writestr(
+                        f"accounting-excel-statements-{import_record.id}-part-{part_number:03d}.zip",
+                        part_buffer.getvalue(),
+                    )
+            else:
+                write_statement_excel_zip(archive, customers, date_from=date_from, date_to=date_to)
+        response = HttpResponse(buffer.getvalue(), content_type="application/zip")
+        suffix = "batched" if is_batched else "selected" if customer_ids else "all"
+        response["Content-Disposition"] = f'attachment; filename="accounting-excel-statements-{import_record.id}-{suffix}.zip"'
         response["X-Accounting-Zip-Batched"] = "true" if is_batched else "false"
         response["X-Accounting-Statement-Count"] = str(customer_count)
         response["X-Accounting-Zip-Batch-Size"] = str(batch_size)
@@ -391,4 +451,16 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
         pdf_bytes = build_statement_pdf(import_customer, style=style, date_from=date_from, date_to=date_to)
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{statement_filename(import_customer, style=style)}"'
+        return response
+
+    @action(detail=True, methods=["get"])
+    def statement_excel(self, request, pk=None):
+        import_customer = self.get_object()
+        date_from, date_to = parse_accounting_date_range(request)
+        workbook_bytes = build_statement_workbook(import_customer, date_from=date_from, date_to=date_to)
+        response = HttpResponse(
+            workbook_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{statement_excel_filename(import_customer)}"'
         return response
