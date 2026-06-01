@@ -12,6 +12,7 @@
 - [ ] Enter missing customer emails.
 - [ ] Download Statement of Account PDFs for several customers and confirm the ledger balance column matches the POS/customer expectation.
 - [ ] Download Statement of Account Excel workbooks for several customers and confirm the ledger balance column matches the PDF/POS expectation.
+- [ ] Open downloaded Excel workbooks in Microsoft Excel and confirm there is no repair/recovery warning.
 - [ ] Use the invoice date range filter when older records should be excluded from the monthly statement.
 - [ ] Use `Download All Due Statements` or `Download All Due Excel` for the monthly due-customer ZIP. Large imports are split into part ZIPs inside the download automatically.
 - [ ] Optionally use `Select Visible`, untick/ignore exceptions, and download a selected PDF or Excel ZIP for a smaller batch.
@@ -30,5 +31,6 @@
 - [ ] Add dashboard export to CSV/XLSX.
 - [ ] Add payment/bank detail settings for the statement footer if accountant wants bank instructions printed.
 - [ ] Add import delete/retest workflow only after clear production data retention rules.
+- [ ] Add async/background import with progress tracking if monthly upload time stays around 90 seconds or grows with larger POS exports.
 - [ ] Add cached/background ZIP generation if batched on-demand ZIP downloads still feel slow for very large months.
 

@@ -106,7 +106,7 @@ The Accounting dashboard still keeps ageing buckets internally for due calculati
 
 If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF/Excel workbook, and ZIP-generated statements use only invoice rows in that date range. The statement prints the selected statement period clearly. If no date range is applied, the statement period is calculated from the minimum and maximum invoice dates included for that customer.
 
-Excel workbooks are formatted for customer-facing use with a branded header, title block, customer/account information, styled ledger table, formatted currency/date columns, totals block, reminder note, filters, freeze panes, and print-ready landscape page setup.
+Excel workbooks are formatted for accountant review with a simple branded header, title block, customer/account information, ledger table, formatted currency/date columns, totals block, reminder note, worksheet autofilter, freeze panes, and print-friendly landscape page setup. The workbook intentionally avoids structured Excel Table objects because Microsoft Excel can repair files that combine table metadata with worksheet-level filters.
 
 ZIP downloads include due, non-ignored customers from the selected import.
 
@@ -127,6 +127,7 @@ Large imports are batched in V1. `ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT` (default 
 - Automatic email sending.
 - Gmail/SMTP integration.
 - Reminder send logs and duplicate-send prevention.
+- Async/background import with progress tracking if monthly CSV upload time grows beyond the current synchronous request window.
 - Scheduled monthly jobs.
 - Private long-term storage of uploaded source files.
 - AI parsing or fuzzy customer matching.

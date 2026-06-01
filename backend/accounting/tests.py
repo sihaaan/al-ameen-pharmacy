@@ -609,6 +609,9 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(sheet.freeze_panes, f"A{header_row + 1}")
         self.assertEqual(sheet.page_setup.orientation, "landscape")
         self.assertEqual(sheet.page_setup.fitToWidth, 1)
+        self.assertEqual(len(sheet.tables), 0)
+        with ZipFile(BytesIO(excel.content)) as workbook_archive:
+            self.assertFalse(any(name.startswith("xl/tables/") for name in workbook_archive.namelist()))
 
         excel_zip = self.client.get(
             reverse("accounting-import-statements-excel-zip", args=[import_id]),

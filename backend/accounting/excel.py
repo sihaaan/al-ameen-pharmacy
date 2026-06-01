@@ -2,7 +2,6 @@ from io import BytesIO
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils import get_column_letter
 
 from .services import statement_filename, statement_ledger
@@ -135,13 +134,6 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
         sheet.cell(current_row, 1, "No invoice rows found for this statement period.")
         current_row += 1
 
-    table_end_row = max(header_row + 1, current_row - 1)
-    if ledger["lines"]:
-        table = Table(displayName=f"StatementRows{import_customer.id}", ref=f"A{header_row}:G{table_end_row}")
-        style = TableStyleInfo(name="TableStyleMedium4", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
-        table.tableStyleInfo = style
-        sheet.add_table(table)
-
     totals_start = current_row + 2
     totals = [
         ("Total Debit", ledger["total_debit"]),
@@ -189,6 +181,11 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
     sheet.freeze_panes = f"A{header_row + 1}"
     sheet.auto_filter.ref = f"A{header_row}:G{max(header_row, current_row - 1)}"
 
+    for row_number in range(header_row + 1, current_row):
+        if row_number % 2 == 0:
+            for col in range(1, 8):
+                sheet.cell(row_number, col).fill = PatternFill("solid", fgColor=SOFT)
+
     for row_number in range(start_row, start_row + len(info_rows)):
         sheet.cell(row_number, 1).fill = PatternFill("solid", fgColor=SOFT)
         sheet.cell(row_number, 5).fill = PatternFill("solid", fgColor=SOFT)
@@ -210,7 +207,6 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 0
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.print_title_rows = f"${header_row}:${header_row}"
     sheet.print_area = f"A1:G{footer_row}"
     sheet.oddFooter.center.text = "Page &P of &N"
     sheet.oddFooter.right.text = "Statement of Account"
