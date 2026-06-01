@@ -65,6 +65,7 @@ const AccountingModule = () => {
   const [dashboard, setDashboard] = useState(null);
   const [imports, setImports] = useState([]);
   const [selectedImport, setSelectedImport] = useState(null);
+  const [duplicateImport, setDuplicateImport] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
@@ -85,9 +86,12 @@ const AccountingModule = () => {
   const [appliedDateRange, setAppliedDateRange] = useState({ from: '', to: '' });
   const [editForm, setEditForm] = useState({ email: '', category: 'unknown', is_ignored: false, notes: '' });
   const customerLoadSeq = useRef(0);
+  const uploadFileInputRef = useRef(null);
+  const categoryFileInputRef = useRef(null);
+  const applyCategoryInputRef = useRef(null);
 
   const selectedImportId = selectedImport?.id;
-  const filteredImport = useMemo(() => selectedImport || imports[0] || null, [selectedImport, imports]);
+  const filteredImport = useMemo(() => selectedImport || null, [selectedImport]);
   const statementParams = () => ({
     ...(appliedDateRange.from ? { date_from: appliedDateRange.from } : {}),
     ...(appliedDateRange.to ? { date_to: appliedDateRange.to } : {}),
@@ -100,9 +104,7 @@ const AccountingModule = () => {
     ]);
     setDashboard(dashboardRes.data);
     setImports(importsRes.data);
-    if (!selectedImport && importsRes.data.length) {
-      setSelectedImport(importsRes.data[0]);
-    }
+    setSelectedImport((current) => (current ? importsRes.data.find((item) => item.id === current.id) || current : null));
   };
 
   const loadCustomers = async () => {
@@ -179,6 +181,7 @@ const AccountingModule = () => {
     setUploading(true);
     setNotice('');
     setError('');
+    setDuplicateImport(null);
     const formData = new FormData();
     formData.append('file', uploadFile);
     if (categoryFile) formData.append('category_file', categoryFile);
@@ -189,12 +192,19 @@ const AccountingModule = () => {
         || (categoryUpdate?.matched !== undefined
           ? ` Category workbook applied. Matched ${categoryUpdate.matched} customers: ${categoryUpdate.updated || 0} updated, ${categoryUpdate.unchanged || 0} already up to date, ${categoryUpdate.unmatched || 0} unmatched.`
           : '');
-      setNotice(response.data.duplicate ? response.data.duplicate_message : `Accounting import parsed successfully.${categoryText ? ` ${categoryText}` : ''}`);
-      setSelectedImport(response.data);
-      setUploadFile(null);
-      setCategoryFile(null);
+      if (response.data.duplicate) {
+        setNotice(response.data.duplicate_message || 'This outstanding file has already been uploaded before. No duplicate import was created.');
+        setDuplicateImport(response.data);
+        setSelectedImport(null);
+      } else {
+        setNotice(response.data.message || `Accounting import parsed successfully.${categoryText ? ` ${categoryText}` : ''}`);
+        setSelectedImport(response.data);
+      }
+      clearUploadInputs();
       await loadImports();
-      await loadCustomers();
+      if (!response.data.duplicate) {
+        setSelectedImport(response.data);
+      }
     } catch (err) {
       const info = await describeAccountingError(err, 'Upload accounting import', 'POST /accounting/imports/upload/');
       setError(info.detail);
@@ -220,6 +230,7 @@ const AccountingModule = () => {
       setNotice(response.data.message || `Category workbook applied. Matched ${update.matched || 0} customers: ${update.updated || 0} updated, ${update.unchanged || 0} already up to date, ${update.unmatched || 0} unmatched.`);
       setSelectedImport(response.data);
       setApplyCategoryFile(null);
+      if (applyCategoryInputRef.current) applyCategoryInputRef.current.value = '';
       await loadImports();
       await loadCustomers();
     } catch (err) {
@@ -409,6 +420,20 @@ const AccountingModule = () => {
   };
 
   const hasDateFilter = !!(appliedDateRange.from || appliedDateRange.to);
+  const openImport = (item) => {
+    setSelectedImport(item);
+    setDuplicateImport(null);
+    setSelectedCustomer(null);
+    setSelectedCustomerIds([]);
+    setError('');
+  };
+
+  const clearUploadInputs = () => {
+    setUploadFile(null);
+    setCategoryFile(null);
+    if (uploadFileInputRef.current) uploadFileInputRef.current.value = '';
+    if (categoryFileInputRef.current) categoryFileInputRef.current.value = '';
+  };
 
   return (
     <div className="accounting-module">
@@ -433,6 +458,17 @@ const AccountingModule = () => {
         This does not send emails yet. It only prepares statement files and email previews for review and download.
       </div>
       {notice && <div className="accounting-notice">{notice}</div>}
+      {duplicateImport && (
+        <div className="accounting-warning accounting-duplicate-banner">
+          <div>
+            <strong>Duplicate import detected.</strong>
+            <p>No duplicate import was created. Open the previous import only if you want to review its customers.</p>
+          </div>
+          <button type="button" className="accounting-secondary" onClick={() => openImport(duplicateImport)}>
+            Open existing import
+          </button>
+        </div>
+      )}
       {error && <div className="accounting-error">{error}</div>}
       {largeZipBatched && (
         <div className="accounting-warning">
@@ -447,11 +483,11 @@ const AccountingModule = () => {
           <form className="accounting-form" onSubmit={uploadImport}>
             <label>
               Outstanding export *
-              <input type="file" accept=".csv,.xlsx" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} />
+              <input ref={uploadFileInputRef} type="file" accept=".csv,.xlsx" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} />
             </label>
             <label>
               Customer category workbook
-              <input type="file" accept=".xlsx" onChange={(event) => setCategoryFile(event.target.files?.[0] || null)} />
+              <input ref={categoryFileInputRef} type="file" accept=".xlsx" onChange={(event) => setCategoryFile(event.target.files?.[0] || null)} />
             </label>
             <button type="submit" className="accounting-primary" disabled={uploading}>
               {uploading ? 'Parsing...' : 'Upload and Parse'}
@@ -462,24 +498,33 @@ const AccountingModule = () => {
         <section className="accounting-panel">
           <div className="accounting-panel-heading">
             <div>
-              <h3>Import Summary</h3>
-              <p>{filteredImport ? filteredImport.source_filename : 'No accounting imports yet.'}</p>
+              <h3>Import History</h3>
+              <p>
+                Select an import to review due customers, or upload a new monthly outstanding file.
+                {dashboard?.import_count ? ` ${dashboard.import_count} imports tracked.` : ''}
+              </p>
             </div>
             <button type="button" className="accounting-secondary" onClick={() => loadImports()}>
               Refresh
             </button>
           </div>
-          <div className="accounting-stat-grid">
-            <div className="accounting-stat"><span>{filteredImport?.parsed_row_count || 0}</span><p>Parsed rows</p></div>
-            <div className="accounting-stat"><span>{filteredImport?.customer_count || 0}</span><p>Customers</p></div>
-            <div className="accounting-stat"><span>{filteredImport?.due_customer_count || 0}</span><p>Due</p></div>
-            <div className="accounting-stat"><span>{dashboard?.email_missing_count || 0}</span><p>Email missing</p></div>
-          </div>
+          {filteredImport ? (
+            <div className="accounting-stat-grid">
+              <div className="accounting-stat"><span>{filteredImport.parsed_row_count || 0}</span><p>Parsed rows</p></div>
+              <div className="accounting-stat"><span>{filteredImport.customer_count || 0}</span><p>Customers</p></div>
+              <div className="accounting-stat"><span>{filteredImport.due_customer_count || 0}</span><p>Due</p></div>
+              <div className="accounting-stat"><span>{filteredImport.email_missing_count || 0}</span><p>Email missing</p></div>
+            </div>
+          ) : (
+            <div className="accounting-empty-state">
+              No import is open. Choose <strong>Open / Review</strong> from the import history below.
+            </div>
+          )}
           {filteredImport && (
             <form className="accounting-inline-form" onSubmit={applyCategories}>
               <label>
                 Apply/update categories for this import
-                <input type="file" accept=".xlsx" onChange={(event) => setApplyCategoryFile(event.target.files?.[0] || null)} />
+                <input ref={applyCategoryInputRef} type="file" accept=".xlsx" onChange={(event) => setApplyCategoryFile(event.target.files?.[0] || null)} />
               </label>
               <button type="submit" className="accounting-secondary" disabled={applyingCategories}>
                 {applyingCategories ? 'Applying...' : 'Apply Categories'}
@@ -497,15 +542,39 @@ const AccountingModule = () => {
           <div className="accounting-table-wrap">
             <table className="accounting-table">
               <thead>
-                <tr><th>File</th><th>Date</th><th>Rows</th><th>Due</th></tr>
+                <tr>
+                  <th>File</th>
+                  <th>Report Date</th>
+                  <th>Uploaded</th>
+                  <th>By</th>
+                  <th>Rows</th>
+                  <th>Customers</th>
+                  <th>Due</th>
+                  <th>Email Missing</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
               </thead>
               <tbody>
+                {imports.length === 0 && (
+                  <tr><td colSpan="10">No accounting imports yet.</td></tr>
+                )}
                 {imports.map((item) => (
-                  <tr key={item.id} className={filteredImport?.id === item.id ? 'active-row' : ''} onClick={() => setSelectedImport(item)}>
+                  <tr key={item.id} className={filteredImport?.id === item.id ? 'active-row' : ''}>
                     <td>{item.source_filename}</td>
                     <td>{item.report_date || '-'}</td>
+                    <td>{item.created_at ? new Date(item.created_at).toLocaleString() : '-'}</td>
+                    <td>{item.uploaded_by_name || '-'}</td>
                     <td>{item.parsed_row_count}</td>
+                    <td>{item.customer_count}</td>
                     <td>{item.due_customer_count}</td>
+                    <td>{item.email_missing_count ?? '-'}</td>
+                    <td><span className="accounting-badge">{item.status}</span></td>
+                    <td>
+                      <button type="button" className="accounting-secondary" onClick={() => openImport(item)}>
+                        {filteredImport?.id === item.id ? 'Open' : 'Open / Review'}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -518,9 +587,19 @@ const AccountingModule = () => {
         <div className="accounting-panel-heading">
           <div>
             <h3>Due Customers</h3>
-            <p>Default view shows customers with invoices older than 30 days or overdue ageing buckets.</p>
+            <p>
+              {filteredImport
+                ? `Reviewing ${filteredImport.source_filename}. Default view shows customers with invoices older than 30 days or overdue ageing buckets.`
+                : 'Select an import to review due customers, or upload a new monthly outstanding file.'}
+            </p>
           </div>
         </div>
+        {!filteredImport ? (
+          <div className="accounting-empty-state">
+            No import selected. Customer rows and download actions will appear here after you open an import.
+          </div>
+        ) : (
+          <>
         <div className="accounting-filter-row">
           <input
             placeholder="Search customer, code, or email"
@@ -656,6 +735,8 @@ const AccountingModule = () => {
             </tbody>
           </table>
         </div>
+          </>
+        )}
       </section>
 
       {selectedCustomer && (

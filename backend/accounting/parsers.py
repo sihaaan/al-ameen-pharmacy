@@ -19,6 +19,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 SUPPORTED_OUTSTANDING_EXTENSIONS = {".csv", ".xlsx"}
 SUPPORTED_CATEGORY_EXTENSIONS = {".xlsx"}
 REPORT_DATE_RE = re.compile(r"as\s+on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.IGNORECASE)
+REPORT_DATE_TO_RE = re.compile(r"\bto\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.IGNORECASE)
 HEADER_ALIASES = {
     "code": "code",
     "party": "party",
@@ -90,8 +91,28 @@ class ParsedCategoryMap:
     parse_meta: dict
 
 
+@dataclass
+class UploadedAccountingSource:
+    filename: str
+    extension: str
+    data: bytes
+    sha256: str
+
+    @property
+    def size(self):
+        return len(self.data)
+
+
 def max_upload_bytes():
     return int(getattr(settings, "ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+
+
+def max_import_rows():
+    return int(getattr(settings, "ACCOUNTING_IMPORT_MAX_ROWS", 100_000))
+
+
+def max_import_columns():
+    return int(getattr(settings, "ACCOUNTING_IMPORT_MAX_COLUMNS", 80))
 
 
 def normalize_customer_name(value):
@@ -132,6 +153,11 @@ def read_upload(uploaded_file, allowed_extensions):
     return filename, extension, data, hashlib.sha256(data).hexdigest()
 
 
+def read_outstanding_source(uploaded_file):
+    filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_OUTSTANDING_EXTENSIONS)
+    return UploadedAccountingSource(filename=filename, extension=extension, data=data, sha256=sha256)
+
+
 def parse_date(value):
     text = str(value or "").strip()
     if not text:
@@ -149,7 +175,8 @@ def parse_date(value):
 
 def parse_report_date(cells):
     for cell in cells:
-        match = REPORT_DATE_RE.search(str(cell or ""))
+        text = str(cell or "")
+        match = REPORT_DATE_RE.search(text) or REPORT_DATE_TO_RE.search(text)
         if match:
             return parse_date(match.group(1))
     return None
@@ -282,9 +309,26 @@ def parse_invoice_row(row, row_number, report_date):
     ), ""
 
 
+def validate_row_shape(row, row_number):
+    if len(row) > max_import_columns():
+        raise ValidationError(
+            f"Row {row_number} has too many columns for the Accounting import parser. "
+            "Please export the agewise outstanding report as a standard CSV/XLSX file."
+        )
+
+
 def parse_csv_rows(data):
     text = data.decode("utf-8-sig", errors="replace")
-    return list(csv.reader(io.StringIO(text)))
+    rows = []
+    try:
+        for row_number, row in enumerate(csv.reader(io.StringIO(text)), start=1):
+            if row_number > max_import_rows():
+                raise ValidationError(f"File has too many rows. Maximum supported rows: {max_import_rows()}.")
+            validate_row_shape(row, row_number)
+            rows.append(row)
+    except csv.Error as exc:
+        raise ValidationError(f"Invalid CSV file: {exc}") from exc
+    return rows
 
 
 def parse_xlsx_rows(data):
@@ -292,7 +336,11 @@ def parse_xlsx_rows(data):
     rows = []
     for sheet in workbook.worksheets:
         for row in sheet.iter_rows(values_only=True):
-            rows.append(list(row))
+            if len(rows) + 1 > max_import_rows():
+                raise ValidationError(f"File has too many rows. Maximum supported rows: {max_import_rows()}.")
+            cleaned = list(row)
+            validate_row_shape(cleaned, len(rows) + 1)
+            rows.append(cleaned)
     return rows
 
 
@@ -303,9 +351,9 @@ def load_xlsx_workbook(data):
         raise ValidationError("Invalid Excel workbook. Please upload a valid .xlsx file.") from exc
 
 
-def parse_outstanding_upload(uploaded_file):
-    filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_OUTSTANDING_EXTENSIONS)
-    rows = parse_csv_rows(data) if extension == ".csv" else parse_xlsx_rows(data)
+def parse_outstanding_upload(uploaded_file=None, *, source=None):
+    source = source or read_outstanding_source(uploaded_file)
+    rows = parse_csv_rows(source.data) if source.extension == ".csv" else parse_xlsx_rows(source.data)
     report_date = None
     parsed_rows = []
     warnings = []
@@ -331,15 +379,15 @@ def parse_outstanding_upload(uploaded_file):
             warnings.append(f"{count} rows skipped: {reason}")
 
     return ParsedOutstanding(
-        filename=filename,
-        sha256=sha256,
-        size=len(data),
+        filename=source.filename,
+        sha256=source.sha256,
+        size=source.size,
         report_date=report_date,
         rows=parsed_rows,
         skipped_row_count=sum(skip_reasons.values()),
         warnings=warnings,
         parse_meta={
-            "extension": extension,
+            "extension": source.extension,
             "total_input_rows": len(rows),
             "skip_reasons": dict(skip_reasons.most_common(20)),
         },

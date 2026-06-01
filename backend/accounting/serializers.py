@@ -39,6 +39,7 @@ class AccountingImportSerializer(serializers.ModelSerializer):
     duplicate = serializers.BooleanField(read_only=True, default=False)
     duplicate_message = serializers.CharField(read_only=True, default="")
     zip_sync_limit = serializers.SerializerMethodField()
+    email_missing_count = serializers.SerializerMethodField()
 
     class Meta:
         model = AccountingImport
@@ -56,6 +57,7 @@ class AccountingImportSerializer(serializers.ModelSerializer):
             "skipped_row_count",
             "customer_count",
             "due_customer_count",
+            "email_missing_count",
             "generated_statement_count",
             "warnings",
             "parse_meta",
@@ -69,6 +71,9 @@ class AccountingImportSerializer(serializers.ModelSerializer):
 
     def get_zip_sync_limit(self, obj):
         return int(getattr(settings, "ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", 75))
+
+    def get_email_missing_count(self, obj):
+        return obj.customers.filter(email="").count() if obj.pk else 0
 
 
 class AccountingInvoiceRowSerializer(serializers.ModelSerializer):

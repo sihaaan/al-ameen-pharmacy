@@ -7,6 +7,7 @@
 - [ ] Check `Accounting access` on the Django user edit page.
 - [ ] Upload the latest monthly POS outstanding export.
 - [ ] Upload the latest customer category workbook.
+- [ ] Confirm the Accounting landing page shows import history first and only opens customer rows after clicking `Open / Review`.
 - [ ] Verify totals for several known customers against the old POS software.
 - [ ] Enter missing customer emails.
 - [ ] Download Statement of Account PDFs for several customers and confirm the ledger balance column matches the POS/customer expectation.
@@ -24,7 +25,6 @@
 - [ ] Prevent duplicate reminder sends for the same import/customer.
 - [ ] Add configurable overdue threshold.
 - [ ] Add email template settings.
-- [ ] Add Excel statement export if accountants request it.
 - [ ] Add a private object storage option for source files if long-term retention becomes necessary.
 - [ ] Add conservative customer alias mapping for category/customer name cleanup.
 - [ ] Add dashboard export to CSV/XLSX.

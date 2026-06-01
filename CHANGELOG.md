@@ -11,6 +11,9 @@
 - Added selected-customer Accounting ZIP downloads and automatic part-ZIP batching for large full-import statement downloads.
 - Added Accounting statement invoice date range filtering that carries into customer summaries, detail rows, PDFs, and ZIP-generated statements.
 - Added protected Accounting statement Excel workbook downloads for individual customers, selected customers, and all due customers.
+- Improved Accounting Excel statements with a customer-facing branded layout, styled ledger table, clearer totals block, print-ready page setup, freeze panes, and filters.
+- Changed Accounting landing behavior so prior imports remain in import history but customer rows only load after staff explicitly opens an import.
+- Hardened Accounting CSV upload handling for the newer repeated-header POS export format and added parser row/column safeguards with clean validation errors.
 - Started Phase 1 quotation module implementation for the existing admin dashboard.
 - Added dedicated quotation module documentation and future-work tracking.
 - Added backend `quotations` app with staff-only APIs, workflow services, audit logs, PDF generation, and tests.

@@ -12,7 +12,7 @@ from .models import (
     AccountingImportCustomer,
     AccountingInvoiceRow,
 )
-from .parsers import normalize_customer_name, parse_category_upload, parse_outstanding_upload
+from .parsers import normalize_customer_name, parse_category_upload, parse_outstanding_upload, read_outstanding_source
 
 
 def customer_lookup_key(row):
@@ -134,8 +134,12 @@ def category_update_message(result):
 
 @transaction.atomic
 def create_accounting_import(*, outstanding_file, category_file=None, actor=None):
-    parsed = parse_outstanding_upload(outstanding_file)
-    duplicate = find_duplicate_import(parsed)
+    source = read_outstanding_source(outstanding_file)
+    duplicate = (
+        AccountingImport.objects.filter(source_sha256=source.sha256)
+        .order_by("-created_at")
+        .first()
+    )
     if duplicate:
         category_meta = {}
         if category_file:
@@ -152,6 +156,7 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
             "category_update_message": category_update_message(category_meta),
         }
 
+    parsed = parse_outstanding_upload(source=source)
     parsed_category = parse_category_upload(category_file) if category_file else None
     category_map = parsed_category.entries if parsed_category else {}
     category_code_map = parsed_category.code_entries if parsed_category else {}

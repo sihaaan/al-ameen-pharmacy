@@ -50,12 +50,61 @@ def make_agewise_row(code, party, bill_no, invoice_date, amount, b0, b30, b60, b
     ]
 
 
+def make_repeated_header_export_row(code, party, bill_no, invoice_date, amount, b0, b30, b60, b90, total, days):
+    return [
+        "AL AMEEN PHARMACY",
+        "Frij Murar, Somali St, Deira, Dubai. Tel: 04 271 3695, Fax: 273 1737.",
+        "Agewise Outstanding from 01/01/20 to 01/06/26",
+        "Page -1 of 1",
+        "Code",
+        "Party",
+        "Place",
+        "Bill No.",
+        "Date",
+        "Amount",
+        "0-30",
+        "30 - 60",
+        "60 - 90",
+        "Over 90",
+        "TOTAL",
+        "Days",
+        code,
+        party,
+        "",
+        bill_no,
+        invoice_date,
+        amount,
+        b0,
+        b30,
+        b60,
+        b90,
+        total,
+        days,
+        "27312116.19",
+        "544868.44",
+        "474621.80",
+        "444934.45",
+        "25646829.75",
+        "27111254.44",
+        "",
+    ]
+
+
 def make_agewise_upload(name="ageoutcode test.csv", marker=""):
     buffer = StringIO()
     writer = csv.writer(buffer)
     writer.writerow(make_agewise_row("083", "MILLENNIUM AIRPORT HOTEL", "571920-UA3IJ2-", "03/02/2026", "1557.70", "0.00", "0.00", "1557.70", "0.00", "1557.70", "80"))
     writer.writerow(make_agewise_row("084", "CARD CUSTOMER", f"571921-{marker}", "20/05/2026", "100.00", "100.00", "0.00", "0.00", "0.00", "100.00", "5"))
     writer.writerow(make_agewise_row("085", "CREDIT NOTE CUSTOMER", "CR-1", "03/02/2026", "(126.00", "0.00", "0.00", "(126.00", "0.00", "(126.00", "80"))
+    return SimpleUploadedFile(name, buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+
+def make_repeated_header_export_upload(name="ageoutcode.csv"):
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(make_repeated_header_export_row("001", "EMRILL CO", "569112-PO165273-", "17/01/2026", "62.50", "0.00", "0.00", "0.00", "62.40", "62.40", "135.00"))
+    writer.writerow(make_repeated_header_export_row("001", "EMRILL CO", "579225-PO173953-", "27/02/2026", "275.00", "0.00", "0.00", "0.00", "275.00", "275.00", "94.00"))
+    writer.writerow(make_repeated_header_export_row("PL", "P/LABEL", "C.Card-", "04/02/2020", "300.00", "0.00", "0.00", "0.00", "300.00", "300.00", "2309.00"))
     return SimpleUploadedFile(name, buffer.getvalue().encode("utf-8"), content_type="text/csv")
 
 
@@ -113,6 +162,19 @@ class AccountingParserTests(TestCase):
         self.assertEqual(second.lpo_reference, "")
         credit = parsed.rows[2]
         self.assertEqual(str(credit.total), "-126.00")
+
+    def test_parse_repeated_header_export_csv_shape(self):
+        parsed = parse_outstanding_upload(make_repeated_header_export_upload())
+        self.assertEqual(parsed.report_date.isoformat(), "2026-06-01")
+        self.assertEqual(len(parsed.rows), 3)
+        self.assertEqual(parsed.skipped_row_count, 0)
+        self.assertEqual(parsed.rows[0].customer_code, "001")
+        self.assertEqual(parsed.rows[0].customer_name, "EMRILL CO")
+        self.assertEqual(parsed.rows[0].invoice_number, "569112")
+        self.assertEqual(parsed.rows[0].lpo_reference, "PO165273")
+        self.assertEqual(parsed.rows[0].days, 135)
+        self.assertEqual(parsed.rows[2].customer_name, "P/LABEL")
+        self.assertNotIn("Report date was not found", " ".join(parsed.warnings))
 
     def test_bill_number_reference_split_is_clean(self):
         examples = {
@@ -376,6 +438,26 @@ class AccountingAPITests(APITestCase):
         )
         self.assertEqual(bad_response.status_code, 400)
 
+        malformed_csv = SimpleUploadedFile("bad.csv", b"not,the,agewise,export\njust,noise", content_type="text/csv")
+        malformed_response = self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": malformed_csv},
+            format="multipart",
+        )
+        self.assertEqual(malformed_response.status_code, 400)
+        self.assertIn("No usable invoice rows", str(malformed_response.data["detail"]))
+
+    @override_settings(ACCOUNTING_IMPORT_MAX_ROWS=2)
+    def test_oversized_row_count_returns_clean_validation_error(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(
+            reverse("accounting-import-upload"),
+            {"file": make_repeated_header_export_upload()},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("too many rows", str(response.data["detail"]).lower())
+
     def test_duplicate_upload_returns_previous_import_without_creating_another(self):
         first = self.upload_import()
         self.assertEqual(first.status_code, 201)
@@ -509,10 +591,21 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(excel.status_code, 200)
         workbook = load_workbook(BytesIO(excel.content), data_only=True)
         sheet = workbook.active
-        header_values = [sheet.cell(8, column).value for column in range(1, 8)]
+        header_row = next(
+            row[0].row
+            for row in sheet.iter_rows()
+            if [cell.value for cell in row[:7]] == ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance"]
+        )
+        header_values = [sheet.cell(header_row, column).value for column in range(1, 8)]
         self.assertEqual(header_values, ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance"])
-        self.assertNotIn("PDC", [cell.value for row in sheet.iter_rows() for cell in row])
-        self.assertIn("2026-02-01 to 2026-02-28", [cell.value for row in sheet.iter_rows() for cell in row])
+        all_values = [cell.value for row in sheet.iter_rows() for cell in row]
+        self.assertNotIn("PDC", all_values)
+        self.assertNotIn("0-30", all_values)
+        self.assertNotIn("30-60", all_values)
+        self.assertIn("2026-02-01 to 2026-02-28", all_values)
+        self.assertEqual(sheet.freeze_panes, f"A{header_row + 1}")
+        self.assertEqual(sheet.page_setup.orientation, "landscape")
+        self.assertEqual(sheet.page_setup.fitToWidth, 1)
 
         excel_zip = self.client.get(
             reverse("accounting-import-statements-excel-zip", args=[import_id]),

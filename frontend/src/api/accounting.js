@@ -12,9 +12,11 @@ const accountingAPI = {
     retrieve: (id) => axiosInstance.get(`/accounting/imports/${id}/`),
     upload: (formData) => axiosInstance.post('/accounting/imports/upload/', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
     }),
     applyCategories: (id, formData) => axiosInstance.post(`/accounting/imports/${id}/apply_categories/`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000,
     }),
     statementsZip: (id, style = 'professional', customerIds = [], extraParams = {}) => axiosInstance.get(`/accounting/imports/${id}/statements_zip/`, {
       params: { style, customer_ids: customerIds.join(','), ...extraParams },

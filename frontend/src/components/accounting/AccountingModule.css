@@ -124,6 +124,27 @@
   margin-top: 12px;
 }
 
+.accounting-empty-state {
+  border: 1px dashed #99f6e4;
+  border-radius: 8px;
+  background: #f0fdfa;
+  color: #115e59;
+  padding: 14px;
+  margin-top: 12px;
+}
+
+.accounting-duplicate-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.accounting-duplicate-banner p {
+  margin: 4px 0 0;
+}
+
 .accounting-selection-bar {
   display: flex;
   align-items: center;

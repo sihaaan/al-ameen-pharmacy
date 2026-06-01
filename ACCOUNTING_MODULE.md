@@ -47,15 +47,16 @@ Custom permissions:
 
 1. Log in as a staff user with Accounting access.
 2. Open `Admin Dashboard -> Accounting`.
-3. Upload the monthly outstanding export.
-4. Optionally upload/update the category workbook.
-5. Review parsed row count, customer count, due customer count, and warnings.
-6. Filter due customers, missing emails, categories, ignored customers, or all rows.
-7. Save missing customer emails directly from the Due Customers table, or open the customer detail drawer for deeper review.
-8. Apply an optional invoice date range if the customer statement should exclude older or newer invoices.
-9. Save email/category/ignored status if needed.
-10. Download an individual Statement of Account PDF/Excel workbook, or download the ZIP of due statements.
-11. Manually attach statement files to emails outside the system.
+3. Review the import history. No previous import is opened automatically.
+4. Click `Open / Review` on an existing import, or upload the monthly outstanding export.
+5. Optionally upload/update the category workbook.
+6. Review parsed row count, customer count, due customer count, missing-email count, and warnings.
+7. Filter due customers, missing emails, categories, ignored customers, or all rows.
+8. Save missing customer emails directly from the Due Customers table, or open the customer detail drawer for deeper review.
+9. Apply an optional invoice date range if the customer statement should exclude older or newer invoices.
+10. Save email/category/ignored status if needed.
+11. Download an individual Statement of Account PDF/Excel workbook, or download the ZIP of due statements.
+12. Manually attach statement files to emails outside the system.
 
 ## Parser Notes
 
@@ -75,6 +76,8 @@ Category workbook matching uses the same conservative approach. If the category 
 
 If `Days` is missing or invalid, the parser calculates days from invoice date to report date. If report date is missing, upload date is used with a warning.
 
+Parser safeguards reject unsupported files, malformed Excel workbooks, CSV rows with unexpected column explosions, and files above the configured row/size limits with clear validation errors instead of server errors. The newer POS export format `Agewise Outstanding from ... to ...` is supported and uses the final `to` date as the report date.
+
 The parser splits raw POS bill numbers for display:
 
 - `570170-284750-0-` -> `Invoice No. 570170`, `LPO / Reference No. 284750-0`
@@ -85,7 +88,7 @@ The parser splits raw POS bill numbers for display:
 
 Statement PDFs and Excel workbooks are generated on demand from database rows. Generated files are not stored permanently in V1.
 
-The customer-facing PDF is now a ledger-style Statement of Account. The main table intentionally does not print ageing buckets. Instead it shows:
+The customer-facing PDF and Excel workbook are ledger-style Statements of Account. The main table intentionally does not print ageing buckets. Instead it shows:
 
 - Invoice Date
 - Doc Type
@@ -101,7 +104,9 @@ The summary section shows Total Debit, Total Credit, Net Value / Total Outstandi
 
 The Accounting dashboard still keeps ageing buckets internally for due calculations, filters, and review. Ageing data is not removed from the database or internal UI.
 
-If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF, and ZIP-generated PDFs use only invoice rows in that date range. The PDF prints the selected statement period clearly. If no date range is applied, the statement period is calculated from the minimum and maximum invoice dates included for that customer.
+If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF/Excel workbook, and ZIP-generated statements use only invoice rows in that date range. The statement prints the selected statement period clearly. If no date range is applied, the statement period is calculated from the minimum and maximum invoice dates included for that customer.
+
+Excel workbooks are formatted for customer-facing use with a branded header, title block, customer/account information, styled ledger table, formatted currency/date columns, totals block, reminder note, filters, freeze panes, and print-ready landscape page setup.
 
 ZIP downloads include due, non-ignored customers from the selected import.
 
