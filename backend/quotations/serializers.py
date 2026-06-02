@@ -688,6 +688,7 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
     imports = HistoricalPriceImportSerializer(many=True, read_only=True)
     import_count = serializers.SerializerMethodField()
     pending_suggestion_count = serializers.SerializerMethodField()
+    wizard_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = HistoricalImportBatch
@@ -702,6 +703,7 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
             "imports",
             "import_count",
             "pending_suggestion_count",
+            "wizard_summary",
             "created_at",
             "updated_at",
         ]
@@ -715,6 +717,7 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
             "imports",
             "import_count",
             "pending_suggestion_count",
+            "wizard_summary",
             "created_at",
             "updated_at",
         ]
@@ -724,6 +727,67 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
 
     def get_pending_suggestion_count(self, obj):
         return obj.ai_suggestions.filter(status=HistoricalImportAISuggestion.STATUS_PENDING).count()
+
+    def get_wizard_summary(self, obj):
+        imports = list(obj.imports.all())
+        suggestions = list(obj.ai_suggestions.all())
+        line_counts = {
+            "total": 0,
+            "ready": 0,
+            "needs_review": 0,
+            "skipped": 0,
+            "committed": 0,
+            "duplicate": 0,
+        }
+        missing_document_details = 0
+        company_ready = 0
+        for historical_import in imports:
+            if historical_import.company_id:
+                company_ready += 1
+            if not historical_import.company_id or not historical_import.document_date:
+                missing_document_details += 1
+            for line in historical_import.lines.all():
+                line_counts["total"] += 1
+                if line.status in line_counts:
+                    line_counts[line.status] += 1
+
+        suggestion_counts = {}
+        pending_action_counts = {}
+        applied_action_counts = {}
+        conflict_action_counts = {}
+        high_confidence_pending = 0
+        for suggestion in suggestions:
+            suggestion_counts[suggestion.status] = suggestion_counts.get(suggestion.status, 0) + 1
+            if suggestion.status == HistoricalImportAISuggestion.STATUS_PENDING:
+                pending_action_counts[suggestion.action] = pending_action_counts.get(suggestion.action, 0) + 1
+                if suggestion.confidence >= 0.85:
+                    high_confidence_pending += 1
+            elif suggestion.status == HistoricalImportAISuggestion.STATUS_APPLIED:
+                applied_action_counts[suggestion.action] = applied_action_counts.get(suggestion.action, 0) + 1
+            elif suggestion.status == HistoricalImportAISuggestion.STATUS_CONFLICT:
+                conflict_action_counts[suggestion.action] = conflict_action_counts.get(suggestion.action, 0) + 1
+
+        files = (obj.summary or {}).get("files", [])
+        failed_files = len([entry for entry in files if entry.get("status") == "failed"])
+        duplicate_files = len([entry for entry in files if entry.get("status") == "duplicate"])
+        pending_count = suggestion_counts.get(HistoricalImportAISuggestion.STATUS_PENDING, 0)
+        conflict_count = suggestion_counts.get(HistoricalImportAISuggestion.STATUS_CONFLICT, 0)
+        return {
+            "file_count": len(files) or len(imports),
+            "parsed_file_count": len([entry for entry in files if entry.get("status") == "parsed"]) or len(imports),
+            "failed_file_count": failed_files,
+            "duplicate_file_count": duplicate_files,
+            "import_count": len(imports),
+            "company_ready_count": company_ready,
+            "documents_missing_details_count": missing_document_details,
+            "line_counts": line_counts,
+            "suggestion_status_counts": suggestion_counts,
+            "pending_suggestion_action_counts": pending_action_counts,
+            "applied_suggestion_action_counts": applied_action_counts,
+            "conflict_suggestion_action_counts": conflict_action_counts,
+            "high_confidence_pending_suggestion_count": high_confidence_pending,
+            "unresolved_count": line_counts["needs_review"] + pending_count + conflict_count + missing_document_details,
+        }
 
 
 class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
@@ -735,6 +799,12 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
     line_quantity = serializers.DecimalField(source="line.quantity", max_digits=12, decimal_places=3, read_only=True, allow_null=True)
     line_unit = serializers.CharField(source="line.unit", read_only=True, allow_null=True)
     line_unit_price = serializers.DecimalField(source="line.unit_price", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    line_amount = serializers.DecimalField(source="line.amount", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    line_vat_amount = serializers.DecimalField(source="line.vat_amount", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    line_vat_rate = serializers.DecimalField(source="line.vat_rate", max_digits=5, decimal_places=2, read_only=True, allow_null=True)
+    line_total = serializers.DecimalField(source="line.line_total", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    line_status = serializers.CharField(source="line.status", read_only=True, allow_null=True)
+    line_raw = serializers.CharField(source="line.raw_line", read_only=True, allow_null=True)
     suggested_company_name = serializers.CharField(source="suggested_company.name", read_only=True, allow_null=True)
     suggested_product_name = serializers.CharField(source="suggested_product.name", read_only=True, allow_null=True)
 
@@ -753,6 +823,12 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "line_quantity",
             "line_unit",
             "line_unit_price",
+            "line_amount",
+            "line_vat_amount",
+            "line_vat_rate",
+            "line_total",
+            "line_status",
+            "line_raw",
             "suggestion_type",
             "action",
             "status",
@@ -791,6 +867,12 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "line_quantity",
             "line_unit",
             "line_unit_price",
+            "line_amount",
+            "line_vat_amount",
+            "line_vat_rate",
+            "line_total",
+            "line_status",
+            "line_raw",
             "suggestion_type",
             "status",
             "candidate_companies",

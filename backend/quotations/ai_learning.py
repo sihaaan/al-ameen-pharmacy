@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from decimal import Decimal
 
 from django.conf import settings
@@ -45,6 +46,23 @@ from .services import (
 MAX_LEARNING_ROWS = 120
 MAX_CANDIDATES_PER_ROW = 6
 MAX_COMPANY_CANDIDATES = 6
+
+
+HISTORICAL_NOISE_PATTERNS = [
+    re.compile(r"^\s*$"),
+    re.compile(r"^\s*(item|items|item description|material description|description|particulars)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(qty|quantity|req quantity|unit|uom|price|rate|unit price|u price|amount|vat|total)\s*$", re.IGNORECASE),
+    re.compile(
+        r"\b(item description|material description|req quantity|unit price|u price)\b.*\b(total|amount|qty|quantity)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*(sub[\s-]?total|total|grand total|net total|vat total|vat|amount)\b", re.IGNORECASE),
+    re.compile(r"^\s*(quotation|quote|invoice|lpo|local purchase order|tender no|tender number)\b", re.IGNORECASE),
+    re.compile(r"^\s*(date|from|seller|to|buyer|kind attn|attn|attention)\b", re.IGNORECASE),
+    re.compile(r"^\s*(tel|fax|email|e-mail|website|www\.|https?://|p\s*o\s*box)\b", re.IGNORECASE),
+    re.compile(r"^\s*(terms|conditions|payment terms|validity|delivery|prepared by|approved by|signature|stamp|yours truly|for al ameen)\b", re.IGNORECASE),
+    re.compile(r"^\s*page\s+\d+(\s+of\s+\d+)?\s*$", re.IGNORECASE),
+]
 
 LINE_ACTIONS = {
     HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
@@ -170,6 +188,45 @@ def _company_payload(company):
     }
 
 
+def _historical_noise_reason(line):
+    text = _clean_text(" ".join([line.item_name or "", line.raw_line or ""]))
+    normalized = normalize_label(text)
+    if not normalized:
+        return "Blank or empty extracted row."
+
+    compact_item = normalize_label(line.item_name or "")
+    header_tokens = {
+        "item",
+        "items",
+        "item description",
+        "material description",
+        "description",
+        "particulars",
+        "qty",
+        "quantity",
+        "req quantity",
+        "unit",
+        "uom",
+        "unit price",
+        "u price",
+        "amount",
+        "vat",
+        "total",
+    }
+    if compact_item in header_tokens:
+        return "Looks like a table header, not an item."
+
+    for pattern in HISTORICAL_NOISE_PATTERNS:
+        if pattern.search(text):
+            return "Looks like document header, footer, total, or table-label noise."
+
+    has_item_words = len([token for token in normalized.split() if len(token) >= 3])
+    has_price_or_qty = any([line.quantity, line.unit_price, line.amount, line.line_total])
+    if has_item_words == 0 and not has_price_or_qty:
+        return "No usable product text or price data was extracted."
+    return ""
+
+
 def _candidate_products_for_line(line, company=None):
     seen = {}
     match = suggest_product_for_text(line.item_name, company)
@@ -236,7 +293,12 @@ def _existing_alias_context(historical_import):
 def build_learning_context(historical_import):
     candidate_companies = _candidate_companies_for_import(historical_import)
     lines = []
+    noise_rows = []
     for line in historical_import.lines.order_by("sort_order", "id")[:MAX_LEARNING_ROWS]:
+        noise_reason = _historical_noise_reason(line)
+        if noise_reason:
+            noise_rows.append({"line": line, "reason": noise_reason})
+            continue
         lines.append(
             {
                 "line_id": line.id,
@@ -278,7 +340,12 @@ def build_learning_context(historical_import):
         "existing_aliases": _existing_alias_context(historical_import),
         "rows": lines,
     }
-    return json.dumps(payload, ensure_ascii=True, indent=2), candidate_companies, {row["line_id"]: row["candidate_products"] for row in lines}
+    return (
+        json.dumps(payload, ensure_ascii=True, indent=2),
+        candidate_companies,
+        {row["line_id"]: row["candidate_products"] for row in lines},
+        noise_rows,
+    )
 
 
 def _learning_instructions(mode):
@@ -365,7 +432,7 @@ def _normalize_learning_result(raw_result, historical_import, candidate_companie
     return normalized
 
 
-def _store_learning_suggestions(historical_import, normalized_result, candidate_companies, line_candidate_products, actor):
+def _store_learning_suggestions(historical_import, normalized_result, candidate_companies, line_candidate_products, actor, noise_rows=None):
     HistoricalImportAISuggestion.objects.filter(
         historical_import=historical_import,
         status__in=[
@@ -423,6 +490,23 @@ def _store_learning_suggestions(historical_import, normalized_result, candidate_
                 created_by=actor if getattr(actor, "is_authenticated", False) else None,
             )
         )
+    for noise in noise_rows or []:
+        line = noise["line"]
+        created.append(
+            HistoricalImportAISuggestion.objects.create(
+                batch=historical_import.batch,
+                historical_import=historical_import,
+                line=line,
+                suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+                action=HistoricalImportAISuggestion.ACTION_SKIP,
+                alias_text=line.item_name,
+                proposed_product_name=line.item_name,
+                confidence=1.0,
+                reason=noise["reason"],
+                raw_ai_payload={"deterministic_noise_gate": True},
+                created_by=actor if getattr(actor, "is_authenticated", False) else None,
+            )
+        )
     return created
 
 
@@ -440,7 +524,7 @@ def generate_historical_import_learning_suggestions(historical_import, actor=Non
     if status_info["status"] != "ai_available":
         raise AIProviderUnavailable(status_info["label"])
 
-    context, candidate_companies, line_candidate_products = build_learning_context(historical_import)
+    context, candidate_companies, line_candidate_products, noise_rows = build_learning_context(historical_import)
     preview = {
         "source_type": historical_import.source_type,
         "source_sha256": historical_import.source_sha256,
@@ -540,13 +624,14 @@ def generate_historical_import_learning_suggestions(historical_import, actor=Non
                 raise
             raise AIParseError(str(exc)) from exc
 
-    suggestions = _store_learning_suggestions(historical_import, normalized, candidate_companies, line_candidate_products, actor)
+    suggestions = _store_learning_suggestions(historical_import, normalized, candidate_companies, line_candidate_products, actor, noise_rows)
     historical_import.parse_meta = {
         **(historical_import.parse_meta or {}),
         "ai_learning_last_run_at": timezone.now().isoformat(),
         "ai_learning_last_mode": mode,
         "ai_learning_cache_hit": cache_hit,
         "ai_learning_warning_count": len(normalized.get("warnings", [])),
+        "ai_learning_noise_skip_count": len(noise_rows),
     }
     historical_import.save(update_fields=["parse_meta", "updated_at"])
     audit_log(
@@ -779,21 +864,67 @@ def refresh_historical_import_batch_summary(batch):
     duplicate_files = len([item for item in batch.summary.get("files", []) if item.get("status") == "duplicate"])
     ready_rows = 0
     needs_review_rows = 0
+    skipped_rows = 0
+    committed_rows = 0
+    duplicate_rows = 0
+    total_rows = 0
+    company_ready = 0
+    documents_missing_details = 0
     for entry in imports:
+        if entry.company_id:
+            company_ready += 1
+        if not entry.company_id or not entry.document_date:
+            documents_missing_details += 1
         for line in entry.lines.all():
+            total_rows += 1
             if line.status == HistoricalPriceImportLine.STATUS_READY:
                 ready_rows += 1
             elif line.status == HistoricalPriceImportLine.STATUS_NEEDS_REVIEW:
                 needs_review_rows += 1
+            elif line.status == HistoricalPriceImportLine.STATUS_SKIPPED:
+                skipped_rows += 1
+            elif line.status == HistoricalPriceImportLine.STATUS_COMMITTED:
+                committed_rows += 1
+            elif line.status == HistoricalPriceImportLine.STATUS_DUPLICATE:
+                duplicate_rows += 1
+    suggestions = list(batch.ai_suggestions.all())
+    pending_suggestions = [suggestion for suggestion in suggestions if suggestion.status == HistoricalImportAISuggestion.STATUS_PENDING]
+    suggestion_counts = {}
+    pending_by_action = {}
+    applied_by_action = {}
+    conflict_by_action = {}
+    high_confidence_pending = 0
+    for suggestion in suggestions:
+        suggestion_counts[suggestion.status] = suggestion_counts.get(suggestion.status, 0) + 1
+        if suggestion.status == HistoricalImportAISuggestion.STATUS_PENDING:
+            pending_by_action[suggestion.action] = pending_by_action.get(suggestion.action, 0) + 1
+            if suggestion.confidence >= 0.85:
+                high_confidence_pending += 1
+        elif suggestion.status == HistoricalImportAISuggestion.STATUS_APPLIED:
+            applied_by_action[suggestion.action] = applied_by_action.get(suggestion.action, 0) + 1
+        elif suggestion.status == HistoricalImportAISuggestion.STATUS_CONFLICT:
+            conflict_by_action[suggestion.action] = conflict_by_action.get(suggestion.action, 0) + 1
     batch.summary = {
         **(batch.summary or {}),
         "import_count": import_count,
         "committed_import_count": committed,
         "failed_file_count": failed_files,
         "duplicate_file_count": duplicate_files,
+        "company_ready_count": company_ready,
+        "documents_missing_details_count": documents_missing_details,
+        "total_row_count": total_rows,
         "ready_row_count": ready_rows,
         "needs_review_row_count": needs_review_rows,
-        "pending_suggestion_count": batch.ai_suggestions.filter(status=HistoricalImportAISuggestion.STATUS_PENDING).count(),
+        "skipped_row_count": skipped_rows,
+        "committed_row_count": committed_rows,
+        "duplicate_row_count": duplicate_rows,
+        "pending_suggestion_count": len(pending_suggestions),
+        "suggestion_status_counts": suggestion_counts,
+        "pending_suggestion_action_counts": pending_by_action,
+        "applied_suggestion_action_counts": applied_by_action,
+        "conflict_suggestion_action_counts": conflict_by_action,
+        "high_confidence_pending_suggestion_count": high_confidence_pending,
+        "unresolved_count": needs_review_rows + len(pending_suggestions) + sum(conflict_by_action.values()) + documents_missing_details,
     }
     if failed_files and not import_count:
         batch.status = HistoricalImportBatch.STATUS_FAILED

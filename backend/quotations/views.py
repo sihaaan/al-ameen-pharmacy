@@ -597,6 +597,7 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         "imports__lines",
         "imports__lines__product",
         "imports__lines__quote_item",
+        "ai_suggestions",
     )
     parser_classes = [JSONParser, MultiPartParser, FormParser]
     http_method_names = ["get", "post", "patch", "head", "options"]

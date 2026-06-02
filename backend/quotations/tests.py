@@ -1,5 +1,7 @@
 from decimal import Decimal
+from datetime import date
 from io import BytesIO
+import json
 import tempfile
 from unittest.mock import patch
 
@@ -1220,6 +1222,65 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(response.data["summary"]["failed"], 1)
         self.assertIn("missing API key", response.data["summary"]["results"][0]["message"])
         self.assertEqual(HistoricalImportAISuggestion.objects.count(), 0)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_ai_learning_skips_obvious_historical_noise_before_product_review(self):
+        batch = HistoricalImportBatch.objects.create(name="Noise gate", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="noise.pdf",
+            source_sha256="0" * 64,
+            document_number="Q-TEST",
+            document_date=date(2026, 5, 21),
+            created_by=self.staff,
+        )
+        HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="Item Description",
+            raw_line="Item Description | Qty | Unit | Unit Price | Total",
+            sort_order=0,
+        )
+        HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="SAVLON ANTISEPTIC SOLUTION",
+            raw_line="1 | SAVLON ANTISEPTIC SOLUTION | 1 | bottle | 5.00 | 5.25",
+            quantity=Decimal("1.000"),
+            unit="bottle",
+            unit_price=Decimal("5.00"),
+            line_total=Decimal("5.25"),
+            sort_order=1,
+        )
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.ai_parsing_enabled = True
+        settings_obj.save()
+
+        provider = MockLearningProvider()
+        with patch("quotations.ai_learning.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-historical-import-batch-run-ai-suggestions", args=[batch.id]),
+                {"import_ids": [historical_import.id], "mode": "text"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        context = json.loads(provider.calls[0]["text_context"])
+        self.assertEqual([row["item_name"] for row in context["rows"]], ["SAVLON ANTISEPTIC SOLUTION"])
+        skip_suggestion = HistoricalImportAISuggestion.objects.get(action=HistoricalImportAISuggestion.ACTION_SKIP)
+        self.assertEqual(skip_suggestion.line.item_name, "Item Description")
+        self.assertIn("table header", skip_suggestion.reason.lower())
+
+        batch_response = self.client.get(reverse("quotation-historical-import-batch-detail", args=[batch.id]))
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.data["wizard_summary"]["pending_suggestion_action_counts"]["skip"], 1)
+        self.assertEqual(batch_response.data["wizard_summary"]["line_counts"]["total"], 2)
 
     def test_historical_import_same_company_document_number_opens_existing_import(self):
         first = self.create_parsed_historical_import()
