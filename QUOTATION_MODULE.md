@@ -26,9 +26,10 @@ Included:
 - Protected PDF generation streamed from the backend
 - React admin dashboard tab: `Admin Dashboard -> Quotations`
 - Historical finalized quotation PDF import for reviewed company price-history backfill
+- Batch historical quotation PDF upload and review-only AI learning suggestions for company/Product/alias/new-draft-product decisions
 
 Not included in Phase 1:
-- AI product matching or pricing decisions
+- Fully automatic AI product creation, alias creation, product matching, or pricing decisions without staff approval
 - OpenAI embeddings
 - pgvector migrations
 - Gmail API import
@@ -116,6 +117,14 @@ Completed:
   - AI candidate rows must be applied by staff before they replace deterministic review rows
   - AI parsing does not match Products, create Products, create aliases, create price history, finalize quotations, or bypass review
   - missing Product matches never trigger AI cleanup and do not lower parse confidence
+- Batch AI-assisted historical quotation learning:
+  - staff can upload up to 25 old finalized PDF files into a `HistoricalImportBatch`
+  - each file becomes a normal staged `HistoricalPriceImport` or returns duplicate metadata without creating another staged import
+  - staff can run AI suggestions on selected imports in the batch
+  - AI suggestions are stored as pending review data only and can propose existing Product matches, company-specific aliases, new draft/internal Products, company matches/new companies, skips, or manual review
+  - durable changes happen only after staff selects and applies suggestions
+  - alias conflicts and duplicate Product names are guarded before approval mutates data
+  - ready rows still use the existing duplicate-safe historical price-history commit flow
 
 Partially completed:
 - None
@@ -198,7 +207,7 @@ Import limitations:
 - PDF import supports selectable text/tables only.
 - Scanned/image-only PDFs show: `No selectable text detected. OCR is not enabled in this environment.`
 - AI Clean Parse can help clean messy extracted rows when enabled, including capped vision cleanup for PDFs. It still produces review candidates only.
-- OCR, Gmail import, AI product matching, and background workers are intentionally not part of this implementation.
+- OCR, Gmail import, fully automatic AI product matching, and background workers are intentionally not part of this implementation.
 - No AI API calls happen when `Enable AI Parsing` is off in `Quotations -> Settings` or the global environment kill switch is disabled.
 - Missing Product matches never trigger AI cleanup. Parse confidence describes extraction quality only.
 
@@ -213,6 +222,17 @@ Backfill historical finalized quotation prices:
 - Click `Commit Price History`
 - Confirm `Quotations -> Price History` shows the imported company-specific prices
 - This does not create a new active quotation to send. It creates a hidden finalized historical quotation record only to keep price history traceable.
+
+Batch backfill old finalized quotation prices:
+- Go to `Quotations -> Historical Imports`
+- In `Batch Historical Learning`, choose multiple PDF files; V1 caps the browser upload at 25 files
+- Click `Upload Batch`; the frontend uploads files sequentially so one slow/duplicate file does not silently block the rest
+- Open the created batch and select imports that should be reviewed
+- Click `Run AI Suggestions` only when AI Parsing is enabled and provider keys are configured
+- Review `AI Suggestion Review`; AI suggestions are not durable data until selected and applied
+- Approve/edit high-confidence Product matches, company-specific aliases, new draft/internal Products, company suggestions, skips, or manual-review decisions
+- Mark complete rows/imports ready, then commit selected ready imports to price history through the existing duplicate-safe commit logic
+- Missing Product matches and low Product catalog coverage are expected during setup; staff approval is still the source of truth
 
 Create a quotation from an inquiry:
 - In `Quotations -> Inquiries`, click `Create Quotation from Inquiry` beside the inquiry
@@ -324,6 +344,8 @@ Implemented Phase 1 models:
 - `HistoricalPriceImport`
 - `HistoricalPriceImportLine`
 - `ProductAlias`
+- `HistoricalImportBatch`
+- `HistoricalImportAISuggestion`
 
 `QuoteItem` is deprecated compatibility storage. New inquiry lines, quotation lines, historical import lines, and price-history rows can link directly to `Product`.
 
@@ -344,6 +366,8 @@ Historical price backfill models:
 - `HistoricalPriceImport` stores the reviewed source metadata for an old finalized quotation PDF: company, suggested company name, source filename/MIME/SHA-256/private ref, parser metadata, document number/date, currency, totals, status, committed user/time, and the hidden historical quotation created during commit.
 - `HistoricalPriceImportLine` stores each extracted old price row: raw source line, cleaned item text, linked `Product`, compatibility `QuoteItem`, quantity, unit, unit price, VAT/total fields, serial/page/row metadata, parse confidence, status, duplicate reason, match reason, and notes.
 - `Quotation.is_historical_import` marks hidden finalized quotations created only to keep historical price-history rows traceable. Normal `GET /api/quotations/quotes/` excludes these unless `include_historical=true`.
+- `HistoricalImportBatch` groups staged historical imports from a multi-file upload and stores per-file parse/duplicate/failure summaries.
+- `HistoricalImportAISuggestion` stores pending review-only company and line suggestions from AI learning. Suggestions can point to existing Companies/Products, propose new Companies/Products, propose aliases, mark skips, or flag manual review, but they are not durable business changes until staff applies them.
 
 ## API Endpoints Added
 
@@ -358,6 +382,8 @@ Implemented endpoints:
 - `/inquiry-lines/`
 - `/historical-imports/`
 - `/historical-import-lines/`
+- `/historical-import-batches/`
+- `/historical-import-ai-suggestions/`
 - `/quotes/`
 - `/quote-lines/`
 - `/price-history/`
@@ -375,6 +401,13 @@ Implemented custom actions:
 - `POST /historical-imports/parse_file/`
 - `POST /historical-imports/{id}/commit/`
 - `GET /historical-imports/{id}/preview_page/`
+- `POST /historical-imports/{id}/run_ai_suggestions/`
+- `POST /historical-import-batches/{id}/upload_file/`
+- `POST /historical-import-batches/{id}/run_ai_suggestions/`
+- `POST /historical-import-batches/{id}/apply_ai_suggestions/`
+- `POST /historical-import-batches/{id}/commit_ready_imports/`
+- `POST /historical-import-ai-suggestions/apply/`
+- `POST /historical-import-ai-suggestions/reject/`
 - `GET /companies/{id}/price_history/`
 - `POST /quotes/{id}/submit_review/`
 - `POST /quotes/{id}/approve/`
@@ -403,6 +436,15 @@ Historical import endpoints:
 - `GET /historical-imports/{id}/preview_page/` streams a staff-only first-page PNG preview from private storage when PyMuPDF is available.
 - `POST /historical-imports/{id}/ai_clean_rows/` returns AI-cleaned candidate price rows for staff review when AI parsing is enabled.
 - `POST /historical-imports/{id}/apply_ai_clean_rows/` replaces staged historical import rows with explicitly approved AI-cleaned rows and leaves them `needs_review`.
+- `POST /historical-imports/{id}/run_ai_suggestions/` stores review-only company/Product/alias/new-product suggestions for one staged historical import.
+- `POST /historical-import-batches/` creates a batch wrapper for a multi-file historical import run.
+- `POST /historical-import-batches/{id}/upload_file/` uploads one PDF into the batch, reusing existing duplicate detection and normal staged import creation.
+- `POST /historical-import-batches/{id}/run_ai_suggestions/` runs review-only AI suggestions for selected imports in the batch.
+- `POST /historical-import-batches/{id}/apply_ai_suggestions/` applies selected suggestions only after staff approval.
+- `POST /historical-import-batches/{id}/commit_ready_imports/` commits selected ready imports through the existing duplicate-safe historical price-history flow.
+- `PATCH /historical-import-ai-suggestions/{id}/` lets staff edit the pending suggestion action/target/proposed fields before approval.
+- `POST /historical-import-ai-suggestions/apply/` applies selected pending suggestions.
+- `POST /historical-import-ai-suggestions/reject/` rejects selected pending suggestions.
 
 AI parsing endpoints:
 - `POST /inquiries/ai_clean_parse/` accepts the deterministic inquiry preview JSON and returns AI-cleaned candidate rows. It does not save an inquiry.
@@ -951,13 +993,12 @@ Future template customization:
 ## Phase 2/3 Roadmap
 
 Phase 2:
-- Company-specific aliases
-- Global aliases
-- Deterministic item matching
+- Broader alias-management UI outside row-level workflows
+- Continued deterministic item matching improvements
 - Fuzzy matching
-- Confirmed-match learning
+- Confirmed-match learning beyond historical import approval actions
 - Optional `pg_trgm`
-- AI-assisted matching and reranking
+- AI-assisted matching/reranking expansion beyond approval-gated historical import suggestions
 - Embeddings and pgvector evaluation
 - OCR/scanned document parsing for uploaded inquiries/LPOs
 
@@ -976,7 +1017,7 @@ Phase 3:
 - Manual inquiry entry is intentionally simple; email/document parsing is deferred.
 - Import parsing is deterministic and intentionally conservative; unclear non-empty lines are returned for review instead of being silently guessed.
 - Excel/PDF import handles common digital LPOs but will need tuning against real company files.
-- Item matching is manual in Phase 1.
+- Product matching remains staff-approved. Historical import batches can receive AI suggestions, but staff must apply or edit them before any Product, alias, Company, or price-history record changes.
 - Existing public product/cart/order/auth flows must not be coupled to quotation internals.
 - Quotation UI errors now use inline diagnostic panels. Existing non-quotation admin/product/order screens still use their older alert patterns.
 - Directly loading `/admin` in a fresh browser session can briefly redirect to `/login` before the existing auth context finishes reading local storage. Navigating to `/admin` from inside the app works. This is an existing admin route-guard timing issue, not quotation-specific, but it is worth cleaning up later.
@@ -1166,8 +1207,8 @@ Warnings:
 - Do not expose uploaded inquiry or historical source files through Cloudinary public URLs; use private storage refs only
 - Railway production needs a durable private storage plan before relying on long-term source-file retention
 - Do not add DOCX-to-PDF conversion unless Railway deployment has an explicit, supported conversion path
-- Do not implement AI Product matching, Gmail API, pgvector, OCR, broad automatic document processing, reporting, or background workers in this cleanup scope
-- AI parsing is review-only. It must not create Products, aliases, price history, quotations, or pricing decisions automatically.
+- Do not implement Gmail API, pgvector, OCR, broad automatic document processing, reporting, or background workers in this cleanup scope
+- AI parsing and AI learning suggestions are review-only. They must not create Products, aliases, Companies, price history, quotations, or pricing decisions automatically.
 - No AI calls happen unless the environment has a provider key and staff enable AI Parsing in `Quotations -> Settings`.
 - Do not break product catalog, cart, checkout, orders, admin product management, admin order management, or JWT auth flows
 - Current frontend build still has pre-existing hook dependency warnings in `OrderManagement.js` and `ProductDetail.js`; quotation-specific build warnings were fixed

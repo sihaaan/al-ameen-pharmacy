@@ -28,6 +28,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    HistoricalImportAISuggestion,
+    HistoricalImportBatch,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
     Inquiry,
@@ -64,8 +66,10 @@ class QuotationPermissionTests(APITestCase):
         "quotation-item-list",
         "quotation-inquiry-list",
         "quotation-inquiry-line-list",
+        "quotation-historical-import-batch-list",
         "quotation-historical-import-list",
         "quotation-historical-import-line-list",
+        "quotation-historical-import-ai-suggestion-list",
         "quotation-list",
         "quotation-line-list",
         "quotation-price-history-list",
@@ -1017,6 +1021,206 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(third.data["status"], HistoricalPriceImport.STATUS_COMMITTED)
         self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company, product=self.item_one).count(), 1)
 
+    def test_batch_upload_creates_staged_imports_and_detects_duplicate_per_file(self):
+        batch = self.client.post(reverse("quotation-historical-import-batch-list"), {"name": "May history"}, format="json")
+        self.assertEqual(batch.status_code, status.HTTP_201_CREATED)
+        batch_id = batch.data["id"]
+        upload = self.make_historical_pdf_upload()
+        upload_bytes = upload.read()
+
+        def file_upload():
+            return SimpleUploadedFile(upload.name, upload_bytes, content_type="application/pdf")
+
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                first = self.client.post(
+                    reverse("quotation-historical-import-batch-upload-file", args=[batch_id]),
+                    {"file": file_upload()},
+                    format="multipart",
+                )
+                second = self.client.post(
+                    reverse("quotation-historical-import-batch-upload-file", args=[batch_id]),
+                    {"file": file_upload()},
+                    format="multipart",
+                )
+
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(first.data["status"], "parsed")
+        self.assertEqual(first.data["import"]["batch"], batch_id)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["status"], "duplicate")
+        self.assertTrue(second.data["duplicate_check"]["blocked_new_import"])
+        self.assertEqual(HistoricalPriceImport.objects.filter(batch_id=batch_id).count(), 1)
+        refreshed_batch = HistoricalImportBatch.objects.get(pk=batch_id)
+        self.assertEqual(refreshed_batch.summary["duplicate_file_count"], 1)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+        QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_ai_learning_suggestions_are_review_only_until_staff_applies(self):
+        batch = self.client.post(reverse("quotation-historical-import-batch-list"), {"name": "AI learning"}, format="json")
+        batch_id = batch.data["id"]
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.ai_parsing_enabled = True
+        settings_obj.save()
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                upload = self.client.post(
+                    reverse("quotation-historical-import-batch-upload-file", args=[batch_id]),
+                    {"file": self.make_historical_pdf_upload()},
+                    format="multipart",
+                )
+        self.assertEqual(upload.status_code, status.HTTP_201_CREATED)
+        before_products = Product.objects.count()
+
+        provider = MockLearningProvider()
+        with patch("quotations.ai_learning.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-historical-import-batch-run-ai-suggestions", args=[batch_id]),
+                {"import_ids": [upload.data["import"]["id"]], "mode": "text"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(HistoricalImportAISuggestion.objects.filter(batch_id=batch_id, status=HistoricalImportAISuggestion.STATUS_PENDING).count(), 3)
+        self.assertEqual(Product.objects.count(), before_products)
+        self.assertEqual(ProductAlias.objects.count(), 0)
+        self.assertEqual(CompanyPriceHistory.objects.count(), 0)
+        self.assertEqual(provider.calls[0]["schema_name"], "quotation_historical_learning")
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_staff_approval_creates_alias_and_new_draft_product_then_commit_ready_rows(self):
+        batch = self.client.post(reverse("quotation-historical-import-batch-list"), {"name": "AI approve"}, format="json")
+        batch_id = batch.data["id"]
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.ai_parsing_enabled = True
+        settings_obj.save()
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                upload = self.client.post(
+                    reverse("quotation-historical-import-batch-upload-file", args=[batch_id]),
+                    {"file": self.make_historical_pdf_upload()},
+                    format="multipart",
+                )
+        import_id = upload.data["import"]["id"]
+        with patch("quotations.ai_learning.get_ai_parse_provider", return_value=MockLearningProvider()):
+            self.client.post(
+                reverse("quotation-historical-import-batch-run-ai-suggestions", args=[batch_id]),
+                {"import_ids": [import_id], "mode": "text"},
+                format="json",
+            )
+
+        company_suggestion = HistoricalImportAISuggestion.objects.get(
+            batch_id=batch_id,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_COMPANY,
+        )
+        line_suggestions = list(
+            HistoricalImportAISuggestion.objects.filter(
+                batch_id=batch_id,
+                suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            ).order_by("line__sort_order")
+        )
+        apply_company = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch_id]),
+            {"suggestion_ids": [company_suggestion.id]},
+            format="json",
+        )
+        apply_lines = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch_id]),
+            {"suggestion_ids": [line_suggestions[0].id, line_suggestions[1].id]},
+            format="json",
+        )
+
+        self.assertEqual(apply_company.status_code, status.HTTP_200_OK)
+        self.assertEqual(apply_lines.status_code, status.HTTP_200_OK)
+        self.assertEqual(apply_lines.data["summary"]["applied"], 2)
+        self.assertEqual(ProductAlias.objects.filter(company=self.company, product=self.item_one).count(), 1)
+        created_product = Product.objects.get(name="Custom Historical Refill")
+        self.assertEqual(created_product.status, "draft")
+        self.assertFalse(created_product.show_price)
+        self.assertEqual(CompanyPriceHistory.objects.count(), 0)
+
+        commit = self.client.post(
+            reverse("quotation-historical-import-batch-commit-ready-imports", args=[batch_id]),
+            {"import_ids": [import_id]},
+            format="json",
+        )
+
+        self.assertEqual(commit.status_code, status.HTTP_200_OK)
+        self.assertEqual(commit.data["summary"]["committed"], 1)
+        self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company).count(), 2)
+
+    def test_alias_conflict_blocks_ai_suggestion_approval_without_overwriting(self):
+        response = self.create_parsed_historical_import()
+        import_id = response.data["id"]
+        historical_import = HistoricalPriceImport.objects.get(pk=import_id)
+        historical_import.company = self.company
+        historical_import.save(update_fields=["company", "updated_at"])
+        line = historical_import.lines.order_by("sort_order").first()
+        ProductAlias.objects.create(company=self.company, product=self.item_two, alias=line.item_name, created_by=self.staff)
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS,
+            suggested_product=self.item_one,
+            alias_text=line.item_name,
+            confidence=0.95,
+            reason="AI thinks this maps to item one.",
+            created_by=self.staff,
+        )
+
+        result = self.client.post(
+            reverse("quotation-historical-import-ai-suggestion-apply"),
+            {"suggestion_ids": [suggestion.id]},
+            format="json",
+        )
+
+        self.assertEqual(result.status_code, status.HTTP_200_OK)
+        suggestion.refresh_from_db()
+        self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_CONFLICT)
+        self.assertEqual(ProductAlias.objects.get(company=self.company, normalized_alias=line.normalized_item_name).product, self.item_two)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {}, clear=True)
+    def test_ai_learning_missing_key_fails_cleanly(self):
+        batch = self.client.post(reverse("quotation-historical-import-batch-list"), {"name": "No key"}, format="json")
+        batch_id = batch.data["id"]
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.ai_parsing_enabled = True
+        settings_obj.save()
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                upload = self.client.post(
+                    reverse("quotation-historical-import-batch-upload-file", args=[batch_id]),
+                    {"file": self.make_historical_pdf_upload()},
+                    format="multipart",
+                )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-run-ai-suggestions", args=[batch_id]),
+            {"import_ids": [upload.data["import"]["id"]], "mode": "text"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["failed"], 1)
+        self.assertIn("missing API key", response.data["summary"]["results"][0]["message"])
+        self.assertEqual(HistoricalImportAISuggestion.objects.count(), 0)
+
     def test_historical_import_same_company_document_number_opens_existing_import(self):
         first = self.create_parsed_historical_import()
         import_id = first.data["id"]
@@ -1250,6 +1454,83 @@ class MockAIProvider:
     def clean_rows(self, **kwargs):
         self.calls.append(kwargs)
         return self.result, {"input_tokens": 10, "output_tokens": 20}
+
+
+class MockLearningProvider:
+    def __init__(self, result=None):
+        self.result = result
+        self.calls = []
+
+    def clean_rows(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.result is not None:
+            return self.result, {"input_tokens": 20, "output_tokens": 30}
+        context = __import__("json").loads(kwargs["text_context"])
+        company_candidates = context.get("candidate_companies") or []
+        rows = []
+        for index, row in enumerate(context.get("rows") or []):
+            candidate_products = row.get("candidate_products") or []
+            if index == 0 and candidate_products:
+                rows.append(
+                    {
+                        "line_id": str(row["line_id"]),
+                        "action": "create_company_alias",
+                        "product_id": str(candidate_products[0]["id"]),
+                        "alias_text": row["item_name"],
+                        "new_product_name": "",
+                        "new_product_unit": "",
+                        "new_product_pack_size": "",
+                        "new_product_dosage": "",
+                        "confidence": 0.93,
+                        "reason": "Customer wording is a clear alias for the candidate Product.",
+                        "candidate_product_ids": [str(candidate["id"]) for candidate in candidate_products],
+                    }
+                )
+            elif index == 1:
+                rows.append(
+                    {
+                        "line_id": str(row["line_id"]),
+                        "action": "create_new_product",
+                        "product_id": "",
+                        "alias_text": "",
+                        "new_product_name": "Custom Historical Refill",
+                        "new_product_unit": row.get("unit") or "box",
+                        "new_product_pack_size": row.get("unit") or "box",
+                        "new_product_dosage": "",
+                        "confidence": 0.86,
+                        "reason": "No candidate Product is specific enough.",
+                        "candidate_product_ids": [str(candidate["id"]) for candidate in candidate_products],
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "line_id": str(row["line_id"]),
+                        "action": "needs_manual_review",
+                        "product_id": "",
+                        "alias_text": "",
+                        "new_product_name": "",
+                        "new_product_unit": "",
+                        "new_product_pack_size": "",
+                        "new_product_dosage": "",
+                        "confidence": 0.45,
+                        "reason": "Ambiguous row.",
+                        "candidate_product_ids": [str(candidate["id"]) for candidate in candidate_products],
+                    }
+                )
+        return {
+            "company": {
+                "action": "match_existing_company" if company_candidates else "needs_manual_review",
+                "company_id": str(company_candidates[0]["id"]) if company_candidates else "",
+                "proposed_company_name": context["document"].get("suggested_company_name") or "",
+                "confidence": 0.9 if company_candidates else 0.4,
+                "reason": "Company candidate matches the document name." if company_candidates else "No clear company candidate.",
+                "candidate_company_ids": [str(candidate["id"]) for candidate in company_candidates],
+            },
+            "rows": rows,
+            "warnings": [],
+            "document_notes": "Learning suggestions for staff review.",
+        }, {"input_tokens": 20, "output_tokens": 30}
 
 
 class AIImportParsingTests(APITestCase):

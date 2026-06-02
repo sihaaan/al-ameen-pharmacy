@@ -309,11 +309,12 @@ def find_historical_import_duplicates(preview_data):
 
 
 @transaction.atomic
-def create_historical_price_import(preview_data, actor):
+def create_historical_price_import(preview_data, actor, batch=None):
     lines_data = preview_data.pop("lines", [])
     warnings = preview_data.pop("warnings", [])
     meta = preview_data.pop("meta", {})
     historical_import = HistoricalPriceImport.objects.create(
+        batch=batch,
         parse_meta={**meta, "warnings": warnings},
         created_by=actor if getattr(actor, "is_authenticated", False) else None,
         **preview_data,

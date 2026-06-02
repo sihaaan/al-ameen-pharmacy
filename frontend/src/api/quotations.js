@@ -112,7 +112,25 @@ const quotationAPI = {
     bulkSkipRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/bulk_skip_rows/`, data),
     aiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/ai_clean_rows/`, data),
     applyAiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/apply_ai_clean_rows/`, data),
+    runAiSuggestions: (id, data = {}) => axiosInstance.post(`/quotations/historical-imports/${id}/run_ai_suggestions/`, data),
     previewPage: (id) => axiosInstance.get(`/quotations/historical-imports/${id}/preview_page/`, { responseType: 'blob' }),
+  },
+  historicalImportBatches: {
+    list: (params = {}) => axiosInstance.get('/quotations/historical-import-batches/', { params }),
+    retrieve: (id) => axiosInstance.get(`/quotations/historical-import-batches/${id}/`),
+    create: (data) => axiosInstance.post('/quotations/historical-import-batches/', data),
+    uploadFile: (id, formData) => axiosInstance.post(`/quotations/historical-import-batches/${id}/upload_file/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+    runAiSuggestions: (id, data = {}) => axiosInstance.post(`/quotations/historical-import-batches/${id}/run_ai_suggestions/`, data),
+    applyAiSuggestions: (id, data = {}) => axiosInstance.post(`/quotations/historical-import-batches/${id}/apply_ai_suggestions/`, data),
+    commitReadyImports: (id, data = {}) => axiosInstance.post(`/quotations/historical-import-batches/${id}/commit_ready_imports/`, data),
+  },
+  historicalImportAiSuggestions: {
+    list: (params = {}) => axiosInstance.get('/quotations/historical-import-ai-suggestions/', { params }),
+    update: (id, data) => axiosInstance.patch(`/quotations/historical-import-ai-suggestions/${id}/`, data),
+    apply: (data = {}) => axiosInstance.post('/quotations/historical-import-ai-suggestions/apply/', data),
+    reject: (id, data = {}) => axiosInstance.post(`/quotations/historical-import-ai-suggestions/${id}/reject/`, data),
   },
   historicalImportLines: {
     list: (params = {}) => axiosInstance.get('/quotations/historical-import-lines/', { params }),

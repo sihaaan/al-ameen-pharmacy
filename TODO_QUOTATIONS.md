@@ -74,6 +74,9 @@
 - [x] Add staff-only AI cleanup endpoints for inquiry previews and staged historical imports
 - [x] Add AI candidate review/apply UI so deterministic rows are not replaced until staff approve
 - [x] Keep AI parsing separate from Product matching and price-history commit decisions
+- [x] Add batch historical PDF upload for old finalized quotations
+- [x] Add review-only AI company/Product/alias/new-draft-product suggestions for historical imports
+- [x] Add staff approval actions so AI suggestions cannot silently create Companies, Products, aliases, or price history
 
 ## Phase 1 Follow-Ups Before Phase 2
 
@@ -81,7 +84,7 @@
 - [ ] Have staff try inline company creation in inquiry import, manual inquiry, direct quotation creation, and historical imports
 - [ ] Have staff try the historical import bulk review flow with a real 20+ row PDF and confirm the toolbar wording is natural
 - [ ] Consider adding keyboard shortcuts for row selection/save only after staff confirm the bulk workflow is useful
-- [ ] Try `Quotations -> Historical Imports` with a batch of real old finalized PDF quotations and tune parser rules from reviewed failures
+- [ ] Try the new batch AI historical import workflow with real old finalized PDF quotations and tune parser/AI prompt limits from reviewed failures
 - [ ] Decide whether staff need a guarded `Continue anyway` control for rare historical import duplicate false positives
 - [ ] Decide where durable private storage should live on Railway before relying on long-term historical source-file retention
 - [ ] Browser-verify quotation settings save/logo behavior on the deployed-like environment before merging
@@ -93,7 +96,7 @@
 - [ ] Consider draft PDF watermarking if staff might accidentally send draft quotations
 - [ ] Prototype static PDF/image background templates with ReportLab overlays before considering DOCX-to-PDF conversion
 - [ ] Tune import parser rules with real company LPO samples after staff review
-- [ ] Configure production AI provider env vars and manually verify `AI Clean Parse` / `AI Clean Rows` with a real messy PDF before enabling auto cleanup
+- [ ] Configure production AI provider env vars and manually verify `AI Clean Parse`, `AI Clean Rows`, and batch `Run AI Suggestions` with real PDFs before enabling auto cleanup
 - [ ] Review AI parse logs/cost after a few staff trials and adjust page/text/image limits if needed
 - [ ] Do one human browser pass with the native file picker because Browser automation could not attach a file to the upload input directly
 - [ ] Configure durable private object storage/persistent private storage for Railway before relying on long-term inquiry/historical source-file retention
@@ -109,7 +112,7 @@
 - [ ] Fuzzy matching
 - [ ] Confirmed-match learning
 - [ ] Optional `pg_trgm` support
-- [ ] AI-assisted Product match suggestions
+- [x] AI-assisted Product match suggestions for historical imports with staff approval
 - [ ] Embeddings and pgvector evaluation
 - [ ] OCR/scanned LPO parsing if a Railway-safe approach is chosen
 

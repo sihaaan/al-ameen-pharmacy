@@ -6,6 +6,8 @@ from .models import (
     CompanyPriceHistory,
     AIParseCache,
     AIParseLog,
+    HistoricalImportAISuggestion,
+    HistoricalImportBatch,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
     Inquiry,
@@ -194,14 +196,32 @@ class HistoricalPriceImportLineInline(admin.TabularInline):
     readonly_fields = ["normalized_item_name", "duplicate_reason", "created_at", "updated_at"]
 
 
+@admin.register(HistoricalImportBatch)
+class HistoricalImportBatchAdmin(admin.ModelAdmin):
+    list_display = ["name", "status", "created_by", "created_at", "updated_at"]
+    list_filter = ["status", "created_at"]
+    search_fields = ["name", "created_by__username"]
+    autocomplete_fields = ["created_by"]
+    readonly_fields = ["summary", "warnings", "created_at", "updated_at"]
+
+
 @admin.register(HistoricalPriceImport)
 class HistoricalPriceImportAdmin(admin.ModelAdmin):
-    list_display = ["source_filename", "company", "document_number", "document_date", "status", "created_at"]
-    list_filter = ["status", "source_type", "document_date", "created_at"]
-    search_fields = ["source_filename", "source_sha256", "source_file_ref", "document_number", "suggested_company_name", "company__name"]
-    autocomplete_fields = ["company", "created_quotation", "created_by", "committed_by"]
+    list_display = ["source_filename", "batch", "company", "document_number", "document_date", "status", "created_at"]
+    list_filter = ["status", "source_type", "document_date", "batch", "created_at"]
+    search_fields = ["source_filename", "source_sha256", "source_file_ref", "document_number", "suggested_company_name", "company__name", "batch__name"]
+    autocomplete_fields = ["batch", "company", "created_quotation", "created_by", "committed_by"]
     readonly_fields = ["created_at", "updated_at", "committed_at"]
     inlines = [HistoricalPriceImportLineInline]
+
+
+@admin.register(HistoricalImportAISuggestion)
+class HistoricalImportAISuggestionAdmin(admin.ModelAdmin):
+    list_display = ["action", "status", "historical_import", "line", "suggested_product", "suggested_company", "confidence", "updated_at"]
+    list_filter = ["action", "status", "suggestion_type", "batch"]
+    search_fields = ["historical_import__source_filename", "line__item_name", "alias_text", "proposed_product_name", "proposed_company_name", "reason"]
+    autocomplete_fields = ["batch", "historical_import", "line", "suggested_company", "suggested_product", "created_by", "applied_by"]
+    readonly_fields = ["candidate_companies", "candidate_products", "raw_ai_payload", "error_message", "created_at", "updated_at", "applied_at"]
 
 
 @admin.register(HistoricalPriceImportLine)

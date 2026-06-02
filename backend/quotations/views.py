@@ -16,6 +16,14 @@ from .ai_parsing import (
     clean_preview_with_ai,
     maybe_attach_auto_ai_candidate,
 )
+from .ai_learning import (
+    append_batch_file_result,
+    apply_historical_ai_suggestions,
+    commit_ready_imports_for_batch,
+    generate_batch_learning_suggestions,
+    generate_historical_import_learning_suggestions,
+    refresh_historical_import_batch_summary,
+)
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
 from .matching import apply_match_to_preview_line
@@ -23,6 +31,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    HistoricalImportAISuggestion,
+    HistoricalImportBatch,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
     Inquiry,
@@ -41,6 +51,8 @@ from .serializers import (
     CompanySerializer,
     HistoricalPriceImportLineSerializer,
     HistoricalPriceImportSerializer,
+    HistoricalImportAISuggestionSerializer,
+    HistoricalImportBatchSerializer,
     ImportedInquiryCreateSerializer,
     InquiryLineSerializer,
     InquirySerializer,
@@ -562,6 +574,224 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return Response(ProductAliasSerializer(alias, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
+def _request_int_list(data, key):
+    values = data.get(key, [])
+    if values in (None, ""):
+        return []
+    if not isinstance(values, list):
+        raise DjangoValidationError(f"{key} must be a list.")
+    try:
+        return [int(value) for value in values if value not in (None, "")]
+    except (TypeError, ValueError) as exc:
+        raise DjangoValidationError(f"{key} must contain only ids.") from exc
+
+
+class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = HistoricalImportBatchSerializer
+    queryset = HistoricalImportBatch.objects.select_related("created_by").prefetch_related(
+        "imports",
+        "imports__company",
+        "imports__created_by",
+        "imports__committed_by",
+        "imports__created_quotation",
+        "imports__lines",
+        "imports__lines__product",
+        "imports__lines__quote_item",
+    )
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def perform_create(self, serializer):
+        batch = serializer.save(created_by=self.request.user)
+        audit_log(
+            self.request.user,
+            QuotationAuditLog.ACTION_CREATED,
+            batch,
+            message="Created historical import batch.",
+        )
+
+    @action(detail=True, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def upload_file(self, request, pk=None):
+        batch = self.get_object()
+        upload = request.FILES.get("file")
+        try:
+            preview = parse_historical_pdf_upload(upload)
+            duplicate_check = find_historical_import_duplicates(preview)
+            force_new_import = str(request.data.get("force_new_import", "")).lower() in {"1", "true", "yes"}
+            if duplicate_check.get("is_duplicate"):
+                preview.setdefault("meta", {})["duplicate_check"] = duplicate_check
+                preview.setdefault("warnings", []).append(duplicate_check["message"])
+            if duplicate_check.get("blocking") and not force_new_import:
+                existing_import = HistoricalPriceImport.objects.get(pk=duplicate_check["primary_match"]["id"])
+                append_batch_file_result(
+                    batch,
+                    {
+                        "filename": preview.get("source_filename", ""),
+                        "status": "duplicate",
+                        "existing_import_id": existing_import.id,
+                        "message": duplicate_check.get("message", ""),
+                    },
+                )
+                data = HistoricalPriceImportSerializer(existing_import, context={"request": request}).data
+                return Response(
+                    {
+                        "status": "duplicate",
+                        "import": data,
+                        "duplicate_check": {
+                            **duplicate_check,
+                            "blocked_new_import": True,
+                        },
+                        "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            historical_import = create_historical_price_import(preview, request.user, batch=batch)
+            maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
+            append_batch_file_result(
+                batch,
+                {
+                    "filename": historical_import.source_filename,
+                    "status": "parsed",
+                    "import_id": historical_import.id,
+                    "line_count": historical_import.lines.count(),
+                    "duplicate": bool(duplicate_check.get("is_duplicate")),
+                },
+            )
+        except DjangoValidationError as exc:
+            filename = getattr(upload, "name", "") or request.data.get("filename", "")
+            append_batch_file_result(
+                batch,
+                {
+                    "filename": filename,
+                    "status": "failed",
+                    "message": " ".join(getattr(exc, "messages", [str(exc)])),
+                },
+            )
+            return self.handle_workflow_error(exc)
+        data = HistoricalPriceImportSerializer(historical_import, context={"request": request}).data
+        if duplicate_check.get("is_duplicate"):
+            data["duplicate_check"] = duplicate_check
+        if preview.get("ai_candidate"):
+            data["ai_candidate"] = preview["ai_candidate"]
+            data["ai_status"] = preview.get("ai_status")
+            data["ai_status_label"] = preview.get("ai_status_label")
+        return Response(
+            {
+                "status": "parsed",
+                "import": data,
+                "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"])
+    def run_ai_suggestions(self, request, pk=None):
+        batch = self.get_object()
+        try:
+            import_ids = _request_int_list(request.data, "import_ids")
+            summary, results = generate_batch_learning_suggestions(
+                batch,
+                import_ids=import_ids,
+                actor=request.user,
+                requested_mode=request.data.get("mode") or "auto",
+            )
+        except (DjangoValidationError, AIParseError) as exc:
+            return self.handle_workflow_error(exc)
+        return Response(
+            {
+                "summary": summary,
+                "results": results,
+                "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def apply_ai_suggestions(self, request, pk=None):
+        batch = self.get_object()
+        try:
+            suggestion_ids = _request_int_list(request.data, "suggestion_ids")
+            summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return Response(
+            {
+                "summary": summary,
+                "results": results,
+                "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def commit_ready_imports(self, request, pk=None):
+        batch = self.get_object()
+        try:
+            import_ids = _request_int_list(request.data, "import_ids")
+            summary, results = commit_ready_imports_for_batch(batch, import_ids, request.user)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return Response(
+            {
+                "summary": summary,
+                "results": results,
+                "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
+            }
+        )
+
+
+class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = HistoricalImportAISuggestionSerializer
+    queryset = HistoricalImportAISuggestion.objects.select_related(
+        "batch",
+        "historical_import",
+        "historical_import__company",
+        "line",
+        "suggested_company",
+        "suggested_product",
+        "created_by",
+        "applied_by",
+    )
+    http_method_names = ["get", "patch", "post", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        batch_id = self.request.query_params.get("batch")
+        import_id = self.request.query_params.get("historical_import")
+        status_filter = self.request.query_params.get("status")
+        action_filter = self.request.query_params.get("action")
+        suggestion_type = self.request.query_params.get("suggestion_type")
+        if batch_id:
+            queryset = queryset.filter(batch_id=batch_id)
+        if import_id:
+            queryset = queryset.filter(historical_import_id=import_id)
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        if action_filter:
+            queryset = queryset.filter(action=action_filter)
+        if suggestion_type:
+            queryset = queryset.filter(suggestion_type=suggestion_type)
+        return queryset
+
+    @action(detail=False, methods=["post"])
+    def apply(self, request):
+        try:
+            suggestion_ids = _request_int_list(request.data, "suggestion_ids")
+            summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return Response({"summary": summary, "results": results})
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        suggestion = self.get_object()
+        if suggestion.status != HistoricalImportAISuggestion.STATUS_PENDING:
+            return Response({"detail": "Only pending suggestions can be rejected."}, status=status.HTTP_400_BAD_REQUEST)
+        suggestion.status = HistoricalImportAISuggestion.STATUS_REJECTED
+        suggestion.error_message = request.data.get("reason", "")
+        suggestion.save(update_fields=["status", "error_message", "updated_at"])
+        serializer = self.get_serializer(suggestion)
+        return Response(serializer.data)
+
+
 class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = HistoricalPriceImportSerializer
     queryset = HistoricalPriceImport.objects.select_related(
@@ -726,6 +956,25 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(candidate)
+
+    @action(detail=True, methods=["post"])
+    def run_ai_suggestions(self, request, pk=None):
+        historical_import = self.get_object()
+        try:
+            suggestions, meta = generate_historical_import_learning_suggestions(
+                historical_import,
+                actor=request.user,
+                requested_mode=request.data.get("mode") or "auto",
+            )
+        except AIParseError as exc:
+            return self.handle_workflow_error(exc)
+        return Response(
+            {
+                "summary": {"suggested": len(suggestions), "failed": 0},
+                "meta": meta,
+                "suggestions": HistoricalImportAISuggestionSerializer(suggestions, many=True, context={"request": request}).data,
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def apply_ai_clean_rows(self, request, pk=None):

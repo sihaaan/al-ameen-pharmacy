@@ -92,7 +92,7 @@ class AIProviderUnavailable(AIParseError):
 
 
 class AIParseProvider:
-    def clean_rows(self, *, mode, model, instructions, text_context, image_data_urls=None):
+    def clean_rows(self, *, mode, model, instructions, text_context, image_data_urls=None, json_schema=None, schema_name="quotation_import_parse"):
         raise NotImplementedError
 
 
@@ -102,7 +102,7 @@ class OpenAIResponsesParseProvider(AIParseProvider):
     def __init__(self, api_key=None):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
 
-    def clean_rows(self, *, mode, model, instructions, text_context, image_data_urls=None):
+    def clean_rows(self, *, mode, model, instructions, text_context, image_data_urls=None, json_schema=None, schema_name="quotation_import_parse"):
         if not self.api_key:
             raise AIProviderUnavailable("AI unavailable: missing OpenAI API key.")
         if not model:
@@ -121,8 +121,8 @@ class OpenAIResponsesParseProvider(AIParseProvider):
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "quotation_import_parse",
-                    "schema": AI_PARSE_JSON_SCHEMA,
+                    "name": schema_name,
+                    "schema": json_schema or AI_PARSE_JSON_SCHEMA,
                     "strict": True,
                 }
             },
@@ -158,7 +158,7 @@ class OpenAIResponsesParseProvider(AIParseProvider):
 
 
 class AnthropicParseProvider(AIParseProvider):
-    def clean_rows(self, *, mode, model, instructions, text_context, image_data_urls=None):
+    def clean_rows(self, *, mode, model, instructions, text_context, image_data_urls=None, json_schema=None, schema_name="quotation_import_parse"):
         raise AIProviderUnavailable("Anthropic AI parsing is not implemented in this release. Use the OpenAI provider.")
 
 

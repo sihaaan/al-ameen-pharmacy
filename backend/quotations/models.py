@@ -171,6 +171,47 @@ class ProductAlias(models.Model):
         super().save(*args, **kwargs)
 
 
+class HistoricalImportBatch(models.Model):
+    STATUS_CREATED = "created"
+    STATUS_PROCESSING = "processing"
+    STATUS_PARSED = "parsed"
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_COMMITTED = "committed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_CREATED, "Created"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_PARSED, "Parsed"),
+        (STATUS_NEEDS_REVIEW, "Needs Review"),
+        (STATUS_COMMITTED, "Committed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    name = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_CREATED)
+    summary = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_historical_import_batches",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["created_by"]),
+        ]
+
+    def __str__(self):
+        return self.name or f"Historical import batch #{self.pk}"
+
+
 class QuotationSettings(models.Model):
     STYLE_CLASSIC = "classic"
     STYLE_MODERN = "modern"
@@ -491,6 +532,13 @@ class HistoricalPriceImport(models.Model):
         blank=True,
         related_name="historical_price_imports",
     )
+    batch = models.ForeignKey(
+        HistoricalImportBatch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="imports",
+    )
     suggested_company_name = models.CharField(max_length=255, blank=True)
     source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES, default=SOURCE_TYPE_PDF)
     source_filename = models.CharField(max_length=255, blank=True)
@@ -535,6 +583,7 @@ class HistoricalPriceImport(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [
+            models.Index(fields=["batch", "status"]),
             models.Index(fields=["source_sha256"]),
             models.Index(fields=["company", "document_date"]),
             models.Index(fields=["document_number"]),
@@ -612,6 +661,125 @@ class HistoricalPriceImportLine(models.Model):
     def save(self, *args, **kwargs):
         self.normalized_item_name = normalize_label(self.item_name)
         super().save(*args, **kwargs)
+
+
+class HistoricalImportAISuggestion(models.Model):
+    TYPE_COMPANY = "company"
+    TYPE_LINE = "line"
+    TYPE_CHOICES = [
+        (TYPE_COMPANY, "Company"),
+        (TYPE_LINE, "Line"),
+    ]
+
+    ACTION_MATCH_EXISTING_PRODUCT = "match_existing_product"
+    ACTION_CREATE_COMPANY_ALIAS = "create_company_alias"
+    ACTION_CREATE_NEW_PRODUCT = "create_new_product"
+    ACTION_NEEDS_MANUAL_REVIEW = "needs_manual_review"
+    ACTION_SKIP = "skip"
+    ACTION_MATCH_EXISTING_COMPANY = "match_existing_company"
+    ACTION_CREATE_NEW_COMPANY = "create_new_company"
+    ACTION_CHOICES = [
+        (ACTION_MATCH_EXISTING_PRODUCT, "Match Existing Product"),
+        (ACTION_CREATE_COMPANY_ALIAS, "Create Company Alias"),
+        (ACTION_CREATE_NEW_PRODUCT, "Create New Product"),
+        (ACTION_NEEDS_MANUAL_REVIEW, "Needs Manual Review"),
+        (ACTION_SKIP, "Skip"),
+        (ACTION_MATCH_EXISTING_COMPANY, "Match Existing Company"),
+        (ACTION_CREATE_NEW_COMPANY, "Create New Company"),
+    ]
+
+    STATUS_PENDING = "pending"
+    STATUS_APPLIED = "applied"
+    STATUS_REJECTED = "rejected"
+    STATUS_CONFLICT = "conflict"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPLIED, "Applied"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_CONFLICT, "Conflict"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    batch = models.ForeignKey(
+        HistoricalImportBatch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="ai_suggestions",
+    )
+    historical_import = models.ForeignKey(
+        HistoricalPriceImport,
+        on_delete=models.CASCADE,
+        related_name="ai_suggestions",
+    )
+    line = models.ForeignKey(
+        HistoricalPriceImportLine,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="ai_suggestions",
+    )
+    suggestion_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default=TYPE_LINE)
+    action = models.CharField(max_length=40, choices=ACTION_CHOICES)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    suggested_company = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="historical_ai_company_suggestions",
+    )
+    suggested_product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="historical_ai_product_suggestions",
+    )
+    alias_text = models.CharField(max_length=255, blank=True)
+    proposed_company_name = models.CharField(max_length=255, blank=True)
+    proposed_product_name = models.CharField(max_length=255, blank=True)
+    proposed_unit = models.CharField(max_length=80, blank=True)
+    proposed_pack_size = models.CharField(max_length=120, blank=True)
+    proposed_dosage = models.CharField(max_length=120, blank=True)
+    confidence = models.FloatField(default=0.0)
+    reason = models.TextField(blank=True)
+    candidate_companies = models.JSONField(default=list, blank=True)
+    candidate_products = models.JSONField(default=list, blank=True)
+    raw_ai_payload = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_historical_ai_suggestions",
+    )
+    applied_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="applied_historical_ai_suggestions",
+    )
+    applied_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["historical_import", "line__sort_order", "suggestion_type", "id"]
+        indexes = [
+            models.Index(fields=["batch", "status"]),
+            models.Index(fields=["historical_import", "status"]),
+            models.Index(fields=["line", "status"]),
+            models.Index(fields=["action"]),
+            models.Index(fields=["confidence"]),
+        ]
+
+    def __str__(self):
+        target = self.line.item_name if self.line_id else self.historical_import
+        return f"{self.action} for {target}"
 
 
 class Quotation(models.Model):

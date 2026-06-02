@@ -9,12 +9,23 @@ const statusOptions = [
   { value: 'skipped', label: 'Skipped' },
 ];
 
+const confidencePercent = (value) => {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) return 0;
+  return numeric <= 1 ? Math.round(numeric * 100) : Math.round(numeric);
+};
+
 const HistoricalImportManager = () => {
   const [companies, setCompanies] = useState([]);
   const [items, setItems] = useState([]);
   const [imports, setImports] = useState([]);
+  const [batches, setBatches] = useState([]);
   const [selectedImport, setSelectedImport] = useState(null);
+  const [selectedBatch, setSelectedBatch] = useState(null);
   const [uploadFile, setUploadFile] = useState(null);
+  const [batchFiles, setBatchFiles] = useState([]);
+  const [batchUploading, setBatchUploading] = useState(false);
+  const [batchProgress, setBatchProgress] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -32,28 +43,39 @@ const HistoricalImportManager = () => {
   const [aiCleaning, setAiCleaning] = useState(false);
   const [applyingAiRows, setApplyingAiRows] = useState(false);
   const [aiCandidate, setAiCandidate] = useState(null);
+  const [selectedBatchImportIds, setSelectedBatchImportIds] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
+  const [selectedSuggestionIds, setSelectedSuggestionIds] = useState([]);
+  const [suggestionFilter, setSuggestionFilter] = useState('all');
+  const [suggestionAction, setSuggestionAction] = useState('');
 
   const load = async () => {
     setLoading(true);
     setErrorInfo(null);
     try {
-      const [companiesRes, itemsRes, importsRes] = await Promise.all([
+      const [companiesRes, itemsRes, importsRes, batchesRes] = await Promise.all([
         quotationAPI.companies.list({ active: 'true' }),
         quotationAPI.items.list({ active: 'true' }),
         quotationAPI.historicalImports.list(),
+        quotationAPI.historicalImportBatches.list(),
       ]);
       setCompanies(companiesRes.data);
       setItems(itemsRes.data);
       setImports(importsRes.data);
+      setBatches(batchesRes.data);
       if (selectedImport) {
         const refreshed = importsRes.data.find((entry) => entry.id === selectedImport.id);
         if (refreshed) setSelectedImport(refreshed);
+      }
+      if (selectedBatch) {
+        const refreshedBatch = batchesRes.data.find((entry) => entry.id === selectedBatch.id);
+        if (refreshedBatch) setSelectedBatch(refreshedBatch);
       }
     } catch (error) {
       const details = await describeQuotationError(
         error,
         'Load historical imports',
-        'GET /quotations/historical-imports/'
+        'GET /quotations/historical-imports/, /quotations/historical-import-batches/'
       );
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -78,6 +100,14 @@ const HistoricalImportManager = () => {
     setAiCandidate(null);
   }, [selectedImport?.id]);
 
+  useEffect(() => {
+    setSelectedBatchImportIds([]);
+    setSelectedSuggestionIds([]);
+    setSuggestions([]);
+    if (selectedBatch?.id) loadSuggestions(selectedBatch.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBatch?.id]);
+
   const selectedSummary = useMemo(() => {
     const lines = selectedImport?.lines || [];
     return {
@@ -92,10 +122,133 @@ const HistoricalImportManager = () => {
 
   const selectedDuplicateCheck = selectedImport?.duplicate_check || selectedImport?.parse_meta?.duplicate_check || null;
 
+  const selectedBatchImports = useMemo(() => selectedBatch?.imports || [], [selectedBatch]);
+  const visibleBatchImportIds = useMemo(() => selectedBatchImports.map((entry) => entry.id), [selectedBatchImports]);
+  const allBatchImportsSelected = visibleBatchImportIds.length > 0 && visibleBatchImportIds.every((id) => selectedBatchImportIds.includes(id));
+
+  const filteredSuggestions = useMemo(() => {
+    return suggestions.filter((suggestion) => {
+      if (suggestionFilter === 'all') return true;
+      if (suggestionFilter === 'uncertain') return suggestion.action === 'needs_manual_review' || suggestion.status === 'conflict';
+      if (suggestionFilter === 'high_confidence') return confidencePercent(suggestion.confidence) >= 85 && suggestion.status === 'pending';
+      return suggestion.action === suggestionFilter || suggestion.status === suggestionFilter;
+    });
+  }, [suggestions, suggestionFilter]);
+  const visibleSuggestionIds = useMemo(() => filteredSuggestions.map((suggestion) => suggestion.id), [filteredSuggestions]);
+  const allSuggestionsSelected = visibleSuggestionIds.length > 0 && visibleSuggestionIds.every((id) => selectedSuggestionIds.includes(id));
+
   const duplicateHelperText = (duplicateCheck) => {
     if (!duplicateCheck?.is_duplicate) return '';
     if (duplicateCheck.blocking || duplicateCheck.blocked_new_import) return 'No duplicate import was created.';
     return 'Please review before continuing.';
+  };
+
+  const loadSuggestions = async (batchId = selectedBatch?.id) => {
+    if (!batchId) return;
+    try {
+      const response = await quotationAPI.historicalImportAiSuggestions.list({ batch: batchId });
+      setSuggestions(response.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load AI suggestions', 'GET /quotations/historical-import-ai-suggestions/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    }
+  };
+
+  const selectBatch = async (batch) => {
+    setSelectedBatch(batch);
+    setNotice(null);
+    setErrorInfo(null);
+    await loadSuggestions(batch.id);
+  };
+
+  const toggleBatchImportSelection = (importId) => {
+    setSelectedBatchImportIds((current) => (
+      current.includes(importId)
+        ? current.filter((candidate) => candidate !== importId)
+        : [...current, importId]
+    ));
+  };
+
+  const toggleAllBatchImports = () => {
+    setSelectedBatchImportIds((current) => {
+      if (allBatchImportsSelected) {
+        return current.filter((id) => !visibleBatchImportIds.includes(id));
+      }
+      return Array.from(new Set([...current, ...visibleBatchImportIds]));
+    });
+  };
+
+  const toggleSuggestionSelection = (suggestionId) => {
+    setSelectedSuggestionIds((current) => (
+      current.includes(suggestionId)
+        ? current.filter((candidate) => candidate !== suggestionId)
+        : [...current, suggestionId]
+    ));
+  };
+
+  const toggleAllSuggestions = () => {
+    setSelectedSuggestionIds((current) => {
+      if (allSuggestionsSelected) {
+        return current.filter((id) => !visibleSuggestionIds.includes(id));
+      }
+      return Array.from(new Set([...current, ...visibleSuggestionIds]));
+    });
+  };
+
+  const uploadBatchFiles = async () => {
+    if (batchUploading || !batchFiles.length) return;
+    const files = batchFiles.slice(0, 25);
+    if (batchFiles.length > 25) {
+      setNotice({ type: 'warning', message: 'Only the first 25 PDFs are processed in one batch for safety.' });
+    }
+    setBatchUploading(true);
+    setErrorInfo(null);
+    setDuplicateUploadWarning(null);
+    const initialProgress = files.map((file) => ({ filename: file.name, status: 'queued', message: '' }));
+    setBatchProgress(initialProgress);
+    try {
+      const batchName = `Historical batch ${new Date().toLocaleString()}`;
+      const batchResponse = await quotationAPI.historicalImportBatches.create({ name: batchName });
+      let currentBatch = batchResponse.data;
+      setSelectedBatch(currentBatch);
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setBatchProgress((current) => current.map((entry, entryIndex) => (
+          entryIndex === index ? { ...entry, status: 'parsing', message: 'Parsing...' } : entry
+        )));
+        const formData = new FormData();
+        formData.append('file', file);
+        try {
+          const response = await quotationAPI.historicalImportBatches.uploadFile(currentBatch.id, formData);
+          currentBatch = response.data.batch || currentBatch;
+          setSelectedBatch(currentBatch);
+          const statusLabel = response.data.status === 'duplicate' ? 'duplicate' : 'parsed';
+          setBatchProgress((current) => current.map((entry, entryIndex) => (
+            entryIndex === index
+              ? { ...entry, status: statusLabel, message: response.data.duplicate_check?.message || `${response.data.import?.lines?.length || 0} rows parsed` }
+              : entry
+          )));
+          if (response.data.import && response.data.status !== 'duplicate') {
+            setSelectedImport(response.data.import);
+          }
+        } catch (error) {
+          const details = await describeQuotationError(error, `Parse ${file.name}`, `POST /quotations/historical-import-batches/${currentBatch.id}/upload_file/`);
+          setBatchProgress((current) => current.map((entry, entryIndex) => (
+            entryIndex === index ? { ...entry, status: 'failed', message: details.detail || 'Upload failed' } : entry
+          )));
+        }
+      }
+      setNotice({ type: 'success', message: 'Batch upload finished. Review parsed files and run AI suggestions when ready.' });
+      await load();
+      await loadSuggestions(currentBatch.id);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Create historical batch', 'POST /quotations/historical-import-batches/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setBatchUploading(false);
+    }
   };
 
   const filteredRows = useMemo(() => {
@@ -439,6 +592,108 @@ const HistoricalImportManager = () => {
     }
   };
 
+  const runBatchAiSuggestions = async () => {
+    if (!selectedBatch || suggestionAction) return;
+    const importIds = selectedBatchImportIds.length ? selectedBatchImportIds : visibleBatchImportIds;
+    if (!importIds.length) {
+      setNotice({ type: 'warning', message: 'Select at least one parsed import before running AI suggestions.' });
+      return;
+    }
+    setSuggestionAction('ai');
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.historicalImportBatches.runAiSuggestions(selectedBatch.id, { import_ids: importIds, mode: 'auto' });
+      setSelectedBatch(response.data.batch || selectedBatch);
+      await loadSuggestions(selectedBatch.id);
+      setNotice({ type: response.data.summary.failed ? 'warning' : 'success', message: `AI suggestions finished: ${response.data.summary.suggested || 0} imports suggested, ${response.data.summary.failed || 0} failed.` });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Run batch AI suggestions', `POST /quotations/historical-import-batches/${selectedBatch.id}/run_ai_suggestions/`);
+      setErrorInfo(details);
+      setNotice({ type: 'warning', message: 'AI suggestions failed. Deterministic rows are still available.' });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSuggestionAction('');
+    }
+  };
+
+  const runSelectedImportAiSuggestions = async () => {
+    if (!selectedImport || suggestionAction || selectedImport.status === 'committed') return;
+    setSuggestionAction('ai-one');
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.historicalImports.runAiSuggestions(selectedImport.id, { mode: 'auto' });
+      if (selectedBatch?.id) await loadSuggestions(selectedBatch.id);
+      setNotice({ type: 'success', message: `AI suggestions created: ${response.data.summary.suggested || 0}. Review before applying.` });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Run import AI suggestions', `POST /quotations/historical-imports/${selectedImport.id}/run_ai_suggestions/`);
+      setErrorInfo(details);
+      setNotice({ type: 'warning', message: 'AI suggestions failed. No Products, aliases, companies, or prices were created.' });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSuggestionAction('');
+    }
+  };
+
+  const updateSuggestion = async (suggestionId, patch) => {
+    try {
+      const response = await quotationAPI.historicalImportAiSuggestions.update(suggestionId, patch);
+      setSuggestions((current) => current.map((suggestion) => suggestion.id === suggestionId ? response.data : suggestion));
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Update AI suggestion', `PATCH /quotations/historical-import-ai-suggestions/${suggestionId}/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    }
+  };
+
+  const applySelectedSuggestions = async () => {
+    if (!selectedSuggestionIds.length || suggestionAction) return;
+    if (!window.confirm('Apply selected AI suggestions? This may create approved draft Products, aliases, or company links, but will not commit price history.')) return;
+    setSuggestionAction('apply');
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = selectedBatch
+        ? await quotationAPI.historicalImportBatches.applyAiSuggestions(selectedBatch.id, { suggestion_ids: selectedSuggestionIds })
+        : await quotationAPI.historicalImportAiSuggestions.apply({ suggestion_ids: selectedSuggestionIds });
+      setNotice({ type: response.data.summary.conflict ? 'warning' : 'success', message: `Suggestions applied: ${response.data.summary.applied || 0}, conflicts: ${response.data.summary.conflict || 0}, failed: ${response.data.summary.failed || 0}.` });
+      setSelectedSuggestionIds([]);
+      await load();
+      if (selectedBatch?.id) await loadSuggestions(selectedBatch.id);
+      const itemsRes = await quotationAPI.items.list({ active: 'true' });
+      setItems(itemsRes.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Apply AI suggestions', 'POST /quotations/historical-import-ai-suggestions/apply/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSuggestionAction('');
+    }
+  };
+
+  const commitSelectedBatchImports = async () => {
+    if (!selectedBatch || suggestionAction) return;
+    const importIds = selectedBatchImportIds.length ? selectedBatchImportIds : visibleBatchImportIds;
+    if (!importIds.length) return;
+    if (!window.confirm('Commit ready rows from the selected imports into price history? Needs-review and skipped rows are ignored.')) return;
+    setSuggestionAction('commit');
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.historicalImportBatches.commitReadyImports(selectedBatch.id, { import_ids: importIds });
+      setSelectedBatch(response.data.batch || selectedBatch);
+      setNotice({ type: response.data.summary.failed ? 'warning' : 'success', message: `Batch commit complete: ${response.data.summary.committed || 0} committed, ${response.data.summary.failed || 0} failed.` });
+      await load();
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Commit batch ready imports', `POST /quotations/historical-import-batches/${selectedBatch.id}/commit_ready_imports/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSuggestionAction('');
+    }
+  };
+
   const commitImport = async () => {
     if (!selectedImport || committing) return;
     if (!window.confirm('Commit reviewed rows into company price history? This cannot be edited like a draft quotation.')) return;
@@ -463,6 +718,238 @@ const HistoricalImportManager = () => {
     <div className="qm-section">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       {notice && <div className={`qm-feedback ${notice.type}`}>{notice.message}</div>}
+
+      <div className="qm-panel">
+        <div className="qm-panel-heading">
+          <div>
+            <h3>Batch Historical Learning</h3>
+            <p>Upload several old finalized quotation PDFs, process them one by one, then review AI suggestions before creating any Products, aliases, companies, or price history.</p>
+          </div>
+        </div>
+        <div className="qm-import-source">
+          <label>
+            <span className="qm-label-text">Old finalized quotation PDFs</span>
+            <input type="file" accept=".pdf" multiple onChange={(event) => setBatchFiles(Array.from(event.target.files || []))} />
+          </label>
+          <button type="button" className="qm-primary" disabled={batchUploading || !batchFiles.length} onClick={uploadBatchFiles}>
+            {batchUploading ? 'Uploading batch...' : 'Upload Batch'}
+          </button>
+        </div>
+        <div className="qm-helper compact">V1 processes up to 25 PDFs sequentially. AI suggestions are review-only until staff approves them.</div>
+        {batchProgress.length > 0 && (
+          <div className="qm-batch-progress">
+            {batchProgress.map((entry) => (
+              <div key={entry.filename} className={`qm-batch-file status-${entry.status}`}>
+                <strong>{entry.filename}</strong>
+                <span>{entry.status}</span>
+                {entry.message && <small>{entry.message}</small>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="qm-panel">
+        <div className="qm-panel-heading">
+          <div>
+            <h3>Historical Import Batches</h3>
+            <p>Select a batch to run AI suggestions, review uncertain rows, and commit approved ready imports.</p>
+          </div>
+          <button type="button" className="qm-secondary small" onClick={load} disabled={loading}>Refresh</button>
+        </div>
+        {loading ? (
+          <div className="qm-loading">Loading batches...</div>
+        ) : (
+          <div className="qm-table-wrap">
+            <table className="qm-table">
+              <thead>
+                <tr>
+                  <th>Batch</th>
+                  <th>Imports</th>
+                  <th>Ready</th>
+                  <th>Needs Review</th>
+                  <th>AI Pending</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map((batch) => (
+                  <tr key={batch.id} className={selectedBatch?.id === batch.id ? 'selected' : ''}>
+                    <td>{batch.name || `Batch #${batch.id}`}<br /><small>{batch.created_at}</small></td>
+                    <td>{batch.summary?.import_count ?? batch.import_count ?? 0}</td>
+                    <td>{batch.summary?.ready_row_count || 0}</td>
+                    <td>{batch.summary?.needs_review_row_count || 0}</td>
+                    <td>{batch.pending_suggestion_count || batch.summary?.pending_suggestion_count || 0}</td>
+                    <td><span className={`qm-badge status-${batch.status}`}>{batch.status}</span></td>
+                    <td><button type="button" className="qm-secondary small" onClick={() => selectBatch(batch)}>Open / Review</button></td>
+                  </tr>
+                ))}
+                {!batches.length && (
+                  <tr><td colSpan="7"><div className="qm-empty compact">No historical batches yet. Upload PDFs above to begin.</div></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {selectedBatch && (
+        <div className="qm-panel">
+          <div className="qm-panel-heading">
+            <div>
+              <h3>Batch Review: {selectedBatch.name || `Batch #${selectedBatch.id}`}</h3>
+              <p>Select imports to run AI suggestions or commit only rows already marked ready.</p>
+            </div>
+          </div>
+          <div className="qm-bulk-toolbar">
+            <strong>{selectedBatchImportIds.length} imports selected</strong>
+            <button type="button" className="qm-secondary small" disabled={!visibleBatchImportIds.length} onClick={toggleAllBatchImports}>
+              {allBatchImportsSelected ? 'Deselect All' : 'Select All'}
+            </button>
+            <span className="qm-bulk-spacer" />
+            <button type="button" className="qm-primary small" disabled={suggestionAction || !visibleBatchImportIds.length} onClick={runBatchAiSuggestions}>
+              {suggestionAction === 'ai' ? 'Running AI...' : 'Run AI Suggestions'}
+            </button>
+            <button type="button" className="qm-secondary small" disabled={suggestionAction || !visibleBatchImportIds.length} onClick={commitSelectedBatchImports}>
+              {suggestionAction === 'commit' ? 'Committing...' : 'Commit Ready Imports'}
+            </button>
+          </div>
+          <div className="qm-table-wrap">
+            <table className="qm-table">
+              <thead>
+                <tr>
+                  <th className="qm-check-cell"><input type="checkbox" checked={allBatchImportsSelected} onChange={toggleAllBatchImports} disabled={!visibleBatchImportIds.length} /></th>
+                  <th>File</th>
+                  <th>Company</th>
+                  <th>Document</th>
+                  <th>Date</th>
+                  <th>Rows</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedBatchImports.map((entry) => (
+                  <tr key={entry.id} className={selectedImport?.id === entry.id ? 'selected' : ''}>
+                    <td className="qm-check-cell"><input type="checkbox" checked={selectedBatchImportIds.includes(entry.id)} onChange={() => toggleBatchImportSelection(entry.id)} /></td>
+                    <td>{entry.source_filename}</td>
+                    <td>{entry.company_name || entry.suggested_company_name || '-'}</td>
+                    <td>{entry.document_number || '-'}</td>
+                    <td>{entry.document_date || '-'}</td>
+                    <td>{entry.lines?.length || 0}</td>
+                    <td><span className={`qm-badge status-${entry.status}`}>{entry.status}</span></td>
+                    <td><button type="button" className="qm-secondary small" onClick={() => selectImport(entry)}>Open File</button></td>
+                  </tr>
+                ))}
+                {!selectedBatchImports.length && (
+                  <tr><td colSpan="8"><div className="qm-empty compact">No imports are attached to this batch yet.</div></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {selectedBatch && (
+        <div className="qm-panel">
+          <div className="qm-panel-heading">
+            <div>
+              <h3>AI Suggestion Review</h3>
+              <p>AI suggestions are only pending review. Select and apply the ones you approve.</p>
+            </div>
+          </div>
+          <div className="qm-row-review-controls">
+            <div className="qm-controls">
+              <select className="qm-input" value={suggestionFilter} onChange={(event) => setSuggestionFilter(event.target.value)}>
+                <option value="all">All suggestions</option>
+                <option value="high_confidence">High confidence pending</option>
+                <option value="uncertain">Uncertain / conflicts</option>
+                <option value="match_existing_product">Product matches</option>
+                <option value="create_company_alias">Aliases</option>
+                <option value="create_new_product">New Products</option>
+                <option value="needs_manual_review">Needs manual review</option>
+                <option value="skip">Skip rows</option>
+              </select>
+            </div>
+            <div className="qm-bulk-toolbar">
+              <strong>{selectedSuggestionIds.length} suggestions selected</strong>
+              <button type="button" className="qm-secondary small" disabled={!visibleSuggestionIds.length} onClick={toggleAllSuggestions}>
+                {allSuggestionsSelected ? 'Deselect Visible' : 'Select Visible'}
+              </button>
+              <span className="qm-bulk-spacer" />
+              <button type="button" className="qm-primary small" disabled={!selectedSuggestionIds.length || Boolean(suggestionAction)} onClick={applySelectedSuggestions}>
+                {suggestionAction === 'apply' ? 'Applying...' : 'Apply Selected Suggestions'}
+              </button>
+            </div>
+          </div>
+          <div className="qm-table-wrap">
+            <table className="qm-table historical-table">
+              <thead>
+                <tr>
+                  <th className="qm-check-cell"><input type="checkbox" checked={allSuggestionsSelected} onChange={toggleAllSuggestions} disabled={!visibleSuggestionIds.length} /></th>
+                  <th>Source Row</th>
+                  <th>Action</th>
+                  <th>Target / Proposal</th>
+                  <th>Confidence</th>
+                  <th>Reason</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredSuggestions.map((suggestion) => (
+                  <tr key={suggestion.id} className={`qm-review-row row-${suggestion.status}`}>
+                    <td className="qm-check-cell"><input type="checkbox" checked={selectedSuggestionIds.includes(suggestion.id)} disabled={suggestion.status !== 'pending'} onChange={() => toggleSuggestionSelection(suggestion.id)} /></td>
+                    <td>
+                      <strong>{suggestion.line_item_name || suggestion.proposed_company_name || suggestion.historical_import_filename}</strong>
+                      <small className="qm-muted-text">{suggestion.historical_import_filename} · {suggestion.historical_import_company_name || '-'}</small>
+                    </td>
+                    <td>
+                      <select disabled={suggestion.status !== 'pending'} value={suggestion.action} onChange={(event) => updateSuggestion(suggestion.id, { action: event.target.value })}>
+                        <option value="match_existing_product">Match Product</option>
+                        <option value="create_company_alias">Create Alias</option>
+                        <option value="create_new_product">Create New Product</option>
+                        <option value="needs_manual_review">Needs Review</option>
+                        <option value="skip">Skip</option>
+                        <option value="match_existing_company">Match Company</option>
+                        <option value="create_new_company">Create Company</option>
+                      </select>
+                    </td>
+                    <td>
+                      {suggestion.action === 'create_new_product' ? (
+                        <input disabled={suggestion.status !== 'pending'} value={suggestion.proposed_product_name || ''} onChange={(event) => updateSuggestion(suggestion.id, { proposed_product_name: event.target.value })} placeholder="New Product name" />
+                      ) : suggestion.action === 'create_new_company' ? (
+                        <input disabled={suggestion.status !== 'pending'} value={suggestion.proposed_company_name || ''} onChange={(event) => updateSuggestion(suggestion.id, { proposed_company_name: event.target.value })} placeholder="New company name" />
+                      ) : suggestion.action === 'match_existing_company' ? (
+                        <select disabled={suggestion.status !== 'pending'} value={suggestion.suggested_company || ''} onChange={(event) => updateSuggestion(suggestion.id, { suggested_company: event.target.value || null })}>
+                          <option value="">Select company</option>
+                          {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+                        </select>
+                      ) : (
+                        <>
+                          <select disabled={suggestion.status !== 'pending'} value={suggestion.suggested_product || ''} onChange={(event) => updateSuggestion(suggestion.id, { suggested_product: event.target.value || null })}>
+                            <option value="">Select Product</option>
+                            {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                          </select>
+                          {suggestion.action === 'create_company_alias' && (
+                            <input disabled={suggestion.status !== 'pending'} value={suggestion.alias_text || ''} onChange={(event) => updateSuggestion(suggestion.id, { alias_text: event.target.value })} placeholder="Alias text" />
+                          )}
+                        </>
+                      )}
+                    </td>
+                    <td>{confidencePercent(suggestion.confidence)}%</td>
+                    <td>{suggestion.reason || suggestion.error_message || '-'}</td>
+                    <td><span className={`qm-badge status-${suggestion.status}`}>{suggestion.status}</span></td>
+                  </tr>
+                ))}
+                {!filteredSuggestions.length && (
+                  <tr><td colSpan="7"><div className="qm-empty compact">No AI suggestions yet. Run AI suggestions on selected imports.</div></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="qm-panel">
         <div className="qm-panel-heading">
@@ -648,6 +1135,9 @@ const HistoricalImportManager = () => {
                 </button>
                 <button type="button" className="qm-secondary" disabled={aiCleaning || selectedImport.status === 'committed'} onClick={runAiCleanRows}>
                   {aiCleaning ? 'Cleaning...' : 'AI Clean Rows'}
+                </button>
+                <button type="button" className="qm-secondary" disabled={Boolean(suggestionAction) || selectedImport.status === 'committed'} onClick={runSelectedImportAiSuggestions}>
+                  {suggestionAction === 'ai-one' ? 'Thinking...' : 'AI Product Suggestions'}
                 </button>
                 <span className="qm-helper compact">Save company/date/header details before committing price rows.</span>
               </section>

@@ -12,6 +12,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    HistoricalImportAISuggestion,
+    HistoricalImportBatch,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
     Inquiry,
@@ -608,6 +610,7 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
 
 
 class HistoricalPriceImportSerializer(serializers.ModelSerializer):
+    batch_name = serializers.CharField(source="batch.name", read_only=True, allow_null=True)
     company_name = serializers.CharField(source="company.name", read_only=True, allow_null=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     committed_by_username = serializers.CharField(source="committed_by.username", read_only=True, allow_null=True)
@@ -618,6 +621,8 @@ class HistoricalPriceImportSerializer(serializers.ModelSerializer):
         model = HistoricalPriceImport
         fields = [
             "id",
+            "batch",
+            "batch_name",
             "company",
             "company_name",
             "suggested_company_name",
@@ -649,6 +654,8 @@ class HistoricalPriceImportSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "batch",
+            "batch_name",
             "source_type",
             "source_filename",
             "source_mime_type",
@@ -674,6 +681,128 @@ class HistoricalPriceImportSerializer(serializers.ModelSerializer):
         if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
             raise serializers.ValidationError("Invalid private source file reference.")
         return value
+
+
+class HistoricalImportBatchSerializer(serializers.ModelSerializer):
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    imports = HistoricalPriceImportSerializer(many=True, read_only=True)
+    import_count = serializers.SerializerMethodField()
+    pending_suggestion_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HistoricalImportBatch
+        fields = [
+            "id",
+            "name",
+            "status",
+            "summary",
+            "warnings",
+            "created_by",
+            "created_by_username",
+            "imports",
+            "import_count",
+            "pending_suggestion_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "status",
+            "summary",
+            "warnings",
+            "created_by",
+            "created_by_username",
+            "imports",
+            "import_count",
+            "pending_suggestion_count",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_import_count(self, obj):
+        return obj.imports.count()
+
+    def get_pending_suggestion_count(self, obj):
+        return obj.ai_suggestions.filter(status=HistoricalImportAISuggestion.STATUS_PENDING).count()
+
+
+class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
+    batch_name = serializers.CharField(source="batch.name", read_only=True, allow_null=True)
+    historical_import_document = serializers.CharField(source="historical_import.document_number", read_only=True, allow_null=True)
+    historical_import_filename = serializers.CharField(source="historical_import.source_filename", read_only=True, allow_null=True)
+    historical_import_company_name = serializers.CharField(source="historical_import.company.name", read_only=True, allow_null=True)
+    line_item_name = serializers.CharField(source="line.item_name", read_only=True, allow_null=True)
+    line_quantity = serializers.DecimalField(source="line.quantity", max_digits=12, decimal_places=3, read_only=True, allow_null=True)
+    line_unit = serializers.CharField(source="line.unit", read_only=True, allow_null=True)
+    line_unit_price = serializers.DecimalField(source="line.unit_price", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    suggested_company_name = serializers.CharField(source="suggested_company.name", read_only=True, allow_null=True)
+    suggested_product_name = serializers.CharField(source="suggested_product.name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = HistoricalImportAISuggestion
+        fields = [
+            "id",
+            "batch",
+            "batch_name",
+            "historical_import",
+            "historical_import_document",
+            "historical_import_filename",
+            "historical_import_company_name",
+            "line",
+            "line_item_name",
+            "line_quantity",
+            "line_unit",
+            "line_unit_price",
+            "suggestion_type",
+            "action",
+            "status",
+            "suggested_company",
+            "suggested_company_name",
+            "suggested_product",
+            "suggested_product_name",
+            "alias_text",
+            "proposed_company_name",
+            "proposed_product_name",
+            "proposed_unit",
+            "proposed_pack_size",
+            "proposed_dosage",
+            "confidence",
+            "reason",
+            "candidate_companies",
+            "candidate_products",
+            "raw_ai_payload",
+            "error_message",
+            "created_by",
+            "applied_by",
+            "applied_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "batch",
+            "batch_name",
+            "historical_import",
+            "historical_import_document",
+            "historical_import_filename",
+            "historical_import_company_name",
+            "line",
+            "line_item_name",
+            "line_quantity",
+            "line_unit",
+            "line_unit_price",
+            "suggestion_type",
+            "status",
+            "candidate_companies",
+            "candidate_products",
+            "raw_ai_payload",
+            "error_message",
+            "created_by",
+            "applied_by",
+            "applied_at",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class QuotationLineSerializer(serializers.ModelSerializer):

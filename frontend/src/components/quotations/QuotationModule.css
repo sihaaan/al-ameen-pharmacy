@@ -880,6 +880,49 @@
   flex: 1 1 auto;
 }
 
+.qm-batch-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.qm-batch-file {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 110px minmax(160px, 1.2fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #dbe4ee;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 0.85rem;
+}
+
+.qm-batch-file.status-parsed,
+.qm-batch-file.status-duplicate {
+  background: #ecfdf5;
+  border-color: #99f6e4;
+}
+
+.qm-batch-file.status-failed {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.qm-batch-file.status-parsing {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.qm-batch-file span {
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.qm-batch-file small {
+  color: #52627a;
+}
+
 .qm-sticky-commit-bar {
   position: sticky;
   bottom: 0;

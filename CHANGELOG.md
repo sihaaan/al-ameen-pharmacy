@@ -55,6 +55,7 @@
 - Added `QuotationSettings` controls for `Enable AI Parsing`, `Enable Auto AI Cleanup`, and `Enable Vision AI for PDFs`, while provider keys and hard limits remain environment-managed.
 - Added staff-only AI cleanup endpoints that return candidate rows, plus explicit apply behavior for historical imports so AI output cannot bypass review.
 - Added AI parse cache/log models for provider/model/mode metadata, cache hits, text/page/image counts, success/failure, and usage data when returned by the provider.
+- Added batch AI-assisted historical quotation imports with multi-file staged upload, batch dashboards, review-only company/Product/alias/new-draft-product suggestions, staff approval actions, and duplicate-safe price-history commit.
 
 ### Fixed
 - Corrected local frontend API targeting for quotation development so `/admin -> Quotations` calls the local Django API instead of undeployed Railway quotation routes.
