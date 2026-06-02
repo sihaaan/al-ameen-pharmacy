@@ -923,6 +923,341 @@
   color: #52627a;
 }
 
+.historical-wizard {
+  gap: 14px;
+}
+
+.qm-wizard-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.qm-wizard-stepper {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.qm-wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  text-align: left;
+}
+
+.qm-wizard-step span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #475569;
+  font-size: 12px;
+}
+
+.qm-wizard-step.active {
+  border-color: #0d9488;
+  color: #0f766e;
+  background: #f0fdfa;
+}
+
+.qm-wizard-step.active span,
+.qm-wizard-step.complete span {
+  background: #0d9488;
+  color: #ffffff;
+}
+
+.qm-wizard-step:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.qm-wizard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.qm-wizard-summary,
+.qm-ai-analysis-grid,
+.qm-final-review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.qm-wizard-summary div,
+.qm-ai-analysis-card,
+.qm-final-review-grid div {
+  padding: 12px;
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.qm-wizard-summary span,
+.qm-ai-analysis-card span,
+.qm-final-review-grid span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-wizard-summary strong,
+.qm-ai-analysis-card strong,
+.qm-final-review-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: #0f766e;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.qm-ai-analysis-card small {
+  display: block;
+  margin-top: 7px;
+  color: #64748b;
+  font-weight: 700;
+}
+
+.qm-ai-analysis-card.warning strong {
+  color: #b45309;
+}
+
+.qm-ai-analysis-card.muted strong {
+  color: #475569;
+}
+
+.qm-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.qm-file-chips span {
+  padding: 6px 9px;
+  border: 1px solid #ccfbf1;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-document-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
+}
+
+.qm-company-suggestions {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.qm-company-suggestions h4,
+.qm-decision-group h4,
+.qm-document-card-compact h4 {
+  margin: 0;
+  color: #111827;
+}
+
+.qm-document-card-compact,
+.qm-decision-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.qm-card-title-row,
+.qm-decision-group-header,
+.qm-decision-card-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.qm-decision-group {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.qm-decision-group-header p {
+  margin: 4px 0 0;
+  color: #64748b;
+}
+
+.qm-decision-group-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.qm-decision-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.qm-decision-list.compact {
+  opacity: 0.92;
+}
+
+.qm-decision-card.status-conflict {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.qm-decision-card.status-applied {
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+}
+
+.qm-decision-card.status-rejected,
+.qm-decision-card.status-failed {
+  border-color: #e5e7eb;
+  background: #f9fafb;
+}
+
+.qm-check-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding-top: 3px;
+}
+
+.qm-decision-source {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.qm-decision-source strong {
+  display: block;
+  color: #111827;
+}
+
+.qm-decision-source small {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-weight: 700;
+}
+
+.qm-decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.qm-decision-meta span:not(.qm-badge) {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-decision-edit-grid,
+.qm-line-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.qm-decision-edit-grid label,
+.qm-line-edit-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-decision-edit-grid input,
+.qm-decision-edit-grid select,
+.qm-line-edit-grid input,
+.qm-line-edit-grid select,
+.qm-document-card-compact input,
+.qm-document-card-compact select,
+.qm-decision-card input,
+.qm-decision-card select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  font: inherit;
+}
+
+.qm-decision-reason {
+  padding: 9px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.qm-decision-reason summary {
+  cursor: pointer;
+  color: #0f766e;
+  font-weight: 800;
+}
+
+.qm-candidate-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.qm-candidate-list span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .qm-sticky-commit-bar {
   position: sticky;
   bottom: 0;
