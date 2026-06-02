@@ -44,6 +44,7 @@ const categoryLabel = (value) => categories.find((option) => option.value === va
 const formatMoney = (value) => `AED ${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const statementPeriodText = (customer) => {
   const period = customer?.statement_period || {};
+  if (period.display) return period.display;
   const start = period.display_from || period.from;
   const end = period.display_to || period.to;
   if (start && end) return start === end ? start : `${start} to ${end}`;
@@ -562,8 +563,8 @@ const AccountingModule = () => {
                 {imports.map((item) => (
                   <tr key={item.id} className={filteredImport?.id === item.id ? 'active-row' : ''}>
                     <td>{item.source_filename}</td>
-                    <td>{item.report_date || '-'}</td>
-                    <td>{item.created_at ? new Date(item.created_at).toLocaleString() : '-'}</td>
+                    <td>{item.report_date_display || item.report_date || '-'}</td>
+                    <td>{item.created_at_display || (item.created_at ? new Date(item.created_at).toLocaleString() : '-')}</td>
                     <td>{item.uploaded_by_name || '-'}</td>
                     <td>{item.parsed_row_count}</td>
                     <td>{item.customer_count}</td>
@@ -812,7 +813,7 @@ const AccountingModule = () => {
                       <td>{invoice.invoice_number}</td>
                       <td>{invoice.doc_type}</td>
                       <td>{invoice.lpo_reference || '-'}</td>
-                      <td>{invoice.invoice_date || '-'}</td>
+                      <td>{invoice.invoice_date_display || invoice.invoice_date || '-'}</td>
                       <td>{formatMoney(invoice.debit)}</td>
                       <td>{formatMoney(invoice.credit)}</td>
                       <td>{formatMoney(invoice.balance)}</td>

@@ -12,6 +12,7 @@
 - Added Accounting statement invoice date range filtering that carries into customer summaries, detail rows, PDFs, and ZIP-generated statements.
 - Added protected Accounting statement Excel workbook downloads for individual customers, selected customers, and all due customers.
 - Improved Accounting Excel statements with an accountant-friendly branded layout, simple ledger table, clearer totals block, print-ready page setup, freeze panes, and worksheet filters.
+- Added `Days` to Accounting statement ledgers and standardized visible Accounting dates to UAE `dd/mm/yyyy` format while keeping database date fields typed.
 - Changed Accounting landing behavior so prior imports remain in import history but customer rows only load after staff explicitly opens an import.
 - Hardened Accounting CSV upload handling for the newer repeated-header POS export format and added parser row/column safeguards with clean validation errors.
 - Optimized large Accounting import saves by batching invoice-summary and row inserts and storing compact row trace metadata instead of repeated POS report headers on every invoice line.

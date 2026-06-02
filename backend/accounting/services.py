@@ -4,7 +4,9 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
+from .formatting import format_accounting_date
 from .models import (
     AccountCustomer,
     AccountingCategory,
@@ -389,11 +391,16 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
     invoice_dates = [row.invoice_date for row in rows if row.invoice_date]
     period_start = date_from or (min(invoice_dates) if invoice_dates else None)
     period_end = date_to or (max(invoice_dates) if invoice_dates else None)
+    statement_date = import_customer.accounting_import.report_date or timezone.localdate()
     running_balance = Decimal("0.00")
     lines = []
     total_debit = Decimal("0.00")
     total_credit = Decimal("0.00")
     for row in rows:
+        if row.invoice_date:
+            days = max((statement_date - row.invoice_date).days, 0)
+        else:
+            days = row.days or 0
         row_value = row.total if row.total is not None else row.amount
         if row_value >= 0:
             debit = row_value
@@ -411,6 +418,7 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
                 "debit": debit,
                 "credit": credit,
                 "balance": running_balance,
+                "days": days,
             }
         )
 
@@ -419,9 +427,9 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
     bucket_60_90 = sum((row.bucket_60_90 for row in rows), Decimal("0.00"))
     bucket_over_90 = sum((row.bucket_over_90 for row in rows), Decimal("0.00"))
     overdue_amount = bucket_30_60 + bucket_60_90 + bucket_over_90
-    max_days = max((row.days for row in rows), default=0)
+    max_days = max((line["days"] for line in lines), default=0)
     net_value = total_debit - total_credit
-    is_due = overdue_amount != 0 or max_days > 30 or any(invoice_is_due(row) for row in rows)
+    is_due = overdue_amount != 0 or max_days > 30 or any(line["days"] > 30 for line in lines) or any(invoice_is_due(row) for row in rows)
     if import_customer.is_ignored:
         status = AccountingImportCustomer.STATUS_IGNORED
         is_due = False
@@ -446,6 +454,8 @@ def statement_ledger(import_customer, *, date_from=None, date_to=None):
         "status": status,
         "date_from": date_from,
         "date_to": date_to,
+        "statement_date": statement_date,
+        "statement_date_display": format_accounting_date(statement_date),
         "period_start": period_start,
         "period_end": period_end,
     }

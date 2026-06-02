@@ -8,6 +8,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .formatting import format_accounting_date, format_accounting_period
 from .services import statement_ledger
 
 try:
@@ -36,7 +37,7 @@ def money(value):
 
 
 def short_date(value):
-    return value.isoformat() if value else "-"
+    return format_accounting_date(value) or "-"
 
 
 def company_config():
@@ -144,20 +145,12 @@ def make_footer(config):
 def statement_period_text(ledger):
     period_start = ledger.get("period_start")
     period_end = ledger.get("period_end")
-    if period_start and period_end:
-        if period_start == period_end:
-            return period_start.isoformat()
-        return f"{period_start.isoformat()} to {period_end.isoformat()}"
-    if period_start:
-        return period_start.isoformat()
-    if period_end:
-        return period_end.isoformat()
-    return "No invoice rows"
+    return format_accounting_period(period_start, period_end)
 
 
 def customer_info_table(import_customer, styles, ledger):
     data = [
-        ["Customer", import_customer.customer_name, "Statement Date", short_date(import_customer.accounting_import.report_date)],
+        ["Customer", import_customer.customer_name, "Statement Date", short_date(ledger.get("statement_date"))],
         ["Account No.", import_customer.customer_code or "-", "Currency", "AED"],
         ["Statement Period", statement_period_text(ledger), "Final Balance", money(ledger["final_balance"])],
     ]
@@ -188,6 +181,7 @@ def ledger_rows(ledger, styles):
         Paragraph("Debit", styles["TableHeader"]),
         Paragraph("Credit", styles["TableHeader"]),
         Paragraph("Balance", styles["TableHeader"]),
+        Paragraph("Days", styles["TableHeader"]),
     ]]
     for line in ledger["lines"]:
         invoice = line["row"]
@@ -200,15 +194,16 @@ def ledger_rows(ledger, styles):
                 Paragraph(money(line["debit"]), styles["CellRight"]),
                 Paragraph(money(line["credit"]), styles["CellRight"]),
                 Paragraph(money(line["balance"]), styles["CellRight"]),
+                Paragraph(str(line["days"]), styles["CellRight"]),
             ]
         )
     if len(rows) == 1:
-        rows.append([Paragraph("No invoice rows found for this statement period.", styles["Cell"]), "", "", "", "", "", ""])
+        rows.append([Paragraph("No invoice rows found for this statement period.", styles["Cell"]), "", "", "", "", "", "", ""])
     return rows
 
 
 def ledger_table(ledger, styles, config):
-    widths = [26 * mm, 20 * mm, 25 * mm, 39 * mm, 25 * mm, 25 * mm, 32 * mm]
+    widths = [21 * mm, 17 * mm, 22 * mm, 32 * mm, 22 * mm, 22 * mm, 24 * mm, 12 * mm]
     table = Table(ledger_rows(ledger, styles), repeatRows=1, colWidths=widths)
     table.setStyle(
         TableStyle(

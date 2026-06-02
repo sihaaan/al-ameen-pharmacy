@@ -20,6 +20,7 @@ The Accounting module prepares those monthly overdue statement files inside the 
 - Show read-only email preview text and attachment filename.
 - Support one customer-facing Statement of Account PDF style.
 - Split POS `Bill No.` values into `Invoice No.` and `LPO / Reference No.` while retaining the raw bill value internally.
+- Display Accounting dates in UAE business format (`dd/mm/yyyy`) while keeping database dates as real date fields.
 
 V1 does **not** send emails.
 
@@ -97,14 +98,15 @@ The customer-facing PDF and Excel workbook are ledger-style Statements of Accoun
 - Debit
 - Credit
 - Balance
+- Days
 
-Rows are sorted by invoice date ascending, then invoice/reference order. `Balance` is a cumulative running balance calculated as previous balance + debit - credit. Positive values appear as Debit. Negative values appear as Credit using the absolute value.
+Rows are sorted by invoice date ascending, then invoice/reference order. `Balance` is a cumulative running balance calculated as previous balance + debit - credit. Positive values appear as Debit. Negative values appear as Credit using the absolute value. `Days` is calculated from the invoice date to the statement/report date when available, otherwise to the generated statement date.
 
 The summary section shows Total Debit, Total Credit, Net Value / Total Outstanding, and Final Balance. Internal-only fields such as parser warnings, `Email missing`, `Category Unknown`, ignored status, and system status are not printed on the customer statement.
 
 The Accounting dashboard still keeps ageing buckets internally for due calculations, filters, and review. Ageing data is not removed from the database or internal UI.
 
-If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF/Excel workbook, and ZIP-generated statements use only invoice rows in that date range. The statement prints the selected statement period clearly. If no date range is applied, the statement period is calculated from the minimum and maximum invoice dates included for that customer.
+If a statement date range is applied, the dashboard customer list, detail drawer, individual PDF/Excel workbook, and ZIP-generated statements use only invoice rows in that date range. The statement prints the selected statement period clearly in `dd/mm/yyyy` format. If no date range is applied, the statement period is calculated from the minimum and maximum invoice dates included for that customer.
 
 Excel workbooks are formatted for accountant review with a simple branded header, title block, customer/account information, ledger table, formatted currency/date columns, totals block, reminder note, worksheet autofilter, freeze panes, and print-friendly landscape page setup. The workbook intentionally avoids structured Excel Table objects because Microsoft Excel can repair files that combine table metadata with worksheet-level filters.
 

@@ -1,6 +1,7 @@
 from django.conf import settings
 from rest_framework import serializers
 
+from .formatting import format_accounting_date, format_accounting_datetime, format_accounting_period
 from .models import AccountCustomer, AccountingCategory, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
 from .parsers import normalize_customer_name
 from .services import email_preview_for_import_customer, statement_ledger
@@ -40,6 +41,9 @@ class AccountingImportSerializer(serializers.ModelSerializer):
     duplicate_message = serializers.CharField(read_only=True, default="")
     zip_sync_limit = serializers.SerializerMethodField()
     email_missing_count = serializers.SerializerMethodField()
+    report_date_display = serializers.SerializerMethodField()
+    created_at_display = serializers.SerializerMethodField()
+    updated_at_display = serializers.SerializerMethodField()
 
     class Meta:
         model = AccountingImport
@@ -50,6 +54,7 @@ class AccountingImportSerializer(serializers.ModelSerializer):
             "source_size",
             "category_filename",
             "report_date",
+            "report_date_display",
             "uploaded_by",
             "uploaded_by_name",
             "status",
@@ -65,7 +70,9 @@ class AccountingImportSerializer(serializers.ModelSerializer):
             "duplicate_message",
             "zip_sync_limit",
             "created_at",
+            "created_at_display",
             "updated_at",
+            "updated_at_display",
         ]
         read_only_fields = fields
 
@@ -75,8 +82,19 @@ class AccountingImportSerializer(serializers.ModelSerializer):
     def get_email_missing_count(self, obj):
         return obj.customers.filter(email="").count() if obj.pk else 0
 
+    def get_report_date_display(self, obj):
+        return format_accounting_date(obj.report_date)
+
+    def get_created_at_display(self, obj):
+        return format_accounting_datetime(obj.created_at)
+
+    def get_updated_at_display(self, obj):
+        return format_accounting_datetime(obj.updated_at)
+
 
 class AccountingInvoiceRowSerializer(serializers.ModelSerializer):
+    invoice_date_display = serializers.SerializerMethodField()
+
     class Meta:
         model = AccountingInvoiceRow
         fields = [
@@ -89,6 +107,7 @@ class AccountingInvoiceRowSerializer(serializers.ModelSerializer):
             "invoice_number",
             "lpo_reference",
             "invoice_date",
+            "invoice_date_display",
             "amount",
             "bucket_0_30",
             "bucket_30_60",
@@ -99,6 +118,9 @@ class AccountingInvoiceRowSerializer(serializers.ModelSerializer):
             "warnings",
         ]
         read_only_fields = fields
+
+    def get_invoice_date_display(self, obj):
+        return format_accounting_date(obj.invoice_date)
 
 
 class AccountingImportCustomerSerializer(serializers.ModelSerializer):
@@ -209,14 +231,15 @@ class AccountingImportCustomerDetailSerializer(AccountingImportCustomerSerialize
         return [
             {
                 "id": line["row"].id,
-                "invoice_date": line["row"].invoice_date,
+                "invoice_date": line["row"].invoice_date.isoformat() if line["row"].invoice_date else "",
+                "invoice_date_display": format_accounting_date(line["row"].invoice_date),
                 "doc_type": line["doc_type"],
                 "invoice_number": line["row"].invoice_number or line["row"].bill_number,
                 "lpo_reference": line["row"].lpo_reference,
                 "debit": money_string(line["debit"]),
                 "credit": money_string(line["credit"]),
                 "balance": money_string(line["balance"]),
-                "days": line["row"].days,
+                "days": line["days"],
             }
             for line in lines
         ]
@@ -230,6 +253,7 @@ class AccountingImportCustomerDetailSerializer(AccountingImportCustomerSerialize
         return {
             "from": date_from.isoformat() if date_from else "",
             "to": date_to.isoformat() if date_to else "",
-            "display_from": period_start.isoformat() if period_start else "",
-            "display_to": period_end.isoformat() if period_end else "",
+            "display_from": format_accounting_date(period_start),
+            "display_to": format_accounting_date(period_end),
+            "display": format_accounting_period(period_start, period_end),
         }

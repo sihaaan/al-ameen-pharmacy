@@ -4,6 +4,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from .formatting import format_accounting_date, format_accounting_period
 from .services import statement_filename, statement_ledger
 
 
@@ -26,15 +27,7 @@ def money(value):
 def period_text(ledger):
     start = ledger.get("period_start")
     end = ledger.get("period_end")
-    if start and end:
-        if start == end:
-            return start.isoformat()
-        return f"{start.isoformat()} to {end.isoformat()}"
-    if start:
-        return start.isoformat()
-    if end:
-        return end.isoformat()
-    return "No invoice rows"
+    return format_accounting_period(start, end)
 
 
 def statement_excel_filename(import_customer):
@@ -70,18 +63,18 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
     sheet["A3"].alignment = Alignment(horizontal="center")
     sheet["A3"].fill = PatternFill("solid", fgColor=SOFT_GREEN)
 
-    sheet.merge_cells("E1:G1")
+    sheet.merge_cells("E1:H1")
     sheet["E1"] = "STATEMENT OF ACCOUNT"
     sheet["E1"].font = Font(name="Calibri", size=14, bold=True, color=WHITE)
     sheet["E1"].alignment = Alignment(horizontal="center", vertical="center")
     sheet["E1"].fill = PatternFill("solid", fgColor=PRIMARY)
-    sheet.merge_cells("E2:G2")
+    sheet.merge_cells("E2:H2")
     sheet["E2"] = "Overdue Payment Statement"
     sheet["E2"].font = Font(name="Calibri", size=10, bold=True, color=PRIMARY_DARK)
     sheet["E2"].alignment = Alignment(horizontal="center")
     sheet["E2"].fill = PatternFill("solid", fgColor=LIGHT)
-    sheet.merge_cells("E3:G3")
-    sheet["E3"] = f"Statement Date: {import_customer.accounting_import.report_date or '-'}"
+    sheet.merge_cells("E3:H3")
+    sheet["E3"] = f"Statement Date: {format_accounting_date(ledger.get('statement_date')) or '-'}"
     sheet["E3"].font = Font(name="Calibri", size=9, color=TEXT)
     sheet["E3"].alignment = Alignment(horizontal="center")
     sheet["E3"].fill = PatternFill("solid", fgColor=LIGHT)
@@ -99,7 +92,7 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
         sheet.cell(index, 6, row[3])
 
     header_row = 10
-    headers = ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance"]
+    headers = ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance", "Days"]
     for col, header in enumerate(headers, start=1):
         cell = sheet.cell(header_row, col, header)
         cell.fill = PatternFill("solid", fgColor=PRIMARY)
@@ -117,6 +110,7 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
             money(line["debit"]),
             money(line["credit"]),
             money(line["balance"]),
+            line["days"],
         ]
         for col, value in enumerate(values, start=1):
             cell = sheet.cell(current_row, col, value)
@@ -124,13 +118,15 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
                 cell.number_format = '#,##0.00'
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             elif col == 1:
-                cell.number_format = "yyyy-mm-dd"
+                cell.number_format = "DD/MM/YYYY"
+            elif col == 8:
+                cell.alignment = Alignment(horizontal="right", vertical="center")
             else:
                 cell.alignment = Alignment(vertical="center", wrap_text=(col == 4))
         current_row += 1
 
     if not ledger["lines"]:
-        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=8)
         sheet.cell(current_row, 1, "No invoice rows found for this statement period.")
         current_row += 1
 
@@ -143,7 +139,7 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
     ]
     for index, (label, value) in enumerate(totals, start=totals_start):
         sheet.merge_cells(start_row=index, start_column=4, end_row=index, end_column=5)
-        sheet.merge_cells(start_row=index, start_column=6, end_row=index, end_column=7)
+        sheet.merge_cells(start_row=index, start_column=6, end_row=index, end_column=8)
         sheet.cell(index, 4, label)
         sheet.cell(index, 6, money(value))
         sheet.cell(index, 6).number_format = '#,##0.00'
@@ -153,7 +149,7 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
         sheet.cell(index, 6).alignment = Alignment(horizontal="right")
 
     note_row = totals_start + len(totals) + 2
-    sheet.merge_cells(start_row=note_row, start_column=1, end_row=note_row + 2, end_column=7)
+    sheet.merge_cells(start_row=note_row, start_column=1, end_row=note_row + 2, end_column=8)
     sheet.cell(
         note_row,
         1,
@@ -165,25 +161,25 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
     sheet.cell(note_row, 1).fill = PatternFill("solid", fgColor=SOFT_GREEN)
 
     footer_row = note_row + 4
-    sheet.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=7)
+    sheet.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=8)
     sheet.cell(footer_row, 1, "Al Ameen Pharmacy LLC | This statement is computer generated for account reconciliation.")
     sheet.cell(footer_row, 1).font = Font(name="Calibri", size=9, color=MUTED)
     sheet.cell(footer_row, 1).alignment = Alignment(horizontal="center")
 
     thin = apply_common_styles(sheet)
-    for col in range(1, 8):
-        sheet.column_dimensions[get_column_letter(col)].width = [16, 14, 16, 34, 15, 15, 17][col - 1]
+    for col in range(1, 9):
+        sheet.column_dimensions[get_column_letter(col)].width = [16, 13, 15, 31, 14, 14, 16, 10][col - 1]
     for row_number in range(1, footer_row + 1):
         sheet.row_dimensions[row_number].height = 22
     sheet.row_dimensions[1].height = 30
     sheet.row_dimensions[2].height = 24
     sheet.row_dimensions[note_row].height = 42
     sheet.freeze_panes = f"A{header_row + 1}"
-    sheet.auto_filter.ref = f"A{header_row}:G{max(header_row, current_row - 1)}"
+    sheet.auto_filter.ref = f"A{header_row}:H{max(header_row, current_row - 1)}"
 
     for row_number in range(header_row + 1, current_row):
         if row_number % 2 == 0:
-            for col in range(1, 8):
+            for col in range(1, 9):
                 sheet.cell(row_number, col).fill = PatternFill("solid", fgColor=SOFT)
 
     for row_number in range(start_row, start_row + len(info_rows)):
@@ -207,7 +203,7 @@ def build_statement_workbook(import_customer, *, date_from=None, date_to=None):
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 0
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.print_area = f"A1:G{footer_row}"
+    sheet.print_area = f"A1:H{footer_row}"
     sheet.oddFooter.center.text = "Page &P of &N"
     sheet.oddFooter.right.text = "Statement of Account"
     sheet.page_margins.left = 0.3

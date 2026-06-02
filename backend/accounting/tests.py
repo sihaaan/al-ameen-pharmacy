@@ -302,6 +302,7 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(response.data["parsed_row_count"], 3)
         self.assertEqual(response.data["customer_count"], 3)
         self.assertEqual(response.data["due_customer_count"], 2)
+        self.assertEqual(response.data["report_date_display"], "25/05/2026")
 
         customer = AccountCustomer.objects.get(customer_code="083")
         self.assertEqual(customer.category, "credit")
@@ -488,6 +489,8 @@ class AccountingAPITests(APITestCase):
         self.assertIn("Debit", text)
         self.assertIn("Credit", text)
         self.assertIn("Balance", text)
+        self.assertIn("Days", text)
+        self.assertIn("25/05/2026", text)
         self.assertNotIn("PDC", text)
         self.assertNotIn("PDC Value", text)
         self.assertIn("571920", text)
@@ -516,14 +519,21 @@ class AccountingAPITests(APITestCase):
         balances = [row["balance"] for row in detail.data["ledger_rows"]]
         self.assertEqual(balances, ["100.00", "600.00", "575.00"])
         self.assertEqual(detail.data["ledger_rows"][-1]["credit"], "25.00")
+        self.assertEqual(detail.data["ledger_rows"][0]["invoice_date"], "2026-01-01")
+        self.assertEqual(detail.data["ledger_rows"][0]["invoice_date_display"], "01/01/2026")
+        self.assertEqual(detail.data["ledger_rows"][0]["days"], 144)
+        self.assertEqual(detail.data["ledger_rows"][1]["days"], 99)
         self.assertEqual(detail.data["total_outstanding"], "575.00")
-        self.assertEqual(detail.data["statement_period"]["display_from"], "2026-01-01")
-        self.assertEqual(detail.data["statement_period"]["display_to"], "2026-02-20")
+        self.assertEqual(detail.data["statement_period"]["display_from"], "01/01/2026")
+        self.assertEqual(detail.data["statement_period"]["display_to"], "20/02/2026")
+        self.assertEqual(detail.data["statement_period"]["display"], "01/01/2026 to 20/02/2026")
 
         full_pdf = self.client.get(reverse("accounting-import-customer-statement-pdf", args=[summary.id]))
         self.assertEqual(full_pdf.status_code, 200)
         full_text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(full_pdf.content)).pages)
-        self.assertIn("2026-01-01 to 2026-02-20", full_text)
+        self.assertIn("01/01/2026 to 20/02/2026", full_text)
+        self.assertIn("25/05/2026", full_text)
+        self.assertIn("Days", full_text)
         self.assertIn("Credit", full_text)
         self.assertIn("AED 25.00", full_text)
         self.assertNotIn("PDC", full_text)
@@ -536,8 +546,9 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(len(filtered_detail.data["ledger_rows"]), 2)
         self.assertEqual(filtered_detail.data["ledger_rows"][-1]["balance"], "475.00")
         self.assertEqual(filtered_detail.data["total_outstanding"], "475.00")
-        self.assertEqual(filtered_detail.data["statement_period"]["display_from"], "2026-02-01")
-        self.assertEqual(filtered_detail.data["statement_period"]["display_to"], "2026-02-28")
+        self.assertEqual(filtered_detail.data["statement_period"]["display_from"], "01/02/2026")
+        self.assertEqual(filtered_detail.data["statement_period"]["display_to"], "28/02/2026")
+        self.assertEqual(filtered_detail.data["statement_period"]["display"], "01/02/2026 to 28/02/2026")
 
         one_day_detail = self.client.get(
             reverse("accounting-import-customer-detail", args=[summary.id]),
@@ -545,8 +556,9 @@ class AccountingAPITests(APITestCase):
         )
         self.assertEqual(one_day_detail.status_code, 200)
         self.assertEqual(len(one_day_detail.data["ledger_rows"]), 1)
-        self.assertEqual(one_day_detail.data["statement_period"]["display_from"], "2026-02-15")
-        self.assertEqual(one_day_detail.data["statement_period"]["display_to"], "2026-02-15")
+        self.assertEqual(one_day_detail.data["statement_period"]["display_from"], "15/02/2026")
+        self.assertEqual(one_day_detail.data["statement_period"]["display_to"], "15/02/2026")
+        self.assertEqual(one_day_detail.data["statement_period"]["display"], "15/02/2026")
 
         filtered_list = self.client.get(
             reverse("accounting-import-customer-list"),
@@ -558,17 +570,25 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(hotel["total_outstanding"], "475.00")
         self.assertEqual(hotel["overdue_amount"], "475.00")
 
+        dash_date_filter = self.client.get(
+            reverse("accounting-import-customer-list"),
+            {"import_id": import_id, "date_from": "01-02-2026", "date_to": "28-02-2026", "due_only": "true"},
+        )
+        self.assertEqual(dash_date_filter.status_code, 200)
+        self.assertEqual(next(item for item in dash_date_filter.data if item["customer_code"] == "083")["invoice_count"], 2)
+
         pdf = self.client.get(
             reverse("accounting-import-customer-statement-pdf", args=[summary.id]),
             {"date_from": "2026-02-01", "date_to": "2026-02-28"},
         )
         self.assertEqual(pdf.status_code, 200)
         text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
-        self.assertIn("2026-02-01 to 2026-02-28", text)
+        self.assertIn("01/02/2026 to 28/02/2026", text)
         self.assertIn("570171", text)
         self.assertIn("570172", text)
         self.assertNotIn("570170", text)
         self.assertIn("AED 475.00", text)
+        self.assertIn("Days", text)
         self.assertNotIn("PDC", text)
 
         zip_response = self.client.get(
@@ -582,7 +602,7 @@ class AccountingAPITests(APITestCase):
                 page.extract_text() or ""
                 for page in PdfReader(BytesIO(archive.read(next(name for name in archive.namelist() if "MILLENNIUM" in name)))).pages
             )
-        self.assertIn("2026-02-01 to 2026-02-28", pdf_text)
+        self.assertIn("01/02/2026 to 28/02/2026", pdf_text)
         self.assertIn("570171", pdf_text)
         self.assertNotIn("570170", pdf_text)
         self.assertNotIn("PDC", pdf_text)
@@ -597,15 +617,17 @@ class AccountingAPITests(APITestCase):
         header_row = next(
             row[0].row
             for row in sheet.iter_rows()
-            if [cell.value for cell in row[:7]] == ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance"]
+            if [cell.value for cell in row[:8]] == ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance", "Days"]
         )
-        header_values = [sheet.cell(header_row, column).value for column in range(1, 8)]
-        self.assertEqual(header_values, ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance"])
+        header_values = [sheet.cell(header_row, column).value for column in range(1, 9)]
+        self.assertEqual(header_values, ["Invoice Date", "Doc Type", "Invoice No.", "LPO / Reference No.", "Debit", "Credit", "Balance", "Days"])
+        self.assertEqual(sheet.cell(header_row + 1, 1).number_format, "DD/MM/YYYY")
+        self.assertEqual(sheet.cell(header_row + 1, 8).value, 99)
         all_values = [cell.value for row in sheet.iter_rows() for cell in row]
         self.assertNotIn("PDC", all_values)
         self.assertNotIn("0-30", all_values)
         self.assertNotIn("30-60", all_values)
-        self.assertIn("2026-02-01 to 2026-02-28", all_values)
+        self.assertIn("01/02/2026 to 28/02/2026", all_values)
         self.assertEqual(sheet.freeze_panes, f"A{header_row + 1}")
         self.assertEqual(sheet.page_setup.orientation, "landscape")
         self.assertEqual(sheet.page_setup.fitToWidth, 1)

@@ -1,5 +1,4 @@
 from io import BytesIO
-from datetime import datetime
 from decimal import Decimal
 from zipfile import ZIP_STORED, ZipFile
 
@@ -8,7 +7,6 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, DecimalField, Max, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
-from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -16,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
+from .formatting import parse_accounting_date, format_accounting_datetime
 from .excel import build_statement_workbook, statement_excel_filename
 from .pdf import build_statement_pdf
 from .permissions import IsAccountingUser
@@ -39,21 +38,6 @@ def parse_accounting_date_range(request):
     date_from = parse_accounting_date(request.query_params.get("date_from", "") or "")
     date_to = parse_accounting_date(request.query_params.get("date_to", "") or "")
     return date_from, date_to
-
-
-def parse_accounting_date(value):
-    value = (value or "").strip()
-    if not value:
-        return None
-    parsed = parse_date(value)
-    if parsed:
-        return parsed
-    for date_format in ("%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(value, date_format).date()
-        except ValueError:
-            continue
-    return None
 
 
 def money_string(value):
@@ -388,7 +372,9 @@ class AccountingImportCustomerViewSet(viewsets.ModelViewSet):
                     "warnings": item.warnings,
                     "customer_notes": getattr(item.customer, "notes", ""),
                     "created_at": item.created_at,
+                    "created_at_display": format_accounting_datetime(item.created_at),
                     "updated_at": item.updated_at,
+                    "updated_at_display": format_accounting_datetime(item.updated_at),
                 }
             )
         items = [item for item in items if item["invoice_count"] > 0]
