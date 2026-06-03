@@ -576,8 +576,8 @@ const HistoricalImportManager = () => {
     }));
   };
 
-  const saveSuggestionEdits = async (suggestion) => {
-    if (!suggestion || workingAction) return;
+  const persistSuggestionEdits = async (suggestion, { skipNoopWarning = false } = {}) => {
+    if (!suggestion) return false;
     const suggestionDraft = suggestionDrafts[suggestion.id] || {};
     const lineDraft = suggestion.line ? lineDrafts[suggestion.line] : null;
     const suggestionOriginal = suggestionOriginalFor(suggestion);
@@ -591,41 +591,51 @@ const HistoricalImportManager = () => {
       ? changedFields({ ...lineOriginal, ...(lineDraft || {}) }, lineOriginal, Object.keys(lineOriginal))
       : [];
     if (!suggestionChanges.length && !lineChanges.length) {
-      setInlineFeedback(`suggestion-${suggestion.id}`, 'warning', 'No changes to save for this review row.');
-      setNotice({ type: 'warning', message: 'No changes to save for this review row.' });
-      return;
+      if (!skipNoopWarning) {
+        setInlineFeedback(`suggestion-${suggestion.id}`, 'warning', 'No changes to save for this review row.');
+        setNotice({ type: 'warning', message: 'No changes to save for this review row.' });
+      }
+      return false;
     }
+    await quotationAPI.historicalImportAiSuggestions.update(suggestion.id, {
+      action: suggestionDraft.action || suggestion.action,
+      suggested_product: suggestionDraft.suggested_product || null,
+      suggested_company: suggestionDraft.suggested_company || null,
+      alias_text: suggestionDraft.alias_text || '',
+      proposed_company_name: suggestionDraft.proposed_company_name || '',
+      proposed_product_name: suggestionDraft.proposed_product_name || '',
+      proposed_unit: suggestionDraft.proposed_unit || '',
+      proposed_pack_size: suggestionDraft.proposed_pack_size || '',
+      proposed_dosage: suggestionDraft.proposed_dosage || '',
+    });
+    if (suggestion.line && lineDraft) {
+      await quotationAPI.historicalImportLines.update(suggestion.line, {
+        item_name: lineDraft.item_name || '',
+        quantity: lineDraft.quantity || null,
+        unit: lineDraft.unit || '',
+        unit_price: lineDraft.unit_price || null,
+        vat_amount: lineDraft.vat_amount || null,
+        vat_rate: lineDraft.vat_rate || '0',
+        line_total: lineDraft.line_total || null,
+        status: lineDraft.status || 'needs_review',
+      });
+    }
+    return true;
+  };
+
+  const saveSuggestionEdits = async (suggestion) => {
+    if (!suggestion || workingAction) return;
     setWorkingAction(`save-suggestion-${suggestion.id}`);
     setNotice(null);
     setErrorInfo(null);
     try {
-      await quotationAPI.historicalImportAiSuggestions.update(suggestion.id, {
-        action: suggestionDraft.action || suggestion.action,
-        suggested_product: suggestionDraft.suggested_product || null,
-        suggested_company: suggestionDraft.suggested_company || null,
-        alias_text: suggestionDraft.alias_text || '',
-        proposed_company_name: suggestionDraft.proposed_company_name || '',
-        proposed_product_name: suggestionDraft.proposed_product_name || '',
-        proposed_unit: suggestionDraft.proposed_unit || '',
-        proposed_pack_size: suggestionDraft.proposed_pack_size || '',
-        proposed_dosage: suggestionDraft.proposed_dosage || '',
-      });
-      if (suggestion.line && lineDraft) {
-        await quotationAPI.historicalImportLines.update(suggestion.line, {
-          item_name: lineDraft.item_name || '',
-          quantity: lineDraft.quantity || null,
-          unit: lineDraft.unit || '',
-          unit_price: lineDraft.unit_price || null,
-          vat_amount: lineDraft.vat_amount || null,
-          vat_rate: lineDraft.vat_rate || '0',
-          line_total: lineDraft.line_total || null,
-          status: lineDraft.status || 'needs_review',
-        });
+      const saved = await persistSuggestionEdits(suggestion);
+      if (saved) {
+        setInlineFeedback(`suggestion-${suggestion.id}`, 'success', 'Review edits saved. Apply when you are ready to approve this decision.');
+        await loadSuggestions(selectedBatch.id);
+        await refreshSelectedBatch();
+        setNotice({ type: 'success', message: 'Review row saved.' });
       }
-      setInlineFeedback(`suggestion-${suggestion.id}`, 'success', 'Review edits saved. Apply when you are ready to approve this decision.');
-      await loadSuggestions(selectedBatch.id);
-      await refreshSelectedBatch();
-      setNotice({ type: 'success', message: 'Review row saved.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Save AI suggestion edits', `PATCH /quotations/historical-import-ai-suggestions/${suggestion.id}/`);
       setErrorInfo(details);
@@ -694,6 +704,15 @@ const HistoricalImportManager = () => {
     setNotice(null);
     setErrorInfo(null);
     try {
+      const chosenSuggestions = suggestions.filter((suggestion) => ids.includes(suggestion.id) && isSuggestionActionable(suggestion));
+      let savedDraftCount = 0;
+      for (const suggestion of chosenSuggestions) {
+        // Apply approves exactly what staff sees on the card. Persist visible
+        // edits first so Apply This never depends on a separate Save Edits click.
+        // eslint-disable-next-line no-await-in-loop
+        const saved = await persistSuggestionEdits(suggestion, { skipNoopWarning: true });
+        if (saved) savedDraftCount += 1;
+      }
       const response = await quotationAPI.historicalImportBatches.applyAiSuggestions(selectedBatch.id, { suggestion_ids: ids });
       mergeUpdatedSuggestions(response.data.updated_suggestions || []);
       if (response.data.batch) {
@@ -711,7 +730,7 @@ const HistoricalImportManager = () => {
       });
       setNotice({
         type: response.data.summary.conflict ? 'warning' : 'success',
-        message: buildApplyNotice(response.data.summary),
+        message: `${savedDraftCount ? `${savedDraftCount} edited review row(s) saved first. ` : ''}${buildApplyNotice(response.data.summary)}`,
       });
       setSelectedSuggestionIds([]);
       const refreshed = await refreshSelectedBatch(response.data.batch?.id || selectedBatch.id);

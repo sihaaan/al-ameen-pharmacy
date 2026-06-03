@@ -1715,6 +1715,114 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
         self.assertEqual(updated["suggested_product"], self.item_one.id)
 
+    def test_apply_alias_suggestion_returns_ready_card_state(self):
+        batch = HistoricalImportBatch.objects.create(name="Updated alias cards", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="tongue-depressors.pdf",
+            source_sha256="c" * 64,
+            document_date=date(2026, 6, 1),
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="TONGUE DEPRESSORS",
+            quantity=Decimal("1.000"),
+            unit="PKT",
+            unit_price=Decimal("15.00"),
+            line_total=Decimal("15.00"),
+            status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW,
+        )
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS,
+            suggested_product=self.item_two,
+            alias_text="TONGUE DEPRESSORS",
+            confidence=0.90,
+            reason="Customer wording for an existing Product.",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+            {"suggestion_ids": [suggestion.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        suggestion.refresh_from_db()
+        self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(line.product, self.item_two)
+        self.assertEqual(line.status, HistoricalPriceImportLine.STATUS_READY)
+        self.assertTrue(ProductAlias.objects.filter(company=self.company, alias="TONGUE DEPRESSORS", product=self.item_two).exists())
+        updated = response.data["updated_suggestions"][0]
+        self.assertEqual(updated["id"], suggestion.id)
+        self.assertEqual(updated["status"], HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
+        self.assertEqual(updated["line_ready_blockers"], [])
+
+    def test_apply_new_product_suggestion_returns_ready_card_state(self):
+        batch = HistoricalImportBatch.objects.create(name="Updated new product cards", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="fastum.pdf",
+            source_sha256="9" * 64,
+            document_date=date(2026, 6, 1),
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="FASTUM GEL 50GM",
+            quantity=Decimal("3.000"),
+            unit="Tubes",
+            unit_price=Decimal("30.00"),
+            line_total=Decimal("90.00"),
+            status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW,
+        )
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT,
+            proposed_product_name="Fastum Gel 50gm",
+            proposed_pack_size="Tubes",
+            confidence=0.91,
+            reason="Genuine new Product.",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+            {"suggestion_ids": [suggestion.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        suggestion.refresh_from_db()
+        product = Product.objects.get(name="Fastum Gel 50gm")
+        self.assertEqual(product.status, "draft")
+        self.assertFalse(product.show_price)
+        self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(line.product, product)
+        self.assertEqual(line.status, HistoricalPriceImportLine.STATUS_READY)
+        updated = response.data["updated_suggestions"][0]
+        self.assertEqual(updated["id"], suggestion.id)
+        self.assertEqual(updated["status"], HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
+        self.assertEqual(updated["line_ready_blockers"], [])
+
     def test_apply_ai_suggestion_marks_product_row_ready_even_when_document_details_missing(self):
         batch = HistoricalImportBatch.objects.create(name="Missing document details", created_by=self.staff)
         historical_import = HistoricalPriceImport.objects.create(
