@@ -106,6 +106,7 @@ const HistoricalImportManager = () => {
   const [confirmAction, setConfirmAction] = useState(null);
   const [sourceModal, setSourceModal] = useState(null);
   const [duplicateModal, setDuplicateModal] = useState(null);
+  const [actionFeedback, setActionFeedback] = useState({});
   const [selectedDocumentId, setSelectedDocumentId] = useState(null);
   const [companyModeByImport, setCompanyModeByImport] = useState({});
   const [groupLimits, setGroupLimits] = useState({});
@@ -204,6 +205,39 @@ const HistoricalImportManager = () => {
     }
   };
 
+  const setInlineFeedback = (key, type, message) => {
+    setActionFeedback((current) => ({
+      ...current,
+      [key]: { type, message, at: Date.now() },
+    }));
+  };
+
+  const updateSelectedImport = (importId, updater) => {
+    setSelectedBatch((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        imports: (current.imports || []).map((entry) => (
+          entry.id === importId ? updater(entry) : entry
+        )),
+      };
+    });
+  };
+
+  const removeSelectedImport = (importId) => {
+    setSelectedBatch((current) => {
+      if (!current) return current;
+      const nextImports = (current.imports || []).filter((entry) => entry.id !== importId);
+      return { ...current, imports: nextImports };
+    });
+    setSelectedBatchImportIds((current) => current.filter((id) => id !== importId));
+    setSelectedDocumentId((current) => {
+      if (current !== importId) return current;
+      const nextImport = (selectedBatch?.imports || []).find((entry) => entry.id !== importId);
+      return nextImport?.id || null;
+    });
+  };
+
   const selectBatch = async (batch, step = 'analyze') => {
     setSelectedBatch(batch);
     setActiveStep(step);
@@ -215,6 +249,7 @@ const HistoricalImportManager = () => {
     setAiRunResults([]);
     setLastAiRunFailed(false);
     setImportDrafts({});
+    setActionFeedback({});
     await loadSuggestions(batch.id);
   };
 
@@ -387,6 +422,7 @@ const HistoricalImportManager = () => {
       total: entry.total || '',
     };
     if (!changedFields(draft, original, Object.keys(original)).length) {
+      setInlineFeedback(`import-${entry.id}`, 'warning', 'No changes to save for this document.');
       setNotice({ type: 'warning', message: 'No changes to save for this document.' });
       return;
     }
@@ -394,7 +430,7 @@ const HistoricalImportManager = () => {
     setNotice(null);
     setErrorInfo(null);
     try {
-      await quotationAPI.historicalImports.update(entry.id, {
+      const response = await quotationAPI.historicalImports.update(entry.id, {
         company: draft.company || null,
         suggested_company_name: draft.suggested_company_name || '',
         document_number: draft.document_number || '',
@@ -404,11 +440,13 @@ const HistoricalImportManager = () => {
         vat_total: draft.vat_total || null,
         total: draft.total || null,
       });
+      updateSelectedImport(entry.id, () => response.data);
       setImportDrafts((current) => {
         const next = { ...current };
         delete next[entry.id];
         return next;
       });
+      setInlineFeedback(`import-${entry.id}`, 'success', 'Document edits saved.');
       await load();
       await refreshSelectedBatch();
       setNotice({ type: 'success', message: `Edits saved for ${entry.source_filename}.` });
@@ -475,6 +513,7 @@ const HistoricalImportManager = () => {
       ? changedFields({ ...lineOriginal, ...(lineDraft || {}) }, lineOriginal, Object.keys(lineOriginal))
       : [];
     if (!suggestionChanges.length && !lineChanges.length) {
+      setInlineFeedback(`suggestion-${suggestion.id}`, 'warning', 'No changes to save for this review row.');
       setNotice({ type: 'warning', message: 'No changes to save for this review row.' });
       return;
     }
@@ -505,6 +544,7 @@ const HistoricalImportManager = () => {
           status: lineDraft.status || 'needs_review',
         });
       }
+      setInlineFeedback(`suggestion-${suggestion.id}`, 'success', 'Review edits saved. Apply when you are ready to approve this decision.');
       await loadSuggestions(selectedBatch.id);
       await refreshSelectedBatch();
       setNotice({ type: 'success', message: 'Review row saved.' });
@@ -577,6 +617,16 @@ const HistoricalImportManager = () => {
     setErrorInfo(null);
     try {
       const response = await quotationAPI.historicalImportBatches.applyAiSuggestions(selectedBatch.id, { suggestion_ids: ids });
+      (response.data.results || []).forEach((result) => {
+        if (result.suggestion_id) {
+          const type = result.status === 'conflict' || result.status === 'failed' ? 'warning' : 'success';
+          setInlineFeedback(
+            `suggestion-${result.suggestion_id}`,
+            type,
+            result.message || (result.status === 'applied' ? 'Decision applied.' : `Decision ${result.status}.`)
+          );
+        }
+      });
       setNotice({
         type: response.data.summary.conflict ? 'warning' : 'success',
         message: buildApplyNotice(response.data.summary),
@@ -612,6 +662,11 @@ const HistoricalImportManager = () => {
       await Promise.all(Object.entries(byImport).map(([importId, rows]) => (
         quotationAPI.historicalImports.bulkUpdateRows(importId, { row_ids: rows, status: 'ready' })
       )));
+      suggestions.forEach((suggestion) => {
+        if (lineIds.includes(suggestion.line)) {
+          setInlineFeedback(`suggestion-${suggestion.id}`, 'success', 'Row marked ready where validation allowed.');
+        }
+      });
       await load();
       await refreshSelectedBatch();
       await loadSuggestions(selectedBatch.id);
@@ -680,6 +735,45 @@ const HistoricalImportManager = () => {
       duplicateCheck,
       match,
     });
+  };
+
+  const requestRemoveImportFromBatch = (entry) => {
+    if (!entry || workingAction) return;
+    setConfirmAction({
+      title: 'Remove this import from the batch?',
+      body: 'This cancels the staged import and removes its AI review rows from this batch. It does not delete committed price history.',
+      details: [
+        entry.source_filename || `Import #${entry.id}`,
+        entry.company_name || entry.suggested_company_name || 'No company selected',
+        'Use this for duplicate or accidental uploads before committing.',
+      ],
+      confirmLabel: 'Remove from batch',
+      onConfirm: () => performRemoveImportFromBatch(entry),
+    });
+  };
+
+  const performRemoveImportFromBatch = async (entry) => {
+    if (!entry || workingAction) return;
+    setConfirmAction(null);
+    setWorkingAction(`remove-import-${entry.id}`);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.historicalImports.removeFromBatch(entry.id);
+      removeSelectedImport(entry.id);
+      if (response.data.batch) {
+        setSelectedBatch(response.data.batch);
+      }
+      await loadSuggestions(response.data.batch?.id || selectedBatch?.id);
+      await load();
+      setNotice({ type: 'success', message: `${entry.source_filename} was removed from this batch.` });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Remove historical import from batch', `POST /quotations/historical-imports/${entry.id}/remove_from_batch/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setWorkingAction('');
+    }
   };
 
   const commitSelectedBatchImports = async () => {
@@ -1094,10 +1188,18 @@ const HistoricalImportManager = () => {
                   <div className="qm-card-title-row">
                     <div>
                       <h4>{entry.source_filename}</h4>
-                      <p>{entry.lines?.length || 0} rows - <span className={`qm-badge status-${entry.status}`}>{entry.status}</span></p>
+                      <p>
+                        {entry.lines?.length || 0} rows - <span className={`qm-badge status-${entry.status}`}>{entry.status}</span>
+                        {entry.company_name && <span className="qm-badge success">Company linked: {entry.company_name}</span>}
+                      </p>
                     </div>
                     <span className="qm-badge muted">Document #{entry.id}</span>
                   </div>
+                  {actionFeedback[`import-${entry.id}`] && (
+                    <div className={`qm-inline-feedback ${actionFeedback[`import-${entry.id}`].type}`}>
+                      {actionFeedback[`import-${entry.id}`].message}
+                    </div>
+                  )}
 
                   {duplicateCheck?.is_duplicate && (
                     <div className="qm-notice warning compact">
@@ -1119,6 +1221,14 @@ const HistoricalImportManager = () => {
                             <button type="button" className="qm-secondary small" onClick={() => openDuplicateInspection(entry, duplicateCheck, 'compare')}>
                               Compare with current
                             </button>
+                            <button
+                              type="button"
+                              className="qm-danger small"
+                              disabled={entry.status === 'committed' || Boolean(workingAction)}
+                              onClick={() => requestRemoveImportFromBatch(entry)}
+                            >
+                              {workingAction === `remove-import-${entry.id}` ? 'Removing...' : 'Remove from batch'}
+                            </button>
                           </div>
                         </div>
                       )}
@@ -1138,6 +1248,11 @@ const HistoricalImportManager = () => {
                             </div>
                             <button type="button" className="qm-secondary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>Save</button>
                             <button type="button" className="qm-primary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => requestApplySuggestions([suggestion.id])}>Apply company decision</button>
+                            {actionFeedback[`suggestion-${suggestion.id}`] && (
+                              <div className={`qm-inline-feedback ${actionFeedback[`suggestion-${suggestion.id}`].type}`}>
+                                {actionFeedback[`suggestion-${suggestion.id}`].message}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -1232,6 +1347,11 @@ const HistoricalImportManager = () => {
             </span>
           </div>
         )}
+        {actionFeedback[`suggestion-${suggestion.id}`] && (
+          <div className={`qm-inline-feedback ${actionFeedback[`suggestion-${suggestion.id}`].type}`}>
+            {actionFeedback[`suggestion-${suggestion.id}`].message}
+          </div>
+        )}
 
         <div className="qm-decision-edit-grid">
           <label><span className="qm-label-text">Decision</span>
@@ -1290,13 +1410,13 @@ const HistoricalImportManager = () => {
             <label><span className="qm-label-text">Total</span>
               <input type="number" step="0.01" value={lineDraft.line_total || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { line_total: event.target.value })} />
             </label>
-            <label><span className="qm-label-text">Row status</span>
-              <select value={lineDraft.status || 'needs_review'} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { status: event.target.value })}>
-                <option value="needs_review">Needs review</option>
-                <option value="ready">Ready</option>
-                <option value="skipped">Skipped</option>
-              </select>
-            </label>
+            <div className="qm-derived-status">
+              <span className="qm-label-text">Commit state</span>
+              <span className={`qm-badge status-${lineDraft.status || suggestion.line_status || 'needs_review'}`}>
+                {(lineDraft.status || suggestion.line_status || 'needs_review').replace('_', ' ')}
+              </span>
+              <small>Apply This approves the decision and marks valid rows ready. Skip/noise rows are never committed.</small>
+            </div>
           </div>
         )}
 

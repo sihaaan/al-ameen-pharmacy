@@ -936,6 +936,76 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
 
+    @action(detail=True, methods=["post"])
+    def remove_from_batch(self, request, pk=None):
+        historical_import = self.get_object()
+        if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
+            return Response(
+                {"detail": "Committed historical imports cannot be removed from a batch."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        batch = historical_import.batch
+        if not batch:
+            return Response(
+                {"detail": "This historical import is not attached to a batch."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if HistoricalImportAISuggestion.objects.filter(
+            historical_import=historical_import,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            status=HistoricalImportAISuggestion.STATUS_APPLIED,
+        ).exists():
+            return Response(
+                {
+                    "detail": (
+                        "This import has already applied Product/alias decisions. "
+                        "It cannot be removed from the batch without leaving durable review changes behind."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        files = []
+        for file_result in batch.summary.get("files", []):
+            if file_result.get("import_id") == historical_import.id:
+                files.append(
+                    {
+                        **file_result,
+                        "status": "removed",
+                        "message": "Removed from this batch by staff.",
+                    }
+                )
+            else:
+                files.append(file_result)
+        batch.summary = {**(batch.summary or {}), "files": files}
+        batch.save(update_fields=["summary", "updated_at"])
+        HistoricalImportAISuggestion.objects.filter(
+            historical_import=historical_import,
+            batch=batch,
+        ).update(
+            batch=None,
+            status=HistoricalImportAISuggestion.STATUS_REJECTED,
+            error_message="Removed from batch by staff.",
+        )
+        historical_import.status = HistoricalPriceImport.STATUS_CANCELLED
+        historical_import.batch = None
+        historical_import.save(update_fields=["status", "batch", "updated_at"])
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            historical_import,
+            message="Removed historical import from batch.",
+        )
+        return Response(
+            {
+                "status": "removed",
+                "import": self.get_serializer(historical_import).data,
+                "batch": HistoricalImportBatchSerializer(
+                    refresh_historical_import_batch_summary(batch),
+                    context={"request": request},
+                ).data,
+            }
+        )
+
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def parse_file(self, request):
         try:

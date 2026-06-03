@@ -114,6 +114,7 @@ const quotationAPI = {
     applyAiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/apply_ai_clean_rows/`, data),
     runAiSuggestions: (id, data = {}) => axiosInstance.post(`/quotations/historical-imports/${id}/run_ai_suggestions/`, data),
     previewPage: (id, params = {}) => axiosInstance.get(`/quotations/historical-imports/${id}/preview_page/`, { params, responseType: 'blob' }),
+    removeFromBatch: (id) => axiosInstance.post(`/quotations/historical-imports/${id}/remove_from_batch/`),
   },
   historicalImportBatches: {
     list: (params = {}) => axiosInstance.get('/quotations/historical-import-batches/', { params }),

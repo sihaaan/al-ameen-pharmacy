@@ -1278,6 +1278,43 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(second.data["duplicate_check"]["primary_match"]["id"], first.data["import"]["id"])
         self.assertEqual(second.data["batch"]["summary"]["files"][-1]["duplicate_match"]["id"], first.data["import"]["id"])
 
+    def test_historical_import_can_be_removed_from_batch_before_line_decisions_are_applied(self):
+        batch = self.client.post(reverse("quotation-historical-import-batch-list"), {"name": "Duplicate review"}, format="json")
+        batch_id = batch.data["id"]
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                upload = self.client.post(
+                    reverse("quotation-historical-import-batch-upload-file", args=[batch_id]),
+                    {"file": self.make_historical_pdf_upload()},
+                    format="multipart",
+                )
+        self.assertEqual(upload.status_code, status.HTTP_201_CREATED)
+        historical_import = HistoricalPriceImport.objects.get(pk=upload.data["import"]["id"])
+        line = historical_import.lines.first()
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            batch_id=batch_id,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_NEEDS_MANUAL_REVIEW,
+            status=HistoricalImportAISuggestion.STATUS_PENDING,
+            reason="Pending review.",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(reverse("quotation-historical-import-remove-from-batch", args=[historical_import.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        historical_import.refresh_from_db()
+        suggestion.refresh_from_db()
+        self.assertIsNone(historical_import.batch_id)
+        self.assertEqual(historical_import.status, HistoricalPriceImport.STATUS_CANCELLED)
+        self.assertIsNone(suggestion.batch_id)
+        self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_REJECTED)
+        self.assertEqual(response.data["status"], "removed")
+        self.assertEqual(response.data["batch"]["imports"], [])
+        self.assertEqual(response.data["batch"]["summary"]["files"][0]["status"], "removed")
+
     def test_historical_filename_company_hint_strips_date_suffix_and_matches_existing_company(self):
         intermass = Company.objects.create(name="Intermass")
         with tempfile.TemporaryDirectory() as private_root:
