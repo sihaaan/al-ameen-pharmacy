@@ -10,6 +10,7 @@ from api.models import Product
 
 from .matching import create_product_alias, suggest_product_for_text
 from .models import (
+    Company,
     CompanyPriceHistory,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
@@ -96,6 +97,36 @@ def _historical_import_summary(historical_import):
 
 def _preview_company_key(preview_data):
     return normalize_label(preview_data.get("suggested_company_name") or "")
+
+
+def _match_existing_company_from_preview(preview_data):
+    company_key = _preview_company_key(preview_data)
+    if not company_key:
+        return None
+
+    exact = Company.objects.filter(normalized_name=company_key, is_active=True).first()
+    if exact:
+        return exact
+
+    company_tokens = {token for token in company_key.split() if len(token) >= 3}
+    if not company_tokens:
+        return None
+
+    candidates = Company.objects.filter(is_active=True)
+    for token in list(company_tokens)[:5]:
+        candidates = candidates.filter(normalized_name__icontains=token)
+
+    for company in candidates.order_by("name")[:10]:
+        candidate_key = normalize_label(company.name)
+        candidate_tokens = {token for token in candidate_key.split() if len(token) >= 3}
+        if not candidate_tokens:
+            continue
+        overlap = company_tokens & candidate_tokens
+        if candidate_key in company_key or company_key in candidate_key:
+            return company
+        if overlap and len(overlap) == min(len(company_tokens), len(candidate_tokens)):
+            return company
+    return None
 
 
 def _historical_import_company_key(historical_import):
@@ -313,6 +344,18 @@ def create_historical_price_import(preview_data, actor, batch=None):
     lines_data = preview_data.pop("lines", [])
     warnings = preview_data.pop("warnings", [])
     meta = preview_data.pop("meta", {})
+    matched_company = _match_existing_company_from_preview(preview_data)
+    if matched_company:
+        preview_data["company"] = matched_company
+        meta = {
+            **meta,
+            "company_match": {
+                "source": "filename_or_document_hint",
+                "company_id": matched_company.id,
+                "company_name": matched_company.name,
+                "reason": "Matched cleaned historical import company hint to an existing company.",
+            },
+        }
     historical_import = HistoricalPriceImport.objects.create(
         batch=batch,
         parse_meta={**meta, "warnings": warnings},

@@ -1055,6 +1055,24 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(HistoricalPriceImport.objects.filter(batch_id=batch_id).count(), 1)
         refreshed_batch = HistoricalImportBatch.objects.get(pk=batch_id)
         self.assertEqual(refreshed_batch.summary["duplicate_file_count"], 1)
+        self.assertEqual(second.data["duplicate_check"]["primary_match"]["id"], first.data["import"]["id"])
+        self.assertEqual(second.data["batch"]["summary"]["files"][-1]["duplicate_match"]["id"], first.data["import"]["id"])
+
+    def test_historical_filename_company_hint_strips_date_suffix_and_matches_existing_company(self):
+        intermass = Company.objects.create(name="Intermass")
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                response = self.client.post(
+                    reverse("quotation-historical-import-parse-file"),
+                    {"file": self.make_historical_pdf_upload(name="Intermass 27032026A.pdf")},
+                    format="multipart",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["suggested_company_name"], "Intermass")
+        self.assertEqual(response.data["company"], intermass.id)
+        historical_import = HistoricalPriceImport.objects.get(pk=response.data["id"])
+        self.assertEqual(historical_import.parse_meta["company_match"]["company_name"], "Intermass")
 
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
@@ -1228,6 +1246,59 @@ class HistoricalPriceImportTests(APITestCase):
         QUOTATION_AI_PARSE_PROVIDER="openai",
         QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
     )
+    @patch.dict("os.environ", {}, clear=True)
+    def test_ai_learning_failure_reports_previous_pending_suggestions(self):
+        batch = HistoricalImportBatch.objects.create(name="Stale suggestions", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="stale.pdf",
+            source_sha256="1" * 64,
+            document_number="Q-STale",
+            document_date=date(2026, 5, 21),
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="SAVLON ANTISEPTIC SOLUTION",
+            quantity=Decimal("1.000"),
+            unit_price=Decimal("5.00"),
+        )
+        HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+            suggested_product=self.item_one,
+            confidence=0.9,
+            reason="Previous run.",
+            created_by=self.staff,
+        )
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.ai_parsing_enabled = True
+        settings_obj.save()
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-run-ai-suggestions", args=[batch.id]),
+            {"import_ids": [historical_import.id], "mode": "text"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.data["summary"]["results"][0]
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["showing_previous_suggestions"])
+        self.assertEqual(result["previous_suggestion_count"], 1)
+        self.assertIn("missing API key", result["message"])
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_ai_learning_skips_obvious_historical_noise_before_product_review(self):
         batch = HistoricalImportBatch.objects.create(name="Noise gate", created_by=self.staff)
@@ -1281,6 +1352,90 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
         self.assertEqual(batch_response.data["wizard_summary"]["pending_suggestion_action_counts"]["skip"], 1)
         self.assertEqual(batch_response.data["wizard_summary"]["line_counts"]["total"], 2)
+
+    def test_ai_suggestion_source_context_is_staff_only(self):
+        response = self.create_parsed_historical_import()
+        historical_import = HistoricalPriceImport.objects.get(pk=response.data["id"])
+        line = historical_import.lines.first()
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+            suggested_product=self.item_one,
+            confidence=0.91,
+            reason="Review source.",
+            created_by=self.staff,
+        )
+        url = reverse("quotation-historical-import-ai-suggestion-source-context", args=[suggestion.id])
+
+        self.client.force_authenticate(None)
+        anonymous = self.client.get(url)
+        self.assertIn(anonymous.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+        self.client.force_authenticate(self.customer)
+        blocked = self.client.get(url)
+        self.assertEqual(blocked.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.staff)
+        allowed = self.client.get(url)
+        self.assertEqual(allowed.status_code, status.HTTP_200_OK)
+        self.assertTrue(allowed.data["available"])
+        self.assertIn("preview_page", allowed.data["preview_url"])
+
+    def test_ai_suggestion_serializer_includes_price_history_context_and_variance_warning(self):
+        quotation = Quotation.objects.create(company=self.company, quotation_number="Q-PRICE", status=Quotation.STATUS_FINALIZED)
+        quotation_line = QuotationLine.objects.create(
+            quotation=quotation,
+            product=self.item_one,
+            item_name_snapshot=self.item_one.name,
+            quantity=Decimal("1.000"),
+            unit_price=Decimal("10.00"),
+            vat_rate=Decimal("0.00"),
+        )
+        CompanyPriceHistory.objects.create(
+            company=self.company,
+            product=self.item_one,
+            quotation=quotation,
+            quotation_line=quotation_line,
+            unit_price=Decimal("10.00"),
+            quantity=Decimal("1.000"),
+            unit="bottle",
+        )
+        historical_import = HistoricalPriceImport.objects.create(
+            company=self.company,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="price.pdf",
+            source_sha256="2" * 64,
+            document_number="Q-PRICE-NEW",
+            document_date=date(2026, 5, 22),
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="SAVLON ANTISEPTIC SOLUTION",
+            quantity=Decimal("1.000"),
+            unit_price=Decimal("18.00"),
+        )
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+            suggested_product=self.item_one,
+            confidence=0.92,
+            reason="Existing Product.",
+            created_by=self.staff,
+        )
+
+        response = self.client.get(reverse("quotation-historical-import-ai-suggestion-detail", args=[suggestion.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        summary = response.data["price_history_summary"]
+        self.assertEqual(summary["last_company_price"], "10.00")
+        self.assertEqual(summary["imported_unit_price"], "18.00")
+        self.assertEqual(summary["price_difference"], "8.00")
+        self.assertIn("Large variance", summary["variance_warning"])
 
     def test_historical_import_same_company_document_number_opens_existing_import(self):
         first = self.create_parsed_historical_import()

@@ -231,8 +231,11 @@ def _extract_document_date(text):
 
 def _suggest_company_from_filename(filename):
     stem = Path(filename or "").stem
-    stem = re.sub(r"\b\d{6,8}\b", " ", stem)
-    stem = re.sub(r"\b\d{1,2}[-_ ]?\d{1,2}[-_ ]?\d{2,4}\b", " ", stem)
+    # File names often include document dates or suffixes, e.g.
+    # "Intermass 27032026A.pdf". Treat those as weak metadata, not company text.
+    stem = re.sub(r"\b\d{6,8}[A-Za-z]?\b", " ", stem)
+    stem = re.sub(r"\b\d{1,2}[-_ ]?\d{1,2}[-_ ]?\d{2,4}[A-Za-z]?\b", " ", stem)
+    stem = re.sub(r"\b(?:quote|quotation|invoice|inv|lpo|po|ref)[-_ ]*[A-Z0-9-]+\b", " ", stem, flags=re.IGNORECASE)
     stem = re.sub(r"[_\-]+", " ", stem)
     stem = normalize_import_line(stem)
     return stem.title()[:255]

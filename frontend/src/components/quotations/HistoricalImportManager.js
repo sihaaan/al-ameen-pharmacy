@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
-import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 const STEPS = [
@@ -54,6 +53,15 @@ const duplicateHelperText = (duplicateCheck) => {
 
 const statValue = (summary, key, fallback = 0) => summary?.[key] ?? fallback;
 
+const formatMoney = (value) => {
+  if (value === null || value === undefined || value === '') return '-';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  return `AED ${numeric.toFixed(2)}`;
+};
+
+const duplicatePrimaryMatch = (duplicateCheck) => duplicateCheck?.primary_match || duplicateCheck?.duplicate_match || null;
+
 const HistoricalImportManager = () => {
   const [companies, setCompanies] = useState([]);
   const [items, setItems] = useState([]);
@@ -75,6 +83,17 @@ const HistoricalImportManager = () => {
   const [errorInfo, setErrorInfo] = useState(null);
   const [workingAction, setWorkingAction] = useState('');
   const [decisionFilter, setDecisionFilter] = useState('all');
+  const [decisionCompanyFilter, setDecisionCompanyFilter] = useState('all');
+  const [decisionFileFilter, setDecisionFileFilter] = useState('all');
+  const [decisionConfidenceFilter, setDecisionConfidenceFilter] = useState('all');
+  const [aiRunResults, setAiRunResults] = useState([]);
+  const [lastAiRunFailed, setLastAiRunFailed] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [sourceModal, setSourceModal] = useState(null);
+  const [duplicateModal, setDuplicateModal] = useState(null);
+  const [selectedDocumentId, setSelectedDocumentId] = useState(null);
+  const [companyModeByImport, setCompanyModeByImport] = useState({});
+  const [groupLimits, setGroupLimits] = useState({});
 
   const selectedBatchImports = useMemo(() => selectedBatch?.imports || [], [selectedBatch]);
   const visibleBatchImportIds = useMemo(() => selectedBatchImports.map((entry) => entry.id), [selectedBatchImports]);
@@ -83,6 +102,7 @@ const HistoricalImportManager = () => {
   const lineCounts = wizardSummary.line_counts || {};
   const pendingActionCounts = wizardSummary.pending_suggestion_action_counts || {};
   const appliedActionCounts = wizardSummary.applied_suggestion_action_counts || {};
+  const selectedDocument = selectedBatchImports.find((entry) => entry.id === selectedDocumentId) || selectedBatchImports[0] || null;
 
   const load = async () => {
     setLoading(true);
@@ -165,20 +185,16 @@ const HistoricalImportManager = () => {
     }
   };
 
-  const rememberCompany = (company) => {
-    setCompanies((current) => {
-      const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
-      return [...withoutDuplicate, company].sort((a, b) => a.name.localeCompare(b.name));
-    });
-  };
-
   const selectBatch = async (batch, step = 'analyze') => {
     setSelectedBatch(batch);
     setActiveStep(step);
     setSelectedBatchImportIds((batch.imports || []).map((entry) => entry.id));
+    setSelectedDocumentId((batch.imports || [])[0]?.id || null);
     setSelectedSuggestionIds([]);
     setNotice(null);
     setErrorInfo(null);
+    setAiRunResults([]);
+    setLastAiRunFailed(false);
     setImportDrafts({});
     await loadSuggestions(batch.id);
   };
@@ -236,6 +252,7 @@ const HistoricalImportManager = () => {
       const refreshed = await refreshSelectedBatch(currentBatch.id);
       const importIds = (refreshed?.imports || []).map((entry) => entry.id);
       setSelectedBatchImportIds(importIds);
+      setSelectedDocumentId(importIds[0] || null);
       await loadSuggestions(currentBatch.id);
       setNotice({ type: 'success', message: 'Batch upload finished. Continue to AI Analyze.' });
       setActiveStep('analyze');
@@ -265,9 +282,9 @@ const HistoricalImportManager = () => {
     });
   };
 
-  const runBatchAiAnalyze = async () => {
+  const runBatchAiAnalyze = async (overrideImportIds = null) => {
     if (!selectedBatch || workingAction) return;
-    const importIds = selectedBatchImportIds.length ? selectedBatchImportIds : visibleBatchImportIds;
+    const importIds = overrideImportIds || (selectedBatchImportIds.length ? selectedBatchImportIds : visibleBatchImportIds);
     if (!importIds.length) {
       setNotice({ type: 'warning', message: 'Select at least one parsed import before running AI Analyze.' });
       return;
@@ -275,23 +292,44 @@ const HistoricalImportManager = () => {
     setWorkingAction('ai');
     setNotice(null);
     setErrorInfo(null);
+    setAiRunResults([]);
+    setLastAiRunFailed(false);
     try {
       const response = await quotationAPI.historicalImportBatches.runAiSuggestions(selectedBatch.id, { import_ids: importIds, mode: 'auto' });
       setSelectedBatch(response.data.batch || selectedBatch);
+      setAiRunResults(response.data.results || response.data.summary?.results || []);
+      const failedCount = response.data.summary.failed || 0;
+      const suggestedCount = response.data.summary.suggested || 0;
+      setLastAiRunFailed(failedCount > 0);
       await loadSuggestions(selectedBatch.id);
       await load();
       setNotice({
-        type: response.data.summary.failed ? 'warning' : 'success',
-        message: `AI Analyze finished: ${response.data.summary.suggested || 0} files analyzed, ${response.data.summary.failed || 0} failed.`,
+        type: failedCount ? 'warning' : 'success',
+        message: failedCount
+          ? `AI Analyze finished with issues: ${suggestedCount} files analyzed, ${failedCount} failed. Review per-file reasons below.`
+          : `AI Analyze finished: ${suggestedCount} files analyzed.`,
       });
     } catch (error) {
       const details = await describeQuotationError(error, 'Run batch AI Analyze', `POST /quotations/historical-import-batches/${selectedBatch.id}/run_ai_suggestions/`);
       setErrorInfo(details);
+      setLastAiRunFailed(true);
       setNotice({ type: 'warning', message: 'AI Analyze failed. Parsed rows are still available.' });
       console.error(formatQuotationError(details), error);
     } finally {
       setWorkingAction('');
     }
+  };
+
+  const retryFailedAiAnalyze = async () => {
+    const failedImportIds = aiRunResults
+      .filter((result) => result.status === 'failed' && result.import_id)
+      .map((result) => result.import_id);
+    if (!failedImportIds.length) {
+      setNotice({ type: 'warning', message: 'There are no failed AI files to retry.' });
+      return;
+    }
+    setSelectedBatchImportIds(failedImportIds);
+    await runBatchAiAnalyze(failedImportIds);
   };
 
   const updateImportDraft = (importId, patch) => {
@@ -426,9 +464,37 @@ const HistoricalImportManager = () => {
     setSelectedSuggestionIds((current) => (append ? Array.from(new Set([...current, ...ids])) : ids));
   };
 
-  const applySelectedSuggestions = async (ids = selectedSuggestionIds) => {
+  const describeApplySelection = (ids) => {
+    const chosen = suggestions.filter((suggestion) => ids.includes(suggestion.id));
+    const counts = chosen.reduce((acc, suggestion) => {
+      acc[suggestion.action] = (acc[suggestion.action] || 0) + 1;
+      return acc;
+    }, {});
+    return [
+      counts.match_existing_company ? `${counts.match_existing_company} company match(es)` : '',
+      counts.create_new_company ? `${counts.create_new_company} new company approval(s)` : '',
+      counts.match_existing_product ? `${counts.match_existing_product} Product match(es)` : '',
+      counts.create_company_alias ? `${counts.create_company_alias} alias creation(s)` : '',
+      counts.create_new_product ? `${counts.create_new_product} draft Product creation(s)` : '',
+      counts.skip ? `${counts.skip} skipped/noise row(s)` : '',
+      counts.needs_manual_review ? `${counts.needs_manual_review} row(s) left for manual review` : '',
+    ].filter(Boolean);
+  };
+
+  const requestApplySuggestions = (ids = selectedSuggestionIds) => {
     if (!ids.length || workingAction) return;
-    if (!window.confirm('Apply selected AI decisions? This may create approved draft Products, aliases, or company links, but will not commit price history.')) return;
+    setConfirmAction({
+      title: 'Apply selected AI decisions?',
+      body: 'This applies staff-approved review decisions only. It may create company links, aliases, or draft/internal Products, but it will not commit price history.',
+      details: describeApplySelection(ids),
+      confirmLabel: 'Apply decisions',
+      onConfirm: () => performApplySuggestions(ids),
+    });
+  };
+
+  const performApplySuggestions = async (ids = selectedSuggestionIds) => {
+    if (!ids.length || workingAction) return;
+    setConfirmAction(null);
     setWorkingAction('apply');
     setNotice(null);
     setErrorInfo(null);
@@ -482,11 +548,83 @@ const HistoricalImportManager = () => {
     }
   };
 
+  const openSourceContext = async (suggestion) => {
+    const context = suggestion.source_context || {};
+    setSourceModal({
+      loading: true,
+      title: suggestion.line_item_name || 'Source row',
+      context,
+      imageUrl: '',
+      error: '',
+    });
+    if (!context.available || !suggestion.historical_import) {
+      setSourceModal({
+        loading: false,
+        title: suggestion.line_item_name || 'Source row',
+        context,
+        imageUrl: '',
+        error: context.message || 'Source preview unavailable for this historical import.',
+      });
+      return;
+    }
+    try {
+      const response = await quotationAPI.historicalImports.previewPage(suggestion.historical_import, { page: context.page_number || 1 });
+      const imageUrl = URL.createObjectURL(response.data);
+      setSourceModal({
+        loading: false,
+        title: suggestion.line_item_name || 'Source row',
+        context,
+        imageUrl,
+        error: '',
+      });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load source preview', `GET /quotations/historical-imports/${suggestion.historical_import}/preview_page/`);
+      setSourceModal({
+        loading: false,
+        title: suggestion.line_item_name || 'Source row',
+        context,
+        imageUrl: '',
+        error: details.detail || 'Source preview unavailable.',
+      });
+    }
+  };
+
+  const closeSourceModal = () => {
+    if (sourceModal?.imageUrl) URL.revokeObjectURL(sourceModal.imageUrl);
+    setSourceModal(null);
+  };
+
+  const openDuplicateInspection = (entry, duplicateCheck, mode = 'compare') => {
+    const match = duplicatePrimaryMatch(duplicateCheck);
+    if (!match) return;
+    setDuplicateModal({
+      mode,
+      current: entry,
+      duplicateCheck,
+      match,
+    });
+  };
+
   const commitSelectedBatchImports = async () => {
     if (!selectedBatch || workingAction) return;
     const importIds = selectedBatchImportIds.length ? selectedBatchImportIds : visibleBatchImportIds;
     if (!importIds.length) return;
-    if (!window.confirm('Commit ready rows from the selected imports into price history? Needs-review and skipped rows are ignored.')) return;
+    setConfirmAction({
+      title: 'Commit ready rows to price history?',
+      body: 'Only rows already marked ready will create company-specific price history. Needs-review, skipped, duplicate, and unresolved rows are ignored.',
+      details: [
+        `${importIds.length} selected import(s)`,
+        `${lineCounts.ready || 0} ready row(s) in the batch`,
+        'No Products or aliases are created by this commit step.',
+      ],
+      confirmLabel: 'Commit price history',
+      onConfirm: () => performCommitSelectedBatchImports(importIds),
+    });
+  };
+
+  const performCommitSelectedBatchImports = async (importIds) => {
+    if (!selectedBatch || workingAction || !importIds.length) return;
+    setConfirmAction(null);
     setWorkingAction('commit');
     setNotice(null);
     setErrorInfo(null);
@@ -509,7 +647,18 @@ const HistoricalImportManager = () => {
   };
 
   const suggestionGroups = useMemo(() => {
-    const lineSuggestions = suggestions.filter((suggestion) => suggestion.suggestion_type === 'line');
+    const lineSuggestions = suggestions.filter((suggestion) => {
+      if (suggestion.suggestion_type !== 'line') return false;
+      if (decisionCompanyFilter !== 'all') {
+        const companyName = suggestion.historical_import_company_name || '';
+        if (companyName !== decisionCompanyFilter) return false;
+      }
+      if (decisionFileFilter !== 'all' && suggestion.historical_import_filename !== decisionFileFilter) return false;
+      if (decisionConfidenceFilter === 'high' && confidencePercent(suggestion.confidence) < 85) return false;
+      if (decisionConfidenceFilter === 'low' && confidencePercent(suggestion.confidence) >= 85) return false;
+      if (decisionConfidenceFilter === 'unresolved' && suggestion.status !== 'pending' && suggestion.status !== 'conflict') return false;
+      return true;
+    });
     const groups = {
       match_existing_product: [],
       create_company_alias: [],
@@ -522,10 +671,18 @@ const HistoricalImportManager = () => {
       groups[key].push(suggestion);
     });
     return groups;
-  }, [suggestions]);
+  }, [decisionCompanyFilter, decisionConfidenceFilter, decisionFileFilter, suggestions]);
 
   const companySuggestions = useMemo(() => (
     suggestions.filter((suggestion) => suggestion.suggestion_type === 'company')
+  ), [suggestions]);
+
+  const decisionCompanyOptions = useMemo(() => (
+    Array.from(new Set(suggestions.map((suggestion) => suggestion.historical_import_company_name).filter(Boolean))).sort()
+  ), [suggestions]);
+
+  const decisionFileOptions = useMemo(() => (
+    Array.from(new Set(suggestions.map((suggestion) => suggestion.historical_import_filename).filter(Boolean))).sort()
   ), [suggestions]);
 
   const filteredDecisionGroups = useMemo(() => {
@@ -658,7 +815,7 @@ const HistoricalImportManager = () => {
           <h3>AI Analyze Batch</h3>
           <p>One action cleans parse rows, detects companies, suggests Products, aliases, new draft Products, and skips noise rows.</p>
         </div>
-        <button type="button" className="qm-primary" disabled={!selectedBatch || workingAction === 'ai'} onClick={runBatchAiAnalyze}>
+        <button type="button" className="qm-primary" disabled={!selectedBatch || workingAction === 'ai'} onClick={() => runBatchAiAnalyze()}>
           {workingAction === 'ai' ? 'Running AI Analyze...' : 'Run AI Analyze'}
         </button>
       </div>
@@ -667,6 +824,35 @@ const HistoricalImportManager = () => {
       ) : (
         <>
           {renderBatchSummary()}
+          {lastAiRunFailed && suggestions.length > 0 && (
+            <div className="qm-notice warning">
+              <strong>AI Analyze failed for at least one file in this run.</strong>
+              <p>Showing previous pending suggestions from an earlier successful run. Retry failed files or inspect the per-file reasons below.</p>
+            </div>
+          )}
+          {aiRunResults.length > 0 && (
+            <div className="qm-ai-run-results">
+              <div className="qm-card-title-row">
+                <h4>Latest AI Analyze results</h4>
+                <button type="button" className="qm-secondary small" disabled={workingAction === 'ai' || !aiRunResults.some((result) => result.status === 'failed')} onClick={retryFailedAiAnalyze}>
+                  Retry failed files
+                </button>
+              </div>
+              {aiRunResults.map((result) => {
+                const entry = selectedBatchImports.find((candidate) => candidate.id === result.import_id);
+                return (
+                  <div key={`${result.import_id || result.filename}-${result.status}`} className={`qm-ai-run-row status-${result.status}`}>
+                    <strong>{entry?.source_filename || result.filename || `Import #${result.import_id}`}</strong>
+                    <span>{result.status}</span>
+                    <small>{result.message || `${result.suggestion_count || 0} suggestions generated.`}</small>
+                    {result.showing_previous_suggestions && (
+                      <em>Showing {result.previous_suggestion_count} previous suggestion(s).</em>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="qm-ai-analysis-grid">
             <div className="qm-ai-analysis-card">
               <span>Existing Product matches</span>
@@ -743,88 +929,139 @@ const HistoricalImportManager = () => {
       {!selectedBatch ? (
         <div className="qm-empty">Open a batch first.</div>
       ) : (
-        <div className="qm-document-grid">
-          {companySuggestions.length > 0 && (
-            <div className="qm-company-suggestions">
-              <h4>AI Company Suggestions</h4>
-              {companySuggestions.map((suggestion) => {
-                const draft = suggestionDrafts[suggestion.id] || {};
-                return (
-                  <div key={suggestion.id} className={`qm-decision-card status-${suggestion.status}`}>
-                    <div>
-                      <strong>{suggestion.historical_import_filename}</strong>
-                      <p>{ACTION_LABELS[draft.action || suggestion.action]} - {confidencePercent(suggestion.confidence)}%</p>
-                      <small>{suggestion.reason || '-'}</small>
-                    </div>
-                    <select value={draft.action || suggestion.action} disabled={suggestion.status !== 'pending'} onChange={(event) => updateSuggestionDraft(suggestion.id, { action: event.target.value })}>
-                      <option value="match_existing_company">Match existing company</option>
-                      <option value="create_new_company">Create new company</option>
-                      <option value="needs_manual_review">Needs manual review</option>
-                    </select>
-                    {(draft.action || suggestion.action) === 'match_existing_company' ? (
-                      <select value={draft.suggested_company || ''} disabled={suggestion.status !== 'pending'} onChange={(event) => updateSuggestionDraft(suggestion.id, { suggested_company: event.target.value || '' })}>
-                        <option value="">Select company</option>
-                        {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-                      </select>
-                    ) : (
-                      <input value={draft.proposed_company_name || ''} disabled={suggestion.status !== 'pending'} onChange={(event) => updateSuggestionDraft(suggestion.id, { proposed_company_name: event.target.value })} placeholder="New company name" />
-                    )}
-                    <div className="qm-action-row">
-                      <button type="button" className="qm-secondary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>Save</button>
-                      <button type="button" className="qm-primary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => applySelectedSuggestions([suggestion.id])}>Apply</button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          {selectedBatchImports.map((entry) => {
-            const draft = draftForImport(entry);
-            const duplicateCheck = entry.duplicate_check || entry.parse_meta?.duplicate_check;
-            return (
-              <div key={entry.id} className="qm-document-card-compact">
-                <div className="qm-card-title-row">
-                  <div>
-                    <h4>{entry.source_filename}</h4>
-                    <p>{entry.lines?.length || 0} rows - <span className={`qm-badge status-${entry.status}`}>{entry.status}</span></p>
-                  </div>
-                  {duplicateCheck?.is_duplicate && <span className="qm-badge status-duplicate">duplicate</span>}
-                </div>
-                {duplicateCheck?.is_duplicate && (
-                  <div className="qm-notice warning compact">
-                    <strong>{duplicateCheck.message}</strong>
-                    <p>{duplicateHelperText(duplicateCheck)}</p>
-                  </div>
-                )}
-                <div className="qm-details-grid">
-                  <label>
-                    <span className="qm-label-text">Company</span>
-                    <CompanySelectWithCreate
-                      companies={companies}
-                      value={draft.company || ''}
-                      disabled={entry.status === 'committed'}
-                      initialName={draft.suggested_company_name || ''}
-                      suggestedName={draft.suggested_company_name || ''}
-                      onChange={(companyId) => updateImportDraft(entry.id, { company: companyId })}
-                      onCreated={rememberCompany}
-                    />
-                  </label>
-                  <label><span className="qm-label-text">Document number</span>
-                    <input disabled={entry.status === 'committed'} value={draft.document_number || ''} onChange={(event) => updateImportDraft(entry.id, { document_number: event.target.value })} />
-                  </label>
-                  <label><span className="qm-label-text">Document date</span>
-                    <input disabled={entry.status === 'committed'} type="date" value={draft.document_date || ''} onChange={(event) => updateImportDraft(entry.id, { document_date: event.target.value })} />
-                  </label>
-                  <label><span className="qm-label-text">Total</span>
-                    <input disabled={entry.status === 'committed'} type="number" step="0.01" value={draft.total || ''} onChange={(event) => updateImportDraft(entry.id, { total: event.target.value })} />
-                  </label>
-                </div>
-                <button type="button" className="qm-secondary small" disabled={Boolean(workingAction) || entry.status === 'committed'} onClick={() => saveImportDetails(entry)}>
-                  {workingAction === `save-import-${entry.id}` ? 'Saving...' : 'Save Document'}
+        <div className="qm-document-review-layout">
+          <div className="qm-document-list-panel">
+            <h4>Documents in this batch</h4>
+            {selectedBatchImports.map((entry) => {
+              const duplicateCheck = entry.duplicate_check || entry.parse_meta?.duplicate_check;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className={`qm-document-list-row${selectedDocument?.id === entry.id ? ' active' : ''}`}
+                  onClick={() => setSelectedDocumentId(entry.id)}
+                >
+                  <strong>{entry.source_filename}</strong>
+                  <span>{entry.company_name || entry.suggested_company_name || 'Company not selected'}</span>
+                  <small>{entry.document_number || '-'} - {entry.document_date || '-'}</small>
+                  <em>{entry.lines?.length || 0} rows</em>
+                  {duplicateCheck?.is_duplicate && <i>{duplicateCheck.blocking ? 'Exact duplicate' : 'Similar import'}</i>}
                 </button>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+
+          <div className="qm-document-detail-panel">
+            {!selectedDocument ? (
+              <div className="qm-empty compact">Select a document to review details.</div>
+            ) : (() => {
+              const entry = selectedDocument;
+              const draft = draftForImport(entry);
+              const duplicateCheck = entry.duplicate_check || entry.parse_meta?.duplicate_check;
+              const match = duplicatePrimaryMatch(duplicateCheck);
+              const relatedCompanySuggestions = companySuggestions.filter((suggestion) => suggestion.historical_import === entry.id);
+              const mode = companyModeByImport[entry.id] || (relatedCompanySuggestions[0]?.action === 'create_new_company' ? 'create' : 'match');
+              return (
+                <>
+                  <div className="qm-card-title-row">
+                    <div>
+                      <h4>{entry.source_filename}</h4>
+                      <p>{entry.lines?.length || 0} rows - <span className={`qm-badge status-${entry.status}`}>{entry.status}</span></p>
+                    </div>
+                    <span className="qm-badge muted">Document #{entry.id}</span>
+                  </div>
+
+                  {duplicateCheck?.is_duplicate && (
+                    <div className="qm-notice warning compact">
+                      <strong>{duplicateCheck.blocking ? 'Exact duplicate or blocking duplicate' : 'Similar previous import'}</strong>
+                      <p>{duplicateCheck.message} {duplicateHelperText(duplicateCheck)}</p>
+                      {match && (
+                        <div className="qm-duplicate-match">
+                          <span>Previous import: #{match.id}</span>
+                          <span>File: {match.source_filename || '-'}</span>
+                          <span>Company: {match.company_name || '-'}</span>
+                          <span>Date: {match.document_date || '-'}</span>
+                          <span>Document: {match.document_number || '-'}</span>
+                          <span>Rows: {match.line_count ?? '-'}</span>
+                          <span>Reason: {(match.messages || []).join(' ') || duplicateCheck.message}</span>
+                          <div className="qm-duplicate-actions">
+                            <button type="button" className="qm-secondary small" onClick={() => openDuplicateInspection(entry, duplicateCheck, 'previous')}>
+                              View previous import
+                            </button>
+                            <button type="button" className="qm-secondary small" onClick={() => openDuplicateInspection(entry, duplicateCheck, 'compare')}>
+                              Compare with current
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {relatedCompanySuggestions.length > 0 && (
+                    <div className="qm-company-suggestions compact">
+                      <h4>AI company decision</h4>
+                      {relatedCompanySuggestions.map((suggestion) => {
+                        const suggestionDraft = suggestionDrafts[suggestion.id] || {};
+                        return (
+                          <div key={suggestion.id} className={`qm-company-decision-row status-${suggestion.status}`}>
+                            <div>
+                              <strong>{ACTION_LABELS[suggestionDraft.action || suggestion.action]}</strong>
+                              <small>{confidencePercent(suggestion.confidence)}% - {suggestion.reason || 'No reason provided.'}</small>
+                            </div>
+                            <button type="button" className="qm-secondary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>Save</button>
+                            <button type="button" className="qm-primary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => requestApplySuggestions([suggestion.id])}>Apply company decision</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="qm-company-mode">
+                    <button type="button" className={mode === 'match' ? 'active' : ''} onClick={() => setCompanyModeByImport((current) => ({ ...current, [entry.id]: 'match' }))}>Match existing company</button>
+                    <button type="button" className={mode === 'create' ? 'active' : ''} onClick={() => setCompanyModeByImport((current) => ({ ...current, [entry.id]: 'create' }))}>Create new company</button>
+                  </div>
+
+                  <div className="qm-details-grid relaxed">
+                    {mode === 'match' ? (
+                      <label>
+                        <span className="qm-label-text">Selected existing company</span>
+                        <select disabled={entry.status === 'committed'} value={draft.company || ''} onChange={(event) => updateImportDraft(entry.id, { company: event.target.value })}>
+                          <option value="">Select company</option>
+                          {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+                        </select>
+                      </label>
+                    ) : (
+                      <label>
+                        <span className="qm-label-text">New company name</span>
+                        <input disabled={entry.status === 'committed'} value={draft.suggested_company_name || ''} onChange={(event) => updateImportDraft(entry.id, { suggested_company_name: event.target.value })} />
+                      </label>
+                    )}
+                    <label><span className="qm-label-text">Document number</span>
+                      <input disabled={entry.status === 'committed'} value={draft.document_number || ''} onChange={(event) => updateImportDraft(entry.id, { document_number: event.target.value })} />
+                    </label>
+                    <label><span className="qm-label-text">Document date</span>
+                      <input disabled={entry.status === 'committed'} type="date" value={draft.document_date || ''} onChange={(event) => updateImportDraft(entry.id, { document_date: event.target.value })} />
+                    </label>
+                    <label><span className="qm-label-text">Subtotal</span>
+                      <input disabled={entry.status === 'committed'} type="number" step="0.01" value={draft.subtotal || ''} onChange={(event) => updateImportDraft(entry.id, { subtotal: event.target.value })} />
+                    </label>
+                    <label><span className="qm-label-text">VAT</span>
+                      <input disabled={entry.status === 'committed'} type="number" step="0.01" value={draft.vat_total || ''} onChange={(event) => updateImportDraft(entry.id, { vat_total: event.target.value })} />
+                    </label>
+                    <label><span className="qm-label-text">Total</span>
+                      <input disabled={entry.status === 'committed'} type="number" step="0.01" value={draft.total || ''} onChange={(event) => updateImportDraft(entry.id, { total: event.target.value })} />
+                    </label>
+                  </div>
+                  <div className="qm-action-row">
+                    <button type="button" className="qm-secondary" disabled={Boolean(workingAction) || entry.status === 'committed'} onClick={() => saveImportDetails(entry)}>
+                      {workingAction === `save-import-${entry.id}` ? 'Saving document...' : 'Save Document'}
+                    </button>
+                    <button type="button" className="qm-primary" onClick={() => setActiveStep('decisions')}>Review this document's Products</button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
     </div>
@@ -834,6 +1071,7 @@ const HistoricalImportManager = () => {
     const draft = suggestionDrafts[suggestion.id] || {};
     const lineDraft = suggestion.line ? (lineDrafts[suggestion.line] || emptyLineDraft) : emptyLineDraft;
     const locked = suggestion.status !== 'pending';
+    const priceSummary = suggestion.price_history_summary || {};
     return (
       <div key={suggestion.id} className={`qm-decision-card status-${suggestion.status}`}>
         <div className="qm-decision-card-main">
@@ -846,7 +1084,7 @@ const HistoricalImportManager = () => {
             <small>{suggestion.historical_import_filename} - {suggestion.historical_import_company_name || '-'}</small>
             <div className="qm-decision-meta">
               <span>{lineDraft.quantity || '-'} {lineDraft.unit || ''}</span>
-              <span>Price {lineDraft.unit_price || '-'}</span>
+              <span>Imported price {formatMoney(lineDraft.unit_price)}</span>
               <span>Total {lineDraft.line_total || '-'}</span>
               <span className={`qm-badge ${confidencePercent(suggestion.confidence) >= 85 ? 'success' : 'muted'}`}>{confidencePercent(suggestion.confidence)}%</span>
               <span className={`qm-badge status-${suggestion.status}`}>{suggestion.status}</span>
@@ -921,6 +1159,24 @@ const HistoricalImportManager = () => {
           </div>
         )}
 
+        <div className="qm-price-context">
+          <div>
+            <span>Previous company price</span>
+            <strong>{priceSummary.last_company_price ? formatMoney(priceSummary.last_company_price) : '-'}</strong>
+            <small>{priceSummary.last_company_price_date || priceSummary.message || 'No previous company price found.'}</small>
+          </div>
+          <div>
+            <span>Difference</span>
+            <strong>{priceSummary.price_difference ? formatMoney(priceSummary.price_difference) : '-'}</strong>
+            <small>{priceSummary.price_difference_percent ? `${priceSummary.price_difference_percent}%` : `${priceSummary.recent_company_price_count || 0} recent price(s)`}</small>
+          </div>
+          <div>
+            <span>Product base price</span>
+            <strong>{formatMoney(priceSummary.product_base_price)}</strong>
+            <small>{priceSummary.variance_warning || 'Compare before approving.'}</small>
+          </div>
+        </div>
+
         <details className="qm-decision-reason">
           <summary>AI reason and candidates</summary>
           <p>{suggestion.reason || suggestion.error_message || 'No reason provided.'}</p>
@@ -934,10 +1190,11 @@ const HistoricalImportManager = () => {
         </details>
 
         <div className="qm-action-row">
+          <button type="button" className="qm-secondary small" onClick={() => openSourceContext(suggestion)}>View Source</button>
           <button type="button" className="qm-secondary small" disabled={Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>
             {workingAction === `save-suggestion-${suggestion.id}` ? 'Saving...' : 'Save Edits'}
           </button>
-          <button type="button" className="qm-primary small" disabled={locked || Boolean(workingAction)} onClick={() => applySelectedSuggestions([suggestion.id])}>Apply This</button>
+          <button type="button" className="qm-primary small" disabled={locked || Boolean(workingAction)} onClick={() => requestApplySuggestions([suggestion.id])}>Apply This</button>
         </div>
       </div>
     );
@@ -947,6 +1204,8 @@ const HistoricalImportManager = () => {
     const isCollapsed = key === 'skip' && !expandedGroups.skip;
     const pending = groupSuggestions.filter((suggestion) => suggestion.status === 'pending');
     const highConfidence = pending.filter((suggestion) => confidencePercent(suggestion.confidence) >= 85);
+    const visibleLimit = groupLimits[key] || 25;
+    const visibleSuggestions = groupSuggestions.slice(0, visibleLimit);
     return (
       <div className={`qm-decision-group group-${key}`} key={key}>
         <div className="qm-decision-group-header">
@@ -965,7 +1224,7 @@ const HistoricalImportManager = () => {
             ) : (
               <>
                 <button type="button" className="qm-secondary small" disabled={!pending.length} onClick={() => selectSuggestionGroup(pending)}>Select Pending</button>
-                <button type="button" className="qm-primary small" disabled={!highConfidence.length || Boolean(workingAction)} onClick={() => applySelectedSuggestions(highConfidence.map((suggestion) => suggestion.id))}>
+                <button type="button" className="qm-primary small" disabled={!highConfidence.length || Boolean(workingAction)} onClick={() => requestApplySuggestions(highConfidence.map((suggestion) => suggestion.id))}>
                   Approve High Confidence
                 </button>
               </>
@@ -974,8 +1233,13 @@ const HistoricalImportManager = () => {
         </div>
         {!isCollapsed && (
           <div className={options.compact ? 'qm-decision-list compact' : 'qm-decision-list'}>
-            {groupSuggestions.map(renderDecisionCard)}
+            {visibleSuggestions.map(renderDecisionCard)}
             {!groupSuggestions.length && <div className="qm-empty compact">No rows in this group.</div>}
+            {groupSuggestions.length > visibleSuggestions.length && (
+              <button type="button" className="qm-secondary" onClick={() => setGroupLimits((current) => ({ ...current, [key]: visibleLimit + 25 }))}>
+                Show 25 more ({groupSuggestions.length - visibleSuggestions.length} remaining)
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -998,6 +1262,20 @@ const HistoricalImportManager = () => {
             <option value="needs_manual_review">Needs manual review</option>
             <option value="skip">Skipped/noise rows</option>
           </select>
+          <select className="qm-input" value={decisionCompanyFilter} onChange={(event) => setDecisionCompanyFilter(event.target.value)}>
+            <option value="all">All companies</option>
+            {decisionCompanyOptions.map((companyName) => <option key={companyName} value={companyName}>{companyName}</option>)}
+          </select>
+          <select className="qm-input" value={decisionFileFilter} onChange={(event) => setDecisionFileFilter(event.target.value)}>
+            <option value="all">All files</option>
+            {decisionFileOptions.map((filename) => <option key={filename} value={filename}>{filename}</option>)}
+          </select>
+          <select className="qm-input" value={decisionConfidenceFilter} onChange={(event) => setDecisionConfidenceFilter(event.target.value)}>
+            <option value="all">All confidence</option>
+            <option value="high">High confidence</option>
+            <option value="low">Needs closer review</option>
+            <option value="unresolved">Pending/conflict only</option>
+          </select>
           <button type="button" className="qm-secondary" onClick={() => setActiveStep('commit')}>Final Review</button>
         </div>
       </div>
@@ -1009,7 +1287,7 @@ const HistoricalImportManager = () => {
             <strong>{selectedSuggestionIds.length} AI decisions selected</strong>
             <button type="button" className="qm-secondary small" disabled={!selectedSuggestionIds.length} onClick={() => setSelectedSuggestionIds([])}>Clear</button>
             <span className="qm-bulk-spacer" />
-            <button type="button" className="qm-primary small" disabled={!selectedSuggestionIds.length || Boolean(workingAction)} onClick={() => applySelectedSuggestions()}>Apply Selected</button>
+            <button type="button" className="qm-primary small" disabled={!selectedSuggestionIds.length || Boolean(workingAction)} onClick={() => requestApplySuggestions()}>Apply Selected</button>
             <button type="button" className="qm-secondary small" disabled={!selectedSuggestionIds.length || Boolean(workingAction)} onClick={() => markLinesReady(suggestions.filter((suggestion) => selectedSuggestionIds.includes(suggestion.id)).map((suggestion) => suggestion.line).filter(Boolean))}>Mark Selected Rows Ready</button>
           </div>
           {Object.entries(filteredDecisionGroups).map(([key, group]) => {
@@ -1105,6 +1383,88 @@ const HistoricalImportManager = () => {
       {renderStepHeader()}
       {notice && <div className={`qm-feedback ${notice.type || 'success'}`}>{notice.message}</div>}
       {errorInfo && <QuotationErrorNotice errorInfo={errorInfo} onDismiss={() => setErrorInfo(null)} />}
+      {confirmAction && (
+        <div className="qm-modal-backdrop" role="presentation">
+          <div className="qm-confirm-modal" role="dialog" aria-modal="true" aria-label={confirmAction.title}>
+            <h3>{confirmAction.title}</h3>
+            <p>{confirmAction.body}</p>
+            {confirmAction.details?.length > 0 && (
+              <ul>
+                {confirmAction.details.map((detail) => <li key={detail}>{detail}</li>)}
+              </ul>
+            )}
+            <div className="qm-action-row">
+              <button type="button" className="qm-secondary" onClick={() => setConfirmAction(null)}>Cancel</button>
+              <button type="button" className="qm-primary" onClick={confirmAction.onConfirm}>{confirmAction.confirmLabel || 'Confirm'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {sourceModal && (
+        <div className="qm-modal-backdrop" role="presentation">
+          <div className="qm-source-modal" role="dialog" aria-modal="true" aria-label="Source quotation preview">
+            <div className="qm-card-title-row">
+              <div>
+                <h3>Source quotation evidence</h3>
+                <p>{sourceModal.context?.filename || 'Historical source'} - page {sourceModal.context?.page_number || 1}, row {sourceModal.context?.source_row || '-'}</p>
+              </div>
+              <button type="button" className="qm-secondary small" onClick={closeSourceModal}>Close</button>
+            </div>
+            <div className="qm-source-context-grid">
+              <div className="qm-source-preview">
+                {sourceModal.loading && <div className="qm-loading">Loading source preview...</div>}
+                {!sourceModal.loading && sourceModal.imageUrl && <img src={sourceModal.imageUrl} alt="Source PDF page preview" />}
+                {!sourceModal.loading && !sourceModal.imageUrl && <div className="qm-empty compact">{sourceModal.error || 'Source preview unavailable.'}</div>}
+              </div>
+              <div className="qm-source-row-context">
+                <h4>{sourceModal.title}</h4>
+                <p>{sourceModal.context?.raw_line || 'No extracted row context was stored.'}</p>
+                <small>Use the source page and row text to verify pack size, dosage, quantity, and price before approval.</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {duplicateModal && (
+        <div className="qm-modal-backdrop" role="presentation">
+          <div className="qm-confirm-modal qm-duplicate-modal" role="dialog" aria-modal="true" aria-label="Duplicate import details">
+            <div className="qm-card-title-row">
+              <div>
+                <h3>{duplicateModal.mode === 'previous' ? 'Previous import details' : 'Compare duplicate warning'}</h3>
+                <p>{duplicateModal.duplicateCheck?.blocking ? 'Exact duplicate or blocking duplicate' : 'Similar historical import'} - {duplicateModal.duplicateCheck?.message}</p>
+              </div>
+              <button type="button" className="qm-secondary small" onClick={() => setDuplicateModal(null)}>Close</button>
+            </div>
+            <div className="qm-duplicate-compare-grid">
+              <div>
+                <h4>Current upload</h4>
+                <dl>
+                  <dt>Import ID</dt><dd>#{duplicateModal.current?.id}</dd>
+                  <dt>File</dt><dd>{duplicateModal.current?.source_filename || '-'}</dd>
+                  <dt>Company</dt><dd>{duplicateModal.current?.company_name || duplicateModal.current?.suggested_company_name || '-'}</dd>
+                  <dt>Date</dt><dd>{duplicateModal.current?.document_date || '-'}</dd>
+                  <dt>Document</dt><dd>{duplicateModal.current?.document_number || '-'}</dd>
+                  <dt>Rows</dt><dd>{duplicateModal.current?.lines?.length ?? '-'}</dd>
+                </dl>
+              </div>
+              <div>
+                <h4>Previous import</h4>
+                <dl>
+                  <dt>Import ID</dt><dd>#{duplicateModal.match?.id}</dd>
+                  <dt>File</dt><dd>{duplicateModal.match?.source_filename || '-'}</dd>
+                  <dt>Company</dt><dd>{duplicateModal.match?.company_name || '-'}</dd>
+                  <dt>Date</dt><dd>{duplicateModal.match?.document_date || '-'}</dd>
+                  <dt>Document</dt><dd>{duplicateModal.match?.document_number || '-'}</dd>
+                  <dt>Rows</dt><dd>{duplicateModal.match?.line_count ?? '-'}</dd>
+                </dl>
+              </div>
+            </div>
+            <div className="qm-helper compact">
+              Reason: {(duplicateModal.match?.messages || []).join(' ') || duplicateModal.duplicateCheck?.message || 'Matched by duplicate detection.'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {activeStep === 'upload' && renderUploadStep()}
       {activeStep === 'analyze' && renderAnalyzeStep()}

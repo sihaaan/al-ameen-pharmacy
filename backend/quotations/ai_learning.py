@@ -26,6 +26,7 @@ from .ai_parsing import (
 from .matching import create_product_alias, product_catalog_queryset, suggest_product_for_text
 from .models import (
     Company,
+    CompanyPriceHistory,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
     HistoricalPriceImport,
@@ -179,6 +180,24 @@ def _product_payload(product):
     }
 
 
+def _product_price_context(product, company=None):
+    context = {
+        "base_price": str(product.price) if getattr(product, "price", None) is not None else "",
+        "last_company_price": "",
+        "last_company_price_date": "",
+        "recent_company_price_count": 0,
+    }
+    if not company:
+        return context
+    history = CompanyPriceHistory.objects.filter(company=company, product=product).order_by("-quoted_at", "-id")
+    context["recent_company_price_count"] = history[:10].count()
+    last_price = history.first()
+    if last_price:
+        context["last_company_price"] = str(last_price.unit_price)
+        context["last_company_price_date"] = last_price.quoted_at.date().isoformat()
+    return context
+
+
 def _company_payload(company):
     return {
         "id": company.id,
@@ -243,7 +262,10 @@ def _candidate_products_for_line(line, company=None):
             if len(seen) >= MAX_CANDIDATES_PER_ROW:
                 break
 
-    return [_product_payload(product) for product in list(seen.values())[:MAX_CANDIDATES_PER_ROW]]
+    return [
+        {**_product_payload(product), "price_context": _product_price_context(product, company)}
+        for product in list(seen.values())[:MAX_CANDIDATES_PER_ROW]
+    ]
 
 
 def _candidate_companies_for_import(historical_import):
@@ -666,9 +688,45 @@ def generate_batch_learning_suggestions(batch, import_ids=None, actor=None, requ
                 }
             )
         except AIParseError as exc:
-            results.append({"import_id": historical_import.id, "status": "failed", "message": str(exc)})
+            existing_count = HistoricalImportAISuggestion.objects.filter(
+                historical_import=historical_import,
+                status=HistoricalImportAISuggestion.STATUS_PENDING,
+            ).count()
+            results.append(
+                {
+                    "import_id": historical_import.id,
+                    "filename": historical_import.source_filename,
+                    "status": "failed",
+                    "message": _friendly_ai_failure_message(str(exc)),
+                    "raw_message": str(exc),
+                    "previous_suggestion_count": existing_count,
+                    "showing_previous_suggestions": existing_count > 0,
+                }
+            )
     refresh_historical_import_batch_summary(batch)
     return _summary_from_results(results), results
+
+
+def _friendly_ai_failure_message(message):
+    text = str(message or "").strip()
+    lowered = text.lower()
+    if "missing api key" in lowered or "api key" in lowered:
+        return "AI unavailable: missing API key. Check OPENAI_API_KEY on the Railway backend service."
+    if "disabled" in lowered and "vision" in lowered:
+        return "AI vision cleanup is disabled in Quotation Settings."
+    if "disabled" in lowered:
+        return "AI parsing is disabled in Quotation Settings or by the global environment switch."
+    if "render" in lowered and "pdf" in lowered:
+        return "AI could not render the source PDF for vision analysis."
+    if "source pdf" in lowered or "source file" in lowered or "private storage" in lowered:
+        return "Source file is unavailable for AI analysis. Re-upload the PDF if source preview is missing."
+    if "timeout" in lowered:
+        return "AI request timed out. Retry failed files or reduce the batch size."
+    if "rate" in lowered and "limit" in lowered:
+        return "AI rate limit reached. Wait briefly and retry failed files."
+    if not text:
+        return "AI request failed with no provider details. Retry failed files and check backend logs."
+    return text
 
 
 def _summary_from_results(results):

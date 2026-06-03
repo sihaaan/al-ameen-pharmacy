@@ -631,6 +631,9 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         "status": "duplicate",
                         "existing_import_id": existing_import.id,
                         "message": duplicate_check.get("message", ""),
+                        "duplicate_type": duplicate_check.get("duplicate_type", ""),
+                        "duplicate_match": duplicate_check.get("primary_match", {}),
+                        "duplicate_matches": duplicate_check.get("matches", []),
                     },
                 )
                 data = HistoricalPriceImportSerializer(existing_import, context={"request": request}).data
@@ -656,6 +659,9 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     "import_id": historical_import.id,
                     "line_count": historical_import.lines.count(),
                     "duplicate": bool(duplicate_check.get("is_duplicate")),
+                    "duplicate_type": duplicate_check.get("duplicate_type", ""),
+                    "duplicate_match": duplicate_check.get("primary_match", {}),
+                    "duplicate_matches": duplicate_check.get("matches", []),
                 },
             )
         except DjangoValidationError as exc:
@@ -791,6 +797,12 @@ class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelVi
         suggestion.save(update_fields=["status", "error_message", "updated_at"])
         serializer = self.get_serializer(suggestion)
         return Response(serializer.data)
+
+    @action(detail=True, methods=["get"])
+    def source_context(self, request, pk=None):
+        suggestion = self.get_object()
+        serializer = self.get_serializer(suggestion)
+        return Response(serializer.data.get("source_context") or {})
 
 
 class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
@@ -1007,7 +1019,12 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return Response({"detail": "Source PDF is not available in private storage."}, status=status.HTTP_404_NOT_FOUND)
         try:
             with fitz.open(stream=data, filetype="pdf") as document:
-                page = document[0]
+                try:
+                    requested_page = int(request.query_params.get("page") or 1)
+                except (TypeError, ValueError):
+                    requested_page = 1
+                page_index = max(0, min(requested_page - 1, len(document) - 1))
+                page = document[page_index]
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
                 png_bytes = pixmap.tobytes("png")
         except Exception as exc:

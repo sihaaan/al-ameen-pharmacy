@@ -805,8 +805,12 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
     line_total = serializers.DecimalField(source="line.line_total", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
     line_status = serializers.CharField(source="line.status", read_only=True, allow_null=True)
     line_raw = serializers.CharField(source="line.raw_line", read_only=True, allow_null=True)
+    line_source_page = serializers.IntegerField(source="line.source_page", read_only=True, allow_null=True)
+    line_source_row = serializers.IntegerField(source="line.source_row", read_only=True, allow_null=True)
     suggested_company_name = serializers.CharField(source="suggested_company.name", read_only=True, allow_null=True)
     suggested_product_name = serializers.CharField(source="suggested_product.name", read_only=True, allow_null=True)
+    price_history_summary = serializers.SerializerMethodField()
+    source_context = serializers.SerializerMethodField()
 
     class Meta:
         model = HistoricalImportAISuggestion
@@ -829,6 +833,8 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "line_total",
             "line_status",
             "line_raw",
+            "line_source_page",
+            "line_source_row",
             "suggestion_type",
             "action",
             "status",
@@ -847,6 +853,8 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "candidate_companies",
             "candidate_products",
             "raw_ai_payload",
+            "price_history_summary",
+            "source_context",
             "error_message",
             "created_by",
             "applied_by",
@@ -873,11 +881,15 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "line_total",
             "line_status",
             "line_raw",
+            "line_source_page",
+            "line_source_row",
             "suggestion_type",
             "status",
             "candidate_companies",
             "candidate_products",
             "raw_ai_payload",
+            "price_history_summary",
+            "source_context",
             "error_message",
             "created_by",
             "applied_by",
@@ -885,6 +897,73 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_price_history_summary(self, obj):
+        line = obj.line
+        product = obj.suggested_product or (line.product if line and line.product_id else None)
+        historical_import = obj.historical_import
+        imported_price = line.unit_price if line else None
+        if not product:
+            return {
+                "available": False,
+                "imported_unit_price": str(imported_price) if imported_price is not None else "",
+                "message": "Select a target Product to see previous price context.",
+            }
+        summary = {
+            "available": bool(historical_import and historical_import.company_id),
+            "product_id": product.id,
+            "product_name": product.name,
+            "product_base_price": str(product.price) if product.price is not None else "",
+            "imported_unit_price": str(imported_price) if imported_price is not None else "",
+            "last_company_price": "",
+            "last_company_price_date": "",
+            "price_difference": "",
+            "price_difference_percent": "",
+            "recent_company_price_count": 0,
+            "variance_warning": "",
+        }
+        if not historical_import or not historical_import.company_id:
+            summary["message"] = "Select or approve the company to compare company-specific price history."
+            return summary
+        history = CompanyPriceHistory.objects.filter(
+            company=historical_import.company,
+            product=product,
+        ).order_by("-quoted_at", "-id")
+        summary["recent_company_price_count"] = history.count()
+        last_price = history.first()
+        if not last_price:
+            summary["message"] = "No previous company-specific price history for this Product."
+            return summary
+        summary["last_company_price"] = str(last_price.unit_price)
+        summary["last_company_price_date"] = last_price.quoted_at.date().isoformat()
+        if imported_price is not None:
+            difference = Decimal(imported_price) - Decimal(last_price.unit_price)
+            summary["price_difference"] = str(difference.quantize(Decimal("0.01")))
+            if last_price.unit_price:
+                percent = (difference / Decimal(last_price.unit_price)) * Decimal("100")
+                summary["price_difference_percent"] = str(percent.quantize(Decimal("0.01")))
+                if abs(percent) >= Decimal("25"):
+                    summary["variance_warning"] = "Large variance from last company price."
+        return summary
+
+    def get_source_context(self, obj):
+        line = obj.line
+        historical_import = obj.historical_import
+        source_available = bool(historical_import and historical_import.source_file_ref)
+        page_number = line.source_page if line else None
+        return {
+            "available": source_available,
+            "filename": historical_import.source_filename if historical_import else "",
+            "page_number": page_number,
+            "source_row": line.source_row if line else None,
+            "raw_line": line.raw_line if line else "",
+            "preview_url": (
+                f"/api/quotations/historical-imports/{historical_import.id}/preview_page/?page={page_number or 1}"
+                if historical_import and source_available
+                else ""
+            ),
+            "message": "" if source_available else "Source preview unavailable for this historical import.",
+        }
 
 
 class QuotationLineSerializer(serializers.ModelSerializer):

@@ -113,7 +113,7 @@ const quotationAPI = {
     aiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/ai_clean_rows/`, data),
     applyAiCleanRows: (id, data) => axiosInstance.post(`/quotations/historical-imports/${id}/apply_ai_clean_rows/`, data),
     runAiSuggestions: (id, data = {}) => axiosInstance.post(`/quotations/historical-imports/${id}/run_ai_suggestions/`, data),
-    previewPage: (id) => axiosInstance.get(`/quotations/historical-imports/${id}/preview_page/`, { responseType: 'blob' }),
+    previewPage: (id, params = {}) => axiosInstance.get(`/quotations/historical-imports/${id}/preview_page/`, { params, responseType: 'blob' }),
   },
   historicalImportBatches: {
     list: (params = {}) => axiosInstance.get('/quotations/historical-import-batches/', { params }),
@@ -131,6 +131,7 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/historical-import-ai-suggestions/${id}/`, data),
     apply: (data = {}) => axiosInstance.post('/quotations/historical-import-ai-suggestions/apply/', data),
     reject: (id, data = {}) => axiosInstance.post(`/quotations/historical-import-ai-suggestions/${id}/reject/`, data),
+    sourceContext: (id) => axiosInstance.get(`/quotations/historical-import-ai-suggestions/${id}/source_context/`),
   },
   historicalImportLines: {
     list: (params = {}) => axiosInstance.get('/quotations/historical-import-lines/', { params }),
