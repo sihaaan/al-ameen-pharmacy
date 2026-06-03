@@ -278,7 +278,7 @@ def build_quotation_pdf(quotation):
     styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=7.8, leading=9.4, textColor=TEXT))
     styles.add(ParagraphStyle(name="TableCellCenter", parent=styles["TableCell"], alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="TableCellRight", parent=styles["TableCell"], alignment=TA_RIGHT))
-    styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=6.9, leading=8.5, splitLongWords=False, spaceShrinkage=0.05))
+    styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=7.8, leading=9.4, splitLongWords=False, spaceShrinkage=0.03))
     styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading4"], fontSize=10, leading=12, textColor=primary))
     styles.add(ParagraphStyle(name="QuoteTitle", parent=styles["Title"], alignment=TA_RIGHT, fontSize=18, leading=22, textColor=TEXT))
     styles.add(ParagraphStyle(name="ApprovalLine", parent=styles["SmallMuted"], alignment=TA_CENTER, fontSize=8, leading=9, textColor=MUTED))
@@ -353,7 +353,7 @@ def build_quotation_pdf(quotation):
 
     line_table = Table(
         table_data,
-        colWidths=[10 * mm, 70 * mm, 14 * mm, 15 * mm, 23 * mm, 23 * mm, 23 * mm],
+        colWidths=[10 * mm, 73 * mm, 14 * mm, 15 * mm, 26 * mm, 25 * mm, 25 * mm],
         repeatRows=1,
     )
     line_table.setStyle(
