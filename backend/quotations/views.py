@@ -1,3 +1,5 @@
+import logging
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
 from django.db.models import Q
@@ -95,6 +97,9 @@ except Exception:  # pragma: no cover
     fitz = None
 
 
+logger = logging.getLogger(__name__)
+
+
 class QuotationBaseViewSet:
     permission_classes = [IsQuotationStaff]
 
@@ -105,9 +110,13 @@ class QuotationBaseViewSet:
         if isinstance(exc, DjangoValidationError):
             return self.handle_workflow_error(exc)
         if isinstance(exc, IntegrityError):
+            logger.exception("%s Database conflict while running quotation workflow action.", fallback_message)
             return Response({"detail": "A duplicate or conflicting database value blocked this action. Link the existing Product or edit the Product name."}, status=status.HTTP_400_BAD_REQUEST)
-        error_text = str(exc).strip()
-        detail = f"{fallback_message} {error_text}" if error_text else fallback_message
+        logger.exception("%s Unexpected quotation workflow error.", fallback_message)
+        detail = (
+            f"{fallback_message} Please refresh and retry. "
+            "If this is an older historical-import batch, re-run AI Analyze or create a fresh batch."
+        )
         return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -871,8 +880,8 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         try:
             suggestion_ids = _request_int_list(request.data, "suggestion_ids")
             summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            return self.handle_safe_workflow_exception(exc, "Apply AI suggestions failed.")
         return Response(
             {
                 "summary": summary,
@@ -937,8 +946,8 @@ class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelVi
         try:
             suggestion_ids = _request_int_list(request.data, "suggestion_ids")
             summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            return self.handle_safe_workflow_exception(exc, "Apply AI suggestions failed.")
         updated_ids = [result.get("suggestion_id") for result in results if result.get("suggestion_id")]
         suggestions = self.get_queryset().filter(id__in=updated_ids)
         return Response(

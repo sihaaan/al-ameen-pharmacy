@@ -8,6 +8,7 @@ from unittest.mock import patch
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError
 from django.test import override_settings
 from django.urls import reverse
 from openpyxl import Workbook
@@ -1822,6 +1823,43 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(updated["status"], HistoricalImportAISuggestion.STATUS_APPLIED)
         self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
         self.assertEqual(updated["line_ready_blockers"], [])
+
+    def test_batch_apply_ai_suggestions_returns_json_for_database_conflict(self):
+        batch = HistoricalImportBatch.objects.create(name="Apply conflict", created_by=self.staff)
+
+        with self.assertLogs("quotations.views", level="ERROR"), patch(
+            "quotations.views.apply_historical_ai_suggestions",
+            side_effect=IntegrityError("duplicate alias"),
+        ):
+            response = self.client.post(
+                reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+                {"suggestion_ids": [123]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIsInstance(response.data, dict)
+        self.assertIn("detail", response.data)
+        self.assertIn("duplicate or conflicting", response.data["detail"])
+        self.assertNotIn("<html", str(response.data).lower())
+
+    def test_batch_apply_ai_suggestions_returns_json_for_unexpected_old_batch_error(self):
+        batch = HistoricalImportBatch.objects.create(name="Apply old batch error", created_by=self.staff)
+
+        with self.assertLogs("quotations.views", level="ERROR"), patch(
+            "quotations.views.apply_historical_ai_suggestions",
+            side_effect=RuntimeError("legacy stale row"),
+        ):
+            response = self.client.post(
+                reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+                {"suggestion_ids": [123]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIsInstance(response.data, dict)
+        self.assertIn("Apply AI suggestions failed", response.data["detail"])
+        self.assertNotIn("<html", str(response.data).lower())
 
     def test_apply_ai_suggestion_marks_product_row_ready_even_when_document_details_missing(self):
         batch = HistoricalImportBatch.objects.create(name="Missing document details", created_by=self.staff)
