@@ -1861,6 +1861,48 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertIn("Apply AI suggestions failed", response.data["detail"])
         self.assertNotIn("<html", str(response.data).lower())
 
+    def test_batch_apply_ai_suggestions_returns_json_when_response_refresh_fails(self):
+        batch = HistoricalImportBatch.objects.create(name="Apply refresh error", created_by=self.staff)
+
+        with self.assertLogs("quotations.views", level="ERROR"), patch(
+            "quotations.views.apply_historical_ai_suggestions",
+            return_value=({"applied": 1}, [{"suggestion_id": 123, "status": "applied"}]),
+        ), patch(
+            "quotations.views.refresh_historical_import_batch_summary",
+            side_effect=RuntimeError("legacy summary refresh failed"),
+        ):
+            response = self.client.post(
+                reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+                {"suggestion_ids": [123]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIsInstance(response.data, dict)
+        self.assertIn("Apply AI suggestions failed", response.data["detail"])
+        self.assertNotIn("<html", str(response.data).lower())
+
+    def test_batch_apply_ai_suggestions_returns_json_when_updated_suggestion_serializing_fails(self):
+        batch = HistoricalImportBatch.objects.create(name="Apply serializer error", created_by=self.staff)
+
+        with self.assertLogs("quotations.views", level="ERROR"), patch(
+            "quotations.views.apply_historical_ai_suggestions",
+            return_value=({"applied": 1}, [{"suggestion_id": 123, "status": "applied"}]),
+        ), patch(
+            "quotations.views._serialized_ai_suggestions_for_results",
+            side_effect=RuntimeError("legacy suggestion serialize failed"),
+        ):
+            response = self.client.post(
+                reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+                {"suggestion_ids": [123]},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIsInstance(response.data, dict)
+        self.assertIn("Apply AI suggestions failed", response.data["detail"])
+        self.assertNotIn("<html", str(response.data).lower())
+
     def test_apply_ai_suggestion_marks_product_row_ready_even_when_document_details_missing(self):
         batch = HistoricalImportBatch.objects.create(name="Missing document details", created_by=self.staff)
         historical_import = HistoricalPriceImport.objects.create(

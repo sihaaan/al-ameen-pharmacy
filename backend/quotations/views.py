@@ -876,18 +876,21 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def apply_ai_suggestions(self, request, pk=None):
-        batch = self.get_object()
         try:
+            batch = self.get_object()
             suggestion_ids = _request_int_list(request.data, "suggestion_ids")
             summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
+            refreshed_batch = refresh_historical_import_batch_summary(batch)
+            updated_suggestions = _serialized_ai_suggestions_for_results(batch, results, request)
+            serialized_batch = self.get_serializer(refreshed_batch).data
         except Exception as exc:
             return self.handle_safe_workflow_exception(exc, "Apply AI suggestions failed.")
         return Response(
             {
                 "summary": summary,
                 "results": results,
-                "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
-                "updated_suggestions": _serialized_ai_suggestions_for_results(batch, results, request),
+                "batch": serialized_batch,
+                "updated_suggestions": updated_suggestions,
             }
         )
 
@@ -946,15 +949,16 @@ class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelVi
         try:
             suggestion_ids = _request_int_list(request.data, "suggestion_ids")
             summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
+            updated_ids = [result.get("suggestion_id") for result in results if result.get("suggestion_id")]
+            suggestions = self.get_queryset().filter(id__in=updated_ids)
+            updated_suggestions = self.get_serializer(suggestions, many=True).data
         except Exception as exc:
             return self.handle_safe_workflow_exception(exc, "Apply AI suggestions failed.")
-        updated_ids = [result.get("suggestion_id") for result in results if result.get("suggestion_id")]
-        suggestions = self.get_queryset().filter(id__in=updated_ids)
         return Response(
             {
                 "summary": summary,
                 "results": results,
-                "updated_suggestions": self.get_serializer(suggestions, many=True).data,
+                "updated_suggestions": updated_suggestions,
             }
         )
 
