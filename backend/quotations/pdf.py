@@ -259,6 +259,7 @@ def build_quotation_pdf(quotation):
     styles.add(ParagraphStyle(name="TableHeader", parent=styles["Normal"], fontSize=8, leading=10, textColor=colors.white, alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=TEXT))
     styles.add(ParagraphStyle(name="TableCellRight", parent=styles["TableCell"], alignment=TA_RIGHT))
+    styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=7.2, leading=9))
     styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading4"], fontSize=10, leading=12, textColor=primary))
     styles.add(ParagraphStyle(name="QuoteTitle", parent=styles["Title"], alignment=TA_RIGHT, fontSize=18, leading=22, textColor=TEXT))
     styles.add(ParagraphStyle(name="ApprovalLine", parent=styles["SmallMuted"], alignment=TA_CENTER, fontSize=8, leading=9, textColor=MUTED))
@@ -326,15 +327,15 @@ def build_quotation_pdf(quotation):
                 Paragraph(item_text, styles["TableCell"]),
                 Paragraph(_number(line.quantity), styles["TableCellRight"]),
                 Paragraph(_text(line.unit), styles["TableCell"]),
-                Paragraph(_money(quotation.currency, line.unit_price), styles["TableCellRight"]),
-                Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellRight"]),
-                Paragraph(_money(quotation.currency, line.line_total), styles["TableCellRight"]),
+                Paragraph(_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
+                Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
+                Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
             ]
         )
 
     line_table = Table(
         table_data,
-        colWidths=[8 * mm, 74 * mm, 16 * mm, 16 * mm, 24 * mm, 18 * mm, 22 * mm],
+        colWidths=[7 * mm, 66 * mm, 15 * mm, 15 * mm, 23 * mm, 25 * mm, 27 * mm],
         repeatRows=1,
     )
     line_table.setStyle(
@@ -348,6 +349,8 @@ def build_quotation_pdf(quotation):
                 ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ("TOPPADDING", (0, 0), (-1, -1), 6),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (4, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (4, 0), (-1, -1), 3),
             ]
         )
     )
