@@ -898,7 +898,7 @@ def create_imported_inquiry(validated_data, actor):
 
 @transaction.atomic
 def remember_inquiry_line_alias(line, actor):
-    line = InquiryLine.objects.select_for_update().select_related("inquiry__company", "matched_product").get(pk=line.pk)
+    line = InquiryLine.objects.select_for_update().select_related("inquiry__company").get(pk=line.pk)
     if not line.matched_product_id:
         raise ValidationError("Select a product before remembering this alias.")
     alias, created = create_product_alias(
@@ -924,7 +924,7 @@ def remember_inquiry_line_alias(line, actor):
 def remember_historical_import_line_alias(line, actor):
     line = (
         HistoricalPriceImportLine.objects.select_for_update()
-        .select_related("historical_import__company", "product")
+        .select_related("historical_import__company")
         .get(pk=line.pk)
     )
     if not line.historical_import.company_id:
@@ -952,7 +952,7 @@ def remember_historical_import_line_alias(line, actor):
 
 @transaction.atomic
 def remember_quotation_line_alias(line, actor):
-    line = QuotationLine.objects.select_for_update().select_related("quotation__company", "product").get(pk=line.pk)
+    line = QuotationLine.objects.select_for_update().select_related("quotation__company").get(pk=line.pk)
     if not line.product_id:
         raise ValidationError("Select a product before remembering this alias.")
     alias_text = line.inquiry_line.raw_name if line.inquiry_line_id else line.item_name_snapshot
@@ -980,7 +980,7 @@ def remember_quotation_line_alias(line, actor):
 def create_product_from_quotation_line(line, actor, product_name=""):
     line = (
         QuotationLine.objects.select_for_update()
-        .select_related("quotation__company", "inquiry_line", "product")
+        .select_related("quotation__company")
         .get(pk=line.pk)
     )
     ensure_quotation_editable(line.quotation)
@@ -1002,7 +1002,7 @@ def bulk_create_products_from_quotation_lines(quotation, line_ids, actor, names_
     names_by_id = {int(key): value for key, value in (names_by_id or {}).items() if str(key).isdigit()}
     lines = list(
         quotation.lines.select_for_update()
-        .select_related("quotation__company", "inquiry_line", "product")
+        .select_related("quotation__company")
         .filter(id__in=line_ids)
         .order_by("sort_order", "id")
     )
