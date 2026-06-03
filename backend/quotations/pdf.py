@@ -14,7 +14,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .pdf_config import get_quotation_pdf_config
 
@@ -41,7 +41,7 @@ def _text(value, fallback="-"):
 
 
 def _money(currency, value):
-    return f"{currency}&nbsp;{value or 0:.2f}"
+    return f"{currency} {value or 0:.2f}"
 
 
 def _number(value):
@@ -376,7 +376,6 @@ def build_quotation_pdf(quotation):
         )
     )
     elements.append(line_table)
-    elements.append(Spacer(1, 10))
     line_count = max(quotation.lines.count(), 1)
 
     totals_table = Table(
@@ -403,7 +402,7 @@ def build_quotation_pdf(quotation):
             ]
         )
     )
-    elements.append(totals_table)
+    elements.append(KeepTogether([Spacer(1, 10), totals_table]))
 
     if quotation.notes:
         elements.append(Spacer(1, 8))

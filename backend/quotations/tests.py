@@ -2840,6 +2840,10 @@ class QuotationSettingsTests(APITestCase):
         self.assertNotIn("Quantity and unit detected", text)
         self.assertIn("Item 10", text)
         self.assertNotIn("\n1\n0\n", text)
+        self.assertNotIn("&nbsp;", text)
+        self.assertIn("Subtotal", text)
+        self.assertIn("VAT", text)
+        self.assertIn("Grand Total", text)
 
     def test_pdf_generation_works_with_uploaded_logo_and_stamp_images(self):
         storage_settings = {
