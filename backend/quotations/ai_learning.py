@@ -37,7 +37,6 @@ from .models import (
     normalize_label,
 )
 from .services import (
-    _historical_ready_errors,
     apply_product_matches_to_historical_import,
     audit_log,
     commit_historical_price_import,
@@ -800,10 +799,25 @@ def _matching_pending_line_suggestions(source_suggestion):
     )
 
 
+def _line_ready_errors(line):
+    errors = []
+    if not line.product_id and not line.quote_item_id:
+        errors.append("Link a product/item.")
+    if line.quantity is None or line.quantity <= 0:
+        errors.append("Enter a quantity greater than zero.")
+    if line.unit_price is None or line.unit_price < 0:
+        errors.append("Enter a unit price of zero or more.")
+    return errors
+
+
+def _line_has_staff_approved_ai_match(line):
+    return bool(line and (line.match_reason or "").startswith("Approved AI"))
+
+
 def _ready_or_review(line):
     return (
         HistoricalPriceImportLine.STATUS_READY
-        if not _historical_ready_errors(line.historical_import, line)
+        if not _line_ready_errors(line)
         else HistoricalPriceImportLine.STATUS_NEEDS_REVIEW
     )
 
@@ -1095,6 +1109,7 @@ def _apply_one_suggestion(suggestion, actor):
 def refresh_historical_import_batch_summary(batch):
     batch = HistoricalImportBatch.objects.get(pk=batch.pk)
     _close_stale_batch_ai_suggestions(batch)
+    _repair_applied_line_suggestion_readiness(batch)
     imports = list(batch.imports.prefetch_related("lines").all())
     import_count = len(imports)
     committed = sum(1 for entry in imports if entry.status == HistoricalPriceImport.STATUS_COMMITTED)
@@ -1198,6 +1213,44 @@ def _close_stale_batch_ai_suggestions(batch):
             close_as = HistoricalImportAISuggestion.STATUS_APPLIED
             close_message = "Closed because this source row has already been committed."
         elif (
+            line
+            and suggestion.suggestion_type == HistoricalImportAISuggestion.TYPE_LINE
+            and suggestion.action in {
+                HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+                HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS,
+            }
+            and suggestion.suggested_product_id
+            and line.product_id == suggestion.suggested_product_id
+            and _line_has_staff_approved_ai_match(line)
+        ):
+            close_as = HistoricalImportAISuggestion.STATUS_APPLIED
+            close_message = f"Closed because Product is already linked: {suggestion.suggested_product.name}."
+            new_status = _ready_or_review(line)
+            if line.status == HistoricalPriceImportLine.STATUS_NEEDS_REVIEW and new_status == HistoricalPriceImportLine.STATUS_READY:
+                line.status = new_status
+                line.save(update_fields=["status", "updated_at"])
+        elif (
+            line
+            and suggestion.suggestion_type == HistoricalImportAISuggestion.TYPE_LINE
+            and suggestion.action == HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT
+            and line.product_id
+            and _line_has_staff_approved_ai_match(line)
+        ):
+            close_as = HistoricalImportAISuggestion.STATUS_APPLIED
+            close_message = f"Closed because Product is already linked: {line.product.name}."
+            new_status = _ready_or_review(line)
+            if line.status == HistoricalPriceImportLine.STATUS_NEEDS_REVIEW and new_status == HistoricalPriceImportLine.STATUS_READY:
+                line.status = new_status
+                line.save(update_fields=["status", "updated_at"])
+        elif (
+            line
+            and suggestion.suggestion_type == HistoricalImportAISuggestion.TYPE_LINE
+            and suggestion.action == HistoricalImportAISuggestion.ACTION_SKIP
+            and line.status == HistoricalPriceImportLine.STATUS_SKIPPED
+        ):
+            close_as = HistoricalImportAISuggestion.STATUS_APPLIED
+            close_message = "Closed because this source row is already skipped."
+        elif (
             suggestion.suggestion_type == HistoricalImportAISuggestion.TYPE_COMPANY
             and suggestion.action == HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_COMPANY
             and suggestion.suggested_company_id
@@ -1219,6 +1272,31 @@ def _close_stale_batch_ai_suggestions(batch):
             stale_suggestions,
             ["status", "error_message", "applied_at", "updated_at"],
         )
+
+
+def _repair_applied_line_suggestion_readiness(batch):
+    repaired_lines = []
+    for suggestion in (
+        batch.ai_suggestions.select_related("line")
+        .filter(
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            status=HistoricalImportAISuggestion.STATUS_APPLIED,
+            action__in=[
+                HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+                HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS,
+                HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT,
+            ],
+            line__status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW,
+        )
+    ):
+        line = suggestion.line
+        if line and _ready_or_review(line) == HistoricalPriceImportLine.STATUS_READY:
+            line.status = HistoricalPriceImportLine.STATUS_READY
+            line.updated_at = timezone.now()
+            repaired_lines.append(line)
+
+    if repaired_lines:
+        HistoricalPriceImportLine.objects.bulk_update(repaired_lines, ["status", "updated_at"])
 
 
 def append_batch_file_result(batch, result):

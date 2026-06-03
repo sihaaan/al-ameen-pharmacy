@@ -83,6 +83,10 @@ const isSuggestionActionable = (suggestion) => (
   suggestion.status === 'pending' && !isClosedLineSuggestion(suggestion)
 );
 
+const cleanBlockers = (blockers = []) => (
+  Array.isArray(blockers) ? blockers.filter(Boolean) : []
+);
+
 const dateSortValue = (value) => {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -710,8 +714,8 @@ const HistoricalImportManager = () => {
         message: buildApplyNotice(response.data.summary),
       });
       setSelectedSuggestionIds([]);
-      const refreshed = await refreshSelectedBatch();
-      await loadSuggestions(selectedBatch.id);
+      const refreshed = await refreshSelectedBatch(response.data.batch?.id || selectedBatch.id);
+      await loadSuggestions(response.data.batch?.id || selectedBatch.id);
       if (refreshed) {
         setSelectedBatchImportIds((current) => current.filter((id) => (refreshed.imports || []).some((entry) => entry.id === id)));
       }
@@ -1407,6 +1411,15 @@ const HistoricalImportManager = () => {
     const locked = !actionable;
     const hasDraftChanges = suggestionHasDraftChanges(suggestion);
     const priceSummary = suggestion.price_history_summary || {};
+    const lineBlockers = cleanBlockers(suggestion.line_ready_blockers);
+    const importBlockers = cleanBlockers(suggestion.import_commit_blockers).filter((blocker) => blocker !== 'already committed');
+    const lineReady = suggestion.line_status === 'ready' || (!lineBlockers.length && suggestion.status === 'applied');
+    const decisionApplied = suggestion.status === 'applied' || displayStatus === 'committed';
+    const readinessLabel = displayStatus === 'committed'
+      ? 'committed'
+      : lineReady
+        ? 'ready'
+        : (suggestion.line_status || 'needs_review');
     return (
       <div key={suggestion.id} className={`qm-decision-card status-${displayStatus}`}>
         <div className="qm-decision-card-main">
@@ -1427,15 +1440,25 @@ const HistoricalImportManager = () => {
           </div>
         </div>
 
+        {actionable && (lineBlockers.length > 0 || importBlockers.length > 0) && (
+          <div className="qm-inline-feedback warning">
+            <strong>Before commit:</strong>{' '}
+            {lineBlockers.length > 0 && <>Fix row: {lineBlockers.join(', ')}. </>}
+            {importBlockers.length > 0 && <>Finish document: {importBlockers.join(', ')}.</>}
+          </div>
+        )}
+
         {!actionable && (
           <div className={`qm-applied-state status-${displayStatus}`}>
-            <strong>{displayStatus === 'applied' ? 'Applied' : displayStatus}</strong>
+            <strong>{displayStatus === 'applied' ? 'Decision applied' : displayStatus}</strong>
             <span>
               {displayStatus === 'committed' && 'This source row is already committed to price history. No more approval is needed.'}
               {displayStatus === 'duplicate' && 'This source row is duplicate/blocked and cannot be approved.'}
-              {suggestion.line_status === 'ready' && 'Row is ready for price history commit.'}
+              {suggestion.line_status === 'ready' && importBlockers.length === 0 && 'Row is ready for price history commit.'}
+              {suggestion.line_status === 'ready' && importBlockers.length > 0 && `Product decision is approved and the row is ready. Finish document details before commit: ${importBlockers.join(', ')}.`}
               {suggestion.line_status === 'skipped' && 'Row is skipped and will not be committed.'}
-              {suggestion.line_status === 'needs_review' && 'Row still needs review before commit.'}
+              {suggestion.line_status === 'needs_review' && lineBlockers.length > 0 && `Row still needs review: ${lineBlockers.join(', ')}.`}
+              {suggestion.line_status === 'needs_review' && !lineBlockers.length && 'Row mapping is approved, but the batch needs a refresh before commit.'}
               {suggestion.error_message && ` ${suggestion.error_message}`}
             </span>
           </div>
@@ -1504,11 +1527,17 @@ const HistoricalImportManager = () => {
               <input type="number" step="0.01" value={lineDraft.line_total || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { line_total: event.target.value })} />
             </label>
             <div className="qm-derived-status">
-              <span className="qm-label-text">Commit state</span>
-              <span className={`qm-badge status-${lineDraft.status || suggestion.line_status || 'needs_review'}`}>
-                {(lineDraft.status || suggestion.line_status || 'needs_review').replace('_', ' ')}
+              <span className="qm-label-text">Commit readiness</span>
+              <span className={`qm-badge status-${readinessLabel}`}>
+                {readinessLabel.replace('_', ' ')}
               </span>
-              <small>Apply This approves the decision and marks valid rows ready. Skip/noise rows are never committed.</small>
+              <small>
+                {decisionApplied && lineReady && importBlockers.length === 0 && 'Ready to commit.'}
+                {decisionApplied && lineReady && importBlockers.length > 0 && `Decision approved. Finish document details: ${importBlockers.join(', ')}.`}
+                {decisionApplied && !lineReady && lineBlockers.length > 0 && `Decision approved, but row needs: ${lineBlockers.join(', ')}.`}
+                {!decisionApplied && lineBlockers.length === 0 && importBlockers.length === 0 && 'Apply This approves the decision and marks this row ready.'}
+                {!decisionApplied && (lineBlockers.length > 0 || importBlockers.length > 0) && 'Apply approves the product decision; remaining blockers are shown above.'}
+              </small>
             </div>
           </div>
         )}

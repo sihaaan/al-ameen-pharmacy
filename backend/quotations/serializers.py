@@ -846,6 +846,8 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
     suggested_product_name = serializers.CharField(source="suggested_product.name", read_only=True, allow_null=True)
     price_history_summary = serializers.SerializerMethodField()
     source_context = serializers.SerializerMethodField()
+    line_ready_blockers = serializers.SerializerMethodField()
+    import_commit_blockers = serializers.SerializerMethodField()
 
     class Meta:
         model = HistoricalImportAISuggestion
@@ -891,6 +893,8 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "raw_ai_payload",
             "price_history_summary",
             "source_context",
+            "line_ready_blockers",
+            "import_commit_blockers",
             "error_message",
             "created_by",
             "applied_by",
@@ -927,6 +931,8 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "raw_ai_payload",
             "price_history_summary",
             "source_context",
+            "line_ready_blockers",
+            "import_commit_blockers",
             "error_message",
             "created_by",
             "applied_by",
@@ -1001,6 +1007,42 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             ),
             "message": "" if source_available else "Source preview unavailable for this historical import.",
         }
+
+    def get_line_ready_blockers(self, obj):
+        line = obj.line
+        if not line:
+            return []
+        blockers = []
+        if line.status == HistoricalPriceImportLine.STATUS_COMMITTED:
+            return ["already committed to price history"]
+        if line.status == HistoricalPriceImportLine.STATUS_DUPLICATE:
+            return ["duplicate row"]
+        if line.status == HistoricalPriceImportLine.STATUS_SKIPPED:
+            return ["skipped row"]
+        if not line.product_id and not line.quote_item_id:
+            blockers.append("missing Product")
+        if line.quantity is None or line.quantity <= 0:
+            blockers.append("missing quantity")
+        if line.unit_price is None or line.unit_price < 0:
+            blockers.append("missing unit price")
+        return blockers
+
+    def get_import_commit_blockers(self, obj):
+        historical_import = obj.historical_import
+        if not historical_import:
+            return []
+        blockers = []
+        if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
+            blockers.append("already committed")
+        if historical_import.status == HistoricalPriceImport.STATUS_CANCELLED:
+            blockers.append("cancelled import")
+        if not historical_import.company_id:
+            blockers.append("missing company")
+        if not historical_import.document_number:
+            blockers.append("missing document number")
+        if not historical_import.document_date:
+            blockers.append("missing document date")
+        return blockers
 
 
 class QuotationLineSerializer(serializers.ModelSerializer):
