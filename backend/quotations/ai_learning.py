@@ -1316,8 +1316,6 @@ def _commit_blockers_for_import(historical_import):
         blockers.append("cancelled import")
     if not historical_import.company_id:
         blockers.append("missing company")
-    if not historical_import.document_number:
-        blockers.append("missing document number")
     if not historical_import.document_date:
         blockers.append("missing document date")
     ready_count = historical_import.lines.filter(status=HistoricalPriceImportLine.STATUS_READY).count()

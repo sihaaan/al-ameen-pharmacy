@@ -524,6 +524,48 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         response["Content-Disposition"] = f'attachment; filename="{quotation.quotation_number}.pdf"'
         return response
 
+    @action(detail=True, methods=["get"])
+    def product_price(self, request, pk=None):
+        quotation = self.get_object()
+        product_id = request.query_params.get("product")
+        if not product_id:
+            return Response({"detail": "Select a Product before requesting a price."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            product = Product.objects.get(pk=product_id)
+        except (Product.DoesNotExist, ValueError):
+            return Response({"detail": "Selected Product was not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        history = CompanyPriceHistory.objects.filter(
+            company=quotation.company,
+            product=product,
+        ).order_by("-quoted_at", "-id").first()
+        if history:
+            return Response(
+                {
+                    "product": product.id,
+                    "product_name": product.name,
+                    "unit_price": str(history.unit_price),
+                    "unit": history.unit or "",
+                    "currency": history.currency,
+                    "source": "company_price_history",
+                    "source_label": f"Latest {quotation.company.name} price",
+                    "quoted_at": history.quoted_at.date().isoformat(),
+                }
+            )
+
+        return Response(
+            {
+                "product": product.id,
+                "product_name": product.name,
+                "unit_price": str(product.price) if product.price is not None else "",
+                "unit": "",
+                "currency": quotation.currency,
+                "source": "product_base_price",
+                "source_label": "Product base price",
+                "quoted_at": "",
+            }
+        )
+
     @action(detail=True, methods=["post"])
     def bulk_update_lines(self, request, pk=None):
         quotation = self.get_object()

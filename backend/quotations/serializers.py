@@ -785,8 +785,6 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
                 blockers.append("cancelled import")
             if not entry.company_id:
                 blockers.append("missing company")
-            if not entry.document_number:
-                blockers.append("missing document number")
             if not entry.document_date:
                 blockers.append("missing document date")
             ready_rows = [line for line in entry.lines.all() if line.status == HistoricalPriceImportLine.STATUS_READY]
@@ -1038,8 +1036,6 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             blockers.append("cancelled import")
         if not historical_import.company_id:
             blockers.append("missing company")
-        if not historical_import.document_number:
-            blockers.append("missing document number")
         if not historical_import.document_date:
             blockers.append("missing document date")
         return blockers

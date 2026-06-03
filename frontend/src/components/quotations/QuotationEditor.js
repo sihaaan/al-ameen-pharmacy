@@ -168,6 +168,77 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }));
   };
 
+  const productPatch = (draft, productId) => {
+    const item = items.find((candidate) => String(candidate.id) === String(productId));
+    return {
+      product: productId,
+      item_name_snapshot: item ? item.name : draft.item_name_snapshot,
+      unit: item?.unit || draft.unit,
+      match_status: productId ? 'confirmed' : 'unresolved',
+    };
+  };
+
+  const priceShouldAutofill = (draft) => (
+    !draft.unit_price || Number(draft.unit_price) <= 0 || draft.match_status === 'unresolved'
+  );
+
+  const maybeFetchProductPrice = async (productId) => {
+    if (!quote?.id || !productId) return null;
+    try {
+      const response = await quotationAPI.quotes.productPrice(quote.id, { product: productId });
+      return response.data;
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load company Product price', `GET /quotations/quotes/${quote.id}/product_price/?product=${productId}`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+      return null;
+    }
+  };
+
+  const handleLineProductChange = async (line, productId) => {
+    if (productId === '__create__') {
+      createProductForLine(line.id);
+      return;
+    }
+    const currentDraft = lineDrafts[line.id] || {};
+    const patch = productPatch(currentDraft, productId);
+    updateLineDraft(line.id, patch);
+    setHistoryItem(productId);
+    if (!productId) return;
+
+    const suggestion = await maybeFetchProductPrice(productId);
+    if (!suggestion?.unit_price) return;
+    const pricePatch = {};
+    if (priceShouldAutofill(currentDraft)) {
+      pricePatch.unit_price = suggestion.unit_price;
+    }
+    if (!currentDraft.unit && suggestion.unit) {
+      pricePatch.unit = suggestion.unit;
+    }
+    if (Object.keys(pricePatch).length) {
+      updateLineDraft(line.id, pricePatch);
+      setLineFeedback({
+        type: 'success',
+        message: suggestion.source === 'company_price_history'
+          ? `Filled latest ${quote.company_name} price for ${suggestion.product_name}.`
+          : `Filled base Product price for ${suggestion.product_name}.`,
+      });
+    }
+  };
+
+  const handleLineFormProductChange = async (productId) => {
+    const patch = productPatch(lineForm, productId);
+    setLineForm((current) => ({ ...current, ...patch }));
+    if (!productId) return;
+    const suggestion = await maybeFetchProductPrice(productId);
+    if (!suggestion?.unit_price) return;
+    setLineForm((current) => ({
+      ...current,
+      unit_price: priceShouldAutofill(current) ? suggestion.unit_price : current.unit_price,
+      unit: current.unit || suggestion.unit || '',
+    }));
+  };
+
   const payloadForLine = (draft) => ({
     ...draft,
     product: draft.product || null,
@@ -616,20 +687,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
                     <td>
-                      <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => {
-                        if (event.target.value === '__create__') {
-                          createProductForLine(line.id);
-                          return;
-                        }
-                        const item = items.find((candidate) => String(candidate.id) === event.target.value);
-                        updateLineDraft(line.id, {
-                          product: event.target.value,
-                          item_name_snapshot: item ? item.name : draft.item_name_snapshot,
-                          unit: item?.unit || draft.unit,
-                          match_status: event.target.value ? 'confirmed' : 'unresolved',
-                        });
-                        setHistoryItem(event.target.value);
-                      }}>
+                      <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>
                         <option value="__create__">+ Create draft Product from this row</option>
                         {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -664,16 +722,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
 
         {isEditable && (
           <form onSubmit={addLine} className="qm-add-line">
-            <select value={lineForm.product} onChange={(event) => {
-              const item = items.find((candidate) => String(candidate.id) === event.target.value);
-              setLineForm({
-                ...lineForm,
-                product: event.target.value,
-                item_name_snapshot: item ? item.name : lineForm.item_name_snapshot,
-                unit: item?.unit || lineForm.unit,
-                match_status: event.target.value ? 'confirmed' : 'unresolved',
-              });
-            }}>
+            <select value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
               <option value="">Select item</option>
               {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>

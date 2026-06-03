@@ -163,6 +163,34 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(CompanyPriceHistory.objects.count(), 1)
 
+    def test_quote_product_price_uses_latest_company_history(self):
+        historical_quote = self.create_quote()
+        self.create_valid_line(historical_quote)
+        finalize_response = self.client.post(reverse("quotation-finalize", args=[historical_quote.id]))
+        self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
+
+        current_quote = self.create_quote()
+        response = self.client.get(
+            reverse("quotation-product-price", args=[current_quote.id]),
+            {"product": self.product.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["source"], "company_price_history")
+        self.assertEqual(response.data["unit_price"], "10.00")
+        self.assertEqual(response.data["unit"], "box")
+
+    def test_quote_product_price_falls_back_to_product_base_price(self):
+        current_quote = self.create_quote()
+        response = self.client.get(
+            reverse("quotation-product-price", args=[current_quote.id]),
+            {"product": self.product.id},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["source"], "product_base_price")
+        self.assertEqual(response.data["unit_price"], "1.00")
+
     def test_finalized_quote_cannot_be_edited(self):
         quotation = self.create_quote()
         line = self.create_valid_line(quotation)
@@ -1191,6 +1219,73 @@ class HistoricalPriceImportTests(APITestCase):
         all_quotes = self.client.get(reverse("quotation-list"), {"include_historical": "true"})
         self.assertIn(historical_import.created_quotation.id, [quote["id"] for quote in all_quotes.data])
 
+    def test_historical_import_commit_allows_missing_document_number_with_fallback_reference(self):
+        historical_import = HistoricalPriceImport.objects.create(
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="Intermass 30032026.pdf",
+            source_sha256="a" * 64,
+            document_date=date(2026, 3, 30),
+            created_by=self.staff,
+        )
+        HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="SAVLON ANTISEPTIC SOLUTION 1000ml",
+            quantity=Decimal("1.000"),
+            unit="bottle",
+            unit_price=Decimal("5.00"),
+            product=self.item_one,
+            status=HistoricalPriceImportLine.STATUS_READY,
+        )
+
+        response = self.client.post(reverse("quotation-historical-import-commit", args=[historical_import.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        historical_import.refresh_from_db()
+        self.assertEqual(historical_import.status, HistoricalPriceImport.STATUS_COMMITTED)
+        self.assertEqual(historical_import.created_quotation.quotation_number, f"HIST-{historical_import.id:06d}")
+        self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company, product=self.item_one).count(), 1)
+
+    def test_batch_commit_allows_missing_document_number_when_rows_are_ready(self):
+        batch = HistoricalImportBatch.objects.create(name="Initial learning batch", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="Intermass 30032026.pdf",
+            source_sha256="b" * 64,
+            document_date=date(2026, 3, 30),
+            created_by=self.staff,
+        )
+        HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="SAVLON ANTISEPTIC SOLUTION 1000ml",
+            quantity=Decimal("1.000"),
+            unit="bottle",
+            unit_price=Decimal("5.00"),
+            product=self.item_one,
+            status=HistoricalPriceImportLine.STATUS_READY,
+        )
+
+        detail = self.client.get(reverse("quotation-historical-import-batch-detail", args=[batch.id]))
+        blocker = detail.data["wizard_summary"]["commit_blockers"][0]
+        self.assertEqual(blocker["ready_row_count"], 1)
+        self.assertNotIn("missing document number", blocker["blockers"])
+        self.assertTrue(blocker["can_commit"])
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-commit-ready-imports", args=[batch.id]),
+            {"import_ids": [historical_import.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["committed"], 1)
+        historical_import.refresh_from_db()
+        self.assertEqual(historical_import.status, HistoricalPriceImport.STATUS_COMMITTED)
+
     def test_historical_import_duplicate_commit_does_not_append_price_history_twice(self):
         upload = self.make_historical_pdf_upload()
         upload_bytes = upload.read()
@@ -1667,7 +1762,7 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
         self.assertEqual(updated["line_ready_blockers"], [])
         self.assertIn("missing company", updated["import_commit_blockers"])
-        self.assertIn("missing document number", updated["import_commit_blockers"])
+        self.assertNotIn("missing document number", updated["import_commit_blockers"])
         self.assertEqual(response.data["batch"]["wizard_summary"]["line_counts"]["ready"], 1)
 
     def test_batch_summary_closes_pending_suggestions_for_committed_rows(self):

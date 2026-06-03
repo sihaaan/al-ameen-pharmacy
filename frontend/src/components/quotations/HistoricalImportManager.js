@@ -1371,8 +1371,13 @@ const HistoricalImportManager = () => {
                         <input disabled={entry.status === 'committed'} value={draft.suggested_company_name || ''} onChange={(event) => updateImportDraft(entry.id, { suggested_company_name: event.target.value })} />
                       </label>
                     )}
-                    <label><span className="qm-label-text">Document number</span>
-                      <input disabled={entry.status === 'committed'} value={draft.document_number || ''} onChange={(event) => updateImportDraft(entry.id, { document_number: event.target.value })} />
+                    <label><span className="qm-label-text">Document number <small>(optional)</small></span>
+                      <input
+                        disabled={entry.status === 'committed'}
+                        placeholder={`Uses HIST-${String(entry.id).padStart(6, '0')} if blank`}
+                        value={draft.document_number || ''}
+                        onChange={(event) => updateImportDraft(entry.id, { document_number: event.target.value })}
+                      />
                     </label>
                     <label><span className="qm-label-text">Document date</span>
                       <input disabled={entry.status === 'committed'} type="date" value={draft.document_date || ''} onChange={(event) => updateImportDraft(entry.id, { document_date: event.target.value })} />
@@ -1703,7 +1708,7 @@ const HistoricalImportManager = () => {
       <div className="qm-panel-heading">
         <div>
           <h3>Final Review & Commit</h3>
-          <p>Nothing durable is committed until this step. Only ready rows create company-specific price history.</p>
+          <p>Nothing durable is committed until this step. Document number is optional; if blank, a stable HIST import reference is used.</p>
         </div>
         <button type="button" className="qm-primary" disabled={!selectedBatch || workingAction === 'commit' || !(selectedReadyRowCount > 0)} onClick={commitSelectedBatchImports}>
           {workingAction === 'commit' ? 'Committing...' : 'Commit Approved Rows to Price History'}
@@ -1736,6 +1741,7 @@ const HistoricalImportManager = () => {
                   <th>Ready</th>
                   <th>Needs Review</th>
                   <th>Commit Check</th>
+                  <th>Fix</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -1758,6 +1764,24 @@ const HistoricalImportManager = () => {
                           <span className="qm-badge success">Ready</span>
                         ) : (
                           <span className="qm-blocker-text">{(commitInfo?.blockers || ['not ready']).join(', ')}</span>
+                        )}
+                      </td>
+                      <td>
+                        {(commitInfo?.blockers || []).includes('missing company') || (commitInfo?.blockers || []).includes('missing document date') ? (
+                          <button
+                            type="button"
+                            className="qm-secondary small"
+                            onClick={() => {
+                              setSelectedDocumentId(entry.id);
+                              setActiveStep('companies');
+                            }}
+                          >
+                            Fix details
+                          </button>
+                        ) : (commitInfo?.blockers || []).includes('no ready rows') ? (
+                          <button type="button" className="qm-secondary small" onClick={() => setActiveStep('decisions')}>Review rows</button>
+                        ) : (
+                          <span className="qm-muted">-</span>
                         )}
                       </td>
                       <td><span className={`qm-badge status-${entry.status}`}>{entry.status}</span></td>

@@ -149,6 +149,7 @@ const quotationAPI = {
     finalize: (id) => axiosInstance.post(`/quotations/quotes/${id}/finalize/`),
     bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_update_lines/`, data),
     bulkCreateProductsForLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_create_products_for_lines/`, data),
+    productPrice: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_price/`, { params }),
     markSent: (id) => axiosInstance.post(`/quotations/quotes/${id}/mark_sent/`),
     revise: (id) => axiosInstance.post(`/quotations/quotes/${id}/revise/`),
     cancel: (id) => axiosInstance.post(`/quotations/quotes/${id}/cancel/`),
