@@ -145,7 +145,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       const draft = lineDrafts[line.id] || {};
       const name = draft.item_name_snapshot || `Line ${index + 1}`;
       if (draft.match_status !== 'ignored') {
-        if (!draft.product) issues.push(`${name}: select a matched product item.`);
+        if (!draft.product) issues.push(`${name}: select or create a Product.`);
         if (!draft.quantity || Number(draft.quantity) <= 0) issues.push(`${name}: enter a valid quantity.`);
         if (!draft.unit_price || Number(draft.unit_price) <= 0) issues.push(`${name}: enter a valid unit price.`);
       }
@@ -376,7 +376,20 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }));
     setLineDrafts((current) => ({
       ...current,
-      ...Object.fromEntries(updatedLines.map((line) => [line.id, draftFromLine(line)])),
+      ...Object.fromEntries(updatedLines.map((line) => {
+        const nextDraft = draftFromLine(line);
+        const currentDraft = current[line.id] || {};
+        const savedDraft = savedLineDrafts[line.id] || {};
+        return [line.id, {
+          ...nextDraft,
+          quantity: currentDraft.quantity !== savedDraft.quantity ? currentDraft.quantity : nextDraft.quantity,
+          unit: currentDraft.unit !== savedDraft.unit ? currentDraft.unit : nextDraft.unit,
+          unit_price: currentDraft.unit_price !== savedDraft.unit_price ? currentDraft.unit_price : nextDraft.unit_price,
+          vat_rate: currentDraft.vat_rate !== savedDraft.vat_rate ? currentDraft.vat_rate : nextDraft.vat_rate,
+          description: currentDraft.description !== savedDraft.description ? currentDraft.description : nextDraft.description,
+          notes: currentDraft.notes !== savedDraft.notes ? currentDraft.notes : nextDraft.notes,
+        }];
+      })),
     }));
     setSavedLineDrafts((current) => ({
       ...current,
@@ -611,7 +624,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                         setHistoryItem(event.target.value);
                       }}>
                         <option value="">Unmatched</option>
-                        <option value="__create__">+ Create new Product from this line</option>
+                        <option value="__create__">+ Create draft Product from this row</option>
                         {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                       </select>
                     </td>
@@ -619,8 +632,8 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td><input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
                     <td><input disabled={!isEditable} value={draft.unit || ''} onChange={(event) => updateLineDraft(line.id, { unit: event.target.value })} /></td>
                     <td><input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
-                    <td>
-                      <select disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
+                    <td className="qm-vat-cell">
+                      <select className="qm-vat-select" disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
                         <option value="0">0%</option>
                         <option value="5">5%</option>
                       </select>
@@ -630,9 +643,6 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td className="qm-row-actions">
                       <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty} onClick={() => saveLine(line.id)}>Save</button>
-                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || statusInfo.id !== 'unmatched'} onClick={() => createProductForLine(line.id)}>
-                        {actionInFlight === `create-product-${line.id}` ? 'Creating...' : 'Create Product'}
-                      </button>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight} onClick={() => updateLineDraft(line.id, { match_status: draft.match_status === 'ignored' ? (draft.product ? 'confirmed' : 'unresolved') : 'ignored' })}>{draft.match_status === 'ignored' ? 'Unskip' : 'Skip'}</button>
                       <button type="button" className="qm-secondary small" onClick={() => setHistoryItem(draft.product || '')}>History</button>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !draft.product} onClick={() => rememberAlias(line.id)}>Remember Alias</button>

@@ -106,7 +106,9 @@ class QuotationBaseViewSet:
             return self.handle_workflow_error(exc)
         if isinstance(exc, IntegrityError):
             return Response({"detail": "A duplicate or conflicting database value blocked this action. Link the existing Product or edit the Product name."}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({"detail": fallback_message, "error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        error_text = str(exc).strip()
+        detail = f"{fallback_message} {error_text}" if error_text else fallback_message
+        return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class QuotationSettingsView(APIView):

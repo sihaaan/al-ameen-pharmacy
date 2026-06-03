@@ -583,7 +583,27 @@
 }
 
 .line-table {
-  min-width: 1040px;
+  min-width: 1120px;
+}
+
+.line-table th:nth-child(7),
+.line-table td:nth-child(7) {
+  width: 82px;
+  min-width: 82px;
+  text-align: center;
+}
+
+.qm-vat-cell {
+  text-align: center;
+}
+
+.qm-table .qm-vat-select {
+  width: 68px;
+  min-width: 68px;
+  max-width: 68px;
+  padding: 7px 8px;
+  text-align: center;
+  font-weight: 700;
 }
 
 .import-table {

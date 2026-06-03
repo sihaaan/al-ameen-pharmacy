@@ -1007,7 +1007,7 @@ def bulk_create_products_from_quotation_lines(quotation, line_ids, actor, names_
         .order_by("sort_order", "id")
     )
     if not lines:
-        raise ValidationError("Select at least one quotation line.")
+        raise ValidationError(f"No selected quotation lines were found for this quotation. Selected ids: {line_ids or 'none'}.")
 
     products_by_key = {}
     updated_lines = []
