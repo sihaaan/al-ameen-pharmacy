@@ -25,6 +25,13 @@ const emptyLine = {
   notes: '',
 };
 
+const normalizeVatRate = (value) => {
+  if (value === null || value === undefined || value === '') return '0';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  return numeric === 5 ? '5' : '0';
+};
+
 const normalizeDraft = (draft = {}) => ({
   product: String(draft.product || ''),
   item_name_snapshot: String(draft.item_name_snapshot || ''),
@@ -32,7 +39,7 @@ const normalizeDraft = (draft = {}) => ({
   quantity: String(draft.quantity || ''),
   unit: String(draft.unit || ''),
   unit_price: String(draft.unit_price || ''),
-  vat_rate: String(draft.vat_rate || '0'),
+  vat_rate: normalizeVatRate(draft.vat_rate),
   match_status: String(draft.match_status || 'unresolved'),
   notes: String(draft.notes || ''),
 });
@@ -46,7 +53,7 @@ const draftFromLine = (line) => ({
   quantity: line.quantity || '1',
   unit: line.unit || '',
   unit_price: line.unit_price || '',
-  vat_rate: line.vat_rate || '0',
+  vat_rate: normalizeVatRate(line.vat_rate),
   match_status: line.match_status || 'unresolved',
   notes: line.notes || '',
 });
