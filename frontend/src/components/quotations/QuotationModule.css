@@ -583,14 +583,14 @@
 }
 
 .line-table {
-  min-width: 1580px;
+  min-width: 1500px;
   table-layout: fixed;
 }
 
 .line-table th:nth-child(2),
 .line-table td:nth-child(2) {
-  width: 300px;
-  min-width: 300px;
+  width: 240px;
+  min-width: 240px;
 }
 
 .line-table th:nth-child(3),
@@ -613,8 +613,8 @@
 
 .line-table th:nth-child(6),
 .line-table td:nth-child(6) {
-  width: 126px;
-  min-width: 126px;
+  width: 104px;
+  min-width: 104px;
 }
 
 .line-table th:nth-child(7),
