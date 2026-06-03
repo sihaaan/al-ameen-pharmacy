@@ -286,6 +286,37 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(second.product, product)
         self.assertEqual(response.data["unique_products"], 1)
 
+    def test_create_product_reuses_same_slug_product_instead_of_duplicate(self):
+        quotation = self.create_quote()
+        existing = Product.objects.create(name="Alcohol Detector Mouth-Piece", price=Decimal("1.00"), status="draft")
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="ALCOHOL DETECTOR MOUTH PIECE",
+            quantity=Decimal("50.000"),
+            unit="NOS",
+            unit_price=Decimal("2.75"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+
+        response = self.client.post(reverse("quotation-line-create-product", args=[line.id]), format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.product, existing)
+        self.assertEqual(Product.objects.filter(name__icontains="Alcohol Detector").count(), 1)
+
+    def test_bulk_create_products_returns_json_error_for_invalid_selection(self):
+        quotation = self.create_quote()
+
+        response = self.client.post(
+            reverse("quotation-bulk-create-products-for-lines", args=[quotation.id]),
+            {"line_ids": [999999]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)
+
     def test_save_all_lines_and_finalize_with_created_product_and_skipped_row(self):
         quotation = self.create_quote()
         active = QuotationLine.objects.create(

@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
 from django.db.models import Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
@@ -99,6 +100,13 @@ class QuotationBaseViewSet:
 
     def handle_workflow_error(self, exc):
         return Response(serializer_error_from_django_validation(exc), status=status.HTTP_400_BAD_REQUEST)
+
+    def handle_safe_workflow_exception(self, exc, fallback_message="Quotation workflow action failed."):
+        if isinstance(exc, DjangoValidationError):
+            return self.handle_workflow_error(exc)
+        if isinstance(exc, IntegrityError):
+            return Response({"detail": "A duplicate or conflicting database value blocked this action. Link the existing Product or edit the Product name."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": fallback_message, "error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class QuotationSettingsView(APIView):
@@ -546,8 +554,8 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 request.user,
                 names_by_id=request.data.get("names") or {},
             )
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            return self.handle_safe_workflow_exception(exc, "Create Products from quote lines failed. Check selected line IDs and Product names.")
         line_serializer = QuotationLineSerializer(summary["updated_lines"], many=True, context={"request": request})
         return Response(
             {
@@ -633,8 +641,8 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 request.user,
                 product_name=request.data.get("product_name") or "",
             )
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            return self.handle_safe_workflow_exception(exc, "Create Product from quote line failed. Check the Product name and line status.")
         return Response(
             {
                 "line": QuotationLineSerializer(line, context={"request": request}).data,

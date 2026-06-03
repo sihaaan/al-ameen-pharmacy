@@ -368,6 +368,55 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }
   };
 
+  const applyUpdatedLines = (updatedLines = []) => {
+    const updatedById = Object.fromEntries(updatedLines.map((line) => [line.id, line]));
+    setQuote((current) => ({
+      ...current,
+      lines: (current.lines || []).map((line) => updatedById[line.id] || line),
+    }));
+    setLineDrafts((current) => ({
+      ...current,
+      ...Object.fromEntries(updatedLines.map((line) => [line.id, draftFromLine(line)])),
+    }));
+    setSavedLineDrafts((current) => ({
+      ...current,
+      ...Object.fromEntries(updatedLines.map((line) => [line.id, draftFromLine(line)])),
+    }));
+  };
+
+  const rememberProductsInList = (products = []) => {
+    setItems((current) => {
+      const byId = new Map(current.map((item) => [String(item.id), item]));
+      products
+        .filter((product) => product?.id)
+        .forEach((product) => byId.set(String(product.id), { ...(byId.get(String(product.id)) || {}), ...product }));
+      return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
+
+  const createProductForLine = async (lineId) => {
+    if (saving || actionInFlight) return;
+    setSaving(true);
+    setActionInFlight(`create-product-${lineId}`);
+    setErrorInfo(null);
+    setLineFeedback(null);
+    try {
+      const draft = lineDrafts[lineId] || {};
+      const response = await quotationAPI.lines.createProduct(lineId, { product_name: draft.item_name_snapshot || '' });
+      applyUpdatedLines([response.data.line]);
+      rememberProductsInList([response.data.product]);
+      setSelectedLineIds((current) => current.filter((id) => id !== lineId));
+      setLineFeedback({ type: 'success', message: response.data.message || 'Created Product and linked row.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Create Product from quote line', `POST /quotations/quote-lines/${lineId}/create_product/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+      setActionInFlight('');
+    }
+  };
+
   const actionEndpoint = (label) => {
     const endpointNames = {
       'Submit Review': 'submit_review',
@@ -549,7 +598,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td>
                       <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => {
                         if (event.target.value === '__create__') {
-                          openCreateProductModal([line.id]);
+                          createProductForLine(line.id);
                           return;
                         }
                         const item = items.find((candidate) => String(candidate.id) === event.target.value);
@@ -581,7 +630,9 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td className="qm-row-actions">
                       <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty} onClick={() => saveLine(line.id)}>Save</button>
-                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || statusInfo.id !== 'unmatched'} onClick={() => openCreateProductModal([line.id])}>Create Product</button>
+                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || statusInfo.id !== 'unmatched'} onClick={() => createProductForLine(line.id)}>
+                        {actionInFlight === `create-product-${line.id}` ? 'Creating...' : 'Create Product'}
+                      </button>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight} onClick={() => updateLineDraft(line.id, { match_status: draft.match_status === 'ignored' ? (draft.product ? 'confirmed' : 'unresolved') : 'ignored' })}>{draft.match_status === 'ignored' ? 'Unskip' : 'Skip'}</button>
                       <button type="button" className="qm-secondary small" onClick={() => setHistoryItem(draft.product || '')}>History</button>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !draft.product} onClick={() => rememberAlias(line.id)}>Remember Alias</button>

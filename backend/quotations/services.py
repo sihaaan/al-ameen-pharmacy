@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Max, Sum
 from django.utils import timezone
+from django.utils.text import slugify
 
 from api.models import Product
 
@@ -77,15 +78,20 @@ def _find_product_by_normalized_name(name):
     key = normalize_label(name)
     if not key:
         return None
+    slug_key = slugify(name)
     exact = Product.objects.filter(name__iexact=name).first()
     if exact:
         return exact
+    if slug_key:
+        slug_match = Product.objects.filter(slug=slug_key).first()
+        if slug_match:
+            return slug_match
     first_token = key.split()[0] if key.split() else ""
     candidates = Product.objects.all()
     if first_token:
         candidates = candidates.filter(name__icontains=first_token)
     for product in candidates[:100]:
-        if normalize_label(product.name) == key:
+        if normalize_label(product.name) == key or (slug_key and slugify(product.name) == slug_key):
             return product
     return None
 
