@@ -772,6 +772,35 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
         duplicate_files = len([entry for entry in files if entry.get("status") == "duplicate"])
         pending_count = suggestion_counts.get(HistoricalImportAISuggestion.STATUS_PENDING, 0)
         conflict_count = suggestion_counts.get(HistoricalImportAISuggestion.STATUS_CONFLICT, 0)
+        commit_blockers = []
+        for entry in imports:
+            blockers = []
+            if entry.status == HistoricalPriceImport.STATUS_COMMITTED:
+                blockers.append("already committed")
+            if entry.status == HistoricalPriceImport.STATUS_CANCELLED:
+                blockers.append("cancelled import")
+            if not entry.company_id:
+                blockers.append("missing company")
+            if not entry.document_number:
+                blockers.append("missing document number")
+            if not entry.document_date:
+                blockers.append("missing document date")
+            ready_rows = [line for line in entry.lines.all() if line.status == HistoricalPriceImportLine.STATUS_READY]
+            unresolved_rows = [line for line in entry.lines.all() if line.status == HistoricalPriceImportLine.STATUS_NEEDS_REVIEW]
+            if not ready_rows:
+                blockers.append("no ready rows")
+            commit_blockers.append(
+                {
+                    "import_id": entry.id,
+                    "filename": entry.source_filename,
+                    "company_name": entry.company.name if entry.company_id else "",
+                    "document_number": entry.document_number,
+                    "ready_row_count": len(ready_rows),
+                    "unresolved_row_count": len(unresolved_rows),
+                    "blockers": blockers,
+                    "can_commit": not blockers,
+                }
+            )
         return {
             "file_count": len(files) or len(imports),
             "parsed_file_count": len([entry for entry in files if entry.get("status") == "parsed"]) or len(imports),
@@ -787,12 +816,14 @@ class HistoricalImportBatchSerializer(serializers.ModelSerializer):
             "conflict_suggestion_action_counts": conflict_action_counts,
             "high_confidence_pending_suggestion_count": high_confidence_pending,
             "unresolved_count": line_counts["needs_review"] + pending_count + conflict_count + missing_document_details,
+            "commit_blockers": commit_blockers,
         }
 
 
 class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
     batch_name = serializers.CharField(source="batch.name", read_only=True, allow_null=True)
     historical_import_document = serializers.CharField(source="historical_import.document_number", read_only=True, allow_null=True)
+    historical_import_document_date = serializers.DateField(source="historical_import.document_date", read_only=True, allow_null=True)
     historical_import_filename = serializers.CharField(source="historical_import.source_filename", read_only=True, allow_null=True)
     historical_import_company_name = serializers.CharField(source="historical_import.company.name", read_only=True, allow_null=True)
     line_item_name = serializers.CharField(source="line.item_name", read_only=True, allow_null=True)
@@ -820,6 +851,7 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "batch_name",
             "historical_import",
             "historical_import_document",
+            "historical_import_document_date",
             "historical_import_filename",
             "historical_import_company_name",
             "line",
@@ -868,6 +900,7 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "batch_name",
             "historical_import",
             "historical_import_document",
+            "historical_import_document_date",
             "historical_import_filename",
             "historical_import_company_name",
             "line",

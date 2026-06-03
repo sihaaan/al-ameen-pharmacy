@@ -112,6 +112,16 @@ def _split_uom(item_name, uom):
     return item_name, uom[:50]
 
 
+def _looks_like_unit_text(value):
+    text = _clean_cell(value)
+    if not text or _quantity(text) is not None:
+        return False
+    normalized = text.lower().rstrip(".")
+    if normalized in UNIT_WORD_SET:
+        return True
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z.\-/ ]{0,24}", text))
+
+
 def _vat_rate(amount, vat_amount):
     if not amount or amount <= 0 or vat_amount is None:
         return Decimal("0.00")
@@ -156,8 +166,13 @@ def _parse_table_row(row, mapping, *, page_number, row_number, sort_order):
     if not item_name:
         return None
 
-    item_name, unit = _split_uom(item_name, _cell(row, mapping, "unit"))
-    quantity = _quantity(_cell(row, mapping, "quantity"))
+    quantity_cell = _cell(row, mapping, "quantity")
+    unit_cell = _cell(row, mapping, "unit")
+    if _quantity(quantity_cell) is None and _quantity(unit_cell) is not None and _looks_like_unit_text(quantity_cell):
+        quantity_cell, unit_cell = unit_cell, quantity_cell
+
+    item_name, unit = _split_uom(item_name, unit_cell)
+    quantity = _quantity(quantity_cell)
     unit_price = _money(_cell(row, mapping, "unit_price"))
     amount = _money(_cell(row, mapping, "amount"))
     vat_amount = _money(_cell(row, mapping, "vat_amount"), default_zero=True)

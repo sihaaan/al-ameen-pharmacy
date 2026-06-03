@@ -851,6 +851,36 @@ class HistoricalPriceImportTests(APITestCase):
         )
         return SimpleUploadedFile(name, buffer.getvalue(), content_type="application/pdf")
 
+    def make_qty_uom_shifted_historical_pdf_upload(self, name="qty-uom-shift.pdf"):
+        buffer = BytesIO()
+        styles = getSampleStyleSheet()
+        document = SimpleDocTemplate(buffer, pagesize=A4)
+        rows = [
+            ["S. No.", "Item Description", "Qty", "UOM", "U PRICE", "TOTAL", "VAT", "G TOTAL"],
+            ["1", "Fastum Gel 50gm", "Tubes.", "3", "30", "90", "0", "90"],
+            ["2", "Silvadiazin Ointment 30gm", "Tubes.", "2", "8", "16", "0", "16"],
+        ]
+        table = Table(rows, colWidths=[40, 185, 60, 48, 58, 58, 48, 58])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        document.build(
+            [
+                Paragraph("QUOTATION-FASTUM", styles["Title"]),
+                Paragraph("DATE :21/05/2026", styles["Normal"]),
+                Spacer(1, 16),
+                table,
+            ]
+        )
+        return SimpleUploadedFile(name, buffer.getvalue(), content_type="application/pdf")
+
     def parse_historical_import(self):
         return self.client.post(
             reverse("quotation-historical-import-parse-file"),
@@ -1074,6 +1104,28 @@ class HistoricalPriceImportTests(APITestCase):
         historical_import = HistoricalPriceImport.objects.get(pk=response.data["id"])
         self.assertEqual(historical_import.parse_meta["company_match"]["company_name"], "Intermass")
 
+    def test_historical_parser_keeps_uom_text_and_numeric_quantity_when_columns_shift(self):
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                response = self.client.post(
+                    reverse("quotation-historical-import-parse-file"),
+                    {"file": self.make_qty_uom_shifted_historical_pdf_upload()},
+                    format="multipart",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        lines = {line["item_name"]: line for line in response.data["lines"]}
+        fastum = lines["Fastum Gel 50gm"]
+        silvadiazin = lines["Silvadiazin Ointment 30gm"]
+        self.assertEqual(fastum["quantity"], "3.000")
+        self.assertEqual(fastum["unit"], "Tubes.")
+        self.assertEqual(fastum["unit_price"], "30.00")
+        self.assertEqual(fastum["line_total"], "90.00")
+        self.assertEqual(silvadiazin["quantity"], "2.000")
+        self.assertEqual(silvadiazin["unit"], "Tubes.")
+        self.assertEqual(silvadiazin["unit_price"], "8.00")
+        self.assertEqual(silvadiazin["line_total"], "16.00")
+
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
         QUOTATION_AI_PARSE_PROVIDER="openai",
@@ -1210,6 +1262,89 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_CONFLICT)
         self.assertEqual(ProductAlias.objects.get(company=self.company, normalized_alias=line.normalized_item_name).product, self.item_two)
 
+    def test_repeated_new_product_suggestions_reuse_one_draft_product_and_mark_rows_ready(self):
+        batch = HistoricalImportBatch.objects.create(name="Repeated ENO", created_by=self.staff)
+        first_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="eno-latest.pdf",
+            source_sha256="a" * 64,
+            document_number="Q-ENO-2",
+            document_date=date(2026, 5, 28),
+            created_by=self.staff,
+        )
+        second_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="eno-old.pdf",
+            source_sha256="b" * 64,
+            document_number="Q-ENO-1",
+            document_date=date(2026, 5, 20),
+            created_by=self.staff,
+        )
+        line_one = HistoricalPriceImportLine.objects.create(
+            historical_import=first_import,
+            item_name="ENO Sachet",
+            quantity=Decimal("2.000"),
+            unit="box",
+            unit_price=Decimal("12.00"),
+            sort_order=1,
+        )
+        line_two = HistoricalPriceImportLine.objects.create(
+            historical_import=second_import,
+            item_name="ENO Sachet",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("11.50"),
+            sort_order=1,
+        )
+        first_suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=first_import,
+            line=line_one,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT,
+            proposed_product_name="ENO Sachet",
+            proposed_pack_size="box",
+            confidence=0.91,
+            reason="Likely new Product.",
+            created_by=self.staff,
+        )
+        second_suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=second_import,
+            line=line_two,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT,
+            proposed_product_name="ENO Sachet",
+            proposed_pack_size="box",
+            confidence=0.9,
+            reason="Repeated Product.",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+            {"suggestion_ids": [first_suggestion.id, second_suggestion.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["applied"], 1)
+        self.assertEqual(response.data["summary"]["applied_similar"], 1)
+        self.assertEqual(Product.objects.filter(name__iexact="ENO Sachet").count(), 1)
+        product = Product.objects.get(name__iexact="ENO Sachet")
+        line_one.refresh_from_db()
+        line_two.refresh_from_db()
+        self.assertEqual(line_one.product, product)
+        self.assertEqual(line_two.product, product)
+        self.assertEqual(line_one.status, HistoricalPriceImportLine.STATUS_READY)
+        self.assertEqual(line_two.status, HistoricalPriceImportLine.STATUS_READY)
+
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
         QUOTATION_AI_PARSE_PROVIDER="openai",
@@ -1240,6 +1375,39 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(response.data["summary"]["failed"], 1)
         self.assertIn("missing API key", response.data["summary"]["results"][0]["message"])
         self.assertEqual(HistoricalImportAISuggestion.objects.count(), 0)
+
+    def test_batch_commit_blocks_selected_imports_with_zero_ready_rows(self):
+        batch = HistoricalImportBatch.objects.create(name="No ready rows", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="blocked.pdf",
+            source_sha256="c" * 64,
+            document_number="Q-BLOCKED",
+            document_date=date(2026, 5, 21),
+            created_by=self.staff,
+        )
+        HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="Pending Item",
+            quantity=Decimal("1.000"),
+            unit_price=Decimal("5.00"),
+            status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW,
+        )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-commit-ready-imports", args=[batch.id]),
+            {"import_ids": [historical_import.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["blocked"], 1)
+        self.assertEqual(response.data["summary"]["committed"], 0)
+        self.assertIn("no ready rows", response.data["results"][0]["message"])
+        self.assertEqual(CompanyPriceHistory.objects.count(), 0)
 
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,

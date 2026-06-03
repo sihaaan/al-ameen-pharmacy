@@ -733,27 +733,71 @@ def _summary_from_results(results):
     counts = {}
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
+    auto_applied = sum(int(result.get("auto_applied_similar") or 0) for result in results)
     return {
         **counts,
         "suggested": counts.get("suggested", 0),
         "applied": counts.get("applied", 0),
+        "applied_similar": counts.get("applied_similar", 0),
+        "auto_applied_similar": auto_applied,
         "conflict": counts.get("conflict", 0),
         "committed": counts.get("committed", 0),
+        "blocked": counts.get("blocked", 0),
         "failed": counts.get("failed", 0),
         "results": results,
     }
 
 
-def _find_existing_product_by_normalized_name(name):
+def _find_existing_product_by_normalized_name(name, *, pack_size="", dosage="", unit=""):
     normalized = normalize_label(name)
     if not normalized:
         return None
-    for product in Product.objects.exclude(status="archived").filter(name__iexact=name.strip())[:2]:
-        return product
-    for product in Product.objects.exclude(status="archived").filter(name__icontains=name.strip()[:80])[:20]:
-        if normalize_label(product.name) == normalized:
+    candidates = list(Product.objects.exclude(status="archived").filter(name__iexact=name.strip())[:10])
+    if not candidates:
+        candidates = [
+            product
+            for product in Product.objects.exclude(status="archived").filter(name__icontains=name.strip()[:80])[:50]
+            if normalize_label(product.name) == normalized
+        ]
+    if not candidates:
+        return None
+    desired_pack = normalize_label(pack_size or unit)
+    desired_dosage = normalize_label(dosage)
+    if desired_pack or desired_dosage:
+        for product in candidates:
+            product_pack = normalize_label(getattr(product, "pack_size", "") or "")
+            product_dosage = normalize_label(getattr(product, "dosage", "") or "")
+            if desired_pack and product_pack and desired_pack != product_pack:
+                continue
+            if desired_dosage and product_dosage and desired_dosage != product_dosage:
+                continue
             return product
-    return None
+    return candidates[0]
+
+
+def _line_units_are_compatible(source_line, target_line):
+    source_unit = normalize_label(source_line.unit or "")
+    target_unit = normalize_label(target_line.unit or "")
+    return not source_unit or not target_unit or source_unit == target_unit
+
+
+def _matching_pending_line_suggestions(source_suggestion):
+    line = source_suggestion.line
+    batch = source_suggestion.batch
+    if not line or not batch or not line.normalized_item_name:
+        return HistoricalImportAISuggestion.objects.none()
+    return (
+        HistoricalImportAISuggestion.objects.select_for_update()
+        .select_related("historical_import__company", "batch", "line", "suggested_company", "suggested_product")
+        .filter(
+            batch=batch,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            status=HistoricalImportAISuggestion.STATUS_PENDING,
+            line__normalized_item_name=line.normalized_item_name,
+        )
+        .exclude(id=source_suggestion.id)
+        .order_by("historical_import_id", "line__sort_order", "id")
+    )
 
 
 def _ready_or_review(line):
@@ -789,7 +833,90 @@ def _safe_create_company_alias(suggestion, actor):
     line.match_reason = f"Approved AI alias '{alias.alias}'."
     line.status = _ready_or_review(line)
     line.save(update_fields=["product", "match_reason", "status", "updated_at"])
-    return {"alias_id": alias.id, "product_id": suggestion.suggested_product_id}
+    return {
+        "alias_id": alias.id,
+        "alias_text": alias.alias,
+        "product_id": suggestion.suggested_product_id,
+        "product_name": suggestion.suggested_product.name,
+        "row_status": line.status,
+        "message": f"Alias approved: '{alias.alias}' -> {suggestion.suggested_product.name}.",
+    }
+
+
+def _apply_exact_matching_line_suggestions(source_suggestion, actor, source_result):
+    action = source_suggestion.action
+    if action not in {
+        HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+        HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS,
+        HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT,
+        HistoricalImportAISuggestion.ACTION_SKIP,
+    }:
+        return []
+    line = source_suggestion.line
+    if not line:
+        return []
+
+    results = []
+    product_id = source_result.get("product_id")
+    propagated_product = Product.objects.filter(pk=product_id).first() if product_id else source_suggestion.suggested_product
+    for target in _matching_pending_line_suggestions(source_suggestion):
+        if not target.line or not _line_units_are_compatible(line, target.line):
+            continue
+        if action == HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS:
+            if target.historical_import.company_id != source_suggestion.historical_import.company_id:
+                continue
+            target.suggested_product_id = product_id or source_suggestion.suggested_product_id
+            if propagated_product:
+                target.suggested_product = propagated_product
+            target.alias_text = target.alias_text or target.line.item_name
+        elif product_id and action in {
+            HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+            HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT,
+        }:
+            target.suggested_product_id = product_id
+            if propagated_product:
+                target.suggested_product = propagated_product
+            target.action = HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT
+            target.reason = (
+                f"Reused staff-approved mapping from exact same imported item '{line.item_name}'. "
+                f"Original AI reason: {target.reason}"
+            )[:1000]
+        elif action == HistoricalImportAISuggestion.ACTION_SKIP:
+            target.action = HistoricalImportAISuggestion.ACTION_SKIP
+        try:
+            result = _apply_one_suggestion(target, actor)
+            target.status = HistoricalImportAISuggestion.STATUS_APPLIED
+            target.error_message = ""
+            target.applied_by = actor if getattr(actor, "is_authenticated", False) else None
+            target.applied_at = timezone.now()
+            target.save(
+                update_fields=[
+                    "action",
+                    "suggested_product",
+                    "alias_text",
+                    "reason",
+                    "status",
+                    "error_message",
+                    "applied_by",
+                    "applied_at",
+                    "updated_at",
+                ]
+            )
+            results.append(
+                {
+                    "suggestion_id": target.id,
+                    "historical_import_id": target.historical_import_id,
+                    "status": "applied_similar",
+                    "message": f"Applied the same exact-item decision to '{target.line.item_name}'.",
+                    **result,
+                }
+            )
+        except ValidationError as exc:
+            target.status = HistoricalImportAISuggestion.STATUS_CONFLICT
+            target.error_message = " ".join(str(part) for part in getattr(exc, "messages", [str(exc)]))
+            target.save(update_fields=["status", "error_message", "updated_at"])
+            results.append({"suggestion_id": target.id, "status": "conflict", "message": target.error_message})
+    return results
 
 
 @transaction.atomic
@@ -809,9 +936,18 @@ def apply_historical_ai_suggestions(suggestion_ids, actor):
 
     results = []
     touched_import_ids = set()
+    auto_applied_ids = set()
     for suggestion in suggestions:
+        if suggestion.id in auto_applied_ids:
+            continue
         if suggestion.status != HistoricalImportAISuggestion.STATUS_PENDING:
-            results.append({"suggestion_id": suggestion.id, "status": "failed", "message": "Suggestion is not pending."})
+            results.append(
+                {
+                    "suggestion_id": suggestion.id,
+                    "status": "already_applied" if suggestion.status == HistoricalImportAISuggestion.STATUS_APPLIED else "failed",
+                    "message": f"Suggestion is already {suggestion.status}.",
+                }
+            )
             continue
         try:
             result = _apply_one_suggestion(suggestion, actor)
@@ -820,8 +956,27 @@ def apply_historical_ai_suggestions(suggestion_ids, actor):
             suggestion.applied_by = actor if getattr(actor, "is_authenticated", False) else None
             suggestion.applied_at = timezone.now()
             suggestion.save(update_fields=["status", "error_message", "applied_by", "applied_at", "updated_at"])
-            results.append({"suggestion_id": suggestion.id, "status": "applied", **result})
+            similar_results = _apply_exact_matching_line_suggestions(suggestion, actor, result)
+            results.append(
+                {
+                    "suggestion_id": suggestion.id,
+                    "status": "applied",
+                    "auto_applied_similar": len([item for item in similar_results if item.get("status") == "applied_similar"]),
+                    **result,
+                }
+            )
+            results.extend(similar_results)
+            auto_applied_ids.update(
+                item.get("suggestion_id")
+                for item in similar_results
+                if item.get("status") == "applied_similar"
+            )
             touched_import_ids.add(suggestion.historical_import_id)
+            touched_import_ids.update(
+                item.get("historical_import_id")
+                for item in similar_results
+                if item.get("historical_import_id")
+            )
         except ValidationError as exc:
             suggestion.status = HistoricalImportAISuggestion.STATUS_CONFLICT
             suggestion.error_message = " ".join(str(part) for part in getattr(exc, "messages", [str(exc)]))
@@ -845,7 +1000,11 @@ def _apply_one_suggestion(suggestion, actor):
                 raise ValidationError("Select a company before applying this suggestion.")
             historical_import.company = suggestion.suggested_company
             historical_import.save(update_fields=["company", "updated_at"])
-            return {"company_id": suggestion.suggested_company_id}
+            return {
+                "company_id": suggestion.suggested_company_id,
+                "company_name": suggestion.suggested_company.name,
+                "message": f"Company linked: {suggestion.suggested_company.name}.",
+            }
         if suggestion.action == HistoricalImportAISuggestion.ACTION_CREATE_NEW_COMPANY:
             name = suggestion.proposed_company_name or historical_import.suggested_company_name
             if not name:
@@ -855,7 +1014,7 @@ def _apply_one_suggestion(suggestion, actor):
                 company = Company.objects.create(name=name[:255])
             historical_import.company = company
             historical_import.save(update_fields=["company", "updated_at"])
-            return {"company_id": company.id, "company_name": company.name}
+            return {"company_id": company.id, "company_name": company.name, "message": f"Company linked: {company.name}."}
         historical_import.status = HistoricalPriceImport.STATUS_REVIEWED
         historical_import.save(update_fields=["status", "updated_at"])
         return {"message": "Company left for manual review."}
@@ -873,14 +1032,24 @@ def _apply_one_suggestion(suggestion, actor):
         line.match_reason = f"Approved AI Product match: {suggestion.reason}"[:255]
         line.status = _ready_or_review(line)
         line.save(update_fields=["product", "match_reason", "status", "updated_at"])
-        return {"product_id": suggestion.suggested_product_id, "row_status": line.status}
+        return {
+            "product_id": suggestion.suggested_product_id,
+            "product_name": suggestion.suggested_product.name,
+            "row_status": line.status,
+            "message": f"Product linked: {suggestion.suggested_product.name}. Row is {line.status}.",
+        }
 
     if suggestion.action == HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS:
         return _safe_create_company_alias(suggestion, actor)
 
     if suggestion.action == HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT:
         name = suggestion.proposed_product_name or line.item_name
-        product = _find_existing_product_by_normalized_name(name)
+        product = _find_existing_product_by_normalized_name(
+            name,
+            pack_size=suggestion.proposed_pack_size,
+            dosage=suggestion.proposed_dosage,
+            unit=suggestion.proposed_unit or line.unit,
+        )
         created = False
         if not product:
             product = Product.objects.create(
@@ -899,18 +1068,28 @@ def _apply_one_suggestion(suggestion, actor):
         line.match_reason = "Approved AI new draft Product." if created else "Approved AI suggestion linked existing exact Product."
         line.status = _ready_or_review(line)
         line.save(update_fields=["product", "match_reason", "status", "updated_at"])
-        return {"product_id": product.id, "created": created, "row_status": line.status}
+        return {
+            "product_id": product.id,
+            "product_name": product.name,
+            "created": created,
+            "row_status": line.status,
+            "message": (
+                f"Draft Product created: {product.name}. Row is {line.status}."
+                if created
+                else f"Existing exact Product reused: {product.name}. Row is {line.status}."
+            ),
+        }
 
     if suggestion.action == HistoricalImportAISuggestion.ACTION_SKIP:
         line.status = HistoricalPriceImportLine.STATUS_SKIPPED
         line.match_reason = f"Skipped by approved AI suggestion: {suggestion.reason}"[:255]
         line.save(update_fields=["status", "match_reason", "updated_at"])
-        return {"row_status": line.status}
+        return {"row_status": line.status, "message": "Row skipped and will not be committed."}
 
     line.status = HistoricalPriceImportLine.STATUS_NEEDS_REVIEW
     line.match_reason = f"AI needs manual review: {suggestion.reason}"[:255]
     line.save(update_fields=["status", "match_reason", "updated_at"])
-    return {"row_status": line.status}
+    return {"row_status": line.status, "message": "Row left in manual review."}
 
 
 def refresh_historical_import_batch_summary(batch):
@@ -1005,16 +1184,67 @@ def append_batch_file_result(batch, result):
     return refresh_historical_import_batch_summary(batch)
 
 
+def _commit_blockers_for_import(historical_import):
+    blockers = []
+    if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
+        blockers.append("already committed")
+    if historical_import.status == HistoricalPriceImport.STATUS_CANCELLED:
+        blockers.append("cancelled import")
+    if not historical_import.company_id:
+        blockers.append("missing company")
+    if not historical_import.document_number:
+        blockers.append("missing document number")
+    if not historical_import.document_date:
+        blockers.append("missing document date")
+    ready_count = historical_import.lines.filter(status=HistoricalPriceImportLine.STATUS_READY).count()
+    if ready_count <= 0:
+        blockers.append("no ready rows")
+    unresolved_count = historical_import.lines.filter(status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW).count()
+    return blockers, ready_count, unresolved_count
+
+
 def commit_ready_imports_for_batch(batch, import_ids, actor):
     queryset = batch.imports.all()
     if import_ids:
         queryset = queryset.filter(id__in=import_ids)
     results = []
     for historical_import in queryset.order_by("created_at", "id"):
+        blockers, ready_count, unresolved_count = _commit_blockers_for_import(historical_import)
+        base_result = {
+            "import_id": historical_import.id,
+            "filename": historical_import.source_filename,
+            "company_name": historical_import.company.name if historical_import.company_id else "",
+            "document_number": historical_import.document_number,
+            "ready_row_count": ready_count,
+            "unresolved_row_count": unresolved_count,
+        }
+        if blockers:
+            results.append(
+                {
+                    **base_result,
+                    "status": "blocked",
+                    "message": "; ".join(blockers),
+                    "blockers": blockers,
+                }
+            )
+            continue
         try:
             committed = commit_historical_price_import(historical_import, actor)
-            results.append({"import_id": historical_import.id, "status": "committed", "quotation": committed.created_quotation_id})
+            results.append(
+                {
+                    **base_result,
+                    "status": "committed",
+                    "quotation": committed.created_quotation_id,
+                    "message": f"Committed {ready_count} ready row(s) to price history.",
+                }
+            )
         except ValidationError as exc:
-            results.append({"import_id": historical_import.id, "status": "failed", "message": " ".join(getattr(exc, "messages", [str(exc)]))})
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "message": " ".join(getattr(exc, "messages", [str(exc)])),
+                }
+            )
     refresh_historical_import_batch_summary(batch)
     return _summary_from_results(results), results

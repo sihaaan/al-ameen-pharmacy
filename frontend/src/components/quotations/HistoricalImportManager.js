@@ -60,6 +60,21 @@ const formatMoney = (value) => {
   return `AED ${numeric.toFixed(2)}`;
 };
 
+const normalizeComparable = (value) => {
+  if (value === null || value === undefined) return '';
+  return String(value);
+};
+
+const changedFields = (draft, original, keys) => (
+  keys.filter((key) => normalizeComparable(draft[key]) !== normalizeComparable(original[key]))
+);
+
+const dateSortValue = (value) => {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
 const duplicatePrimaryMatch = (duplicateCheck) => duplicateCheck?.primary_match || duplicateCheck?.duplicate_match || null;
 
 const HistoricalImportManager = () => {
@@ -102,7 +117,11 @@ const HistoricalImportManager = () => {
   const lineCounts = wizardSummary.line_counts || {};
   const pendingActionCounts = wizardSummary.pending_suggestion_action_counts || {};
   const appliedActionCounts = wizardSummary.applied_suggestion_action_counts || {};
+  const commitBlockers = wizardSummary.commit_blockers || [];
   const selectedDocument = selectedBatchImports.find((entry) => entry.id === selectedDocumentId) || selectedBatchImports[0] || null;
+  const selectedReadyRowCount = selectedBatchImports
+    .filter((entry) => selectedBatchImportIds.includes(entry.id))
+    .reduce((total, entry) => total + ((entry.lines || []).filter((line) => line.status === 'ready').length), 0);
 
   const load = async () => {
     setLoading(true);
@@ -167,7 +186,7 @@ const HistoricalImportManager = () => {
       }
     });
     setSuggestionDrafts(nextSuggestionDrafts);
-    setLineDrafts((current) => ({ ...nextLineDrafts, ...current }));
+    setLineDrafts(nextLineDrafts);
   };
 
   const loadSuggestions = async (batchId = selectedBatch?.id) => {
@@ -357,6 +376,20 @@ const HistoricalImportManager = () => {
   const saveImportDetails = async (entry) => {
     if (!entry || workingAction) return;
     const draft = draftForImport(entry);
+    const original = {
+      company: entry.company || '',
+      suggested_company_name: entry.suggested_company_name || '',
+      document_number: entry.document_number || '',
+      document_date: entry.document_date || '',
+      currency: entry.currency || 'AED',
+      subtotal: entry.subtotal || '',
+      vat_total: entry.vat_total || '',
+      total: entry.total || '',
+    };
+    if (!changedFields(draft, original, Object.keys(original)).length) {
+      setNotice({ type: 'warning', message: 'No changes to save for this document.' });
+      return;
+    }
     setWorkingAction(`save-import-${entry.id}`);
     setNotice(null);
     setErrorInfo(null);
@@ -378,7 +411,7 @@ const HistoricalImportManager = () => {
       });
       await load();
       await refreshSelectedBatch();
-      setNotice({ type: 'success', message: 'Document details saved.' });
+      setNotice({ type: 'success', message: `Edits saved for ${entry.source_filename}.` });
     } catch (error) {
       const details = await describeQuotationError(error, 'Save historical import', `PATCH /quotations/historical-imports/${entry.id}/`);
       setErrorInfo(details);
@@ -412,6 +445,39 @@ const HistoricalImportManager = () => {
     if (!suggestion || workingAction) return;
     const suggestionDraft = suggestionDrafts[suggestion.id] || {};
     const lineDraft = suggestion.line ? lineDrafts[suggestion.line] : null;
+    const suggestionOriginal = {
+      action: suggestion.action || 'needs_manual_review',
+      suggested_product: suggestion.suggested_product || '',
+      suggested_company: suggestion.suggested_company || '',
+      alias_text: suggestion.alias_text || '',
+      proposed_company_name: suggestion.proposed_company_name || '',
+      proposed_product_name: suggestion.proposed_product_name || '',
+      proposed_unit: suggestion.proposed_unit || '',
+      proposed_pack_size: suggestion.proposed_pack_size || '',
+      proposed_dosage: suggestion.proposed_dosage || '',
+    };
+    const lineOriginal = suggestion.line ? {
+      item_name: suggestion.line_item_name || '',
+      quantity: suggestion.line_quantity || '',
+      unit: suggestion.line_unit || '',
+      unit_price: suggestion.line_unit_price || '',
+      vat_amount: suggestion.line_vat_amount || '',
+      vat_rate: suggestion.line_vat_rate || '',
+      line_total: suggestion.line_total || '',
+      status: suggestion.line_status || 'needs_review',
+    } : {};
+    const suggestionChanges = changedFields(
+      { ...suggestionOriginal, ...suggestionDraft },
+      suggestionOriginal,
+      Object.keys(suggestionOriginal)
+    );
+    const lineChanges = suggestion.line
+      ? changedFields({ ...lineOriginal, ...(lineDraft || {}) }, lineOriginal, Object.keys(lineOriginal))
+      : [];
+    if (!suggestionChanges.length && !lineChanges.length) {
+      setNotice({ type: 'warning', message: 'No changes to save for this review row.' });
+      return;
+    }
     setWorkingAction(`save-suggestion-${suggestion.id}`);
     setNotice(null);
     setErrorInfo(null);
@@ -481,6 +547,17 @@ const HistoricalImportManager = () => {
     ].filter(Boolean);
   };
 
+  const buildApplyNotice = (summary = {}) => {
+    const parts = [];
+    if (summary.applied) parts.push(`${summary.applied} selected decision(s) applied`);
+    if (summary.applied_similar) parts.push(`${summary.applied_similar} exact repeated row(s) updated`);
+    if (summary.auto_applied_similar && !summary.applied_similar) parts.push(`${summary.auto_applied_similar} similar row(s) updated`);
+    if (summary.conflict) parts.push(`${summary.conflict} conflict(s) need review`);
+    if (summary.failed) parts.push(`${summary.failed} failed`);
+    if (summary.already_applied) parts.push(`${summary.already_applied} already applied`);
+    return parts.length ? parts.join(', ') + '.' : 'No pending decisions were changed.';
+  };
+
   const requestApplySuggestions = (ids = selectedSuggestionIds) => {
     if (!ids.length || workingAction) return;
     setConfirmAction({
@@ -502,7 +579,7 @@ const HistoricalImportManager = () => {
       const response = await quotationAPI.historicalImportBatches.applyAiSuggestions(selectedBatch.id, { suggestion_ids: ids });
       setNotice({
         type: response.data.summary.conflict ? 'warning' : 'success',
-        message: `AI decisions applied: ${response.data.summary.applied || 0}, conflicts: ${response.data.summary.conflict || 0}, failed: ${response.data.summary.failed || 0}.`,
+        message: buildApplyNotice(response.data.summary),
       });
       setSelectedSuggestionIds([]);
       await load();
@@ -609,12 +686,19 @@ const HistoricalImportManager = () => {
     if (!selectedBatch || workingAction) return;
     const importIds = selectedBatchImportIds.length ? selectedBatchImportIds : visibleBatchImportIds;
     if (!importIds.length) return;
+    const selectedReady = selectedBatchImports
+      .filter((entry) => importIds.includes(entry.id))
+      .reduce((total, entry) => total + ((entry.lines || []).filter((line) => line.status === 'ready').length), 0);
+    if (!selectedReady) {
+      setNotice({ type: 'warning', message: 'No selected imports have ready rows. Apply decisions or mark valid rows ready before committing.' });
+      return;
+    }
     setConfirmAction({
       title: 'Commit ready rows to price history?',
       body: 'Only rows already marked ready will create company-specific price history. Needs-review, skipped, duplicate, and unresolved rows are ignored.',
       details: [
         `${importIds.length} selected import(s)`,
-        `${lineCounts.ready || 0} ready row(s) in the batch`,
+        `${selectedReady} ready row(s) in the selected imports`,
         'No Products or aliases are created by this commit step.',
       ],
       confirmLabel: 'Commit price history',
@@ -630,9 +714,19 @@ const HistoricalImportManager = () => {
     setErrorInfo(null);
     try {
       const response = await quotationAPI.historicalImportBatches.commitReadyImports(selectedBatch.id, { import_ids: importIds });
+      const blocked = response.data.summary.blocked || 0;
+      const failed = response.data.summary.failed || 0;
+      const committed = response.data.summary.committed || 0;
+      const blockedReasons = (response.data.results || [])
+        .filter((result) => result.status === 'blocked' || result.status === 'failed')
+        .slice(0, 3)
+        .map((result) => `${result.filename || `Import #${result.import_id}`}: ${result.message}`)
+        .join(' | ');
       setNotice({
-        type: response.data.summary.failed ? 'warning' : 'success',
-        message: `Batch commit complete: ${response.data.summary.committed || 0} committed, ${response.data.summary.failed || 0} failed.`,
+        type: blocked || failed ? 'warning' : 'success',
+        message: blocked || failed
+          ? `Commit finished: ${committed} import(s) committed, ${blocked} blocked, ${failed} failed. ${blockedReasons}`
+          : `Commit complete: ${committed} import(s) committed.`,
       });
       await load();
       await refreshSelectedBatch();
@@ -670,12 +764,28 @@ const HistoricalImportManager = () => {
       const key = LINE_ACTIONS.includes(suggestion.action) ? suggestion.action : 'needs_manual_review';
       groups[key].push(suggestion);
     });
+    Object.keys(groups).forEach((key) => {
+      groups[key].sort((a, b) => (
+        dateSortValue(b.historical_import_document_date) - dateSortValue(a.historical_import_document_date)
+        || String(a.line_item_name || '').localeCompare(String(b.line_item_name || ''))
+        || a.id - b.id
+      ));
+    });
     return groups;
   }, [decisionCompanyFilter, decisionConfidenceFilter, decisionFileFilter, suggestions]);
 
   const companySuggestions = useMemo(() => (
     suggestions.filter((suggestion) => suggestion.suggestion_type === 'company')
   ), [suggestions]);
+
+  const highConfidenceCompanyMatches = useMemo(() => (
+    companySuggestions.filter((suggestion) => (
+      suggestion.status === 'pending'
+      && suggestion.action === 'match_existing_company'
+      && suggestion.suggested_company
+      && confidencePercent(suggestion.confidence) >= 85
+    ))
+  ), [companySuggestions]);
 
   const decisionCompanyOptions = useMemo(() => (
     Array.from(new Set(suggestions.map((suggestion) => suggestion.historical_import_company_name).filter(Boolean))).sort()
@@ -929,11 +1039,26 @@ const HistoricalImportManager = () => {
       {!selectedBatch ? (
         <div className="qm-empty">Open a batch first.</div>
       ) : (
+        <>
+        <div className="qm-bulk-toolbar compact company-approval">
+          <strong>{highConfidenceCompanyMatches.length} high-confidence company match(es)</strong>
+          <span>Approve repeated company matches in one action, then review only exceptions.</span>
+          <span className="qm-bulk-spacer" />
+          <button
+            type="button"
+            className="qm-primary small"
+            disabled={!highConfidenceCompanyMatches.length || Boolean(workingAction)}
+            onClick={() => requestApplySuggestions(highConfidenceCompanyMatches.map((suggestion) => suggestion.id))}
+          >
+            Approve High-Confidence Companies
+          </button>
+        </div>
         <div className="qm-document-review-layout">
           <div className="qm-document-list-panel">
             <h4>Documents in this batch</h4>
             {selectedBatchImports.map((entry) => {
               const duplicateCheck = entry.duplicate_check || entry.parse_meta?.duplicate_check;
+              const companySuggestion = companySuggestions.find((suggestion) => suggestion.historical_import === entry.id);
               return (
                 <button
                   key={entry.id}
@@ -943,8 +1068,11 @@ const HistoricalImportManager = () => {
                 >
                   <strong>{entry.source_filename}</strong>
                   <span>{entry.company_name || entry.suggested_company_name || 'Company not selected'}</span>
+                  {companySuggestion && (
+                    <span>AI thinks: {companySuggestion.suggested_company_name || companySuggestion.proposed_company_name || '-'} ({confidencePercent(companySuggestion.confidence)}%)</span>
+                  )}
                   <small>{entry.document_number || '-'} - {entry.document_date || '-'}</small>
-                  <em>{entry.lines?.length || 0} rows</em>
+                  <em>{entry.lines?.length || 0} rows - {entry.company_name ? 'linked' : 'pending'}</em>
                   {duplicateCheck?.is_duplicate && <i>{duplicateCheck.blocking ? 'Exact duplicate' : 'Similar import'}</i>}
                 </button>
               );
@@ -1063,6 +1191,7 @@ const HistoricalImportManager = () => {
             })()}
           </div>
         </div>
+        </>
       )}
     </div>
   );
@@ -1091,6 +1220,18 @@ const HistoricalImportManager = () => {
             </div>
           </div>
         </div>
+
+        {suggestion.status !== 'pending' && (
+          <div className={`qm-applied-state status-${suggestion.status}`}>
+            <strong>{suggestion.status === 'applied' ? 'Applied' : suggestion.status}</strong>
+            <span>
+              {suggestion.line_status === 'ready' && 'Row is ready for price history commit.'}
+              {suggestion.line_status === 'skipped' && 'Row is skipped and will not be committed.'}
+              {suggestion.line_status === 'needs_review' && 'Row still needs review before commit.'}
+              {suggestion.error_message && ` ${suggestion.error_message}`}
+            </span>
+          </div>
+        )}
 
         <div className="qm-decision-edit-grid">
           <label><span className="qm-label-text">Decision</span>
@@ -1190,6 +1331,7 @@ const HistoricalImportManager = () => {
         </details>
 
         <div className="qm-action-row">
+          <span className="qm-action-help">Save Edits only updates review fields. Apply This approves the mapping and marks valid rows ready.</span>
           <button type="button" className="qm-secondary small" onClick={() => openSourceContext(suggestion)}>View Source</button>
           <button type="button" className="qm-secondary small" disabled={Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>
             {workingAction === `save-suggestion-${suggestion.id}` ? 'Saving...' : 'Save Edits'}
@@ -1206,6 +1348,14 @@ const HistoricalImportManager = () => {
     const highConfidence = pending.filter((suggestion) => confidencePercent(suggestion.confidence) >= 85);
     const visibleLimit = groupLimits[key] || 25;
     const visibleSuggestions = groupSuggestions.slice(0, visibleLimit);
+    const groupActionButtons = (
+      <>
+        <button type="button" className="qm-secondary small" disabled={!pending.length} onClick={() => selectSuggestionGroup(pending)}>Select Pending</button>
+        <button type="button" className="qm-primary small" disabled={!highConfidence.length || Boolean(workingAction)} onClick={() => requestApplySuggestions(highConfidence.map((suggestion) => suggestion.id))}>
+          Approve High Confidence
+        </button>
+      </>
+    );
     return (
       <div className={`qm-decision-group group-${key}`} key={key}>
         <div className="qm-decision-group-header">
@@ -1222,12 +1372,7 @@ const HistoricalImportManager = () => {
                 {isCollapsed ? 'Show skipped rows' : 'Hide skipped rows'}
               </button>
             ) : (
-              <>
-                <button type="button" className="qm-secondary small" disabled={!pending.length} onClick={() => selectSuggestionGroup(pending)}>Select Pending</button>
-                <button type="button" className="qm-primary small" disabled={!highConfidence.length || Boolean(workingAction)} onClick={() => requestApplySuggestions(highConfidence.map((suggestion) => suggestion.id))}>
-                  Approve High Confidence
-                </button>
-              </>
+              groupActionButtons
             )}
           </div>
         </div>
@@ -1239,6 +1384,12 @@ const HistoricalImportManager = () => {
               <button type="button" className="qm-secondary" onClick={() => setGroupLimits((current) => ({ ...current, [key]: visibleLimit + 25 }))}>
                 Show 25 more ({groupSuggestions.length - visibleSuggestions.length} remaining)
               </button>
+            )}
+            {key !== 'skip' && pending.length > 0 && (
+              <div className="qm-decision-group-footer">
+                <span>{pending.length} pending in this group</span>
+                {groupActionButtons}
+              </div>
             )}
           </div>
         )}
@@ -1283,7 +1434,7 @@ const HistoricalImportManager = () => {
         <div className="qm-empty">Open a batch first.</div>
       ) : (
         <>
-          <div className="qm-bulk-toolbar compact">
+          <div className="qm-bulk-toolbar selection-toolbar">
             <strong>{selectedSuggestionIds.length} AI decisions selected</strong>
             <button type="button" className="qm-secondary small" disabled={!selectedSuggestionIds.length} onClick={() => setSelectedSuggestionIds([])}>Clear</button>
             <span className="qm-bulk-spacer" />
@@ -1310,7 +1461,7 @@ const HistoricalImportManager = () => {
           <h3>Final Review & Commit</h3>
           <p>Nothing durable is committed until this step. Only ready rows create company-specific price history.</p>
         </div>
-        <button type="button" className="qm-primary" disabled={!selectedBatch || workingAction === 'commit' || !(lineCounts.ready > 0)} onClick={commitSelectedBatchImports}>
+        <button type="button" className="qm-primary" disabled={!selectedBatch || workingAction === 'commit' || !(selectedReadyRowCount > 0)} onClick={commitSelectedBatchImports}>
           {workingAction === 'commit' ? 'Committing...' : 'Commit Approved Rows to Price History'}
         </button>
       </div>
@@ -1340,6 +1491,7 @@ const HistoricalImportManager = () => {
                   <th>Rows</th>
                   <th>Ready</th>
                   <th>Needs Review</th>
+                  <th>Commit Check</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -1347,6 +1499,7 @@ const HistoricalImportManager = () => {
                 {selectedBatchImports.map((entry) => {
                   const ready = (entry.lines || []).filter((line) => line.status === 'ready').length;
                   const needsReview = (entry.lines || []).filter((line) => line.status === 'needs_review').length;
+                  const commitInfo = commitBlockers.find((item) => item.import_id === entry.id);
                   return (
                     <tr key={entry.id}>
                       <td className="qm-check-cell"><input type="checkbox" checked={selectedBatchImportIds.includes(entry.id)} onChange={() => toggleBatchImportSelection(entry.id)} /></td>
@@ -1356,6 +1509,13 @@ const HistoricalImportManager = () => {
                       <td>{entry.lines?.length || 0}</td>
                       <td>{ready}</td>
                       <td>{needsReview}</td>
+                      <td>
+                        {commitInfo?.can_commit ? (
+                          <span className="qm-badge success">Ready</span>
+                        ) : (
+                          <span className="qm-blocker-text">{(commitInfo?.blockers || ['not ready']).join(', ')}</span>
+                        )}
+                      </td>
                       <td><span className={`qm-badge status-${entry.status}`}>{entry.status}</span></td>
                     </tr>
                   );

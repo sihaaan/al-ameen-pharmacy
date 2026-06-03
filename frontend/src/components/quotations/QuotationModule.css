@@ -876,6 +876,18 @@
   padding: 8px 10px;
 }
 
+.qm-bulk-toolbar.selection-toolbar {
+  top: 64px;
+  z-index: 4;
+  margin: 0 0 14px;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.qm-bulk-toolbar.company-approval {
+  margin: 0 0 14px;
+}
+
 .qm-bulk-spacer {
   flex: 1 1 auto;
 }
@@ -1306,6 +1318,23 @@
   flex-wrap: wrap;
 }
 
+.qm-decision-group-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.qm-decision-group-footer span {
+  color: #64748b;
+  font-weight: 800;
+  margin-right: auto;
+}
+
 .qm-decision-list {
   display: grid;
   gap: 12px;
@@ -1330,6 +1359,42 @@
 .qm-decision-card.status-failed {
   border-color: #e5e7eb;
   background: #f9fafb;
+}
+
+.qm-applied-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid #a7f3d0;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #065f46;
+  font-weight: 800;
+}
+
+.qm-applied-state.status-conflict {
+  border-color: #fecaca;
+  background: #fff7f7;
+  color: #991b1b;
+}
+
+.qm-applied-state span {
+  color: inherit;
+  font-weight: 700;
+}
+
+.qm-action-help {
+  flex: 1 1 260px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-blocker-text {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .qm-check-label {
