@@ -2816,6 +2816,31 @@ class QuotationSettingsTests(APITestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertTrue(response.content.startswith(b"%PDF"))
 
+    def test_pdf_hides_internal_line_notes_and_keeps_double_digit_serials_together(self):
+        quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
+        for index in range(1, 13):
+            QuotationLine.objects.create(
+                quotation=quotation,
+                product=self.product,
+                item_name_snapshot=f"Item {index}",
+                quantity=Decimal("1.000"),
+                unit="each",
+                unit_price=Decimal("10.00"),
+                vat_rate=Decimal("0.00"),
+                match_status=QuotationLine.MATCH_CONFIRMED,
+                sort_order=index,
+                notes="Quantity and unit detected, confirm accuracy.",
+            )
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        text = extract_pdf_text(response.content)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("Quantity and unit detected", text)
+        self.assertIn("Item 10", text)
+        self.assertNotIn("\n1\n0\n", text)
+
     def test_pdf_generation_works_with_uploaded_logo_and_stamp_images(self):
         storage_settings = {
             "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},

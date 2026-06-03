@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
@@ -26,6 +27,13 @@ LIGHT_BORDER = colors.HexColor("#E5E7EB")
 SOFT = colors.HexColor("#F9FAFB")
 SUCCESS_SOFT = colors.HexColor("#ECFDF5")
 
+INTERNAL_LINE_DETAIL_PATTERNS = [
+    re.compile(r"\bquantity and unit\b", re.IGNORECASE),
+    re.compile(r"\b(?:verify|validate|confirm|check)\b.*\b(?:accuracy|details?|item|product|quantity|composition|spelling|consistency)\b", re.IGNORECASE),
+    re.compile(r"\b(?:detected|extracted|visible|present|identified)\b.*\b(?:confirm|verify|check|review)\b", re.IGNORECASE),
+    re.compile(r"\bimported from (?:historical|inquiry|source)\b", re.IGNORECASE),
+]
+
 
 def _text(value, fallback="-"):
     value = "" if value is None else str(value)
@@ -38,6 +46,16 @@ def _money(currency, value):
 
 def _number(value):
     return f"{value:g}" if value is not None else "-"
+
+
+def _customer_line_detail(value):
+    value = "" if value is None else str(value).strip()
+    if not value:
+        return ""
+    for pattern in INTERNAL_LINE_DETAIL_PATTERNS:
+        if pattern.search(value):
+            return ""
+    return _text(value, "")
 
 
 def _local_date(value):
@@ -258,6 +276,7 @@ def build_quotation_pdf(quotation):
     styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=8, leading=11, textColor=TEXT))
     styles.add(ParagraphStyle(name="TableHeader", parent=styles["Normal"], fontSize=8, leading=10, textColor=colors.white, alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontSize=8.5, leading=11, textColor=TEXT))
+    styles.add(ParagraphStyle(name="TableCellCenter", parent=styles["TableCell"], alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="TableCellRight", parent=styles["TableCell"], alignment=TA_RIGHT))
     styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=7.2, leading=9))
     styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading4"], fontSize=10, leading=12, textColor=primary))
@@ -315,15 +334,14 @@ def build_quotation_pdf(quotation):
     for index, line in enumerate(quotation.lines.order_by("sort_order", "id"), start=1):
         item_text = _text(line.item_name_snapshot)
         details = []
-        if line.description:
-            details.append(_text(line.description, ""))
-        if line.notes:
-            details.append(f"<font color='#6B7280'>{_text(line.notes, '')}</font>")
+        description = _customer_line_detail(line.description)
+        if description and description != item_text:
+            details.append(description)
         if details:
             item_text = f"{item_text}<br/>{'<br/>'.join(details)}"
         table_data.append(
             [
-                Paragraph(str(index), styles["TableCell"]),
+                Paragraph(str(index), styles["TableCellCenter"]),
                 Paragraph(item_text, styles["TableCell"]),
                 Paragraph(_number(line.quantity), styles["TableCellRight"]),
                 Paragraph(_text(line.unit), styles["TableCell"]),
@@ -335,7 +353,7 @@ def build_quotation_pdf(quotation):
 
     line_table = Table(
         table_data,
-        colWidths=[7 * mm, 66 * mm, 15 * mm, 15 * mm, 23 * mm, 25 * mm, 27 * mm],
+        colWidths=[11 * mm, 62 * mm, 15 * mm, 15 * mm, 23 * mm, 25 * mm, 27 * mm],
         repeatRows=1,
     )
     line_table.setStyle(
@@ -351,6 +369,8 @@ def build_quotation_pdf(quotation):
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ("LEFTPADDING", (4, 0), (-1, -1), 3),
                 ("RIGHTPADDING", (4, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (0, -1), 3),
+                ("RIGHTPADDING", (0, 0), (0, -1), 3),
             ]
         )
     )
