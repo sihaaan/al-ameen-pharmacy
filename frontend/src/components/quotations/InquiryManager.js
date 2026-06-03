@@ -30,6 +30,7 @@ const emptyImportForm = {
   contact: '',
   subject: '',
   raw_text: '',
+  raw_html: '',
 };
 
 const InquiryManager = ({ onOpenQuote }) => {
@@ -274,7 +275,11 @@ const InquiryManager = ({ onOpenQuote }) => {
     setErrorInfo(null);
     setImportNotice(null);
     try {
-      const response = await quotationAPI.inquiries.parseText({ raw_text: importForm.raw_text, company: importForm.company || null });
+      const response = await quotationAPI.inquiries.parseText({
+        raw_text: importForm.raw_text,
+        raw_html: importForm.raw_html || '',
+        company: importForm.company || null,
+      });
       setPreview(response.data);
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse pasted inquiry text', 'POST /quotations/inquiries/parse_text/');
@@ -480,7 +485,16 @@ const InquiryManager = ({ onOpenQuote }) => {
         {importMode === 'paste' ? (
           <div className="qm-import-source">
             <label><span className="qm-label-text">Paste inquiry text</span>
-              <textarea rows="5" value={importForm.raw_text} onChange={(event) => setImportForm({ ...importForm, raw_text: event.target.value })} placeholder="Paste the customer's requested items here..." />
+              <textarea
+                rows="5"
+                value={importForm.raw_text}
+                onPaste={(event) => {
+                  const html = event.clipboardData?.getData('text/html') || '';
+                  setImportForm((current) => ({ ...current, raw_html: html.includes('<table') ? html : current.raw_html }));
+                }}
+                onChange={(event) => setImportForm({ ...importForm, raw_text: event.target.value, raw_html: event.target.value ? importForm.raw_html : '' })}
+                placeholder="Paste the customer's requested items here..."
+              />
             </label>
             <button type="button" className="qm-primary" disabled={importParsing || !importForm.raw_text.trim()} onClick={parsePastedText}>
               {importParsing ? 'Extracting...' : 'Extract Lines'}

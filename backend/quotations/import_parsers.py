@@ -26,7 +26,9 @@ except Exception:  # pragma: no cover - libmagic is optional and platform depend
 from .import_rules import (
     detect_header_row,
     parse_inquiry_line,
+    parse_html_table_lines,
     parse_structured_row,
+    parse_text_table_lines,
     parse_text_lines,
     row_to_text,
     is_noise_line,
@@ -175,8 +177,16 @@ def _preview_response(
     return payload
 
 
-def parse_text_preview(raw_text):
-    lines, skipped = parse_text_lines(raw_text)
+def parse_text_preview(raw_text, raw_html=""):
+    lines = []
+    skipped = 0
+    parse_method = "deterministic_text_v2"
+    if raw_html:
+        lines, skipped = parse_html_table_lines(raw_html)
+        if lines:
+            parse_method = "deterministic_clipboard_html_table_v1"
+    if not lines:
+        lines, skipped = parse_text_lines(raw_text)
     warnings = []
     if not lines:
         warnings.append("No item lines were detected. Review the pasted text or add rows manually.")
@@ -184,7 +194,7 @@ def parse_text_preview(raw_text):
         source_type="pasted_text",
         source_mime_type="text/plain",
         source_sha256=hashlib.sha256(str(raw_text or "").encode("utf-8")).hexdigest(),
-        parse_method="deterministic_text_v2",
+        parse_method=parse_method,
         original_text=raw_text or "",
         lines=lines,
         warnings=warnings,

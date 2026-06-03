@@ -606,6 +606,10 @@ class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         if "product" in validated_data and validated_data.get("product") != instance.product:
             validated_data.setdefault("match_reason", "Selected manually by staff.")
+            if validated_data.get("product"):
+                validated_data.setdefault("match_status", QuotationLine.MATCH_CONFIRMED)
+            elif validated_data.get("match_status") == QuotationLine.MATCH_CONFIRMED:
+                validated_data["match_status"] = QuotationLine.MATCH_UNRESOLVED
         return super().update(instance, validated_data)
 
 

@@ -142,6 +142,76 @@
   flex-wrap: wrap;
 }
 
+.sticky-line-actions {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #ffffff;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 8px 22px rgba(15, 118, 110, 0.08);
+}
+
+.qm-link-button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #0f766e;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.qm-line-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 88px;
+  border-radius: 999px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-line-status.ready {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.qm-line-status.unmatched,
+.qm-line-status.needs_review {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.qm-line-status.skipped {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.qm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.45);
+}
+
+.qm-modal {
+  width: min(760px, 96vw);
+  max-height: 86vh;
+  overflow: auto;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 18px;
+  box-shadow: 0 24px 80px rgba(17, 24, 39, 0.28);
+}
+
 .qm-input,
 .qm-form input,
 .qm-form textarea,
@@ -168,6 +238,11 @@
 
 .qm-input {
   min-width: 190px;
+}
+
+.qm-input.compact {
+  min-width: 150px;
+  width: auto;
 }
 
 .qm-controls .qm-company-picker {

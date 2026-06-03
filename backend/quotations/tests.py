@@ -23,6 +23,7 @@ from rest_framework.test import APITestCase
 
 from api.models import Product
 
+from .import_parsers import parse_text_preview
 from .import_rules import detect_header_row, parse_inquiry_line, parse_text_lines, split_quantity_unit
 from .models import (
     AIParseCache,
@@ -229,6 +230,103 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         self.assertEqual(allowed["Content-Type"], "application/pdf")
 
+    def test_unmatched_quotation_line_can_create_internal_product(self):
+        quotation = self.create_quote()
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="PULSE OXMETER",
+            quantity=Decimal("2.000"),
+            unit="NUM",
+            unit_price=Decimal("35.00"),
+            vat_rate=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+
+        response = self.client.post(reverse("quotation-line-create-product", args=[line.id]), {"product_name": "Pulse Oxmeter"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        line.refresh_from_db()
+        product = Product.objects.get(name="Pulse Oxmeter")
+        self.assertEqual(line.product, product)
+        self.assertEqual(line.match_status, QuotationLine.MATCH_CONFIRMED)
+        self.assertEqual(product.status, "draft")
+        self.assertFalse(product.show_price)
+
+    def test_bulk_create_products_dedupes_same_normalized_names(self):
+        quotation = self.create_quote()
+        first = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="ENO",
+            quantity=Decimal("1.000"),
+            unit="PKT",
+            unit_price=Decimal("3.00"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+        second = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot=" eno ",
+            quantity=Decimal("5.000"),
+            unit="PKT",
+            unit_price=Decimal("3.00"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+
+        response = self.client.post(
+            reverse("quotation-bulk-create-products-for-lines", args=[quotation.id]),
+            {"line_ids": [first.id, second.id], "names": {str(first.id): "ENO", str(second.id): "ENO"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Product.objects.filter(name__iexact="ENO").count(), 1)
+        product = Product.objects.get(name__iexact="ENO")
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.product, product)
+        self.assertEqual(second.product, product)
+        self.assertEqual(response.data["unique_products"], 1)
+
+    def test_save_all_lines_and_finalize_with_created_product_and_skipped_row(self):
+        quotation = self.create_quote()
+        active = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="GLUCOMETER",
+            quantity=Decimal("1.000"),
+            unit="NUM",
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+        skipped = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="IGNORE ME",
+            quantity=Decimal("1.000"),
+            unit="NUM",
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+        create_response = self.client.post(reverse("quotation-line-create-product", args=[active.id]), {"product_name": "Glucometer"}, format="json")
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+
+        save_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {"id": active.id, "unit_price": "25.00", "vat_rate": "5", "quantity": "2", "unit": "NUM"},
+                    {"id": skipped.id, "match_status": QuotationLine.MATCH_IGNORED, "unit_price": "", "vat_rate": "0", "quantity": "1", "unit": "NUM"},
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(save_response.status_code, status.HTTP_200_OK)
+        active.refresh_from_db()
+        skipped.refresh_from_db()
+        self.assertEqual(active.vat_rate, Decimal("5"))
+        self.assertEqual(active.line_total, Decimal("52.50"))
+        self.assertEqual(skipped.match_status, QuotationLine.MATCH_IGNORED)
+
+        finalize_response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(CompanyPriceHistory.objects.count(), 1)
+
 
 class ProductCatalogMatchingTests(APITestCase):
     def setUp(self):
@@ -321,6 +419,67 @@ class InquiryParserRuleTests(APITestCase):
         self.assertEqual(skipped, 1)
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0]["raw_name"], "GAUZE PIECES")
+
+    def test_gmail_cell_per_line_table_parses_item_rows(self):
+        pasted = "\n".join(
+            [
+                "S. No.",
+                "Item Description",
+                "Qty",
+                "UOM",
+                "Price",
+                "1",
+                "PULSE OXMETER",
+                "2",
+                "NUM",
+                "2",
+                "GLUCOMETER",
+                "1",
+                "NUM",
+                "3",
+                "SURGICAL SCISSOR",
+                "2",
+                "NUM",
+                "4",
+                "BP MACHINE",
+                "1",
+                "NUM",
+                "5",
+                "STERILE MOUND DRESSING",
+                "50",
+                "NUM",
+            ]
+        )
+
+        lines, skipped = parse_text_lines(pasted)
+
+        self.assertEqual([line["raw_name"] for line in lines[:5]], [
+            "PULSE OXMETER",
+            "GLUCOMETER",
+            "SURGICAL SCISSOR",
+            "BP MACHINE",
+            "STERILE MOUND DRESSING",
+        ])
+        self.assertEqual(lines[0]["quantity"], "2")
+        self.assertEqual(lines[0]["unit"], "NUM")
+        self.assertNotIn("Item Description", [line["raw_name"] for line in lines])
+
+    def test_gmail_html_table_parses_rows_without_headers(self):
+        html = """
+        <table>
+          <tr><th>S. No.</th><th>Item Description</th><th>Qty</th><th>UOM</th><th>Price</th></tr>
+          <tr><td>1</td><td>PULSE OXMETER</td><td>2</td><td>NUM</td><td></td></tr>
+          <tr><td>2</td><td>GLUCOMETER</td><td>1</td><td>NUM</td><td></td></tr>
+        </table>
+        """
+
+        preview = parse_text_preview("PULSE OXMETER\nGLUCOMETER", raw_html=html)
+
+        self.assertEqual(preview["parse_method"], "deterministic_clipboard_html_table_v1")
+        self.assertEqual(preview["lines"][0]["raw_name"], "PULSE OXMETER")
+        self.assertEqual(preview["lines"][0]["quantity"], "2")
+        self.assertEqual(preview["lines"][0]["unit"], "NUM")
+        self.assertEqual(preview["lines"][1]["raw_name"], "GLUCOMETER")
 
     def test_ocr_provider_interface_is_explicitly_unavailable_by_default(self):
         with self.assertRaises(OCRProviderUnavailable):

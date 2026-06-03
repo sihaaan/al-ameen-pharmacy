@@ -68,10 +68,13 @@ from .services import (
     audit_log,
     apply_product_matches_to_historical_import,
     bulk_create_quote_items_for_historical_import,
+    bulk_create_products_from_quotation_lines,
+    bulk_update_quotation_lines,
     bulk_update_historical_import_rows,
     commit_historical_price_import,
     create_historical_price_import,
     create_imported_inquiry,
+    create_product_from_quotation_line,
     create_quotation_from_inquiry,
     ensure_quotation_editable,
     find_historical_import_duplicates,
@@ -299,9 +302,10 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=False, methods=["post"])
     def parse_text(self, request):
         raw_text = request.data.get("raw_text") or request.data.get("text") or ""
+        raw_html = request.data.get("raw_html") or request.data.get("html") or ""
         if not str(raw_text).strip():
             return Response({"detail": "Paste inquiry text before extracting lines."}, status=status.HTTP_400_BAD_REQUEST)
-        preview = parse_text_preview(raw_text)
+        preview = parse_text_preview(raw_text, raw_html=raw_html)
         self._apply_product_matches(preview, request.data.get("company"))
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=False)
         return Response(preview)
@@ -510,6 +514,54 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         response["Content-Disposition"] = f'attachment; filename="{quotation.quotation_number}.pdf"'
         return response
 
+    @action(detail=True, methods=["post"])
+    def bulk_update_lines(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            quotation, updated_lines = bulk_update_quotation_lines(
+                quotation,
+                request.data.get("lines") or [],
+                request.user,
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        quotation.refresh_from_db()
+        serializer = self.get_serializer(quotation)
+        return Response(
+            {
+                "quotation": serializer.data,
+                "updated_line_ids": [line.id for line in updated_lines],
+                "message": f"Saved {len(updated_lines)} line(s).",
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def bulk_create_products_for_lines(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            line_ids = _request_int_list(request.data, "line_ids")
+            summary = bulk_create_products_from_quotation_lines(
+                quotation,
+                line_ids,
+                request.user,
+                names_by_id=request.data.get("names") or {},
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        line_serializer = QuotationLineSerializer(summary["updated_lines"], many=True, context={"request": request})
+        return Response(
+            {
+                "updated_lines": line_serializer.data,
+                "created_products": summary["created_products"],
+                "reused_products": summary["reused_products"],
+                "unique_products": summary["unique_products"],
+                "message": (
+                    f"Linked {len(summary['updated_lines'])} line(s) to "
+                    f"{summary['unique_products']} Product(s)."
+                ),
+            }
+        )
+
 
 class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationLineSerializer
@@ -572,6 +624,30 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         except (DjangoValidationError, ValueError) as exc:
             return self.handle_workflow_error(exc)
         return Response(ProductAliasSerializer(alias, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def create_product(self, request, pk=None):
+        try:
+            line, product, created = create_product_from_quotation_line(
+                self.get_object(),
+                request.user,
+                product_name=request.data.get("product_name") or "",
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        return Response(
+            {
+                "line": QuotationLineSerializer(line, context={"request": request}).data,
+                "product": QuoteItemSerializer(product, context={"request": request}).data,
+                "created": created,
+                "message": (
+                    f"Created draft/internal Product '{product.name}' and linked the row."
+                    if created
+                    else f"Linked the row to existing Product '{product.name}'."
+                ),
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 def _request_int_list(data, key):

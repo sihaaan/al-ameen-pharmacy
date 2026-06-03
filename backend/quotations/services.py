@@ -1,5 +1,5 @@
-from decimal import Decimal
 from datetime import datetime, time
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -59,6 +59,77 @@ def recalculate_quotation_totals(quotation):
     quotation.total = totals["total"] or Decimal("0.00")
     quotation.save(update_fields=["subtotal", "vat_total", "total", "updated_at"])
     return quotation
+
+
+def _product_name_from_line(line, override_name=""):
+    name = (override_name or "").strip()
+    if not name:
+        name = (line.item_name_snapshot or "").strip()
+    if not name and line.inquiry_line_id:
+        name = (line.inquiry_line.raw_name or "").strip()
+    name = " ".join(name.split())
+    if not name:
+        raise ValidationError("Enter a Product name before creating it from this line.")
+    return name[:200]
+
+
+def _find_product_by_normalized_name(name):
+    key = normalize_label(name)
+    if not key:
+        return None
+    exact = Product.objects.filter(name__iexact=name).first()
+    if exact:
+        return exact
+    first_token = key.split()[0] if key.split() else ""
+    candidates = Product.objects.all()
+    if first_token:
+        candidates = candidates.filter(name__icontains=first_token)
+    for product in candidates[:100]:
+        if normalize_label(product.name) == key:
+            return product
+    return None
+
+
+def _get_or_create_internal_product_from_line(line, actor, override_name=""):
+    product_name = _product_name_from_line(line, override_name)
+    existing = _find_product_by_normalized_name(product_name)
+    if existing:
+        return existing, False
+    product = Product.objects.create(
+        name=product_name,
+        price=Decimal("0.01"),
+        pack_size=(line.unit or "")[:100],
+        status="draft",
+        show_price=False,
+        requires_manual_review=True,
+    )
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_CREATED,
+        product,
+        message=f"Created draft/internal Product '{product.name}' from quotation line {line.pk}.",
+        quotation=line.quotation,
+        company=line.quotation.company,
+    )
+    return product, True
+
+
+def _link_quotation_line_to_product(line, product, actor, *, reason="Created/linked from quotation line."):
+    line.product = product
+    line.quote_item = None
+    line.item_name_snapshot = product.name
+    line.match_status = QuotationLine.MATCH_CONFIRMED
+    line.match_reason = reason
+    line.save(update_fields=["product", "quote_item", "item_name_snapshot", "match_status", "match_reason", "line_subtotal", "vat_amount", "line_total", "updated_at"])
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_UPDATED,
+        line,
+        message=f"Linked quotation line to Product '{product.name}'.",
+        quotation=line.quotation,
+        company=line.quotation.company,
+    )
+    return line
 
 
 def _date_for_audit(value):
@@ -900,6 +971,139 @@ def remember_quotation_line_alias(line, actor):
 
 
 @transaction.atomic
+def create_product_from_quotation_line(line, actor, product_name=""):
+    line = (
+        QuotationLine.objects.select_for_update()
+        .select_related("quotation__company", "inquiry_line", "product")
+        .get(pk=line.pk)
+    )
+    ensure_quotation_editable(line.quotation)
+    product, created = _get_or_create_internal_product_from_line(line, actor, product_name)
+    line = _link_quotation_line_to_product(
+        line,
+        product,
+        actor,
+        reason="Created draft/internal Product from quotation line." if created else "Linked to existing Product with the same name.",
+    )
+    recalculate_quotation_totals(line.quotation)
+    return line, product, created
+
+
+@transaction.atomic
+def bulk_create_products_from_quotation_lines(quotation, line_ids, actor, names_by_id=None):
+    quotation = Quotation.objects.select_for_update().select_related("company").get(pk=quotation.pk)
+    ensure_quotation_editable(quotation)
+    names_by_id = {int(key): value for key, value in (names_by_id or {}).items() if str(key).isdigit()}
+    lines = list(
+        quotation.lines.select_for_update()
+        .select_related("quotation__company", "inquiry_line", "product")
+        .filter(id__in=line_ids)
+        .order_by("sort_order", "id")
+    )
+    if not lines:
+        raise ValidationError("Select at least one quotation line.")
+
+    products_by_key = {}
+    updated_lines = []
+    created_count = 0
+    reused_count = 0
+    for line in lines:
+        product_name = _product_name_from_line(line, names_by_id.get(line.id, ""))
+        key = normalize_label(product_name)
+        if key in products_by_key:
+            product, created = products_by_key[key]
+        else:
+            product, created = _get_or_create_internal_product_from_line(line, actor, product_name)
+            products_by_key[key] = (product, created)
+            if created:
+                created_count += 1
+            else:
+                reused_count += 1
+        updated_lines.append(
+            _link_quotation_line_to_product(
+                line,
+                product,
+                actor,
+                reason="Bulk created/linked draft/internal Product from quotation line." if created else "Bulk linked to existing Product with the same name.",
+            )
+        )
+    recalculate_quotation_totals(quotation)
+    return {
+        "updated_lines": updated_lines,
+        "created_products": created_count,
+        "reused_products": reused_count,
+        "unique_products": len(products_by_key),
+    }
+
+
+@transaction.atomic
+def bulk_update_quotation_lines(quotation, rows, actor):
+    quotation = Quotation.objects.select_for_update().get(pk=quotation.pk)
+    ensure_quotation_editable(quotation)
+    rows_by_id = {}
+    for row in rows or []:
+        try:
+            rows_by_id[int(row.get("id"))] = row
+        except (TypeError, ValueError):
+            raise ValidationError("Each line update must include a valid id.")
+    if not rows_by_id:
+        raise ValidationError("No line changes were provided.")
+
+    lines = {
+        line.id: line
+        for line in quotation.lines.select_for_update().filter(id__in=rows_by_id.keys())
+    }
+    updated = []
+    allowed_fields = {"product", "quote_item", "item_name_snapshot", "description", "quantity", "unit", "unit_price", "vat_rate", "match_status", "notes"}
+
+    def decimal_value(value, label, *, allow_null=False):
+        if value in ("", None):
+            if allow_null:
+                return None
+            raise ValidationError(f"{label} is required.")
+        try:
+            return Decimal(str(value))
+        except Exception as exc:
+            raise ValidationError(f"{label} must be a valid number.") from exc
+
+    for line_id, payload in rows_by_id.items():
+        line = lines.get(line_id)
+        if not line:
+            raise ValidationError(f"Line {line_id} does not belong to this quotation.")
+        for field in allowed_fields:
+            if field not in payload:
+                continue
+            value = payload[field]
+            if field in {"product", "quote_item"}:
+                setattr(line, f"{field}_id", value or None)
+            elif field == "quantity":
+                line.quantity = decimal_value(value, "Quantity")
+            elif field == "unit_price":
+                line.unit_price = decimal_value(value, "Unit price", allow_null=True)
+            elif field == "vat_rate":
+                vat_rate = decimal_value(value, "VAT")
+                if vat_rate not in {Decimal("0"), Decimal("0.00"), Decimal("5"), Decimal("5.00")}:
+                    raise ValidationError("VAT must be 0% or 5% in the quotation line review workflow.")
+                line.vat_rate = vat_rate
+            else:
+                setattr(line, field, value if value != "" else "")
+        if line.product_id and line.match_status == QuotationLine.MATCH_UNRESOLVED:
+            line.match_status = QuotationLine.MATCH_CONFIRMED
+        if not line.product_id and not line.quote_item_id and line.match_status == QuotationLine.MATCH_CONFIRMED:
+            line.match_status = QuotationLine.MATCH_UNRESOLVED
+        line.save()
+        updated.append(line)
+    recalculate_quotation_totals(quotation)
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_UPDATED,
+        quotation,
+        message=f"Saved {len(updated)} quotation line(s).",
+    )
+    return quotation, updated
+
+
+@transaction.atomic
 def create_quotation_from_inquiry(inquiry, actor):
     inquiry = Inquiry.objects.select_for_update().select_related("company").get(pk=inquiry.pk)
     existing = (
@@ -951,8 +1155,6 @@ def create_quotation_from_inquiry(inquiry, actor):
 def _validate_line_for_finalization(line):
     if line.match_status == QuotationLine.MATCH_IGNORED:
         return
-    if line.match_status != QuotationLine.MATCH_CONFIRMED:
-        raise ValidationError(f"Line '{line.item_name_snapshot}' has an unresolved item match.")
     if not line.product_id and not line.quote_item_id:
         raise ValidationError(f"Line '{line.item_name_snapshot}' must be linked to a product/item.")
     if line.quantity is None or line.quantity <= 0:

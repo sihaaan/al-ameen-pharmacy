@@ -2,6 +2,7 @@ import re
 import string
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 
 from .models import InquiryLine
 
@@ -168,6 +169,38 @@ class HeaderDetection:
     score: float
     labels: dict
     data_score: float
+
+
+class _ClipboardTableParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows = []
+        self._in_cell = False
+        self._current_row = None
+        self._current_cell = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "tr":
+            self._current_row = []
+        elif tag in {"td", "th"} and self._current_row is not None:
+            self._in_cell = True
+            self._current_cell = []
+
+    def handle_data(self, data):
+        if self._in_cell:
+            self._current_cell.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in {"td", "th"} and self._in_cell and self._current_row is not None:
+            self._current_row.append(normalize_import_line(" ".join(self._current_cell)))
+            self._current_cell = []
+            self._in_cell = False
+        elif tag == "tr" and self._current_row is not None:
+            if _meaningful_cells(self._current_row):
+                self.rows.append(self._current_row)
+            self._current_row = None
 
 
 def normalize_import_line(value):
@@ -759,7 +792,130 @@ def parse_inquiry_line(raw_line, *, base_confidence=0.55, **source_meta):
     )
 
 
+def _parse_structured_rows(rows, **source_meta):
+    header = detect_header_row(rows, max_scan_rows=10)
+    if not header:
+        return [], 0
+    lines = []
+    skipped = header.row_offset + 1
+    for offset, row in enumerate(rows[header.row_offset + 1 :], start=header.row_offset + 2):
+        parsed, reason = parse_structured_row(
+            row,
+            header,
+            source_row=offset,
+            base_confidence=0.88,
+            **source_meta,
+        )
+        if parsed:
+            lines.append(parsed)
+        elif reason == "skipped":
+            skipped += 1
+    return lines, skipped
+
+
+def parse_html_table_lines(raw_html, **source_meta):
+    html = str(raw_html or "")
+    if "<table" not in html.lower() and "<tr" not in html.lower():
+        return [], 0
+    parser = _ClipboardTableParser()
+    parser.feed(html)
+    return _parse_structured_rows(parser.rows, **source_meta)
+
+
+def _split_delimited_text_rows(raw_text):
+    rows = []
+    for raw_line in str(raw_text or "").splitlines():
+        line = normalize_import_line(raw_line)
+        if not line:
+            continue
+        if "\t" in raw_line:
+            cells = [normalize_import_line(cell) for cell in raw_line.split("\t")]
+        elif "|" in line:
+            cells = [normalize_import_line(cell) for cell in re.split(r"\s*\|\s*", line)]
+        else:
+            continue
+        if len(_meaningful_cells(cells)) > 1:
+            rows.append(cells)
+    return rows
+
+
+def _looks_like_serial_cell(value):
+    return bool(re.fullmatch(r"\d{1,5}", normalize_import_line(value)))
+
+
+def _reconstruct_cell_per_line_table(raw_text):
+    cells = [normalize_import_line(line) for line in str(raw_text or "").splitlines()]
+    cells = [cell for cell in cells if cell]
+    if len(cells) < 8:
+        return []
+
+    roles = []
+    header_cells = []
+    index = 0
+    while index < len(cells):
+        role = classify_header_cell(cells[index])
+        if not role:
+            break
+        roles.append(role)
+        header_cells.append(cells[index])
+        index += 1
+        if "requested_item_name" in roles and "quantity" in roles and "unit" in roles:
+            next_role = classify_header_cell(cells[index]) if index < len(cells) else None
+            if next_role:
+                continue
+            break
+
+    if "requested_item_name" not in roles or "quantity" not in roles or "unit" not in roles:
+        return []
+
+    rows = [header_cells]
+    role_count = len(header_cells)
+    has_price = "unit_price" in roles or "amount" in roles or "line_total" in roles
+    while index < len(cells):
+        if "serial_no" in roles:
+            if index + 3 >= len(cells) or not _looks_like_serial_cell(cells[index]):
+                index += 1
+                continue
+            row = [
+                cells[index],
+                cells[index + 1] if index + 1 < len(cells) else "",
+                cells[index + 2] if index + 2 < len(cells) else "",
+                cells[index + 3] if index + 3 < len(cells) else "",
+            ]
+            index += 4
+            if has_price:
+                if index < len(cells) and not _looks_like_serial_cell(cells[index]):
+                    row.append(cells[index])
+                    index += 1
+                else:
+                    row.append("")
+            while len(row) < role_count:
+                row.append("")
+            rows.append(row[:role_count])
+        else:
+            if index + 2 >= len(cells):
+                break
+            row = cells[index : index + role_count]
+            rows.append(row)
+            index += role_count
+    return rows if len(rows) > 1 else []
+
+
+def parse_text_table_lines(raw_text, **source_meta):
+    delimited_rows = _split_delimited_text_rows(raw_text)
+    lines, skipped = _parse_structured_rows(delimited_rows, **source_meta)
+    if lines:
+        return lines, skipped
+
+    reconstructed_rows = _reconstruct_cell_per_line_table(raw_text)
+    return _parse_structured_rows(reconstructed_rows, **source_meta)
+
+
 def parse_text_lines(raw_text, **source_meta):
+    table_lines, table_skipped = parse_text_table_lines(raw_text, **source_meta)
+    if table_lines:
+        return table_lines, table_skipped
+
     lines = []
     skipped = 0
     paragraph = []
