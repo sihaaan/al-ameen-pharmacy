@@ -742,7 +742,12 @@ const HistoricalImportManager = () => {
       setItems(itemsRes.data);
     } catch (error) {
       const details = await describeQuotationError(error, 'Apply AI suggestions', `POST /quotations/historical-import-batches/${selectedBatch.id}/apply_ai_suggestions/`);
+      const failedMessage = details.detail || 'Apply failed. Review this decision and try again.';
+      ids.forEach((suggestionId) => {
+        setInlineFeedback(`suggestion-${suggestionId}`, 'warning', failedMessage);
+      });
       setErrorInfo(details);
+      setNotice({ type: 'warning', message: failedMessage });
       console.error(formatQuotationError(details), error);
     } finally {
       setWorkingAction('');
@@ -1829,7 +1834,7 @@ const HistoricalImportManager = () => {
 
       {renderStepHeader()}
       {notice && <div className={`qm-feedback ${notice.type || 'success'}`}>{notice.message}</div>}
-      {errorInfo && <QuotationErrorNotice errorInfo={errorInfo} onDismiss={() => setErrorInfo(null)} />}
+      {errorInfo && <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />}
       {confirmAction && (
         <div className="qm-modal-backdrop" role="presentation">
           <div className="qm-confirm-modal" role="dialog" aria-modal="true" aria-label={confirmAction.title}>

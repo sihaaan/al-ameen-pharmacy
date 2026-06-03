@@ -1769,6 +1769,66 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
         self.assertEqual(updated["line_ready_blockers"], [])
 
+    def test_apply_alias_suggestion_reuses_existing_same_product_alias(self):
+        ProductAlias.objects.create(
+            company=self.company,
+            product=self.item_two,
+            alias="TONGUE DEPRESSORS",
+            created_by=self.staff,
+        )
+        batch = HistoricalImportBatch.objects.create(name="Existing alias approval", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="tongue-depressors-repeat.pdf",
+            source_sha256="8" * 64,
+            document_date=date(2026, 6, 1),
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="TONGUE DEPRESSORS",
+            quantity=Decimal("1.000"),
+            unit="PKT",
+            unit_price=Decimal("15.00"),
+            line_total=Decimal("15.00"),
+            status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW,
+        )
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_CREATE_COMPANY_ALIAS,
+            suggested_product=self.item_two,
+            alias_text="TONGUE DEPRESSORS",
+            confidence=0.90,
+            reason="Customer wording for an existing Product.",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+            {"suggestion_ids": [suggestion.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        suggestion.refresh_from_db()
+        self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(line.product, self.item_two)
+        self.assertEqual(line.status, HistoricalPriceImportLine.STATUS_READY)
+        self.assertEqual(
+            ProductAlias.objects.filter(company=self.company, normalized_alias=line.normalized_item_name).count(),
+            1,
+        )
+        updated = response.data["updated_suggestions"][0]
+        self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
+        self.assertEqual(updated["line_ready_blockers"], [])
+
     def test_apply_new_product_suggestion_returns_ready_card_state(self):
         batch = HistoricalImportBatch.objects.create(name="Updated new product cards", created_by=self.staff)
         historical_import = HistoricalPriceImport.objects.create(

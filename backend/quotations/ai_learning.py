@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -831,18 +831,35 @@ def _safe_create_company_alias(suggestion, actor):
         raise ValidationError("Select a target Product before creating an alias.")
     alias_text = suggestion.alias_text or line.item_name
     normalized = normalize_label(alias_text)
-    existing = ProductAlias.objects.filter(company=historical_import.company, normalized_alias=normalized).first()
-    if existing and existing.product_id != suggestion.suggested_product_id:
+    existing_aliases = list(
+        ProductAlias.objects.select_for_update()
+        .select_related("product")
+        .filter(company=historical_import.company, normalized_alias=normalized)
+        .order_by("-is_active", "id")
+    )
+    conflicting = [alias for alias in existing_aliases if alias.product_id != suggestion.suggested_product_id]
+    if conflicting:
+        existing = conflicting[0]
         raise ValidationError(
             f"Alias '{alias_text}' already points to '{existing.product.name}' for this company."
         )
-    alias, _ = create_product_alias(
-        alias_text=alias_text,
-        product=suggestion.suggested_product,
-        company=historical_import.company,
-        actor=actor,
-        notes=f"Approved from historical import AI suggestion {suggestion.pk}.",
-    )
+    if existing_aliases:
+        alias = existing_aliases[0]
+        alias.alias = alias_text.strip()
+        alias.product = suggestion.suggested_product
+        alias.is_active = True
+        alias.notes = f"Approved from historical import AI suggestion {suggestion.pk}."
+        if not alias.created_by_id and getattr(actor, "is_authenticated", False):
+            alias.created_by = actor
+        alias.save(update_fields=["alias", "normalized_alias", "product", "is_active", "notes", "created_by", "updated_at"])
+    else:
+        alias, _ = create_product_alias(
+            alias_text=alias_text,
+            product=suggestion.suggested_product,
+            company=historical_import.company,
+            actor=actor,
+            notes=f"Approved from historical import AI suggestion {suggestion.pk}.",
+        )
     line.product = suggestion.suggested_product
     line.match_reason = f"Approved AI alias '{alias.alias}'."
     line.status = _ready_or_review(line)
@@ -898,24 +915,25 @@ def _apply_exact_matching_line_suggestions(source_suggestion, actor, source_resu
         elif action == HistoricalImportAISuggestion.ACTION_SKIP:
             target.action = HistoricalImportAISuggestion.ACTION_SKIP
         try:
-            result = _apply_one_suggestion(target, actor)
-            target.status = HistoricalImportAISuggestion.STATUS_APPLIED
-            target.error_message = ""
-            target.applied_by = actor if getattr(actor, "is_authenticated", False) else None
-            target.applied_at = timezone.now()
-            target.save(
-                update_fields=[
-                    "action",
-                    "suggested_product",
-                    "alias_text",
-                    "reason",
-                    "status",
-                    "error_message",
-                    "applied_by",
-                    "applied_at",
-                    "updated_at",
-                ]
-            )
+            with transaction.atomic():
+                result = _apply_one_suggestion(target, actor)
+                target.status = HistoricalImportAISuggestion.STATUS_APPLIED
+                target.error_message = ""
+                target.applied_by = actor if getattr(actor, "is_authenticated", False) else None
+                target.applied_at = timezone.now()
+                target.save(
+                    update_fields=[
+                        "action",
+                        "suggested_product",
+                        "alias_text",
+                        "reason",
+                        "status",
+                        "error_message",
+                        "applied_by",
+                        "applied_at",
+                        "updated_at",
+                    ]
+                )
             results.append(
                 {
                     "suggestion_id": target.id,
@@ -928,6 +946,14 @@ def _apply_exact_matching_line_suggestions(source_suggestion, actor, source_resu
         except ValidationError as exc:
             target.status = HistoricalImportAISuggestion.STATUS_CONFLICT
             target.error_message = " ".join(str(part) for part in getattr(exc, "messages", [str(exc)]))
+            target.save(update_fields=["status", "error_message", "updated_at"])
+            results.append({"suggestion_id": target.id, "status": "conflict", "message": target.error_message})
+        except IntegrityError:
+            target.status = HistoricalImportAISuggestion.STATUS_CONFLICT
+            target.error_message = (
+                "This repeated-row approval hit an existing duplicate or conflicting database record. "
+                "Review this row manually."
+            )
             target.save(update_fields=["status", "error_message", "updated_at"])
             results.append({"suggestion_id": target.id, "status": "conflict", "message": target.error_message})
     return results
@@ -964,13 +990,14 @@ def apply_historical_ai_suggestions(suggestion_ids, actor):
             )
             continue
         try:
-            result = _apply_one_suggestion(suggestion, actor)
-            suggestion.status = HistoricalImportAISuggestion.STATUS_APPLIED
-            suggestion.error_message = ""
-            suggestion.applied_by = actor if getattr(actor, "is_authenticated", False) else None
-            suggestion.applied_at = timezone.now()
-            suggestion.save(update_fields=["status", "error_message", "applied_by", "applied_at", "updated_at"])
-            similar_results = _apply_exact_matching_line_suggestions(suggestion, actor, result)
+            with transaction.atomic():
+                result = _apply_one_suggestion(suggestion, actor)
+                suggestion.status = HistoricalImportAISuggestion.STATUS_APPLIED
+                suggestion.error_message = ""
+                suggestion.applied_by = actor if getattr(actor, "is_authenticated", False) else None
+                suggestion.applied_at = timezone.now()
+                suggestion.save(update_fields=["status", "error_message", "applied_by", "applied_at", "updated_at"])
+                similar_results = _apply_exact_matching_line_suggestions(suggestion, actor, result)
             results.append(
                 {
                     "suggestion_id": suggestion.id,
@@ -994,6 +1021,14 @@ def apply_historical_ai_suggestions(suggestion_ids, actor):
         except ValidationError as exc:
             suggestion.status = HistoricalImportAISuggestion.STATUS_CONFLICT
             suggestion.error_message = " ".join(str(part) for part in getattr(exc, "messages", [str(exc)]))
+            suggestion.save(update_fields=["status", "error_message", "updated_at"])
+            results.append({"suggestion_id": suggestion.id, "status": "conflict", "message": suggestion.error_message})
+        except IntegrityError:
+            suggestion.status = HistoricalImportAISuggestion.STATUS_CONFLICT
+            suggestion.error_message = (
+                "This approval hit an existing duplicate or conflicting database record. "
+                "Review the target Product or alias and try again."
+            )
             suggestion.save(update_fields=["status", "error_message", "updated_at"])
             results.append({"suggestion_id": suggestion.id, "status": "conflict", "message": suggestion.error_message})
 
