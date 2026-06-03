@@ -672,6 +672,27 @@ def _request_int_list(data, key):
         raise DjangoValidationError(f"{key} must contain only ids.") from exc
 
 
+def _serialized_ai_suggestions_for_results(batch, results, request):
+    suggestion_ids = [result.get("suggestion_id") for result in results if result.get("suggestion_id")]
+    if not suggestion_ids:
+        return []
+    suggestions = (
+        HistoricalImportAISuggestion.objects.select_related(
+            "batch",
+            "historical_import",
+            "historical_import__company",
+            "line",
+            "suggested_company",
+            "suggested_product",
+            "created_by",
+            "applied_by",
+        )
+        .filter(batch=batch, id__in=suggestion_ids)
+        .order_by("historical_import_id", "line__sort_order", "id")
+    )
+    return HistoricalImportAISuggestionSerializer(suggestions, many=True, context={"request": request}).data
+
+
 class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = HistoricalImportBatchSerializer
     queryset = HistoricalImportBatch.objects.select_related("created_by").prefetch_related(
@@ -687,6 +708,10 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     )
     parser_classes = [JSONParser, MultiPartParser, FormParser]
     http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def retrieve(self, request, *args, **kwargs):
+        batch = refresh_historical_import_batch_summary(self.get_object())
+        return Response(self.get_serializer(batch).data)
 
     def perform_create(self, serializer):
         batch = serializer.save(created_by=self.request.user)
@@ -811,6 +836,7 @@ class HistoricalImportBatchViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 "summary": summary,
                 "results": results,
                 "batch": self.get_serializer(refresh_historical_import_batch_summary(batch)).data,
+                "updated_suggestions": _serialized_ai_suggestions_for_results(batch, results, request),
             }
         )
 
@@ -871,7 +897,15 @@ class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelVi
             summary, results = apply_historical_ai_suggestions(suggestion_ids, request.user)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
-        return Response({"summary": summary, "results": results})
+        updated_ids = [result.get("suggestion_id") for result in results if result.get("suggestion_id")]
+        suggestions = self.get_queryset().filter(id__in=updated_ids)
+        return Response(
+            {
+                "summary": summary,
+                "results": results,
+                "updated_suggestions": self.get_serializer(suggestions, many=True).data,
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):

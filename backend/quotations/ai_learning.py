@@ -1094,6 +1094,7 @@ def _apply_one_suggestion(suggestion, actor):
 
 def refresh_historical_import_batch_summary(batch):
     batch = HistoricalImportBatch.objects.get(pk=batch.pk)
+    _close_stale_batch_ai_suggestions(batch)
     imports = list(batch.imports.prefetch_related("lines").all())
     import_count = len(imports)
     committed = sum(1 for entry in imports if entry.status == HistoricalPriceImport.STATUS_COMMITTED)
@@ -1173,6 +1174,51 @@ def refresh_historical_import_batch_summary(batch):
         batch.status = HistoricalImportBatch.STATUS_PARSED
     batch.save(update_fields=["summary", "status", "updated_at"])
     return batch
+
+
+def _close_stale_batch_ai_suggestions(batch):
+    now = timezone.now()
+    stale_suggestions = []
+    for suggestion in (
+        batch.ai_suggestions.select_related("historical_import", "line", "suggested_company")
+        .filter(status=HistoricalImportAISuggestion.STATUS_PENDING)
+    ):
+        close_message = ""
+        close_as = ""
+        historical_import = suggestion.historical_import
+        line = suggestion.line
+
+        if historical_import.status == HistoricalPriceImport.STATUS_COMMITTED:
+            close_as = HistoricalImportAISuggestion.STATUS_APPLIED
+            close_message = "Closed because this historical import has already been committed."
+        elif historical_import.status == HistoricalPriceImport.STATUS_CANCELLED:
+            close_as = HistoricalImportAISuggestion.STATUS_REJECTED
+            close_message = "Closed because this historical import was cancelled or removed from the batch."
+        elif line and line.status == HistoricalPriceImportLine.STATUS_COMMITTED:
+            close_as = HistoricalImportAISuggestion.STATUS_APPLIED
+            close_message = "Closed because this source row has already been committed."
+        elif (
+            suggestion.suggestion_type == HistoricalImportAISuggestion.TYPE_COMPANY
+            and suggestion.action == HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_COMPANY
+            and suggestion.suggested_company_id
+            and historical_import.company_id == suggestion.suggested_company_id
+        ):
+            close_as = HistoricalImportAISuggestion.STATUS_APPLIED
+            close_message = f"Closed because company is already linked: {suggestion.suggested_company.name}."
+
+        if close_as:
+            suggestion.status = close_as
+            suggestion.error_message = close_message
+            suggestion.updated_at = now
+            if close_as == HistoricalImportAISuggestion.STATUS_APPLIED:
+                suggestion.applied_at = suggestion.applied_at or now
+            stale_suggestions.append(suggestion)
+
+    if stale_suggestions:
+        HistoricalImportAISuggestion.objects.bulk_update(
+            stale_suggestions,
+            ["status", "error_message", "applied_at", "updated_at"],
+        )
 
 
 def append_batch_file_result(batch, result):

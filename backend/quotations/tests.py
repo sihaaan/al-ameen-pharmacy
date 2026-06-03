@@ -1572,6 +1572,103 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(line_one.status, HistoricalPriceImportLine.STATUS_READY)
         self.assertEqual(line_two.status, HistoricalPriceImportLine.STATUS_READY)
 
+    def test_apply_ai_suggestion_returns_updated_card_state(self):
+        batch = HistoricalImportBatch.objects.create(name="Updated cards", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="deep-heat.pdf",
+            source_sha256="d" * 64,
+            document_number="Q-DH-1",
+            document_date=date(2026, 6, 1),
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="DEEP HEAT SPRAY",
+            quantity=Decimal("10.000"),
+            unit="BOTTLES",
+            unit_price=Decimal("18.00"),
+            line_total=Decimal("180.00"),
+            status=HistoricalPriceImportLine.STATUS_NEEDS_REVIEW,
+        )
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+            suggested_product=self.item_one,
+            confidence=0.95,
+            reason="Strong product match.",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(
+            reverse("quotation-historical-import-batch-apply-ai-suggestions", args=[batch.id]),
+            {"suggestion_ids": [suggestion.id]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"]["applied"], 1)
+        updated = response.data["updated_suggestions"][0]
+        self.assertEqual(updated["id"], suggestion.id)
+        self.assertEqual(updated["status"], HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(updated["line_status"], HistoricalPriceImportLine.STATUS_READY)
+        self.assertEqual(updated["suggested_product"], self.item_one.id)
+
+    def test_batch_summary_closes_pending_suggestions_for_committed_rows(self):
+        batch = HistoricalImportBatch.objects.create(name="Committed stale cards", created_by=self.staff)
+        historical_import = HistoricalPriceImport.objects.create(
+            batch=batch,
+            company=self.company,
+            suggested_company_name=self.company.name,
+            source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+            source_filename="committed.pdf",
+            source_sha256="e" * 64,
+            document_number="Q-COM-1",
+            document_date=date(2026, 6, 2),
+            status=HistoricalPriceImport.STATUS_COMMITTED,
+            created_by=self.staff,
+        )
+        line = HistoricalPriceImportLine.objects.create(
+            historical_import=historical_import,
+            item_name="DEEP HEAT SPRAY",
+            quantity=Decimal("10.000"),
+            unit="BOTTLES",
+            unit_price=Decimal("18.00"),
+            line_total=Decimal("180.00"),
+            product=self.item_one,
+            status=HistoricalPriceImportLine.STATUS_COMMITTED,
+        )
+        suggestion = HistoricalImportAISuggestion.objects.create(
+            batch=batch,
+            historical_import=historical_import,
+            line=line,
+            suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+            action=HistoricalImportAISuggestion.ACTION_MATCH_EXISTING_PRODUCT,
+            suggested_product=self.item_one,
+            status=HistoricalImportAISuggestion.STATUS_PENDING,
+            confidence=0.95,
+            reason="Old pending card.",
+            created_by=self.staff,
+        )
+
+        response = self.client.get(reverse("quotation-historical-import-batch-detail", args=[batch.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        suggestion.refresh_from_db()
+        self.assertEqual(suggestion.status, HistoricalImportAISuggestion.STATUS_APPLIED)
+        self.assertEqual(response.data["pending_suggestion_count"], 0)
+        self.assertEqual(
+            response.data["wizard_summary"]["suggestion_status_counts"][HistoricalImportAISuggestion.STATUS_APPLIED],
+            1,
+        )
+        self.assertEqual(response.data["wizard_summary"]["line_counts"]["committed"], 1)
+
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
         QUOTATION_AI_PARSE_PROVIDER="openai",

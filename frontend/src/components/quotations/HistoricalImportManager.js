@@ -69,6 +69,20 @@ const changedFields = (draft, original, keys) => (
   keys.filter((key) => normalizeComparable(draft[key]) !== normalizeComparable(original[key]))
 );
 
+const CLOSED_LINE_STATUSES = new Set(['committed', 'duplicate']);
+
+const isClosedLineSuggestion = (suggestion) => (
+  suggestion.suggestion_type === 'line' && CLOSED_LINE_STATUSES.has(suggestion.line_status)
+);
+
+const effectiveSuggestionStatus = (suggestion) => (
+  isClosedLineSuggestion(suggestion) ? suggestion.line_status : suggestion.status
+);
+
+const isSuggestionActionable = (suggestion) => (
+  suggestion.status === 'pending' && !isClosedLineSuggestion(suggestion)
+);
+
 const dateSortValue = (value) => {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -188,6 +202,60 @@ const HistoricalImportManager = () => {
     });
     setSuggestionDrafts(nextSuggestionDrafts);
     setLineDrafts(nextLineDrafts);
+  };
+
+  const suggestionOriginalFor = (suggestion) => ({
+    action: suggestion.action || 'needs_manual_review',
+    suggested_product: suggestion.suggested_product || '',
+    suggested_company: suggestion.suggested_company || '',
+    alias_text: suggestion.alias_text || '',
+    proposed_company_name: suggestion.proposed_company_name || '',
+    proposed_product_name: suggestion.proposed_product_name || '',
+    proposed_unit: suggestion.proposed_unit || '',
+    proposed_pack_size: suggestion.proposed_pack_size || '',
+    proposed_dosage: suggestion.proposed_dosage || '',
+  });
+
+  const lineOriginalFor = (suggestion) => (suggestion.line ? {
+    item_name: suggestion.line_item_name || '',
+    quantity: suggestion.line_quantity || '',
+    unit: suggestion.line_unit || '',
+    unit_price: suggestion.line_unit_price || '',
+    vat_amount: suggestion.line_vat_amount || '',
+    vat_rate: suggestion.line_vat_rate || '',
+    line_total: suggestion.line_total || '',
+    status: suggestion.line_status || 'needs_review',
+  } : {});
+
+  const suggestionHasDraftChanges = (suggestion) => {
+    const suggestionOriginal = suggestionOriginalFor(suggestion);
+    const suggestionDraft = suggestionDrafts[suggestion.id] || {};
+    const suggestionChanges = changedFields(
+      { ...suggestionOriginal, ...suggestionDraft },
+      suggestionOriginal,
+      Object.keys(suggestionOriginal)
+    );
+    const lineOriginal = lineOriginalFor(suggestion);
+    const lineDraft = suggestion.line ? lineDrafts[suggestion.line] : null;
+    const lineChanges = suggestion.line
+      ? changedFields({ ...lineOriginal, ...(lineDraft || {}) }, lineOriginal, Object.keys(lineOriginal))
+      : [];
+    return Boolean(suggestionChanges.length || lineChanges.length);
+  };
+
+  const mergeUpdatedSuggestions = (updatedSuggestions = []) => {
+    if (!updatedSuggestions.length) return;
+    setSuggestions((current) => {
+      const byId = new Map(current.map((suggestion) => [suggestion.id, suggestion]));
+      updatedSuggestions.forEach((suggestion) => byId.set(suggestion.id, suggestion));
+      const next = Array.from(byId.values()).sort((a, b) => (
+        dateSortValue(b.historical_import_document_date) - dateSortValue(a.historical_import_document_date)
+        || String(a.line_item_name || '').localeCompare(String(b.line_item_name || ''))
+        || a.id - b.id
+      ));
+      buildDrafts(next);
+      return next;
+    });
   };
 
   const loadSuggestions = async (batchId = selectedBatch?.id) => {
@@ -397,8 +465,18 @@ const HistoricalImportManager = () => {
   };
 
   const draftForImport = (entry) => ({
-    company: entry.company || '',
-    suggested_company_name: entry.suggested_company_name || '',
+    company: entry.company || suggestions.find((suggestion) => (
+      suggestion.historical_import === entry.id
+      && suggestion.suggestion_type === 'company'
+      && suggestion.action === 'match_existing_company'
+      && suggestion.suggested_company
+    ))?.suggested_company || '',
+    suggested_company_name: entry.suggested_company_name || suggestions.find((suggestion) => (
+      suggestion.historical_import === entry.id
+      && suggestion.suggestion_type === 'company'
+      && suggestion.action === 'create_new_company'
+      && suggestion.proposed_company_name
+    ))?.proposed_company_name || '',
     document_number: entry.document_number || '',
     document_date: entry.document_date || '',
     currency: entry.currency || 'AED',
@@ -407,6 +485,21 @@ const HistoricalImportManager = () => {
     total: entry.total || '',
     ...(importDrafts[entry.id] || {}),
   });
+
+  const importHasDraftChanges = (entry) => {
+    const draft = draftForImport(entry);
+    const original = {
+      company: entry.company || '',
+      suggested_company_name: entry.suggested_company_name || '',
+      document_number: entry.document_number || '',
+      document_date: entry.document_date || '',
+      currency: entry.currency || 'AED',
+      subtotal: entry.subtotal || '',
+      vat_total: entry.vat_total || '',
+      total: entry.total || '',
+    };
+    return changedFields(draft, original, Object.keys(original)).length > 0;
+  };
 
   const saveImportDetails = async (entry) => {
     if (!entry || workingAction) return;
@@ -447,8 +540,8 @@ const HistoricalImportManager = () => {
         return next;
       });
       setInlineFeedback(`import-${entry.id}`, 'success', 'Document edits saved.');
-      await load();
       await refreshSelectedBatch();
+      await loadSuggestions(selectedBatch.id);
       setNotice({ type: 'success', message: `Edits saved for ${entry.source_filename}.` });
     } catch (error) {
       const details = await describeQuotationError(error, 'Save historical import', `PATCH /quotations/historical-imports/${entry.id}/`);
@@ -483,27 +576,8 @@ const HistoricalImportManager = () => {
     if (!suggestion || workingAction) return;
     const suggestionDraft = suggestionDrafts[suggestion.id] || {};
     const lineDraft = suggestion.line ? lineDrafts[suggestion.line] : null;
-    const suggestionOriginal = {
-      action: suggestion.action || 'needs_manual_review',
-      suggested_product: suggestion.suggested_product || '',
-      suggested_company: suggestion.suggested_company || '',
-      alias_text: suggestion.alias_text || '',
-      proposed_company_name: suggestion.proposed_company_name || '',
-      proposed_product_name: suggestion.proposed_product_name || '',
-      proposed_unit: suggestion.proposed_unit || '',
-      proposed_pack_size: suggestion.proposed_pack_size || '',
-      proposed_dosage: suggestion.proposed_dosage || '',
-    };
-    const lineOriginal = suggestion.line ? {
-      item_name: suggestion.line_item_name || '',
-      quantity: suggestion.line_quantity || '',
-      unit: suggestion.line_unit || '',
-      unit_price: suggestion.line_unit_price || '',
-      vat_amount: suggestion.line_vat_amount || '',
-      vat_rate: suggestion.line_vat_rate || '',
-      line_total: suggestion.line_total || '',
-      status: suggestion.line_status || 'needs_review',
-    } : {};
+    const suggestionOriginal = suggestionOriginalFor(suggestion);
+    const lineOriginal = lineOriginalFor(suggestion);
     const suggestionChanges = changedFields(
       { ...suggestionOriginal, ...suggestionDraft },
       suggestionOriginal,
@@ -566,7 +640,7 @@ const HistoricalImportManager = () => {
   };
 
   const selectSuggestionGroup = (groupSuggestions, append = false) => {
-    const ids = groupSuggestions.filter((suggestion) => suggestion.status === 'pending').map((suggestion) => suggestion.id);
+    const ids = groupSuggestions.filter((suggestion) => isSuggestionActionable(suggestion)).map((suggestion) => suggestion.id);
     setSelectedSuggestionIds((current) => (append ? Array.from(new Set([...current, ...ids])) : ids));
   };
 
@@ -617,6 +691,10 @@ const HistoricalImportManager = () => {
     setErrorInfo(null);
     try {
       const response = await quotationAPI.historicalImportBatches.applyAiSuggestions(selectedBatch.id, { suggestion_ids: ids });
+      mergeUpdatedSuggestions(response.data.updated_suggestions || []);
+      if (response.data.batch) {
+        setSelectedBatch(response.data.batch);
+      }
       (response.data.results || []).forEach((result) => {
         if (result.suggestion_id) {
           const type = result.status === 'conflict' || result.status === 'failed' ? 'warning' : 'success';
@@ -632,9 +710,11 @@ const HistoricalImportManager = () => {
         message: buildApplyNotice(response.data.summary),
       });
       setSelectedSuggestionIds([]);
-      await load();
-      await refreshSelectedBatch();
+      const refreshed = await refreshSelectedBatch();
       await loadSuggestions(selectedBatch.id);
+      if (refreshed) {
+        setSelectedBatchImportIds((current) => current.filter((id) => (refreshed.imports || []).some((entry) => entry.id === id)));
+      }
       const itemsRes = await quotationAPI.items.list({ active: 'true' });
       setItems(itemsRes.data);
     } catch (error) {
@@ -844,7 +924,7 @@ const HistoricalImportManager = () => {
       if (decisionFileFilter !== 'all' && suggestion.historical_import_filename !== decisionFileFilter) return false;
       if (decisionConfidenceFilter === 'high' && confidencePercent(suggestion.confidence) < 85) return false;
       if (decisionConfidenceFilter === 'low' && confidencePercent(suggestion.confidence) >= 85) return false;
-      if (decisionConfidenceFilter === 'unresolved' && suggestion.status !== 'pending' && suggestion.status !== 'conflict') return false;
+      if (decisionConfidenceFilter === 'unresolved' && !isSuggestionActionable(suggestion) && suggestion.status !== 'conflict') return false;
       return true;
     });
     const groups = {
@@ -874,7 +954,7 @@ const HistoricalImportManager = () => {
 
   const highConfidenceCompanyMatches = useMemo(() => (
     companySuggestions.filter((suggestion) => (
-      suggestion.status === 'pending'
+      isSuggestionActionable(suggestion)
       && suggestion.action === 'match_existing_company'
       && suggestion.suggested_company
       && confidencePercent(suggestion.confidence) >= 85
@@ -1183,6 +1263,7 @@ const HistoricalImportManager = () => {
               const match = duplicatePrimaryMatch(duplicateCheck);
               const relatedCompanySuggestions = companySuggestions.filter((suggestion) => suggestion.historical_import === entry.id);
               const mode = companyModeByImport[entry.id] || (relatedCompanySuggestions[0]?.action === 'create_new_company' ? 'create' : 'match');
+              const hasDocumentChanges = importHasDraftChanges(entry);
               return (
                 <>
                   <div className="qm-card-title-row">
@@ -1240,14 +1321,21 @@ const HistoricalImportManager = () => {
                       <h4>AI company decision</h4>
                       {relatedCompanySuggestions.map((suggestion) => {
                         const suggestionDraft = suggestionDrafts[suggestion.id] || {};
+                        const actionable = isSuggestionActionable(suggestion);
+                        const hasDraftChanges = suggestionHasDraftChanges(suggestion);
                         return (
-                          <div key={suggestion.id} className={`qm-company-decision-row status-${suggestion.status}`}>
+                          <div key={suggestion.id} className={`qm-company-decision-row status-${effectiveSuggestionStatus(suggestion)}`}>
                             <div>
                               <strong>{ACTION_LABELS[suggestionDraft.action || suggestion.action]}</strong>
                               <small>{confidencePercent(suggestion.confidence)}% - {suggestion.reason || 'No reason provided.'}</small>
                             </div>
-                            <button type="button" className="qm-secondary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>Save</button>
-                            <button type="button" className="qm-primary small" disabled={suggestion.status !== 'pending' || Boolean(workingAction)} onClick={() => requestApplySuggestions([suggestion.id])}>Apply company decision</button>
+                            <span className={`qm-badge status-${effectiveSuggestionStatus(suggestion)}`}>{effectiveSuggestionStatus(suggestion)}</span>
+                            <button type="button" className="qm-secondary small" disabled={!actionable || Boolean(workingAction) || !hasDraftChanges} onClick={() => saveSuggestionEdits(suggestion)}>
+                              {hasDraftChanges ? 'Save' : 'Saved'}
+                            </button>
+                            <button type="button" className="qm-primary small" disabled={!actionable || Boolean(workingAction)} onClick={() => performApplySuggestions([suggestion.id])}>
+                              {workingAction === 'apply' ? 'Applying...' : 'Apply company decision'}
+                            </button>
                             {actionFeedback[`suggestion-${suggestion.id}`] && (
                               <div className={`qm-inline-feedback ${actionFeedback[`suggestion-${suggestion.id}`].type}`}>
                                 {actionFeedback[`suggestion-${suggestion.id}`].message}
@@ -1296,8 +1384,8 @@ const HistoricalImportManager = () => {
                     </label>
                   </div>
                   <div className="qm-action-row">
-                    <button type="button" className="qm-secondary" disabled={Boolean(workingAction) || entry.status === 'committed'} onClick={() => saveImportDetails(entry)}>
-                      {workingAction === `save-import-${entry.id}` ? 'Saving document...' : 'Save Document'}
+                    <button type="button" className="qm-secondary" disabled={Boolean(workingAction) || entry.status === 'committed' || !hasDocumentChanges} onClick={() => saveImportDetails(entry)}>
+                      {workingAction === `save-import-${entry.id}` ? 'Saving document...' : (hasDocumentChanges ? 'Save Document' : 'Document Saved')}
                     </button>
                     <button type="button" className="qm-primary" onClick={() => setActiveStep('decisions')}>Review this document's Products</button>
                   </div>
@@ -1314,10 +1402,13 @@ const HistoricalImportManager = () => {
   const renderDecisionCard = (suggestion) => {
     const draft = suggestionDrafts[suggestion.id] || {};
     const lineDraft = suggestion.line ? (lineDrafts[suggestion.line] || emptyLineDraft) : emptyLineDraft;
-    const locked = suggestion.status !== 'pending';
+    const displayStatus = effectiveSuggestionStatus(suggestion);
+    const actionable = isSuggestionActionable(suggestion);
+    const locked = !actionable;
+    const hasDraftChanges = suggestionHasDraftChanges(suggestion);
     const priceSummary = suggestion.price_history_summary || {};
     return (
-      <div key={suggestion.id} className={`qm-decision-card status-${suggestion.status}`}>
+      <div key={suggestion.id} className={`qm-decision-card status-${displayStatus}`}>
         <div className="qm-decision-card-main">
           <label className="qm-check-label">
             <input type="checkbox" checked={selectedSuggestionIds.includes(suggestion.id)} disabled={locked} onChange={() => toggleSuggestionSelection(suggestion.id)} />
@@ -1331,15 +1422,17 @@ const HistoricalImportManager = () => {
               <span>Imported price {formatMoney(lineDraft.unit_price)}</span>
               <span>Total {lineDraft.line_total || '-'}</span>
               <span className={`qm-badge ${confidencePercent(suggestion.confidence) >= 85 ? 'success' : 'muted'}`}>{confidencePercent(suggestion.confidence)}%</span>
-              <span className={`qm-badge status-${suggestion.status}`}>{suggestion.status}</span>
+              <span className={`qm-badge status-${displayStatus}`}>{displayStatus}</span>
             </div>
           </div>
         </div>
 
-        {suggestion.status !== 'pending' && (
-          <div className={`qm-applied-state status-${suggestion.status}`}>
-            <strong>{suggestion.status === 'applied' ? 'Applied' : suggestion.status}</strong>
+        {!actionable && (
+          <div className={`qm-applied-state status-${displayStatus}`}>
+            <strong>{displayStatus === 'applied' ? 'Applied' : displayStatus}</strong>
             <span>
+              {displayStatus === 'committed' && 'This source row is already committed to price history. No more approval is needed.'}
+              {displayStatus === 'duplicate' && 'This source row is duplicate/blocked and cannot be approved.'}
               {suggestion.line_status === 'ready' && 'Row is ready for price history commit.'}
               {suggestion.line_status === 'skipped' && 'Row is skipped and will not be committed.'}
               {suggestion.line_status === 'needs_review' && 'Row still needs review before commit.'}
@@ -1453,10 +1546,12 @@ const HistoricalImportManager = () => {
         <div className="qm-action-row">
           <span className="qm-action-help">Save Edits only updates review fields. Apply This approves the mapping and marks valid rows ready.</span>
           <button type="button" className="qm-secondary small" onClick={() => openSourceContext(suggestion)}>View Source</button>
-          <button type="button" className="qm-secondary small" disabled={Boolean(workingAction)} onClick={() => saveSuggestionEdits(suggestion)}>
-            {workingAction === `save-suggestion-${suggestion.id}` ? 'Saving...' : 'Save Edits'}
+          <button type="button" className="qm-secondary small" disabled={locked || Boolean(workingAction) || !hasDraftChanges} onClick={() => saveSuggestionEdits(suggestion)}>
+            {workingAction === `save-suggestion-${suggestion.id}` ? 'Saving...' : (hasDraftChanges ? 'Save Edits' : 'Saved')}
           </button>
-          <button type="button" className="qm-primary small" disabled={locked || Boolean(workingAction)} onClick={() => requestApplySuggestions([suggestion.id])}>Apply This</button>
+          <button type="button" className="qm-primary small" disabled={locked || Boolean(workingAction)} onClick={() => performApplySuggestions([suggestion.id])}>
+            {workingAction === 'apply' ? 'Applying...' : 'Apply This'}
+          </button>
         </div>
       </div>
     );
@@ -1464,7 +1559,7 @@ const HistoricalImportManager = () => {
 
   const renderDecisionGroup = (key, title, helper, groupSuggestions, options = {}) => {
     const isCollapsed = key === 'skip' && !expandedGroups.skip;
-    const pending = groupSuggestions.filter((suggestion) => suggestion.status === 'pending');
+    const pending = groupSuggestions.filter((suggestion) => isSuggestionActionable(suggestion));
     const highConfidence = pending.filter((suggestion) => confidencePercent(suggestion.confidence) >= 85);
     const visibleLimit = groupLimits[key] || 25;
     const visibleSuggestions = groupSuggestions.slice(0, visibleLimit);
