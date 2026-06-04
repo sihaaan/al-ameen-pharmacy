@@ -340,10 +340,15 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response["Content-Type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         workbook = load_workbook(BytesIO(response.content), data_only=True)
         sheet = workbook["Quotation"]
-        self.assertEqual(sheet["A4"].value, "QUOTATION")
-        self.assertEqual(sheet["B13"].value, "Bandage Pack")
-        self.assertEqual(sheet["G13"].value, 20)
-        self.assertEqual(sheet["F17"].value, "Grand Total")
+        self.assertEqual(sheet["A1"].value, "Quotation Export")
+        self.assertEqual(sheet["A14"].value, "S. No.")
+        self.assertEqual(sheet["B14"].value, "Item Description")
+        self.assertEqual(sheet["B15"].value, "Bandage Pack")
+        self.assertEqual(sheet["H15"].value, 20)
+        self.assertEqual(sheet["G19"].value, "Grand Total")
+        self.assertEqual(len(sheet.merged_cells.ranges), 0)
+        self.assertIsNone(sheet.freeze_panes)
+        self.assertIsNone(sheet.auto_filter.ref)
 
     def test_quote_payment_terms_can_be_selected_and_exported(self):
         quotation = self.create_quote()

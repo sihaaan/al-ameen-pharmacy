@@ -770,6 +770,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                   const visibleIds = filteredLines.map((line) => line.id);
                   setSelectedLineIds((current) => visibleIds.every((id) => current.includes(id)) ? current.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...current, ...visibleIds])));
                 }} /></th>
+                <th className="qm-serial-cell">#</th>
                 <th>Matched Item <span className="qm-required">*</span></th>
                 <th>Snapshot Name <span className="qm-required">*</span></th>
                 <th>Qty <span className="qm-required">*</span></th>
@@ -782,13 +783,14 @@ const QuotationEditor = ({ quoteId, onClose }) => {
               </tr>
             </thead>
             <tbody>
-              {filteredLines.map((line) => {
+              {filteredLines.map((line, lineIndex) => {
                 const draft = lineDrafts[line.id] || {};
                 const isDirty = !draftsMatch(draft, savedLineDrafts[line.id]);
                 const statusInfo = derivedLineStatus(line);
                 return (
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
+                    <td className="qm-serial-cell">{lineIndex + 1}</td>
                     <td>
                       <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>

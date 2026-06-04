@@ -688,6 +688,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                 <thead>
                   <tr>
                     <th className="qm-check-cell"><input type="checkbox" checked={importPreview.lines.length > 0 && selectedImportRows.length === importPreview.lines.length} onChange={toggleAllImportRows} /></th>
+                    <th className="qm-serial-cell">#</th>
                     <th>Requested Item Name</th>
                     <th>Matched Product</th>
                     <th>Qty</th>
@@ -704,6 +705,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                     <React.Fragment key={`${line.raw_line || line.raw_name}-${index}`}>
                       <tr>
                         <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRows.includes(index)} onChange={() => toggleImportRowSelection(index)} /></td>
+                        <td className="qm-serial-cell">{index + 1}</td>
                         <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, { raw_name: event.target.value })} /></td>
                         <td className="qm-import-match-cell">
                           <select value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
@@ -749,6 +751,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                       </tr>
                       {expandedRawRows[index] && (
                         <tr className="qm-raw-row">
+                          <td />
                           <td />
                           <td colSpan="9">
                             <label>
