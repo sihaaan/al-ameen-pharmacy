@@ -40,6 +40,11 @@ const normalizeVatRate = (value) => {
   return numeric === 5 ? '5' : '0';
 };
 
+const shouldShowMatchReason = (reason) => {
+  const text = String(reason || '').trim();
+  return text && !/no safe deterministic match found/i.test(text);
+};
+
 const InquiryManager = ({ onOpenQuote }) => {
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -341,9 +346,19 @@ const InquiryManager = ({ onOpenQuote }) => {
     formData.append('preview', JSON.stringify(importPreview));
     try {
       const response = await quotationAPI.inquiries.applyPriceReference(formData);
+      const currentLines = importPreview.lines || [];
+      const responseLines = response.data.lines || [];
       setPreview({
         ...response.data,
         result_source: response.data.result_source || importPreview.result_source || 'deterministic_parse',
+        lines: responseLines.map((line, index) => {
+          const currentLine = currentLines[index] || {};
+          return {
+            ...line,
+            quantity: currentLine.quantity ?? line.quantity ?? '',
+            unit: currentLine.unit || line.unit || '',
+          };
+        }),
       });
       const summary = response.data.price_reference_summary || {};
       setImportNotice({
@@ -690,7 +705,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                       <tr>
                         <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRows.includes(index)} onChange={() => toggleImportRowSelection(index)} /></td>
                         <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, { raw_name: event.target.value })} /></td>
-                        <td>
+                        <td className="qm-import-match-cell">
                           <select value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
                             matched_product: event.target.value || null,
                             match_status: event.target.value ? 'confirmed' : 'unresolved',
@@ -698,7 +713,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                             <option value="">Unmatched</option>
                             {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                           </select>
-                          {line.match_reason && <small className="qm-muted-text">{line.match_reason}</small>}
+                          {shouldShowMatchReason(line.match_reason) && <small className="qm-muted-text">{line.match_reason}</small>}
                         </td>
                         <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>

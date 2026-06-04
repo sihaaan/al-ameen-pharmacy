@@ -674,30 +674,55 @@
 }
 
 .import-table {
-  min-width: 980px;
+  min-width: 1380px;
+  table-layout: fixed;
 }
 
 .import-table .qm-import-item-cell {
-  min-width: 260px;
-  width: 46%;
+  min-width: 360px;
+  width: 38%;
+}
+
+.import-table .qm-import-match-cell {
+  min-width: 230px;
+  width: 17%;
 }
 
 .import-table .qm-import-qty-cell {
-  width: 96px;
+  width: 84px;
+  min-width: 84px;
 }
 
 .import-table .qm-import-unit-cell {
-  width: 110px;
+  width: 92px;
+  min-width: 92px;
 }
 
 .import-table .qm-import-price-cell {
-  width: 150px;
-  min-width: 150px;
+  width: 160px;
+  min-width: 160px;
 }
 
 .import-table .qm-import-vat-cell {
   width: 86px;
   min-width: 86px;
+}
+
+.import-table .qm-import-status-cell {
+  width: 112px;
+  min-width: 112px;
+}
+
+.import-table .qm-row-actions {
+  width: 120px;
+  min-width: 120px;
+}
+
+.import-table .qm-import-qty-cell input,
+.import-table .qm-import-unit-cell input,
+.import-table .qm-import-vat-cell select,
+.import-table .qm-import-status-cell select {
+  min-width: 0;
 }
 
 .qm-price-match {
@@ -711,10 +736,6 @@
 
 .qm-price-match.needs_review {
   color: #92400e;
-}
-
-.import-table .qm-import-status-cell {
-  width: 150px;
 }
 
 .qm-badge {
