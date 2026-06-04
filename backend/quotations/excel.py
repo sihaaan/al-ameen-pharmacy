@@ -30,6 +30,12 @@ def _valid_until(quotation, config):
     return _local_date(quotation.created_at) + timedelta(days=config.validity_days)
 
 
+def _payment_terms(quotation, config):
+    if getattr(quotation, "payment_terms", ""):
+        return quotation.get_payment_terms_display()
+    return config.payment_terms
+
+
 def _money_format(currency):
     return f'"{currency}" #,##0.00'
 
@@ -158,7 +164,7 @@ def build_quotation_excel(quotation):
     sheet.merge_cells(start_row=footer_start + 1, start_column=1, end_row=footer_start + 1, end_column=7)
     sheet.cell(row=footer_start + 1, column=1, value=config.default_terms or "")
     sheet.merge_cells(start_row=footer_start + 2, start_column=1, end_row=footer_start + 2, end_column=7)
-    sheet.cell(row=footer_start + 2, column=1, value=f"Payment Terms: {config.payment_terms or '-'}")
+    sheet.cell(row=footer_start + 2, column=1, value=f"Payment Terms: {_payment_terms(quotation, config) or '-'}")
 
     widths = {
         "A": 7,

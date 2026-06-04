@@ -13,6 +13,15 @@ const statusSteps = [
   { id: 'sent', label: 'Sent' },
 ];
 
+const paymentTermOptions = [
+  { value: 'credit_30_days', label: 'Credit 30 days' },
+  { value: 'credit_60_days', label: 'Credit 60 days' },
+  { value: 'advance_100', label: '100% advance' },
+  { value: 'pdc_30_days', label: 'PDC 30 days' },
+  { value: 'cash', label: 'Cash' },
+  { value: 'pdc_60_days', label: 'PDC 60 days' },
+];
+
 const emptyLine = {
   product: '',
   item_name_snapshot: '',
@@ -58,8 +67,20 @@ const draftFromLine = (line) => ({
   notes: line.notes || '',
 });
 
+const termsDraftFromQuote = (quote = {}) => ({
+  payment_terms: quote.payment_terms || 'credit_30_days',
+  valid_until: quote.valid_until || '',
+});
+
+const termsDraftsMatch = (left = {}, right = {}) => (
+  String(left.payment_terms || '') === String(right.payment_terms || '') &&
+  String(left.valid_until || '') === String(right.valid_until || '')
+);
+
 const QuotationEditor = ({ quoteId, onClose }) => {
   const [quote, setQuote] = useState(null);
+  const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
+  const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [items, setItems] = useState([]);
   const [lineForm, setLineForm] = useState(emptyLine);
   const [lineDrafts, setLineDrafts] = useState({});
@@ -78,6 +99,9 @@ const QuotationEditor = ({ quoteId, onClose }) => {
 
   const setLoadedQuote = useCallback((quoteData) => {
     setQuote(quoteData);
+    const nextTermsDraft = termsDraftFromQuote(quoteData);
+    setQuoteTermsDraft(nextTermsDraft);
+    setSavedQuoteTermsDraft(nextTermsDraft);
     const drafts = Object.fromEntries((quoteData.lines || []).map((line) => [line.id, draftFromLine(line)]));
     setLineDrafts(drafts);
     setSavedLineDrafts(drafts);
@@ -113,6 +137,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     .filter((line) => !draftsMatch(lineDrafts[line.id], savedLineDrafts[line.id]))
     .map((line) => line.id) : [];
   const hasUnsavedLines = changedLineIds.length > 0;
+  const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
 
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
 
@@ -148,6 +173,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     if (!quote || !['draft', 'pending_review', 'approved'].includes(quote.status)) return [];
     const issues = [];
     if (!quote.lines?.length) issues.push('Add at least one quotation line.');
+    if (hasUnsavedQuoteTerms) issues.push('Save quotation terms before finalizing.');
     if (hasUnsavedLines) issues.push('Save all line changes before finalizing.');
     (quote.lines || []).forEach((line, index) => {
       const draft = lineDrafts[line.id] || {};
@@ -167,6 +193,11 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       ...current,
       [lineId]: { ...current[lineId], ...patch },
     }));
+  };
+
+  const updateQuoteTermDraft = (patch) => {
+    setLineFeedback(null);
+    setQuoteTermsDraft((current) => ({ ...current, ...patch }));
   };
 
   const productPatch = (draft, productId) => {
@@ -301,6 +332,30 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       const details = await describeQuotationError(error, 'Save all quote lines', 'PATCH /quotations/quote-lines/{id}/');
       setErrorInfo(details);
       setLineFeedback({ type: 'error', message: 'Some line changes could not be saved.' });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveQuoteTerms = async () => {
+    if (saving || actionInFlight || !hasUnsavedQuoteTerms) return;
+    setSaving(true);
+    setLineFeedback(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.update(quote.id, {
+        payment_terms: quoteTermsDraft.payment_terms || 'credit_30_days',
+        valid_until: quoteTermsDraft.valid_until || null,
+      });
+      setQuote(response.data);
+      const nextTermsDraft = termsDraftFromQuote(response.data);
+      setQuoteTermsDraft(nextTermsDraft);
+      setSavedQuoteTermsDraft(nextTermsDraft);
+      setLineFeedback({ type: 'success', message: 'Quotation terms saved.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Save quotation terms', `PATCH /quotations/quotes/${quote.id}/`);
+      setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setSaving(false);
@@ -641,6 +696,27 @@ const QuotationEditor = ({ quoteId, onClose }) => {
         <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
       )}
       <div className="qm-helper">PDF is generated from the latest saved quotation data and current quotation settings. Save line changes before downloading or finalizing.</div>
+      <div className="qm-panel qm-terms-panel">
+        <div>
+          <h3>Quotation Terms</h3>
+          <p>Default validity is 30 days. Leave Valid Until blank to use the 30-day default in PDF/Excel.</p>
+        </div>
+        <label>
+          <span className="qm-label-text">Payment terms</span>
+          <select disabled={!isEditable || saving || Boolean(actionInFlight)} value={quoteTermsDraft.payment_terms} onChange={(event) => updateQuoteTermDraft({ payment_terms: event.target.value })}>
+            {paymentTermOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <label>
+          <span className="qm-label-text">Valid until</span>
+          <input disabled={!isEditable || saving || Boolean(actionInFlight)} type="date" value={quoteTermsDraft.valid_until || ''} onChange={(event) => updateQuoteTermDraft({ valid_until: event.target.value })} />
+        </label>
+        {isEditable && (
+          <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteTerms} onClick={saveQuoteTerms}>
+            {saving && hasUnsavedQuoteTerms ? 'Saving terms...' : hasUnsavedQuoteTerms ? 'Save Terms' : 'Terms Saved'}
+          </button>
+        )}
+      </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
       {finalizeIssues.length > 0 && (
         <div className="qm-notice">

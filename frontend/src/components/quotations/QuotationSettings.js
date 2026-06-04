@@ -12,8 +12,8 @@ const emptySettings = {
   license_number: '',
   footer_note: '',
   default_terms: '',
-  payment_terms: '',
-  validity_days: 14,
+  payment_terms: 'Credit 30 days',
+  validity_days: 30,
   prepared_by_default: '',
   signature_label: 'Signature',
   stamp_label: 'Stamp',
@@ -278,7 +278,7 @@ const QuotationSettings = () => {
             <label><span className="qm-label-text">Payment terms</span><textarea rows="3" value={settings.payment_terms || ''} onChange={(event) => updateField('payment_terms', event.target.value)} /></label>
             <label><span className="qm-label-text">Footer note</span><textarea rows="2" value={settings.footer_note || ''} onChange={(event) => updateField('footer_note', event.target.value)} /></label>
             <div className="qm-grid-two">
-              <label><span className="qm-label-text">Validity days</span><input type="number" min="1" max="365" value={settings.validity_days || 14} onChange={(event) => updateField('validity_days', event.target.value)} /></label>
+              <label><span className="qm-label-text">Validity days</span><input type="number" min="1" max="365" value={settings.validity_days || 30} onChange={(event) => updateField('validity_days', event.target.value)} /></label>
               <label><span className="qm-label-text">Prepared by default</span><input value={settings.prepared_by_default || ''} onChange={(event) => updateField('prepared_by_default', event.target.value)} /></label>
             </div>
           </div>

@@ -1256,6 +1256,7 @@ def revise_quotation(quotation, actor):
         parent=root,
         valid_until=source.valid_until,
         currency=source.currency,
+        payment_terms=source.payment_terms,
         notes=source.notes,
         internal_notes=source.internal_notes,
         created_by=actor if getattr(actor, "is_authenticated", False) else None,

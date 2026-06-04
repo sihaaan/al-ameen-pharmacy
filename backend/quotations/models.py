@@ -252,8 +252,8 @@ class QuotationSettings(models.Model):
         default="Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
         blank=True,
     )
-    payment_terms = models.TextField(default="Payment terms to be confirmed with the customer.", blank=True)
-    validity_days = models.PositiveIntegerField(default=14)
+    payment_terms = models.TextField(default="Credit 30 days", blank=True)
+    validity_days = models.PositiveIntegerField(default=30)
     prepared_by_default = models.CharField(max_length=255, blank=True)
     signature_label = models.CharField(max_length=120, default="Signature", blank=True)
     stamp_label = models.CharField(max_length=120, default="Stamp", blank=True)
@@ -785,6 +785,21 @@ class HistoricalImportAISuggestion(models.Model):
 
 
 class Quotation(models.Model):
+    PAYMENT_CREDIT_30 = "credit_30_days"
+    PAYMENT_CREDIT_60 = "credit_60_days"
+    PAYMENT_ADVANCE_100 = "advance_100"
+    PAYMENT_PDC_30 = "pdc_30_days"
+    PAYMENT_CASH = "cash"
+    PAYMENT_PDC_60 = "pdc_60_days"
+    PAYMENT_TERM_CHOICES = [
+        (PAYMENT_CREDIT_30, "Credit 30 days"),
+        (PAYMENT_CREDIT_60, "Credit 60 days"),
+        (PAYMENT_ADVANCE_100, "100% advance"),
+        (PAYMENT_PDC_30, "PDC 30 days"),
+        (PAYMENT_CASH, "Cash"),
+        (PAYMENT_PDC_60, "PDC 60 days"),
+    ]
+
     STATUS_DRAFT = "draft"
     STATUS_PENDING_REVIEW = "pending_review"
     STATUS_APPROVED = "approved"
@@ -830,6 +845,11 @@ class Quotation(models.Model):
     )
     valid_until = models.DateField(null=True, blank=True)
     currency = models.CharField(max_length=3, default="AED")
+    payment_terms = models.CharField(
+        max_length=40,
+        choices=PAYMENT_TERM_CHOICES,
+        default=PAYMENT_CREDIT_30,
+    )
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))

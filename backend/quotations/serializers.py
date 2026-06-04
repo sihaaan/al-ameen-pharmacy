@@ -1114,6 +1114,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     finalized_by_username = serializers.CharField(source="finalized_by.username", read_only=True, allow_null=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
+    payment_terms_display = serializers.CharField(source="get_payment_terms_display", read_only=True)
     lines = QuotationLineSerializer(many=True, read_only=True)
 
     class Meta:
@@ -1133,6 +1134,8 @@ class QuotationSerializer(serializers.ModelSerializer):
             "parent",
             "valid_until",
             "currency",
+            "payment_terms",
+            "payment_terms_display",
             "subtotal",
             "vat_total",
             "total",
@@ -1155,6 +1158,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "contact_name",
             "inquiry_subject",
             "quotation_number",
+            "payment_terms_display",
             "subtotal",
             "vat_total",
             "total",

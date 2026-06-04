@@ -72,6 +72,12 @@ def _valid_until(quotation, config):
     return _local_date(quotation.created_at) + timedelta(days=config.validity_days)
 
 
+def _payment_terms(quotation, config):
+    if getattr(quotation, "payment_terms", ""):
+        return quotation.get_payment_terms_display()
+    return config.payment_terms
+
+
 def _resolve_image_source(source):
     if not source:
         return None
@@ -417,7 +423,7 @@ def build_quotation_pdf(quotation):
                 Paragraph(_text(config.default_terms), styles["Small"]),
                 Spacer(1, 4),
                 Paragraph(f"<b>Validity:</b> {config.validity_days} days from quotation date unless otherwise stated.", styles["Small"]),
-                Paragraph(f"<b>Payment Terms:</b> {_text(config.payment_terms)}", styles["Small"]),
+                Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
             ],
             _signature_flowables(config, styles),
         ]

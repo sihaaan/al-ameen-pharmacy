@@ -345,6 +345,27 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(sheet["G13"].value, 20)
         self.assertEqual(sheet["F17"].value, "Grand Total")
 
+    def test_quote_payment_terms_can_be_selected_and_exported(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        update_response = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {"payment_terms": Quotation.PAYMENT_PDC_60},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.data["payment_terms"], Quotation.PAYMENT_PDC_60)
+        self.assertEqual(update_response.data["payment_terms_display"], "PDC 60 days")
+
+        pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        self.assertIn("PDC 60 days", extract_pdf_text(pdf_response.content))
+
+        excel_response = self.client.get(reverse("quotation-excel", args=[quotation.id]))
+        workbook = load_workbook(BytesIO(excel_response.content), data_only=True)
+        values = [str(cell.value) for row in workbook["Quotation"].iter_rows() for cell in row if cell.value is not None]
+        self.assertTrue(any("PDC 60 days" in value for value in values))
+
     def test_unmatched_quotation_line_can_create_internal_product(self):
         quotation = self.create_quote()
         line = QuotationLine.objects.create(
@@ -3097,6 +3118,8 @@ class QuotationSettingsTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["company_name"], "Al Ameen Pharmacy")
+        self.assertEqual(response.data["payment_terms"], "Credit 30 days")
+        self.assertEqual(response.data["validity_days"], 30)
         self.assertEqual(QuotationSettings.objects.count(), 1)
 
     def test_settings_update_works(self):

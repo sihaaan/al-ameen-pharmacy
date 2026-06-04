@@ -99,6 +99,22 @@
   background: #f9fafb;
 }
 
+.qm-terms-panel {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(180px, 240px) minmax(160px, 220px) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.qm-terms-panel h3 {
+  margin: 0 0 4px;
+}
+
+.qm-terms-panel p {
+  margin: 0;
+  color: #64748b;
+}
+
 .qm-stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -2573,6 +2589,10 @@
   .qm-panel,
   .qm-subpanel {
     padding: 14px;
+  }
+
+  .qm-terms-panel {
+    grid-template-columns: 1fr;
   }
 
   .qm-action-row,
