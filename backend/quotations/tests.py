@@ -3283,7 +3283,7 @@ class QuotationSettingsTests(APITestCase):
 
                 self.assertIn("quotations/user-signatures/", config.signature_image_path.replace("\\", "/"))
 
-    def test_pdf_config_falls_back_to_shared_signature(self):
+    def test_pdf_config_ignores_shared_signature_when_user_has_none(self):
         storage_settings = {
             "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
             "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
@@ -3296,7 +3296,7 @@ class QuotationSettingsTests(APITestCase):
 
                 config = get_quotation_pdf_config(quotation=quotation)
 
-                self.assertIn("quotations/signatures/", config.signature_image_path.replace("\\", "/"))
+                self.assertEqual(config.signature_image_path, "")
 
     def test_staff_can_clear_logo_signature_and_stamp(self):
         self.client.force_authenticate(self.staff)

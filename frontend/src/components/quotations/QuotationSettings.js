@@ -285,7 +285,7 @@ const QuotationSettings = () => {
               title="My Signature"
               imageUrl={userSignature.signature_image_url}
               selectedFile={userSignatureFile}
-              emptyText="No user signature uploaded. PDFs can fall back to the shared signature if one still exists."
+              emptyText="No user signature uploaded. PDFs will show your name with a blank signature line."
               label={`Upload signature for ${userSignature.display_name || userSignature.username || 'me'}`}
               onChange={setUserSignatureFile}
               onRemove={clearUserSignature}
