@@ -77,6 +77,11 @@ const termsDraftsMatch = (left = {}, right = {}) => (
   String(left.valid_until || '') === String(right.valid_until || '')
 );
 
+const releaseNumberWheelFocus = (event) => {
+  event.preventDefault();
+  event.currentTarget.blur();
+};
+
 const QuotationEditor = ({ quoteId, onClose }) => {
   const [quote, setQuote] = useState(null);
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
@@ -801,7 +806,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
                     <td><input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
                     <td><input disabled={!isEditable} value={draft.unit || ''} onChange={(event) => updateLineDraft(line.id, { unit: event.target.value })} /></td>
-                    <td><input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
+                    <td><input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
                     <td className="qm-vat-cell">
                       <select className="qm-vat-select" disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
                         <option value="0">0%</option>
@@ -834,7 +839,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
             <input placeholder="Unit" value={lineForm.unit} onChange={(event) => setLineForm({ ...lineForm, unit: event.target.value })} />
-            <input type="number" min="0" step="0.01" placeholder="Price" value={lineForm.unit_price} onChange={(event) => setLineForm({ ...lineForm, unit_price: event.target.value })} />
+            <input type="number" min="0" step="0.01" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, unit_price: event.target.value })} />
             <select value={lineForm.vat_rate} onChange={(event) => setLineForm({ ...lineForm, vat_rate: event.target.value })}>
               <option value="0">VAT 0%</option>
               <option value="5">VAT 5%</option>

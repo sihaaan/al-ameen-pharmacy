@@ -44,7 +44,7 @@ from .models import (
     ProductAlias,
     QuoteItem,
 )
-from .matching import suggest_product_for_text
+from .matching import apply_match_to_preview_line, suggest_product_for_text
 from .ocr import OCRProviderUnavailable, get_ocr_provider
 
 
@@ -527,6 +527,42 @@ class ProductCatalogMatchingTests(APITestCase):
 
         self.assertEqual(match.product, self.product_a)
         self.assertEqual(match.method, "global_alias")
+
+    def test_company_safe_preview_matching_requires_alias_or_company_history(self):
+        exact_catalog_product = Product.objects.create(name="Pulse Oxmeter", price=Decimal("1.00"), status="draft")
+        line = {"raw_name": "Pulse Oxmeter"}
+
+        apply_match_to_preview_line(line, self.company_a)
+
+        self.assertIsNone(line["matched_product"])
+        self.assertEqual(line["match_status"], "unresolved")
+
+        quotation = Quotation.objects.create(company=self.company_a, created_by=self.staff)
+        quotation_line = QuotationLine.objects.create(
+            quotation=quotation,
+            product=exact_catalog_product,
+            item_name_snapshot="Pulse Oxmeter",
+            quantity=Decimal("1.000"),
+            unit="No",
+            unit_price=Decimal("10.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        CompanyPriceHistory.objects.create(
+            company=self.company_a,
+            product=exact_catalog_product,
+            quotation=quotation,
+            quotation_line=quotation_line,
+            unit_price=Decimal("10.00"),
+            unit="No",
+            created_by=self.staff,
+        )
+
+        matched_line = {"raw_name": "Pulse Oxmeter"}
+        apply_match_to_preview_line(matched_line, self.company_a)
+
+        self.assertEqual(matched_line["matched_product"], exact_catalog_product.id)
+        self.assertEqual(matched_line["match_status"], "confirmed")
+        self.assertEqual(matched_line["match_method"], "company_price_history")
 
     def test_public_product_list_hides_internal_draft_products_from_customers(self):
         Product.objects.create(name="Public Item", price=Decimal("2.00"), status="active")

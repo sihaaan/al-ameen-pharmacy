@@ -4,7 +4,7 @@ from django.db.models import Q
 
 from api.models import Product
 
-from .models import ProductAlias, normalize_label
+from .models import CompanyPriceHistory, ProductAlias, normalize_label
 
 
 @dataclass
@@ -40,7 +40,26 @@ def product_catalog_queryset():
     return Product.objects.exclude(status="archived").select_related("brand", "category")
 
 
-def suggest_product_for_text(raw_text, company=None):
+def _company_history_product_match(raw_text, normalized, company):
+    if not company:
+        return None
+    lookup_text = (raw_text or "").strip()
+    for history in (
+        CompanyPriceHistory.objects.filter(company=company)
+        .select_related("product")
+        .order_by("-quoted_at", "-id")[:1000]
+    ):
+        product = history.product
+        if not product or product.status == "archived":
+            continue
+        if normalize_label(product.name) == normalized:
+            return product
+        if lookup_text and (product.sku == lookup_text or product.barcode == lookup_text):
+            return product
+    return None
+
+
+def suggest_product_for_text(raw_text, company=None, *, company_only=False):
     normalized = normalize_label(raw_text)
     if not normalized:
         return ProductMatch(None, 0.0, "empty", "No item text to match.")
@@ -61,6 +80,23 @@ def suggest_product_for_text(raw_text, company=None):
                 0.98,
                 "company_alias",
                 f"Matched company alias '{alias.alias}'.",
+            )
+
+        history_product = _company_history_product_match(raw_text, normalized, company)
+        if history_product:
+            return ProductMatch(
+                history_product,
+                0.92,
+                "company_price_history",
+                f"Matched Product previously quoted to {company.name}.",
+            )
+
+        if company_only:
+            return ProductMatch(
+                None,
+                0.0,
+                "company_unmatched",
+                "No company-specific alias or previous company price history matched this item.",
             )
 
     alias = (
@@ -120,7 +156,11 @@ def suggest_product_for_text(raw_text, company=None):
 
 
 def apply_match_to_preview_line(line, company=None):
-    match = suggest_product_for_text(line.get("raw_name") or line.get("item_name") or line.get("raw_line") or "", company)
+    match = suggest_product_for_text(
+        line.get("raw_name") or line.get("item_name") or line.get("raw_line") or "",
+        company,
+        company_only=bool(company),
+    )
     line.update(match.as_preview())
     if match.confidence >= 0.88:
         line["matched_product"] = match.product.id
