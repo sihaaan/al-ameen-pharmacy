@@ -22,6 +22,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationSettings,
+    UserQuotationProfile,
     QuoteItem,
     ProductAlias,
 )
@@ -29,6 +30,35 @@ from .models import (
 
 SAFE_BRANDING_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 SAFE_BRANDING_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
+
+
+def validate_branding_image_upload(image, label):
+    if not image:
+        return image
+    max_bytes = int(
+        getattr(
+            settings,
+            "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
+            getattr(settings, "QUOTATION_LOGO_MAX_UPLOAD_BYTES", 2 * 1024 * 1024),
+        )
+    )
+    if image.size > max_bytes:
+        raise serializers.ValidationError(f"{label} file is too large. Maximum size is {max_bytes // (1024 * 1024)} MB.")
+    extension = image.name.rsplit(".", 1)[-1].lower() if "." in image.name else ""
+    if extension not in SAFE_BRANDING_IMAGE_EXTENSIONS:
+        raise serializers.ValidationError(f"Unsupported {label.lower()} type. Upload png, jpg, jpeg, or webp only.")
+    if getattr(image, "content_type", "") and image.content_type not in SAFE_BRANDING_IMAGE_CONTENT_TYPES:
+        raise serializers.ValidationError(f"Unsupported {label.lower()} content type.")
+    header = image.read(512)
+    image.seek(0)
+    if extension == "webp":
+        if not (header.startswith(b"RIFF") and b"WEBP" in header[:16]):
+            raise serializers.ValidationError("Uploaded file does not look like a valid WebP image.")
+    elif extension == "png" and not header.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise serializers.ValidationError("Uploaded file does not look like a valid PNG image.")
+    elif extension in {"jpg", "jpeg"} and not header.startswith(b"\xff\xd8\xff"):
+        raise serializers.ValidationError("Uploaded file does not look like a valid image.")
+    return image
 
 
 class CompanyContactSerializer(serializers.ModelSerializer):
@@ -279,32 +309,7 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
         return self._validate_branding_image(image, "Stamp image")
 
     def _validate_branding_image(self, image, label):
-        if not image:
-            return image
-        max_bytes = int(
-            getattr(
-                settings,
-                "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
-                getattr(settings, "QUOTATION_LOGO_MAX_UPLOAD_BYTES", 2 * 1024 * 1024),
-            )
-        )
-        if image.size > max_bytes:
-            raise serializers.ValidationError(f"{label} file is too large. Maximum size is {max_bytes // (1024 * 1024)} MB.")
-        extension = image.name.rsplit(".", 1)[-1].lower() if "." in image.name else ""
-        if extension not in SAFE_BRANDING_IMAGE_EXTENSIONS:
-            raise serializers.ValidationError(f"Unsupported {label.lower()} type. Upload png, jpg, jpeg, or webp only.")
-        if getattr(image, "content_type", "") and image.content_type not in SAFE_BRANDING_IMAGE_CONTENT_TYPES:
-            raise serializers.ValidationError(f"Unsupported {label.lower()} content type.")
-        header = image.read(512)
-        image.seek(0)
-        if extension == "webp":
-            if not (header.startswith(b"RIFF") and b"WEBP" in header[:16]):
-                raise serializers.ValidationError("Uploaded file does not look like a valid WebP image.")
-        elif extension == "png" and not header.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise serializers.ValidationError("Uploaded file does not look like a valid PNG image.")
-        elif extension in {"jpg", "jpeg"} and not header.startswith(b"\xff\xd8\xff"):
-            raise serializers.ValidationError("Uploaded file does not look like a valid image.")
-        return image
+        return validate_branding_image_upload(image, label)
 
     def validate_primary_color(self, value):
         return self._validate_hex_color(value, "primary_color")
@@ -338,6 +343,53 @@ class QuotationSettingsSerializer(serializers.ModelSerializer):
                     except Exception:
                         pass
                 setattr(instance, image_field, None)
+        return super().update(instance, validated_data)
+
+
+class UserQuotationProfileSerializer(serializers.ModelSerializer):
+    signature_image_url = serializers.SerializerMethodField()
+    clear_signature_image = serializers.BooleanField(write_only=True, required=False, default=False)
+    username = serializers.CharField(source="user.username", read_only=True)
+    display_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserQuotationProfile
+        fields = [
+            "id",
+            "user",
+            "username",
+            "display_name",
+            "signature_image",
+            "signature_image_url",
+            "clear_signature_image",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "user", "username", "display_name", "signature_image_url", "created_at", "updated_at"]
+
+    def get_signature_image_url(self, obj):
+        if not obj.signature_image:
+            return ""
+        try:
+            return obj.signature_image.url
+        except ValueError:
+            return ""
+
+    def get_display_name(self, obj):
+        full_name = obj.user.get_full_name() if obj.user_id else ""
+        return full_name or obj.user.username
+
+    def validate_signature_image(self, image):
+        return validate_branding_image_upload(image, "Signature image")
+
+    def update(self, instance, validated_data):
+        should_clear = validated_data.pop("clear_signature_image", False)
+        if should_clear and instance.signature_image:
+            try:
+                instance.signature_image.delete(save=False)
+            except Exception:
+                pass
+            instance.signature_image = None
         return super().update(instance, validated_data)
 
 

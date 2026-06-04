@@ -16,6 +16,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationSettings,
+    UserQuotationProfile,
     ProductAlias,
     QuoteItem,
 )
@@ -118,6 +119,14 @@ class QuotationSettingsAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(UserQuotationProfile)
+class UserQuotationProfileAdmin(admin.ModelAdmin):
+    list_display = ["user", "updated_at"]
+    search_fields = ["user__username", "user__first_name", "user__last_name", "user__email"]
+    autocomplete_fields = ["user"]
+    readonly_fields = ["created_at", "updated_at"]
 
 
 @admin.register(AIParseCache)

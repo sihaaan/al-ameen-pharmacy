@@ -45,6 +45,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationSettings,
+    UserQuotationProfile,
     ProductAlias,
 )
 from .excel import build_quotation_excel
@@ -66,6 +67,7 @@ from .serializers import (
     QuotationLineSerializer,
     QuotationSettingsSerializer,
     QuotationSerializer,
+    UserQuotationProfileSerializer,
     ProductAliasSerializer,
     QuoteItemSerializer,
     serializer_error_from_django_validation,
@@ -146,6 +148,32 @@ class QuotationSettingsView(APIView):
             message="Updated quotation settings.",
         )
         return Response(QuotationSettingsSerializer(settings_obj, context={"request": request}).data)
+
+
+class UserQuotationProfileView(APIView):
+    permission_classes = [IsQuotationStaff]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_object(self, request):
+        profile, _ = UserQuotationProfile.objects.get_or_create(user=request.user)
+        return profile
+
+    def get(self, request):
+        serializer = UserQuotationProfileSerializer(self.get_object(request), context={"request": request})
+        return Response(serializer.data)
+
+    def patch(self, request):
+        profile = self.get_object(request)
+        serializer = UserQuotationProfileSerializer(profile, data=request.data, partial=True, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        profile = serializer.save(user=request.user)
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            profile,
+            message="Updated user quotation signature.",
+        )
+        return Response(UserQuotationProfileSerializer(profile, context={"request": request}).data)
 
 
 class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

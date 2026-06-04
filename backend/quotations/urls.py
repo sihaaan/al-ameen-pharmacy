@@ -21,5 +21,6 @@ router.register(r"audit-logs", views.QuotationAuditLogViewSet, basename="quotati
 
 urlpatterns = [
     path("settings/", views.QuotationSettingsView.as_view(), name="quotation-settings"),
+    path("my-signature/", views.UserQuotationProfileView.as_view(), name="quotation-my-signature"),
     path("", include(router.urls)),
 ]

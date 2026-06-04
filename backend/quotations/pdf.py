@@ -262,7 +262,7 @@ def _footer(canvas, doc):
 
 
 def build_quotation_pdf(quotation):
-    config = get_quotation_pdf_config()
+    config = get_quotation_pdf_config(quotation=quotation)
     primary = colors.HexColor(config.primary_color or "#0F766E")
     accent = colors.HexColor(config.accent_color or "#ECFDF5")
     buffer = BytesIO()
@@ -427,7 +427,7 @@ def build_quotation_pdf(quotation):
                 Paragraph(f"<b>Validity:</b> {config.validity_days} days from quotation date unless otherwise stated.", styles["Small"]),
                 Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
             ],
-            _signature_flowables(config, styles),
+            _signature_flowables(config, styles, quotation),
         ]
     ]
     footer_table = Table(footer_data, colWidths=[112 * mm, 60 * mm])
@@ -455,9 +455,13 @@ def build_quotation_pdf(quotation):
     return buffer.getvalue()
 
 
-def _signature_flowables(config, styles):
+def _signature_flowables(config, styles, quotation=None):
     flowables = [Paragraph("Prepared / Approved By", styles["SectionTitle"])]
-    prepared_by = config.prepared_by_default.strip() if config.prepared_by_default else ""
+    prepared_by = ""
+    if quotation and quotation.created_by:
+        prepared_by = quotation.created_by.get_full_name() or quotation.created_by.username
+    if not prepared_by:
+        prepared_by = config.prepared_by_default.strip() if config.prepared_by_default else ""
     if prepared_by:
         flowables.append(Paragraph(_text(prepared_by), styles["Small"]))
 

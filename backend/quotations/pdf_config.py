@@ -53,6 +53,18 @@ def _settings_image_source(image_field):
         return ""
 
 
+def _user_signature_image_source(user):
+    if not user or not getattr(user, "is_authenticated", False):
+        return ""
+    try:
+        profile = getattr(user, "quotation_profile", None)
+    except Exception:
+        return ""
+    if not profile:
+        return ""
+    return _settings_image_source(profile.signature_image)
+
+
 def _get_saved_settings():
     try:
         from .models import QuotationSettings
@@ -62,9 +74,10 @@ def _get_saved_settings():
         return None
 
 
-def get_quotation_pdf_config():
+def get_quotation_pdf_config(quotation=None):
     settings_obj = _get_saved_settings()
     if settings_obj:
+        user_signature_path = _user_signature_image_source(getattr(quotation, "created_by", None))
         return QuotationPDFConfig(
             company_name=settings_obj.company_name,
             company_name_ar=settings_obj.company_name_ar if settings_obj.show_arabic_name else "",
@@ -73,7 +86,7 @@ def get_quotation_pdf_config():
             email=settings_obj.email,
             trn=settings_obj.trn if settings_obj.show_trn else "",
             logo_path=_settings_image_source(settings_obj.logo) or _default_logo_path(),
-            signature_image_path=_settings_image_source(settings_obj.signature_image),
+            signature_image_path=user_signature_path or _settings_image_source(settings_obj.signature_image),
             stamp_image_path=_settings_image_source(settings_obj.stamp_image),
             logo_layout=settings_obj.logo_layout,
             footer_note=settings_obj.footer_note,
@@ -94,6 +107,7 @@ def get_quotation_pdf_config():
             show_stamp_area=settings_obj.show_stamp_area,
         )
 
+    user_signature_path = _user_signature_image_source(getattr(quotation, "created_by", None))
     return QuotationPDFConfig(
         company_name=getattr(settings, "QUOTATION_COMPANY_NAME", "Al Ameen Pharmacy"),
         company_name_ar=getattr(settings, "QUOTATION_COMPANY_NAME_AR", ""),
@@ -102,7 +116,7 @@ def get_quotation_pdf_config():
         email=getattr(settings, "QUOTATION_COMPANY_EMAIL", "alameenpharmacyllc@gmail.com"),
         trn=getattr(settings, "QUOTATION_COMPANY_TRN", ""),
         logo_path=getattr(settings, "QUOTATION_LOGO_PATH", _default_logo_path()),
-        signature_image_path=getattr(settings, "QUOTATION_SIGNATURE_IMAGE_PATH", ""),
+        signature_image_path=user_signature_path or getattr(settings, "QUOTATION_SIGNATURE_IMAGE_PATH", ""),
         stamp_image_path=getattr(settings, "QUOTATION_STAMP_IMAGE_PATH", ""),
         logo_layout=getattr(settings, "QUOTATION_LOGO_LAYOUT", "full_logo_only"),
         footer_note="",

@@ -40,6 +40,12 @@ const emptySettings = {
   stamp_image_url: '',
 };
 
+const emptyUserSignature = {
+  username: '',
+  display_name: '',
+  signature_image_url: '',
+};
+
 const booleanFields = new Set([
   'show_arabic_name',
   'show_trn',
@@ -79,8 +85,9 @@ const BrandingImageInput = ({ title, imageUrl, selectedFile, emptyText, label, o
 
 const QuotationSettings = () => {
   const [settings, setSettings] = useState(emptySettings);
+  const [userSignature, setUserSignature] = useState(emptyUserSignature);
   const [logoFile, setLogoFile] = useState(null);
-  const [signatureFile, setSignatureFile] = useState(null);
+  const [userSignatureFile, setUserSignatureFile] = useState(null);
   const [stampFile, setStampFile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -92,10 +99,14 @@ const QuotationSettings = () => {
     setLoading(true);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.settings.retrieve();
-      setSettings({ ...emptySettings, ...response.data });
+      const [settingsResponse, signatureResponse] = await Promise.all([
+        quotationAPI.settings.retrieve(),
+        quotationAPI.userSignature.retrieve(),
+      ]);
+      setSettings({ ...emptySettings, ...settingsResponse.data });
+      setUserSignature({ ...emptyUserSignature, ...signatureResponse.data });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Load quotation settings', 'GET /quotations/settings/');
+      const details = await describeQuotationError(error, 'Load quotation settings', 'GET /quotations/settings/, /quotations/my-signature/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -146,13 +157,18 @@ const QuotationSettings = () => {
         formData.append(key, booleanFields.has(key) ? (value ? 'true' : 'false') : (value ?? ''));
       });
       if (logoFile) formData.append('logo', logoFile);
-      if (signatureFile) formData.append('signature_image', signatureFile);
       if (stampFile) formData.append('stamp_image', stampFile);
       const response = await quotationAPI.settings.update(formData, true);
       setSettings({ ...emptySettings, ...response.data });
       setLogoFile(null);
-      setSignatureFile(null);
       setStampFile(null);
+      if (userSignatureFile) {
+        const signatureFormData = new FormData();
+        signatureFormData.append('signature_image', userSignatureFile);
+        const signatureResponse = await quotationAPI.userSignature.update(signatureFormData, true);
+        setUserSignature({ ...emptyUserSignature, ...signatureResponse.data });
+        setUserSignatureFile(null);
+      }
       setNotice({ type: 'success', message: 'Quotation settings saved.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Save quotation settings', 'PATCH /quotations/settings/');
@@ -172,11 +188,29 @@ const QuotationSettings = () => {
       const response = await quotationAPI.settings.update({ [field]: true });
       setSettings({ ...emptySettings, ...response.data });
       if (field === 'clear_logo') setLogoFile(null);
-      if (field === 'clear_signature_image') setSignatureFile(null);
       if (field === 'clear_stamp_image') setStampFile(null);
       setNotice({ type: 'success', message: `${title} removed.` });
     } catch (error) {
       const details = await describeQuotationError(error, `Remove ${title.toLowerCase()}`, 'PATCH /quotations/settings/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setClearingImage('');
+    }
+  };
+
+  const clearUserSignature = async () => {
+    if (saving || clearingImage) return;
+    setClearingImage('user_signature');
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.userSignature.update({ clear_signature_image: true });
+      setUserSignature({ ...emptyUserSignature, ...response.data });
+      setUserSignatureFile(null);
+      setNotice({ type: 'success', message: 'Your quotation signature removed.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Remove user quotation signature', 'PATCH /quotations/my-signature/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -243,26 +277,29 @@ const QuotationSettings = () => {
 
         <div className="qm-settings-grid">
           <div className="qm-subpanel">
-            <h4>Signature / Stamp</h4>
+            <h4>My Signature / Company Stamp</h4>
+            <p className="qm-helper compact">
+              Quotation PDFs use the signature of the user who created the quotation. The company stamp is shared for everyone.
+            </p>
             <BrandingImageInput
-              title="Signature"
-              imageUrl={settings.signature_image_url}
-              selectedFile={signatureFile}
-              emptyText="No signature image uploaded."
-              label="Upload signature"
-              onChange={setSignatureFile}
-              onRemove={() => clearImage('clear_signature_image', 'Signature')}
-              removing={clearingImage === 'clear_signature_image'}
+              title="My Signature"
+              imageUrl={userSignature.signature_image_url}
+              selectedFile={userSignatureFile}
+              emptyText="No user signature uploaded. PDFs can fall back to the shared signature if one still exists."
+              label={`Upload signature for ${userSignature.display_name || userSignature.username || 'me'}`}
+              onChange={setUserSignatureFile}
+              onRemove={clearUserSignature}
+              removing={clearingImage === 'user_signature'}
               disabled={saving || Boolean(clearingImage)}
             />
             <BrandingImageInput
-              title="Stamp"
+              title="Company Stamp"
               imageUrl={settings.stamp_image_url}
               selectedFile={stampFile}
-              emptyText="No stamp image uploaded."
-              label="Upload stamp"
+              emptyText="No company stamp uploaded."
+              label="Upload company stamp"
               onChange={setStampFile}
-              onRemove={() => clearImage('clear_stamp_image', 'Stamp')}
+              onRemove={() => clearImage('clear_stamp_image', 'Company stamp')}
               removing={clearingImage === 'clear_stamp_image'}
               disabled={saving || Boolean(clearingImage)}
             />

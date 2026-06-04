@@ -299,6 +299,24 @@ class QuotationSettings(models.Model):
         return settings_obj
 
 
+class UserQuotationProfile(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="quotation_profile",
+    )
+    signature_image = models.ImageField(upload_to="quotations/user-signatures/", blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "User Quotation Profile"
+        verbose_name_plural = "User Quotation Profiles"
+
+    def __str__(self):
+        return f"Quotation profile for {self.user}"
+
+
 class AIParseCache(models.Model):
     MODE_TEXT = "text"
     MODE_VISION = "vision"

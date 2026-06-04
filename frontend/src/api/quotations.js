@@ -178,6 +178,12 @@ const quotationAPI = {
       headers: { 'Content-Type': 'multipart/form-data' },
     } : undefined),
   },
+  userSignature: {
+    retrieve: () => axiosInstance.get('/quotations/my-signature/'),
+    update: (data, isMultipart = false) => axiosInstance.patch('/quotations/my-signature/', data, isMultipart ? {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    } : undefined),
+  },
 };
 
 export default quotationAPI;

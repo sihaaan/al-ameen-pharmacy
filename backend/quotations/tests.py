@@ -41,9 +41,11 @@ from .models import (
     Quotation,
     QuotationLine,
     QuotationSettings,
+    UserQuotationProfile,
     ProductAlias,
     QuoteItem,
 )
+from .pdf_config import get_quotation_pdf_config
 from .matching import apply_match_to_preview_line, suggest_product_for_text
 from .ocr import OCRProviderUnavailable, get_ocr_provider
 
@@ -3244,6 +3246,57 @@ class QuotationSettingsTests(APITestCase):
                 settings_obj = QuotationSettings.get_solo()
                 self.assertTrue(settings_obj.signature_image.name.startswith("quotations/signatures/"))
                 self.assertTrue(settings_obj.stamp_image.name.startswith("quotations/stamps/"))
+
+    def test_user_signature_uploads_work(self):
+        self.client.force_authenticate(self.staff)
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                response = self.client.patch(
+                    reverse("quotation-my-signature"),
+                    {"signature_image": make_png_upload("my-signature.png")},
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertTrue(response.data["signature_image_url"])
+                profile = UserQuotationProfile.objects.get(user=self.staff)
+                self.assertTrue(profile.signature_image.name.startswith("quotations/user-signatures/"))
+
+    def test_pdf_config_prefers_creator_signature_over_shared_signature(self):
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                settings_obj = QuotationSettings.get_solo()
+                settings_obj.signature_image.save("shared-signature.png", ContentFile(make_png_bytes()), save=True)
+                profile = UserQuotationProfile.objects.create(user=self.staff)
+                profile.signature_image.save("user-signature.png", ContentFile(make_png_bytes(color=(212, 160, 65, 255))), save=True)
+                quotation = self.create_valid_quote()
+
+                config = get_quotation_pdf_config(quotation=quotation)
+
+                self.assertIn("quotations/user-signatures/", config.signature_image_path.replace("\\", "/"))
+
+    def test_pdf_config_falls_back_to_shared_signature(self):
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                settings_obj = QuotationSettings.get_solo()
+                settings_obj.signature_image.save("shared-signature.png", ContentFile(make_png_bytes()), save=True)
+                quotation = self.create_valid_quote()
+
+                config = get_quotation_pdf_config(quotation=quotation)
+
+                self.assertIn("quotations/signatures/", config.signature_image_path.replace("\\", "/"))
 
     def test_staff_can_clear_logo_signature_and_stamp(self):
         self.client.force_authenticate(self.staff)
