@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
@@ -73,11 +73,14 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [importSaving, setImportSaving] = useState(false);
   const [priceReferenceApplying, setPriceReferenceApplying] = useState(false);
   const [importNotice, setImportNotice] = useState(null);
+  const [importActionNotice, setImportActionNotice] = useState(null);
+  const [importValidationDialog, setImportValidationDialog] = useState(null);
   const [expandedRawRows, setExpandedRawRows] = useState({});
   const [selectedImportRows, setSelectedImportRows] = useState([]);
   const [aiCleaning, setAiCleaning] = useState(false);
   const [aiCandidate, setAiCandidate] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
+  const importPanelRef = useRef(null);
 
   const load = async () => {
     setLoading(true);
@@ -180,6 +183,9 @@ const InquiryManager = ({ onOpenQuote }) => {
         quotationNumber: inquiry.quotation_number,
         reused: true,
       });
+      if (savedImportedInquiry?.id === inquiry.id) {
+        setImportActionNotice({ type: 'success', message: 'Quotation already exists. Open it to continue editing the lines.' });
+      }
       return;
     }
     setCreatingQuoteId(inquiry.id);
@@ -193,6 +199,14 @@ const InquiryManager = ({ onOpenQuote }) => {
         quotationNumber: response.data.quotation_number,
         reused: response.status === 200,
       });
+      if (savedImportedInquiry?.id === inquiry.id) {
+        setImportActionNotice({
+          type: 'success',
+          message: response.status === 200
+            ? 'Quotation already exists. Open it to continue editing the lines.'
+            : 'Quotation created. Open it to continue editing the lines.',
+        });
+      }
       await load();
     } catch (error) {
       const details = await describeQuotationError(error, 'Create quote from inquiry', `POST /quotations/inquiries/${inquiry.id}/create_quote/`);
@@ -210,6 +224,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const setPreview = (preview) => {
     setSavedImportedInquiry(null);
     setImportNotice(null);
+    setImportActionNotice(null);
     setExpandedRawRows({});
     setSelectedImportRows([]);
     const candidate = preview.ai_candidate || null;
@@ -376,6 +391,7 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const updateImportLine = (index, patch) => {
     setSavedImportedInquiry(null);
+    setImportActionNotice(null);
     setImportPreview((current) => ({
       ...current,
       lines: current.lines.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line),
@@ -384,6 +400,7 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const removeImportLine = (index) => {
     setSavedImportedInquiry(null);
+    setImportActionNotice(null);
     setSelectedImportRows((current) => current.filter((rowIndex) => rowIndex !== index).map((rowIndex) => rowIndex > index ? rowIndex - 1 : rowIndex));
     setImportPreview((current) => ({
       ...current,
@@ -407,6 +424,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const removeSelectedImportRows = () => {
     if (!selectedImportRows.length) return;
     setSavedImportedInquiry(null);
+    setImportActionNotice(null);
     setImportPreview((current) => ({
       ...current,
       lines: current.lines.filter((_, index) => !selectedImportRows.includes(index)),
@@ -416,6 +434,7 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const addImportLine = () => {
     setSavedImportedInquiry(null);
+    setImportActionNotice(null);
     setImportPreview((current) => ({
       ...(current || {
         source_type: importMode === 'paste' ? 'pasted_text' : importMode,
@@ -457,11 +476,22 @@ const InquiryManager = ({ onOpenQuote }) => {
         match_status: line.match_status || (line.matched_product ? 'confirmed' : 'unresolved'),
       }));
     if (!importForm.company) {
-      setImportNotice({ type: 'error', message: 'Select a company before saving the imported inquiry.' });
+      const message = 'Select a company before saving this imported inquiry.';
+      setImportActionNotice({ type: 'error', message });
+      setImportValidationDialog({
+        title: 'Company required',
+        message,
+        action: 'company',
+      });
       return;
     }
     if (!lines.length) {
-      setImportNotice({ type: 'error', message: 'Add at least one reviewed inquiry line before saving.' });
+      const message = 'Add at least one reviewed inquiry line before saving.';
+      setImportActionNotice({ type: 'error', message });
+      setImportValidationDialog({
+        title: 'No inquiry lines',
+        message,
+      });
       return;
     }
     setImportSaving(true);
@@ -488,6 +518,7 @@ const InquiryManager = ({ onOpenQuote }) => {
       });
       setSavedImportedInquiry(response.data);
       setImportNotice({ type: 'success', message: 'Imported inquiry saved. You can now create a quotation from it.' });
+      setImportActionNotice({ type: 'success', message: 'Inquiry saved. Create the quotation here, then open it for Step 4 line editing.' });
       await load();
     } catch (error) {
       const details = await describeQuotationError(error, 'Save imported inquiry', 'POST /quotations/inquiries/create_imported/');
@@ -496,6 +527,15 @@ const InquiryManager = ({ onOpenQuote }) => {
     } finally {
       setImportSaving(false);
     }
+  };
+
+  const savedQuoteForCurrentImport = savedImportedInquiry && quoteSuccess?.inquiryId === savedImportedInquiry.id
+    ? quoteSuccess
+    : null;
+
+  const goToImportCompany = () => {
+    setImportValidationDialog(null);
+    importPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   return (
@@ -512,7 +552,7 @@ const InquiryManager = ({ onOpenQuote }) => {
           </button>
         </div>
       )}
-      <div className="qm-panel qm-import-panel">
+      <div className="qm-panel qm-import-panel" ref={importPanelRef}>
         <div className="qm-panel-heading">
           <div>
             <h3>Import Inquiry</h3>
@@ -777,13 +817,23 @@ const InquiryManager = ({ onOpenQuote }) => {
               </table>
             </div>
             <div className="qm-import-actions sticky">
+              {importActionNotice && (
+                <div className={`qm-action-feedback ${importActionNotice.type}`}>
+                  {importActionNotice.message}
+                </div>
+              )}
               <button type="button" className="qm-secondary" onClick={addImportLine}>Add Missing Row</button>
               <button type="button" className="qm-primary" disabled={importSaving || Boolean(savedImportedInquiry)} onClick={saveImportedInquiry}>
                 {importSaving ? 'Saving...' : savedImportedInquiry ? 'Inquiry Saved' : 'Save Inquiry'}
               </button>
-              {savedImportedInquiry && (
+              {savedImportedInquiry && !savedQuoteForCurrentImport && (
                 <button type="button" className="qm-secondary" disabled={Boolean(creatingQuoteId)} onClick={() => createQuote(savedImportedInquiry)}>
                   {creatingQuoteId === savedImportedInquiry.id ? 'Creating...' : 'Create Quotation from This Inquiry'}
+                </button>
+              )}
+              {savedQuoteForCurrentImport && (
+                <button type="button" className="qm-primary" onClick={() => openCreatedQuote(savedQuoteForCurrentImport.quoteId)}>
+                  Open Quotation
                 </button>
               )}
             </div>
@@ -940,6 +990,28 @@ const InquiryManager = ({ onOpenQuote }) => {
         </form>
         </div>
       </div>
+      {importValidationDialog && (
+        <div className="qm-modal-backdrop" role="presentation">
+          <div className="qm-modal qm-validation-modal" role="dialog" aria-modal="true" aria-labelledby="import-validation-title">
+            <div className="qm-panel-heading">
+              <div>
+                <h3 id="import-validation-title">{importValidationDialog.title}</h3>
+                <p>{importValidationDialog.message}</p>
+              </div>
+            </div>
+            <div className="qm-action-row">
+              {importValidationDialog.action === 'company' && (
+                <button type="button" className="qm-primary" onClick={goToImportCompany}>
+                  Go to company selection
+                </button>
+              )}
+              <button type="button" className="qm-secondary" onClick={() => setImportValidationDialog(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
