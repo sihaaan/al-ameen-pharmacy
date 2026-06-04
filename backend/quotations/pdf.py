@@ -73,6 +73,8 @@ def _valid_until(quotation, config):
 
 
 def _payment_terms(quotation, config):
+    if getattr(quotation, "payment_terms", "") == "as_per_agreement":
+        return "As per mutually agreed terms."
     if getattr(quotation, "payment_terms", ""):
         return quotation.get_payment_terms_display()
     return config.payment_terms

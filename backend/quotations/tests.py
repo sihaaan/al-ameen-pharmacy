@@ -371,6 +371,23 @@ class QuotationWorkflowTests(APITestCase):
         values = [str(cell.value) for row in workbook["Quotation"].iter_rows() for cell in row if cell.value is not None]
         self.assertTrue(any("PDC 60 days" in value for value in values))
 
+    def test_as_per_agreement_payment_term_has_professional_pdf_wording(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        update_response = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {"payment_terms": Quotation.PAYMENT_AS_PER_AGREEMENT},
+            format="json",
+        )
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.data["payment_terms_display"], "As per agreement")
+
+        pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        pdf_text = extract_pdf_text(pdf_response.content)
+        self.assertIn("As per mutually agreed terms.", pdf_text)
+        self.assertNotIn("Payment Terms: As per agreement", pdf_text)
+
     def test_unmatched_quotation_line_can_create_internal_product(self):
         quotation = self.create_quote()
         line = QuotationLine.objects.create(
