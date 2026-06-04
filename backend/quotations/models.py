@@ -791,6 +791,7 @@ class Quotation(models.Model):
     PAYMENT_PDC_30 = "pdc_30_days"
     PAYMENT_CASH = "cash"
     PAYMENT_PDC_60 = "pdc_60_days"
+    PAYMENT_AS_PER_AGREEMENT = "as_per_agreement"
     PAYMENT_TERM_CHOICES = [
         (PAYMENT_CREDIT_30, "Credit 30 days"),
         (PAYMENT_CREDIT_60, "Credit 60 days"),
@@ -798,6 +799,7 @@ class Quotation(models.Model):
         (PAYMENT_PDC_30, "PDC 30 days"),
         (PAYMENT_CASH, "Cash"),
         (PAYMENT_PDC_60, "PDC 60 days"),
+        (PAYMENT_AS_PER_AGREEMENT, "As per agreement"),
     ]
 
     STATUS_DRAFT = "draft"

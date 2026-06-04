@@ -20,6 +20,7 @@ const paymentTermOptions = [
   { value: 'pdc_30_days', label: 'PDC 30 days' },
   { value: 'cash', label: 'Cash' },
   { value: 'pdc_60_days', label: 'PDC 60 days' },
+  { value: 'as_per_agreement', label: 'As per agreement' },
 ];
 
 const emptyLine = {
