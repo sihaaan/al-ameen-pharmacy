@@ -457,13 +457,6 @@ def build_quotation_pdf(quotation):
 
 def _signature_flowables(config, styles, quotation=None):
     flowables = [Paragraph("Prepared / Approved By", styles["SectionTitle"])]
-    prepared_by = ""
-    if quotation and quotation.created_by:
-        prepared_by = quotation.created_by.get_full_name() or quotation.created_by.username
-    if not prepared_by:
-        prepared_by = config.prepared_by_default.strip() if config.prepared_by_default else ""
-    if prepared_by:
-        flowables.append(Paragraph(_text(prepared_by), styles["Small"]))
 
     approval_cells = []
     if config.show_signature_area:
