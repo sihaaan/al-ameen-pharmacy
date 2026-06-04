@@ -157,6 +157,7 @@ const quotationAPI = {
     revise: (id) => axiosInstance.post(`/quotations/quotes/${id}/revise/`),
     cancel: (id) => axiosInstance.post(`/quotations/quotes/${id}/cancel/`),
     pdf: (id) => axiosInstance.get(`/quotations/quotes/${id}/pdf/`, { responseType: 'blob' }),
+    excel: (id) => axiosInstance.get(`/quotations/quotes/${id}/excel/`, { responseType: 'blob' }),
   },
   lines: {
     create: (data) => axiosInstance.post('/quotations/quote-lines/', data),

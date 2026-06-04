@@ -68,6 +68,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const [saving, setSaving] = useState(false);
   const [actionInFlight, setActionInFlight] = useState('');
   const [downloadLoading, setDownloadLoading] = useState(false);
+  const [excelDownloadLoading, setExcelDownloadLoading] = useState(false);
   const [lineFeedback, setLineFeedback] = useState(null);
   const [historyItem, setHistoryItem] = useState('');
   const [errorInfo, setErrorInfo] = useState(null);
@@ -566,6 +567,31 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }
   };
 
+  const downloadExcel = async () => {
+    if (excelDownloadLoading || actionInFlight) return;
+    setExcelDownloadLoading(true);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.excel(quote.id);
+      const url = window.URL.createObjectURL(new Blob([response.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${quote.quotation_number}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Download quotation Excel', `GET /quotations/quotes/${quote.id}/excel/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setExcelDownloadLoading(false);
+    }
+  };
+
   if (loading) return <div className="qm-loading">Loading quotation...</div>;
   if (!quote) {
     return (
@@ -593,6 +619,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
           {!['revised', 'cancelled'].includes(quote.status) && <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>{actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}</button>}
           <button type="button" className="qm-secondary" disabled={downloadLoading || Boolean(actionInFlight)} onClick={downloadPdf}>{downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}</button>
+          <button type="button" className="qm-secondary" disabled={excelDownloadLoading || Boolean(actionInFlight)} onClick={downloadExcel}>{excelDownloadLoading ? 'Preparing Excel...' : 'Download Excel'}</button>
         </div>
       </div>
 

@@ -11,7 +11,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
 from django.test import override_settings
 from django.urls import reverse
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from pypdf import PdfReader, PdfWriter
 from PIL import Image as PILImage
 from reportlab.lib import colors
@@ -324,6 +324,26 @@ class QuotationWorkflowTests(APITestCase):
         allowed = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
         self.assertEqual(allowed.status_code, status.HTTP_200_OK)
         self.assertEqual(allowed["Content-Type"], "application/pdf")
+
+    def test_excel_endpoint_generates_workbook_for_staff(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        self.client.force_authenticate(self.customer)
+        blocked = self.client.get(reverse("quotation-excel", args=[quotation.id]))
+        self.assertEqual(blocked.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.staff)
+        response = self.client.get(reverse("quotation-excel", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        workbook = load_workbook(BytesIO(response.content), data_only=True)
+        sheet = workbook["Quotation"]
+        self.assertEqual(sheet["A4"].value, "QUOTATION")
+        self.assertEqual(sheet["B13"].value, "Bandage Pack")
+        self.assertEqual(sheet["G13"].value, 20)
+        self.assertEqual(sheet["F17"].value, "Grand Total")
 
     def test_unmatched_quotation_line_can_create_internal_product(self):
         quotation = self.create_quote()

@@ -47,6 +47,7 @@ from .models import (
     QuotationSettings,
     ProductAlias,
 )
+from .excel import build_quotation_excel
 from .pdf import build_quotation_pdf
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_workbook
@@ -555,6 +556,23 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{quotation.quotation_number}.pdf"'
+        return response
+
+    @action(detail=True, methods=["get"])
+    def excel(self, request, pk=None):
+        quotation = self.get_object()
+        workbook_bytes = build_quotation_excel(quotation)
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_PDF_DOWNLOADED,
+            quotation,
+            message=f"Downloaded Excel for {quotation.quotation_number}.",
+        )
+        response = HttpResponse(
+            workbook_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{quotation.quotation_number}.xlsx"'
         return response
 
     @action(detail=True, methods=["get"])
