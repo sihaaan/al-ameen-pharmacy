@@ -89,6 +89,9 @@ const quotationAPI = {
     parseFile: (formData) => axiosInstance.post('/quotations/inquiries/parse_file/', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }),
+    applyPriceReference: (formData) => axiosInstance.post('/quotations/inquiries/apply_price_reference/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
     aiCleanParse: (data) => axiosInstance.post('/quotations/inquiries/ai_clean_parse/', data),
     createImported: (data) => axiosInstance.post('/quotations/inquiries/create_imported/', data),
     createQuote: (id) => axiosInstance.post(`/quotations/inquiries/${id}/create_quote/`),

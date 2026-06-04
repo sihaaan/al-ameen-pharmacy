@@ -246,6 +246,72 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(first_response.data["id"], second_response.data["id"])
         self.assertEqual(Quotation.objects.filter(inquiry=inquiry).count(), 1)
 
+    def test_price_reference_workbook_fills_inquiry_preview_prices(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Sl No", "Items", "unit", "qty", "uprice", "TOTAL", "Vat", "g total"])
+        sheet.append([1, "Adol Infant suspension", "pcs", 3, 12, 36, 0, 36])
+        sheet.append([2, "Fenestil Gel", "pcs", 3, 12.5, 37.5, 0, 37.5])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        upload = SimpleUploadedFile(
+            "paddington.xlsx",
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        preview = {
+            "source_type": "excel",
+            "lines": [
+                {"raw_name": "Adol Infant suspension", "quantity": "3", "unit": "pcs", "parse_status": "parsed"},
+                {"raw_name": "Unknown Clinic Item", "quantity": "1", "unit": "pcs", "parse_status": "needs_review"},
+            ],
+        }
+
+        response = self.client.post(
+            reverse("quotation-inquiry-apply-price-reference"),
+            {"file": upload, "preview": json.dumps(preview)},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["price_reference_summary"]["matched_count"], 1)
+        self.assertEqual(response.data["lines"][0]["unit_price"], "12.00")
+        self.assertEqual(response.data["lines"][0]["vat_rate"], "0.00")
+        self.assertEqual(response.data["lines"][0]["price_reference_status"], "matched")
+        self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
+
+    def test_imported_inquiry_prices_carry_into_created_quote_lines(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-create-imported"),
+            {
+                "company": self.company.id,
+                "subject": "Clinic supplies with workbook prices",
+                "source_type": Inquiry.SOURCE_TYPE_EXCEL,
+                "lines": [
+                    {
+                        "raw_name": "Fenestil Gel",
+                        "quantity": "3",
+                        "unit": "pcs",
+                        "unit_price": "12.50",
+                        "vat_rate": "0",
+                        "parse_status": InquiryLine.PARSE_PARSED,
+                        "parse_confidence": 0.95,
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        inquiry = Inquiry.objects.get(pk=response.data["id"])
+
+        quote_response = self.client.post(reverse("quotation-inquiry-create-quote", args=[inquiry.id]))
+
+        self.assertEqual(quote_response.status_code, status.HTTP_201_CREATED)
+        line = QuotationLine.objects.get(quotation_id=quote_response.data["id"])
+        self.assertEqual(line.unit_price, Decimal("12.50"))
+        self.assertEqual(line.vat_rate, Decimal("0.00"))
+        self.assertEqual(line.line_total, Decimal("37.50"))
+
     def test_pdf_endpoint_is_staff_only(self):
         quotation = self.create_quote()
         self.create_valid_line(quotation)

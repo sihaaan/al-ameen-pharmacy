@@ -16,6 +16,8 @@ const newImportLine = () => ({
   raw_name: '',
   quantity: '',
   unit: '',
+  unit_price: '',
+  vat_rate: '0',
   raw_line: '',
   parse_status: 'needs_review',
   parse_confidence: 0,
@@ -31,6 +33,11 @@ const emptyImportForm = {
   subject: '',
   raw_text: '',
   raw_html: '',
+};
+
+const normalizeVatRate = (value) => {
+  const numeric = Number(value || 0);
+  return numeric === 5 ? '5' : '0';
 };
 
 const InquiryManager = ({ onOpenQuote }) => {
@@ -54,10 +61,12 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [importMode, setImportMode] = useState('paste');
   const [importForm, setImportForm] = useState(emptyImportForm);
   const [importFile, setImportFile] = useState(null);
+  const [priceReferenceFile, setPriceReferenceFile] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   const [savedImportedInquiry, setSavedImportedInquiry] = useState(null);
   const [importParsing, setImportParsing] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
+  const [priceReferenceApplying, setPriceReferenceApplying] = useState(false);
   const [importNotice, setImportNotice] = useState(null);
   const [expandedRawRows, setExpandedRawRows] = useState({});
   const [selectedImportRows, setSelectedImportRows] = useState([]);
@@ -314,6 +323,42 @@ const InquiryManager = ({ onOpenQuote }) => {
     }
   };
 
+  const applyPriceReferenceWorkbook = async () => {
+    if (priceReferenceApplying) return;
+    if (!importPreview?.lines?.length) {
+      setImportNotice({ type: 'error', message: 'Parse an inquiry before applying a price workbook.' });
+      return;
+    }
+    if (!priceReferenceFile) {
+      setImportNotice({ type: 'error', message: 'Choose Dad’s Excel price workbook first.' });
+      return;
+    }
+    setPriceReferenceApplying(true);
+    setErrorInfo(null);
+    setImportNotice(null);
+    const formData = new FormData();
+    formData.append('file', priceReferenceFile);
+    formData.append('preview', JSON.stringify(importPreview));
+    try {
+      const response = await quotationAPI.inquiries.applyPriceReference(formData);
+      setPreview({
+        ...response.data,
+        result_source: response.data.result_source || importPreview.result_source || 'deterministic_parse',
+      });
+      const summary = response.data.price_reference_summary || {};
+      setImportNotice({
+        type: 'success',
+        message: `Price workbook applied. ${summary.matched_count || 0} prices filled, ${summary.needs_review_count || 0} likely matches need review, ${summary.unmatched_count || 0} unmatched.`,
+      });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Apply inquiry price workbook', 'POST /quotations/inquiries/apply_price_reference/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setPriceReferenceApplying(false);
+    }
+  };
+
   const updateImportLine = (index, patch) => {
     setSavedImportedInquiry(null);
     setImportPreview((current) => ({
@@ -387,6 +432,8 @@ const InquiryManager = ({ onOpenQuote }) => {
         raw_line: line.raw_line || line.raw_name,
         quantity: line.quantity || null,
         unit: line.unit || '',
+        unit_price: line.unit_price || null,
+        vat_rate: normalizeVatRate(line.vat_rate),
         notes: line.notes || '',
         parse_status: line.parse_status || 'needs_review',
         parse_confidence: Number(line.parse_confidence || 0),
@@ -516,6 +563,29 @@ const InquiryManager = ({ onOpenQuote }) => {
           </div>
         )}
 
+        <div className="qm-price-reference-box">
+          <div>
+            <h4>Optional: Fill Prices from Dad’s Workbook</h4>
+            <p>Upload a previous company Excel file to fill unit prices for matching inquiry items before saving the inquiry.</p>
+          </div>
+          <label>
+            <span className="qm-label-text">Price reference workbook</span>
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={(event) => setPriceReferenceFile(event.target.files?.[0] || null)}
+            />
+          </label>
+          <button
+            type="button"
+            className="qm-secondary"
+            disabled={priceReferenceApplying || !priceReferenceFile || !importPreview?.lines?.length}
+            onClick={applyPriceReferenceWorkbook}
+          >
+            {priceReferenceApplying ? 'Applying prices...' : 'Apply Workbook Prices'}
+          </button>
+        </div>
+
         {importNotice && <div className={`qm-feedback ${importNotice.type}`}>{importNotice.message}</div>}
         {importPreview && (
           <div className="qm-import-preview">
@@ -607,6 +677,8 @@ const InquiryManager = ({ onOpenQuote }) => {
                     <th>Matched Product</th>
                     <th>Qty</th>
                     <th>Unit</th>
+                    <th>Unit Price</th>
+                    <th>VAT</th>
                     <th>Status</th>
                     <th>Confidence</th>
                     <th>Action</th>
@@ -630,6 +702,20 @@ const InquiryManager = ({ onOpenQuote }) => {
                         </td>
                         <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
+                        <td className="qm-import-price-cell">
+                          <input type="number" min="0" step="0.01" value={line.unit_price || ''} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
+                          {line.price_reference_match && (
+                            <small className={`qm-price-match ${line.price_reference_status || ''}`}>
+                              {line.price_reference_match.match_label} match: {line.price_reference_match.item_name} ({Math.round(Number(line.price_reference_match.confidence || 0) * 100)}%)
+                            </small>
+                          )}
+                        </td>
+                        <td className="qm-import-vat-cell">
+                          <select value={normalizeVatRate(line.vat_rate)} onChange={(event) => updateImportLine(index, { vat_rate: event.target.value })}>
+                            <option value="0">0%</option>
+                            <option value="5">5%</option>
+                          </select>
+                        </td>
                         <td className="qm-import-status-cell">
                           <select value={line.parse_status || 'needs_review'} onChange={(event) => updateImportLine(index, { parse_status: event.target.value })}>
                             <option value="parsed">Parsed</option>
@@ -649,7 +735,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                       {expandedRawRows[index] && (
                         <tr className="qm-raw-row">
                           <td />
-                          <td colSpan="7">
+                          <td colSpan="9">
                             <label>
                               <span className="qm-label-text">Raw source line</span>
                               <textarea rows="2" value={line.raw_line || ''} onChange={(event) => updateImportLine(index, { raw_line: event.target.value })} />
@@ -660,6 +746,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                               {line.page_number && <span>Page: {line.page_number}</span>}
                               {line.serial_no && <span>Serial: {line.serial_no}</span>}
                               {line.unit_price && <span>Unit price: {line.unit_price}</span>}
+                              {line.price_reference_match && <span>Price source: {line.price_reference_match.sheet_name} row {line.price_reference_match.row_number}</span>}
                               {line.line_total && <span>Total: {line.line_total}</span>}
                               {line.notes && <span>Notes: {line.notes}</span>}
                             </div>

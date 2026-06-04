@@ -1,3 +1,4 @@
+import json
 import logging
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -48,6 +49,7 @@ from .models import (
 )
 from .pdf import build_quotation_pdf
 from .permissions import IsQuotationStaff
+from .price_reference import apply_price_reference_to_preview, parse_price_reference_workbook
 from .serializers import (
     CompanyContactSerializer,
     CompanyPriceHistorySerializer,
@@ -338,6 +340,28 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         self._apply_product_matches(preview, request.data.get("company"))
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
         return Response(preview)
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def apply_price_reference(self, request):
+        raw_preview = request.data.get("preview") or "{}"
+        try:
+            preview = json.loads(raw_preview) if isinstance(raw_preview, str) else raw_preview
+        except json.JSONDecodeError:
+            return Response({"detail": "Send the current inquiry preview as valid JSON."}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(preview, dict) or not isinstance(preview.get("lines"), list):
+            return Response({"detail": "A parsed inquiry preview with lines is required before applying price references."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            reference_rows, reference_meta = parse_price_reference_workbook(request.FILES.get("file"))
+            updated_preview = apply_price_reference_to_preview(preview, reference_rows)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        updated_preview["price_reference"] = reference_meta
+        updated_preview.setdefault("warnings", [])
+        updated_preview["warnings"] = [
+            *(updated_preview.get("warnings") or []),
+            *(reference_meta.get("warnings") or []),
+        ]
+        return Response(updated_preview)
 
     def _apply_product_matches(self, preview, company_id):
         company = None

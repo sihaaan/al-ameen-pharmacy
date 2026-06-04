@@ -658,7 +658,7 @@
 }
 
 .import-table {
-  min-width: 760px;
+  min-width: 980px;
 }
 
 .import-table .qm-import-item-cell {
@@ -672,6 +672,29 @@
 
 .import-table .qm-import-unit-cell {
   width: 110px;
+}
+
+.import-table .qm-import-price-cell {
+  width: 150px;
+  min-width: 150px;
+}
+
+.import-table .qm-import-vat-cell {
+  width: 86px;
+  min-width: 86px;
+}
+
+.qm-price-match {
+  display: block;
+  margin-top: 4px;
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.qm-price-match.needs_review {
+  color: #92400e;
 }
 
 .import-table .qm-import-status-cell {
@@ -1016,6 +1039,28 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: end;
+}
+
+.qm-price-reference-box {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 420px) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #a7f3d0;
+  border-radius: 8px;
+  background: #ecfdf5;
+}
+
+.qm-price-reference-box h4 {
+  margin: 0 0 4px;
+  color: #065f46;
+}
+
+.qm-price-reference-box p {
+  margin: 0;
+  color: #4b5563;
 }
 
 .qm-import-preview {
@@ -2555,6 +2600,10 @@
   }
 
   .qm-import-source {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-price-reference-box {
     grid-template-columns: 1fr;
   }
 
