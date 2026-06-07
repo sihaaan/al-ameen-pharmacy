@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
@@ -103,6 +104,18 @@ except Exception:  # pragma: no cover
 
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_download_name_part(value):
+    cleaned = re.sub(r"[^A-Za-z0-9-]+", "_", str(value or "").upper()).strip("_-")
+    return cleaned[:80] or ""
+
+
+def _quotation_download_filename(quotation, extension):
+    company_part = _safe_download_name_part(getattr(quotation.company, "name", ""))
+    quote_part = _safe_download_name_part(quotation.quotation_number) or "QUOTATION"
+    basename = f"{company_part}-{quote_part}" if company_part else quote_part
+    return f"{basename}.{extension}"
 
 
 class QuotationBaseViewSet:
@@ -271,6 +284,13 @@ class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         if self.request.query_params.get("active") == "true":
             queryset = queryset.exclude(status="archived")
+        company_used = self.request.query_params.get("company_used")
+        if company_used:
+            queryset = queryset.filter(
+                Q(company_price_history__company_id=company_used)
+                | Q(quotation_aliases__company_id=company_used, quotation_aliases__is_active=True)
+                | Q(quotation_lines__quotation__company_id=company_used)
+            ).distinct()
         return queryset.order_by("name")
 
     def perform_create(self, serializer):
@@ -583,7 +603,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             message=f"Downloaded PDF for {quotation.quotation_number}.",
         )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
-        response["Content-Disposition"] = f'attachment; filename="{quotation.quotation_number}.pdf"'
+        response["Content-Disposition"] = f'attachment; filename="{_quotation_download_filename(quotation, "pdf")}"'
         return response
 
     @action(detail=True, methods=["get"])
@@ -600,7 +620,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             workbook_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        response["Content-Disposition"] = f'attachment; filename="{quotation.quotation_number}.xlsx"'
+        response["Content-Disposition"] = f'attachment; filename="{_quotation_download_filename(quotation, "xlsx")}"'
         return response
 
     @action(detail=True, methods=["get"])
@@ -636,11 +656,11 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             {
                 "product": product.id,
                 "product_name": product.name,
-                "unit_price": str(product.price) if product.price is not None else "",
+                "unit_price": "",
                 "unit": "",
                 "currency": quotation.currency,
-                "source": "product_base_price",
-                "source_label": "Product base price",
+                "source": "no_company_price_history",
+                "source_label": f"No previous {quotation.company.name} price",
                 "quoted_at": "",
             }
         )

@@ -83,11 +83,27 @@ const releaseNumberWheelFocus = (event) => {
   event.currentTarget.blur();
 };
 
+const safeDownloadNamePart = (value) => {
+  const cleaned = String(value || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]+/g, '_')
+    .replace(/^[_-]+|[_-]+$/g, '');
+  return cleaned.slice(0, 80);
+};
+
+const quotationDownloadFilename = (quote, extension) => {
+  const companyPart = safeDownloadNamePart(quote?.company_name);
+  const quotePart = safeDownloadNamePart(quote?.quotation_number) || 'QUOTATION';
+  return `${companyPart ? `${companyPart}-` : ''}${quotePart}.${extension}`;
+};
+
 const QuotationEditor = ({ quoteId, onClose }) => {
   const [quote, setQuote] = useState(null);
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [items, setItems] = useState([]);
+  const [companyItems, setCompanyItems] = useState([]);
+  const [showFullProductCatalog, setShowFullProductCatalog] = useState(false);
   const [lineForm, setLineForm] = useState(emptyLine);
   const [lineDrafts, setLineDrafts] = useState({});
   const [savedLineDrafts, setSavedLineDrafts] = useState({});
@@ -118,14 +134,16 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     setLoading(true);
     setErrorInfo(null);
     try {
-      const [quoteRes, itemsRes] = await Promise.all([
-        quotationAPI.quotes.retrieve(quoteId),
+      const quoteRes = await quotationAPI.quotes.retrieve(quoteId);
+      const [itemsRes, companyItemsRes] = await Promise.all([
         quotationAPI.items.list({ active: 'true' }),
+        quotationAPI.items.list({ active: 'true', company_used: quoteRes.data.company }),
       ]);
       setLoadedQuote(quoteRes.data);
       setItems(itemsRes.data);
+      setCompanyItems(companyItemsRes.data);
     } catch (error) {
-      const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/ and GET /quotations/items/`);
+      const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/, GET /quotations/items/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -146,6 +164,16 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
 
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
+
+  const productOptionsForDraft = (draft = {}) => {
+    const baseItems = showFullProductCatalog ? items : companyItems;
+    const byId = new Map(baseItems.map((item) => [String(item.id), item]));
+    if (draft.product && !byId.has(String(draft.product))) {
+      const selected = items.find((item) => String(item.id) === String(draft.product));
+      if (selected) byId.set(String(selected.id), selected);
+    }
+    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+  };
 
   const lineTotalForDraft = (draft = {}) => {
     const quantity = Number(draft.quantity || 0);
@@ -211,7 +239,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     return {
       product: productId,
       item_name_snapshot: item ? item.name : draft.item_name_snapshot,
-      unit: item?.unit || draft.unit,
+      unit: draft.unit || item?.unit || '',
       match_status: productId ? 'confirmed' : 'unresolved',
     };
   };
@@ -245,6 +273,10 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     if (!productId) return;
 
     const suggestion = await maybeFetchProductPrice(productId);
+    if (suggestion.source !== 'company_price_history') {
+      setLineFeedback({ type: 'warning', message: `Product linked. No previous ${quote.company_name} price was found, so the price was left unchanged.` });
+      return;
+    }
     if (!suggestion?.unit_price) return;
     const pricePatch = {};
     if (priceShouldAutofill(currentDraft)) {
@@ -270,6 +302,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     if (!productId) return;
     const suggestion = await maybeFetchProductPrice(productId);
     if (!suggestion?.unit_price) return;
+    if (suggestion.source !== 'company_price_history') return;
     setLineForm((current) => ({
       ...current,
       unit_price: priceShouldAutofill(current) ? suggestion.unit_price : current.unit_price,
@@ -614,7 +647,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `${quote.quotation_number}.pdf`);
+      link.setAttribute('download', quotationDownloadFilename(quote, 'pdf'));
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -639,7 +672,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       }));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `${quote.quotation_number}.xlsx`);
+      link.setAttribute('download', quotationDownloadFilename(quote, 'xlsx'));
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -762,6 +795,10 @@ const QuotationEditor = ({ quoteId, onClose }) => {
             <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ vat_rate: '5' })}>VAT 5%</button>
             <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ match_status: 'ignored' })}>Skip selected</button>
             <button type="button" className="qm-secondary small" disabled={!selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
+            <label className="qm-checkbox compact">
+              <input type="checkbox" checked={showFullProductCatalog} onChange={(event) => setShowFullProductCatalog(event.target.checked)} />
+              Show full catalog
+            </label>
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLines} onClick={saveAllLines}>
               {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
             </button>
@@ -793,6 +830,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                 const draft = lineDrafts[line.id] || {};
                 const isDirty = !draftsMatch(draft, savedLineDrafts[line.id]);
                 const statusInfo = derivedLineStatus(line);
+                const productOptions = productOptionsForDraft(draft);
                 return (
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
@@ -800,8 +838,8 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td>
                       <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>
-                        <option value="__create__">+ Create draft Product from this row</option>
-                        {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        {!showFullProductCatalog && productOptions.length === 0 && <option disabled value="__none__">No Products used by this company yet</option>}
+                        {productOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                       </select>
                     </td>
                     <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
@@ -835,7 +873,8 @@ const QuotationEditor = ({ quoteId, onClose }) => {
           <form onSubmit={addLine} className="qm-add-line">
             <select value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
               <option value="">Select item</option>
-              {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {!showFullProductCatalog && productOptionsForDraft(lineForm).length === 0 && <option disabled value="__none__">No Products used by this company yet</option>}
+              {productOptionsForDraft(lineForm).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />

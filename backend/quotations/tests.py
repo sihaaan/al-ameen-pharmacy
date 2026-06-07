@@ -183,7 +183,7 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.data["unit_price"], "10.00")
         self.assertEqual(response.data["unit"], "box")
 
-    def test_quote_product_price_falls_back_to_product_base_price(self):
+    def test_quote_product_price_does_not_fall_back_to_product_base_price(self):
         current_quote = self.create_quote()
         response = self.client.get(
             reverse("quotation-product-price", args=[current_quote.id]),
@@ -191,8 +191,50 @@ class QuotationWorkflowTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["source"], "product_base_price")
-        self.assertEqual(response.data["unit_price"], "1.00")
+        self.assertEqual(response.data["source"], "no_company_price_history")
+        self.assertEqual(response.data["unit_price"], "")
+
+    def test_company_used_items_filter_only_returns_company_products(self):
+        historical_quote = self.create_quote()
+        self.create_valid_line(historical_quote)
+        finalize_response = self.client.post(reverse("quotation-finalize", args=[historical_quote.id]))
+        self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
+        alias_product = Product.objects.create(name="Alias Product", price=Decimal("2.00"), status="draft")
+        ProductAlias.objects.create(company=self.company, product=alias_product, alias="Company alias", created_by=self.staff)
+        other_company = Company.objects.create(name="Other Company")
+        other_product = Product.objects.create(name="Other Product", price=Decimal("3.00"), status="draft")
+        other_quote = Quotation.objects.create(company=other_company, created_by=self.staff)
+        other_line = QuotationLine.objects.create(
+            quotation=other_quote,
+            product=other_product,
+            item_name_snapshot="Other Product",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("3.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        finalize_other = self.client.post(reverse("quotation-finalize", args=[other_quote.id]))
+        self.assertEqual(finalize_other.status_code, status.HTTP_200_OK)
+
+        response = self.client.get(reverse("quotation-item-list"), {"active": "true", "company_used": self.company.id})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        product_ids = {row["id"] for row in response.data}
+        self.assertIn(self.product.id, product_ids)
+        self.assertIn(alias_product.id, product_ids)
+        self.assertNotIn(other_product.id, product_ids)
+
+    def test_download_filenames_start_with_company_name(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        excel_response = self.client.get(reverse("quotation-excel", args=[quotation.id]))
+
+        self.assertEqual(pdf_response.status_code, status.HTTP_200_OK)
+        self.assertIn(f'filename="WORKFLOW_COMPANY-{quotation.quotation_number}.pdf"', pdf_response["Content-Disposition"])
+        self.assertEqual(excel_response.status_code, status.HTTP_200_OK)
+        self.assertIn(f'filename="WORKFLOW_COMPANY-{quotation.quotation_number}.xlsx"', excel_response["Content-Disposition"])
 
     def test_finalized_quote_cannot_be_edited(self):
         quotation = self.create_quote()
