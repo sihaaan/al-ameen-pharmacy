@@ -113,6 +113,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [excelDownloadLoading, setExcelDownloadLoading] = useState(false);
   const [lineFeedback, setLineFeedback] = useState(null);
+  const [linePriceHints, setLinePriceHints] = useState({});
   const [historyItem, setHistoryItem] = useState('');
   const [errorInfo, setErrorInfo] = useState(null);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
@@ -127,6 +128,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     const drafts = Object.fromEntries((quoteData.lines || []).map((line) => [line.id, draftFromLine(line)]));
     setLineDrafts(drafts);
     setSavedLineDrafts(drafts);
+    setLinePriceHints({});
     setSelectedLineIds((current) => current.filter((id) => (quoteData.lines || []).some((line) => line.id === id)));
   }, []);
 
@@ -223,6 +225,13 @@ const QuotationEditor = ({ quoteId, onClose }) => {
 
   const updateLineDraft = (lineId, patch) => {
     setLineFeedback(null);
+    if (Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'product')) {
+      setLinePriceHints((current) => {
+        const next = { ...current };
+        delete next[lineId];
+        return next;
+      });
+    }
     setLineDrafts((current) => ({
       ...current,
       [lineId]: { ...current[lineId], ...patch },
@@ -244,9 +253,19 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     };
   };
 
-  const priceShouldAutofill = (draft) => (
-    !draft.unit_price || Number(draft.unit_price) <= 0 || draft.match_status === 'unresolved'
-  );
+  const priceShouldAutofill = (draft) => !draft.unit_price || Number(draft.unit_price) <= 0;
+
+  const setPriceHintForLine = (lineId, suggestion, mode) => {
+    setLinePriceHints((current) => ({
+      ...current,
+      [lineId]: {
+        mode,
+        unit_price: suggestion?.unit_price || '',
+        quoted_at: suggestion?.quoted_at || '',
+        source_label: suggestion?.source_label || '',
+      },
+    }));
+  };
 
   const maybeFetchProductPrice = async (productId) => {
     if (!quote?.id || !productId) return null;
@@ -261,6 +280,15 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }
   };
 
+  const priceHintText = (hint) => {
+    if (!hint) return '';
+    const dateText = hint.quoted_at ? ` • ${hint.quoted_at}` : '';
+    if (hint.mode === 'autofilled') return `Price history AED ${hint.unit_price}${dateText} applied`;
+    if (hint.mode === 'current_kept') return `Last price AED ${hint.unit_price}${dateText}; current price kept`;
+    if (hint.mode === 'history_found') return `Last price AED ${hint.unit_price}${dateText}`;
+    return 'No previous company price';
+  };
+
   const handleLineProductChange = async (line, productId) => {
     if (productId === '__create__') {
       createProductForLine(line.id);
@@ -273,8 +301,9 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     if (!productId) return;
 
     const suggestion = await maybeFetchProductPrice(productId);
+    if (!suggestion) return;
     if (suggestion.source !== 'company_price_history') {
-      setLineFeedback({ type: 'warning', message: `Product linked. No previous ${quote.company_name} price was found, so the price was left unchanged.` });
+      setPriceHintForLine(line.id, suggestion, 'no_history');
       return;
     }
     if (!suggestion?.unit_price) return;
@@ -287,12 +316,9 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }
     if (Object.keys(pricePatch).length) {
       updateLineDraft(line.id, pricePatch);
-      setLineFeedback({
-        type: 'success',
-        message: suggestion.source === 'company_price_history'
-          ? `Filled latest ${quote.company_name} price for ${suggestion.product_name}.`
-          : `Filled base Product price for ${suggestion.product_name}.`,
-      });
+      setPriceHintForLine(line.id, suggestion, pricePatch.unit_price ? 'autofilled' : 'history_found');
+    } else {
+      setPriceHintForLine(line.id, suggestion, 'current_kept');
     }
   };
 
@@ -831,6 +857,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                 const isDirty = !draftsMatch(draft, savedLineDrafts[line.id]);
                 const statusInfo = derivedLineStatus(line);
                 const productOptions = productOptionsForDraft(draft);
+                const priceHint = linePriceHints[line.id];
                 return (
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
@@ -845,7 +872,10 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                     <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
                     <td><input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
                     <td><input disabled={!isEditable} value={draft.unit || ''} onChange={(event) => updateLineDraft(line.id, { unit: event.target.value })} /></td>
-                    <td><input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
+                    <td className="qm-price-cell">
+                      <input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
+                      {priceHint && <span className={`qm-price-hint ${priceHint.mode}`}>{priceHintText(priceHint)}</span>}
+                    </td>
                     <td className="qm-vat-cell">
                       <select className="qm-vat-select" disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
                         <option value="0">0%</option>
