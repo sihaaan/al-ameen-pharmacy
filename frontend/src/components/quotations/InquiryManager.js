@@ -50,6 +50,15 @@ const contactOptionLabel = (contact) => {
   return details ? `${contact.name} - ${details}` : contact.name;
 };
 
+const emptyContactForm = {
+  name: '',
+  email: '',
+  phone: '',
+  role: '',
+  department: '',
+  is_primary: false,
+};
+
 const InquiryManager = ({ onOpenQuote }) => {
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -85,6 +94,13 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [aiCleaning, setAiCleaning] = useState(false);
   const [aiCandidate, setAiCandidate] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
+  const [showImportContactForm, setShowImportContactForm] = useState(false);
+  const [importContactForm, setImportContactForm] = useState(emptyContactForm);
+  const [importContactSaving, setImportContactSaving] = useState(false);
+  const [showManualContactForm, setShowManualContactForm] = useState(false);
+  const [manualContactForm, setManualContactForm] = useState(emptyContactForm);
+  const [manualNotice, setManualNotice] = useState(null);
+  const [manualContactSaving, setManualContactSaving] = useState(false);
   const importPanelRef = useRef(null);
 
   const load = async () => {
@@ -129,6 +145,49 @@ const InquiryManager = ({ onOpenQuote }) => {
       const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
       return [...withoutDuplicate, company].sort((a, b) => a.name.localeCompare(b.name));
     });
+  };
+
+  const rememberContact = (contact) => {
+    setContacts((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== contact.id);
+      return [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
+
+  const createContactForInquiry = async (mode) => {
+    const isImport = mode === 'import';
+    const companyId = isImport ? importForm.company : form.company;
+    const draft = isImport ? importContactForm : manualContactForm;
+    if (!companyId || !draft.name.trim()) return;
+
+    const setSavingState = isImport ? setImportContactSaving : setManualContactSaving;
+    setSavingState(true);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contacts.create({
+        ...draft,
+        company: companyId,
+        name: draft.name.trim(),
+      });
+      rememberContact(response.data);
+      if (isImport) {
+        setImportForm((current) => ({ ...current, contact: response.data.id }));
+        setImportContactForm(emptyContactForm);
+        setShowImportContactForm(false);
+        setImportNotice({ type: 'success', message: 'Contact created and selected for this imported inquiry.' });
+      } else {
+        setForm((current) => ({ ...current, contact: response.data.id }));
+        setManualContactForm(emptyContactForm);
+        setShowManualContactForm(false);
+        setManualNotice({ type: 'success', message: 'Contact created and selected for this inquiry.' });
+      }
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Create inquiry contact', 'POST /quotations/contacts/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSavingState(false);
+    }
   };
 
   const updateLine = (index, patch) => {
@@ -575,16 +634,39 @@ const InquiryManager = ({ onOpenQuote }) => {
             companies={companies}
             value={importForm.company}
             required
-            onChange={(companyId) => setImportForm({ ...importForm, company: companyId, contact: '' })}
+            onChange={(companyId) => {
+              setImportForm({ ...importForm, company: companyId, contact: '' });
+              setImportContactForm(emptyContactForm);
+              setShowImportContactForm(false);
+            }}
             onCreated={rememberCompany}
           />
-          <label><span className="qm-label-text">Contact</span>
-            <select value={importForm.contact} onChange={(event) => setImportForm({ ...importForm, contact: event.target.value })}>
-              <option value="">No contact</option>
-              {filteredImportContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
-            </select>
-          </label>
+          <div className="qm-contact-control">
+            <label>
+              <span className="qm-label-text">Contact / Purchaser</span>
+              <select disabled={!importForm.company} value={importForm.contact} onChange={(event) => setImportForm({ ...importForm, contact: event.target.value })}>
+                <option value="">No contact</option>
+                {filteredImportContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
+              </select>
+            </label>
+            <button type="button" className="qm-secondary small" disabled={!importForm.company} onClick={() => setShowImportContactForm((value) => !value)}>
+              {showImportContactForm ? 'Cancel new contact' : '+ Create contact'}
+            </button>
+          </div>
         </div>
+        {showImportContactForm && (
+          <div className="qm-inline-card qm-contact-card">
+            <label>Name<input required value={importContactForm.name} onChange={(event) => setImportContactForm({ ...importContactForm, name: event.target.value })} /></label>
+            <label>Phone<input value={importContactForm.phone} onChange={(event) => setImportContactForm({ ...importContactForm, phone: event.target.value })} /></label>
+            <label>Email<input type="email" value={importContactForm.email} onChange={(event) => setImportContactForm({ ...importContactForm, email: event.target.value })} /></label>
+            <label>Position / Designation<input value={importContactForm.role} onChange={(event) => setImportContactForm({ ...importContactForm, role: event.target.value })} /></label>
+            <label>Department<input value={importContactForm.department} onChange={(event) => setImportContactForm({ ...importContactForm, department: event.target.value })} /></label>
+            <label className="qm-checkbox"><input type="checkbox" checked={importContactForm.is_primary} onChange={(event) => setImportContactForm({ ...importContactForm, is_primary: event.target.checked })} /> Primary contact</label>
+            <button type="button" className="qm-primary" disabled={importContactSaving || !importContactForm.name.trim()} onClick={() => createContactForInquiry('import')}>
+              {importContactSaving ? 'Creating contact...' : 'Create and select contact'}
+            </button>
+          </div>
+        )}
         <label className="qm-full-label"><span className="qm-label-text">Subject</span>
           <input className="qm-input" placeholder="Inquiry subject or LPO reference" value={importForm.subject} onChange={(event) => setImportForm({ ...importForm, subject: event.target.value })} />
         </label>
@@ -946,15 +1028,39 @@ const InquiryManager = ({ onOpenQuote }) => {
             companies={companies}
             value={form.company}
             required
-            onChange={(companyId) => setForm({ ...form, company: companyId, contact: '' })}
+            onChange={(companyId) => {
+              setForm({ ...form, company: companyId, contact: '' });
+              setManualContactForm(emptyContactForm);
+              setShowManualContactForm(false);
+            }}
             onCreated={rememberCompany}
           />
-          <label><span className="qm-label-text">Contact</span>
-            <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
-              <option value="">No contact</option>
-              {filteredContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
-            </select>
-          </label>
+          <div className="qm-contact-control">
+            <label>
+              <span className="qm-label-text">Contact / Purchaser</span>
+              <select disabled={!form.company} value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
+                <option value="">No contact</option>
+                {filteredContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
+              </select>
+            </label>
+            <button type="button" className="qm-secondary small" disabled={!form.company} onClick={() => setShowManualContactForm((value) => !value)}>
+              {showManualContactForm ? 'Cancel new contact' : '+ Create contact'}
+            </button>
+          </div>
+          {showManualContactForm && (
+            <div className="qm-inline-card qm-contact-card">
+              <label>Name<input required value={manualContactForm.name} onChange={(event) => setManualContactForm({ ...manualContactForm, name: event.target.value })} /></label>
+              <label>Phone<input value={manualContactForm.phone} onChange={(event) => setManualContactForm({ ...manualContactForm, phone: event.target.value })} /></label>
+              <label>Email<input type="email" value={manualContactForm.email} onChange={(event) => setManualContactForm({ ...manualContactForm, email: event.target.value })} /></label>
+              <label>Position / Designation<input value={manualContactForm.role} onChange={(event) => setManualContactForm({ ...manualContactForm, role: event.target.value })} /></label>
+              <label>Department<input value={manualContactForm.department} onChange={(event) => setManualContactForm({ ...manualContactForm, department: event.target.value })} /></label>
+              <label className="qm-checkbox"><input type="checkbox" checked={manualContactForm.is_primary} onChange={(event) => setManualContactForm({ ...manualContactForm, is_primary: event.target.checked })} /> Primary contact</label>
+              <button type="button" className="qm-primary" disabled={manualContactSaving || !manualContactForm.name.trim()} onClick={() => createContactForInquiry('manual')}>
+                {manualContactSaving ? 'Creating contact...' : 'Create and select contact'}
+              </button>
+            </div>
+          )}
+          {manualNotice && <div className={`qm-feedback ${manualNotice.type}`}>{manualNotice.message}</div>}
           <label><span className="qm-label-text">Subject</span><input placeholder="Inquiry subject or LPO reference" value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} /></label>
           <label><span className="qm-label-text">Original Inquiry Text</span><textarea rows="4" value={form.original_text} onChange={(event) => setForm({ ...form, original_text: event.target.value })} /></label>
 

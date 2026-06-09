@@ -886,9 +886,16 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       )}
       <div className="qm-helper">PDF is generated from the latest saved quotation data and current quotation settings. Save line changes before downloading or finalizing.</div>
       <div className="qm-panel qm-party-panel">
-        <div>
-          <h3>Customer & Contact</h3>
-          <p>Select the customer company and the purchaser/contact shown on this quotation.</p>
+        <div className="qm-panel-heading">
+          <div>
+            <h3>Customer & Contact</h3>
+            <p>Select the customer company and the purchaser/contact shown on this quotation.</p>
+          </div>
+          {isEditable && (
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
+              {saving && hasUnsavedQuoteParty ? 'Saving...' : hasUnsavedQuoteParty ? 'Save Customer & Contact' : 'Saved'}
+            </button>
+          )}
         </div>
         <div className="qm-party-grid">
           <CompanySelectWithCreate
@@ -906,7 +913,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
               updateQuotePartyDraft({ company: company.id, contact: '' });
             }}
           />
-          <div className="qm-field-group">
+          <div className="qm-contact-control">
             <label>
               <span className="qm-label-text">Contact / Purchaser</span>
               <select disabled={!isEditable || saving || Boolean(actionInFlight) || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })}>
@@ -922,7 +929,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
           </div>
         </div>
         {showContactForm && isEditable && (
-          <div className="qm-inline-card">
+          <div className="qm-inline-card qm-contact-card">
             <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
             <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
             <label>Email<input type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
@@ -933,11 +940,6 @@ const QuotationEditor = ({ quoteId, onClose }) => {
               {contactSaving ? 'Creating contact...' : 'Create and select contact'}
             </button>
           </div>
-        )}
-        {isEditable && (
-          <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
-            {saving && hasUnsavedQuoteParty ? 'Saving customer/contact...' : hasUnsavedQuoteParty ? 'Save Customer & Contact' : 'Customer & Contact Saved'}
-          </button>
         )}
       </div>
       <div className="qm-panel qm-terms-panel">

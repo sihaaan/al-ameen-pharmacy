@@ -197,7 +197,7 @@ const QuotationList = ({ onOpenQuote }) => {
             }}
             onCreated={rememberCompany}
           />
-          <div className="qm-field-group">
+          <div className="qm-contact-control">
             <label>Contact
               <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
                 <option value="">No contact</option>
@@ -209,7 +209,7 @@ const QuotationList = ({ onOpenQuote }) => {
             </button>
           </div>
           {showContactForm && (
-            <div className="qm-inline-card">
+            <div className="qm-inline-card qm-contact-card">
               <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
               <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
               <label>Email<input type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>

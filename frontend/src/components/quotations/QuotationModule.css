@@ -109,7 +109,11 @@
 .qm-party-panel {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+}
+
+.qm-party-panel .qm-panel-heading {
+  align-items: flex-start;
 }
 
 .qm-party-panel h3 {
@@ -123,8 +127,8 @@
 
 .qm-party-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 1.1fr) minmax(280px, 0.9fr);
-  gap: 14px;
+  grid-template-columns: minmax(420px, 1.2fr) minmax(340px, 0.8fr);
+  gap: 16px;
   align-items: start;
 }
 
@@ -136,18 +140,50 @@
 }
 
 .qm-field-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   flex: 1;
   min-width: 0;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-contact-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+}
+
+.qm-contact-control label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-contact-control button {
+  min-height: 42px;
 }
 
 .qm-inline-card {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(200px, 1fr));
   gap: 12px;
-  padding: 12px;
+  padding: 14px;
   border: 1px solid #ccfbf1;
   border-radius: 8px;
   background: #f0fdfa;
+}
+
+.qm-contact-card {
+  align-items: end;
 }
 
 .qm-inline-card label {
@@ -161,10 +197,17 @@
 
 .qm-inline-card .qm-checkbox {
   align-self: center;
+  flex-direction: row;
+  align-items: center;
+}
+
+.qm-inline-card .qm-checkbox input[type="checkbox"] {
+  width: auto;
 }
 
 .qm-inline-card button {
   align-self: end;
+  min-height: 42px;
 }
 
 .qm-terms-panel h3 {
@@ -328,6 +371,12 @@
 .qm-company-picker input,
 .qm-company-picker textarea,
 .qm-company-picker select,
+.qm-contact-control input,
+.qm-contact-control textarea,
+.qm-contact-control select,
+.qm-inline-card input,
+.qm-inline-card textarea,
+.qm-inline-card select,
 .qm-details-grid input,
 .qm-details-grid select,
 .qm-details-grid textarea,
@@ -2710,6 +2759,7 @@
   .qm-grid-two,
   .qm-company-picker-grid,
   .qm-party-grid,
+  .qm-contact-control,
   .qm-inline-card,
   .qm-review-import-shell,
   .qm-document-review-layout,
