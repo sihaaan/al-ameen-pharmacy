@@ -18,10 +18,22 @@ const contactOptionLabel = (contact) => {
   return details ? `${contact.name} - ${details}` : contact.name;
 };
 
+const emptyContactForm = {
+  name: '',
+  email: '',
+  phone: '',
+  role: '',
+  department: '',
+  is_primary: false,
+};
+
 const QuotationList = ({ onOpenQuote }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [form, setForm] = useState({ company: '', contact: '', notes: '' });
+  const [showContactForm, setShowContactForm] = useState(false);
+  const [contactForm, setContactForm] = useState(emptyContactForm);
+  const [contactSaving, setContactSaving] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -92,6 +104,40 @@ const QuotationList = ({ onOpenQuote }) => {
     });
   };
 
+  const rememberContact = (contact) => {
+    setCompanies((current) => current.map((company) => {
+      if (String(company.id) !== String(contact.company)) return company;
+      const contacts = company.contacts || [];
+      const withoutDuplicate = contacts.filter((candidate) => candidate.id !== contact.id);
+      return {
+        ...company,
+        contacts: [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name)),
+      };
+    }));
+  };
+
+  const createContact = async () => {
+    if (!form.company || !contactForm.name.trim()) return;
+    setContactSaving(true);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contacts.create({
+        ...contactForm,
+        company: form.company,
+      });
+      rememberContact(response.data);
+      setForm((current) => ({ ...current, contact: response.data.id }));
+      setContactForm(emptyContactForm);
+      setShowContactForm(false);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Create quotation contact', 'POST /quotations/contacts/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setContactSaving(false);
+    }
+  };
+
   if (loading) return <div className="qm-loading">Loading quotations...</div>;
 
   return (
@@ -144,15 +190,37 @@ const QuotationList = ({ onOpenQuote }) => {
             companies={companies}
             value={form.company}
             required
-            onChange={(companyId) => setForm({ ...form, company: companyId, contact: '' })}
+            onChange={(companyId) => {
+              setForm({ ...form, company: companyId, contact: '' });
+              setContactForm(emptyContactForm);
+              setShowContactForm(false);
+            }}
             onCreated={rememberCompany}
           />
-          <label>Contact
-            <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
-              <option value="">No contact</option>
-              {contactsForCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
-            </select>
-          </label>
+          <div className="qm-field-group">
+            <label>Contact
+              <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
+                <option value="">No contact</option>
+                {contactsForCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
+              </select>
+            </label>
+            <button type="button" className="qm-secondary small" disabled={!form.company} onClick={() => setShowContactForm((value) => !value)}>
+              {showContactForm ? 'Cancel new contact' : '+ Create contact'}
+            </button>
+          </div>
+          {showContactForm && (
+            <div className="qm-inline-card">
+              <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
+              <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
+              <label>Email<input type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
+              <label>Position / Designation<input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} /></label>
+              <label>Department<input value={contactForm.department} onChange={(event) => setContactForm({ ...contactForm, department: event.target.value })} /></label>
+              <label className="qm-checkbox"><input type="checkbox" checked={contactForm.is_primary} onChange={(event) => setContactForm({ ...contactForm, is_primary: event.target.checked })} /> Primary contact</label>
+              <button type="button" className="qm-primary" disabled={contactSaving || !contactForm.name.trim()} onClick={createContact}>
+                {contactSaving ? 'Creating contact...' : 'Create and select contact'}
+              </button>
+            </div>
+          )}
           <label>Notes<textarea rows="4" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
           <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Creating...' : 'Create Quotation'}</button>
         </form>

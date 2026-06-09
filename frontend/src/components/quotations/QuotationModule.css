@@ -106,6 +106,67 @@
   align-items: end;
 }
 
+.qm-party-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.qm-party-panel h3 {
+  margin: 0 0 4px;
+}
+
+.qm-party-panel p {
+  margin: 0;
+  color: #64748b;
+}
+
+.qm-party-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.1fr) minmax(280px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.qm-field-group {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qm-field-group label {
+  flex: 1;
+  min-width: 0;
+}
+
+.qm-inline-card {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+
+.qm-inline-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-inline-card .qm-checkbox {
+  align-self: center;
+}
+
+.qm-inline-card button {
+  align-self: end;
+}
+
 .qm-terms-panel h3 {
   margin: 0 0 4px;
 }
@@ -2648,6 +2709,8 @@
   .qm-split.wide-left,
   .qm-grid-two,
   .qm-company-picker-grid,
+  .qm-party-grid,
+  .qm-inline-card,
   .qm-review-import-shell,
   .qm-document-review-layout,
   .qm-source-context-grid,

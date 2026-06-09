@@ -3,6 +3,7 @@ import quotationAPI, { describeQuotationError, formatQuotationError } from '../.
 import PriceHistoryPanel from './PriceHistoryPanel';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationErrorNotice from './QuotationErrorNotice';
+import CompanySelectWithCreate from './CompanySelectWithCreate';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
 const statusSteps = [
@@ -22,6 +23,20 @@ const paymentTermOptions = [
   { value: 'pdc_60_days', label: 'PDC 60 days' },
   { value: 'as_per_agreement', label: 'As per agreement' },
 ];
+
+const contactOptionLabel = (contact) => {
+  const details = [contact.role, contact.department].filter(Boolean).join(', ');
+  return details ? `${contact.name} - ${details}` : contact.name;
+};
+
+const emptyContactForm = {
+  name: '',
+  email: '',
+  phone: '',
+  role: '',
+  department: '',
+  is_primary: false,
+};
 
 const emptyLine = {
   product: '',
@@ -73,9 +88,19 @@ const termsDraftFromQuote = (quote = {}) => ({
   valid_until: quote.valid_until || '',
 });
 
+const partyDraftFromQuote = (quote = {}) => ({
+  company: quote.company || '',
+  contact: quote.contact || '',
+});
+
 const termsDraftsMatch = (left = {}, right = {}) => (
   String(left.payment_terms || '') === String(right.payment_terms || '') &&
   String(left.valid_until || '') === String(right.valid_until || '')
+);
+
+const partyDraftsMatch = (left = {}, right = {}) => (
+  String(left.company || '') === String(right.company || '') &&
+  String(left.contact || '') === String(right.contact || '')
 );
 
 const releaseNumberWheelFocus = (event) => {
@@ -99,6 +124,9 @@ const quotationDownloadFilename = (quote, extension) => {
 
 const QuotationEditor = ({ quoteId, onClose }) => {
   const [quote, setQuote] = useState(null);
+  const [companies, setCompanies] = useState([]);
+  const [quotePartyDraft, setQuotePartyDraft] = useState(partyDraftFromQuote());
+  const [savedQuotePartyDraft, setSavedQuotePartyDraft] = useState(partyDraftFromQuote());
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [items, setItems] = useState([]);
@@ -119,9 +147,15 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [lineFilter, setLineFilter] = useState('active');
   const [productCreateModal, setProductCreateModal] = useState(null);
+  const [showContactForm, setShowContactForm] = useState(false);
+  const [contactForm, setContactForm] = useState(emptyContactForm);
+  const [contactSaving, setContactSaving] = useState(false);
 
   const setLoadedQuote = useCallback((quoteData) => {
     setQuote(quoteData);
+    const nextPartyDraft = partyDraftFromQuote(quoteData);
+    setQuotePartyDraft(nextPartyDraft);
+    setSavedQuotePartyDraft(nextPartyDraft);
     const nextTermsDraft = termsDraftFromQuote(quoteData);
     setQuoteTermsDraft(nextTermsDraft);
     setSavedQuoteTermsDraft(nextTermsDraft);
@@ -137,13 +171,15 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     setErrorInfo(null);
     try {
       const quoteRes = await quotationAPI.quotes.retrieve(quoteId);
-      const [itemsRes, companyItemsRes] = await Promise.all([
+      const [itemsRes, companyItemsRes, companiesRes] = await Promise.all([
         quotationAPI.items.list({ active: 'true' }),
         quotationAPI.items.list({ active: 'true', company_used: quoteRes.data.company }),
+        quotationAPI.companies.list({ active: 'true' }),
       ]);
       setLoadedQuote(quoteRes.data);
       setItems(itemsRes.data);
       setCompanyItems(companyItemsRes.data);
+      setCompanies(companiesRes.data);
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/, GET /quotations/items/`);
       setErrorInfo(details);
@@ -163,7 +199,9 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     .filter((line) => !draftsMatch(lineDrafts[line.id], savedLineDrafts[line.id]))
     .map((line) => line.id) : [];
   const hasUnsavedLines = changedLineIds.length > 0;
+  const hasUnsavedQuoteParty = !partyDraftsMatch(quotePartyDraft, savedQuotePartyDraft);
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
+  const contactsForQuoteCompany = companies.find((company) => String(company.id) === String(quotePartyDraft.company))?.contacts || [];
 
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
 
@@ -209,6 +247,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     if (!quote || !['draft', 'pending_review', 'approved'].includes(quote.status)) return [];
     const issues = [];
     if (!quote.lines?.length) issues.push('Add at least one quotation line.');
+    if (hasUnsavedQuoteParty) issues.push('Save customer/contact before finalizing.');
     if (hasUnsavedQuoteTerms) issues.push('Save quotation terms before finalizing.');
     if (hasUnsavedLines) issues.push('Save all line changes before finalizing.');
     (quote.lines || []).forEach((line, index) => {
@@ -241,6 +280,30 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const updateQuoteTermDraft = (patch) => {
     setLineFeedback(null);
     setQuoteTermsDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const updateQuotePartyDraft = (patch) => {
+    setLineFeedback(null);
+    setQuotePartyDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const rememberCompany = (company) => {
+    setCompanies((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
+      return [...withoutDuplicate, company].sort((a, b) => a.name.localeCompare(b.name));
+    });
+  };
+
+  const rememberContact = (contact) => {
+    setCompanies((current) => current.map((company) => {
+      if (String(company.id) !== String(contact.company)) return company;
+      const contacts = company.contacts || [];
+      const withoutDuplicate = contacts.filter((candidate) => candidate.id !== contact.id);
+      return {
+        ...company,
+        contacts: [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name)),
+      };
+    }));
   };
 
   const productPatch = (draft, productId) => {
@@ -424,6 +487,60 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveQuoteParty = async () => {
+    if (saving || actionInFlight || !hasUnsavedQuoteParty) return;
+    setSaving(true);
+    setLineFeedback(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.update(quote.id, {
+        company: quotePartyDraft.company,
+        contact: quotePartyDraft.contact || null,
+      });
+      setQuote(response.data);
+      const nextPartyDraft = partyDraftFromQuote(response.data);
+      setQuotePartyDraft(nextPartyDraft);
+      setSavedQuotePartyDraft(nextPartyDraft);
+      const [companyItemsRes, companiesRes] = await Promise.all([
+        quotationAPI.items.list({ active: 'true', company_used: response.data.company }),
+        quotationAPI.companies.list({ active: 'true' }),
+      ]);
+      setCompanyItems(companyItemsRes.data);
+      setCompanies(companiesRes.data);
+      setLineFeedback({ type: 'success', message: 'Customer and contact saved.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Save quotation customer/contact', `PATCH /quotations/quotes/${quote.id}/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const createQuoteContact = async () => {
+    if (!quotePartyDraft.company || !contactForm.name.trim() || saving || actionInFlight) return;
+    setContactSaving(true);
+    setErrorInfo(null);
+    setLineFeedback(null);
+    try {
+      const response = await quotationAPI.contacts.create({
+        ...contactForm,
+        company: quotePartyDraft.company,
+      });
+      rememberContact(response.data);
+      updateQuotePartyDraft({ contact: response.data.id });
+      setContactForm(emptyContactForm);
+      setShowContactForm(false);
+      setLineFeedback({ type: 'success', message: 'Contact created and selected. Save customer/contact to apply it to this quotation.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Create quotation contact', 'POST /quotations/contacts/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setContactSaving(false);
     }
   };
 
@@ -768,6 +885,61 @@ const QuotationEditor = ({ quoteId, onClose }) => {
         <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
       )}
       <div className="qm-helper">PDF is generated from the latest saved quotation data and current quotation settings. Save line changes before downloading or finalizing.</div>
+      <div className="qm-panel qm-party-panel">
+        <div>
+          <h3>Customer & Contact</h3>
+          <p>Select the customer company and the purchaser/contact shown on this quotation.</p>
+        </div>
+        <div className="qm-party-grid">
+          <CompanySelectWithCreate
+            companies={companies}
+            value={quotePartyDraft.company}
+            required
+            disabled={!isEditable || saving || Boolean(actionInFlight)}
+            onChange={(companyId) => {
+              updateQuotePartyDraft({ company: companyId, contact: '' });
+              setContactForm(emptyContactForm);
+              setShowContactForm(false);
+            }}
+            onCreated={(company) => {
+              rememberCompany(company);
+              updateQuotePartyDraft({ company: company.id, contact: '' });
+            }}
+          />
+          <div className="qm-field-group">
+            <label>
+              <span className="qm-label-text">Contact / Purchaser</span>
+              <select disabled={!isEditable || saving || Boolean(actionInFlight) || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })}>
+                <option value="">No contact</option>
+                {contactsForQuoteCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
+              </select>
+            </label>
+            {isEditable && (
+              <button type="button" className="qm-secondary small" disabled={!quotePartyDraft.company || saving || Boolean(actionInFlight)} onClick={() => setShowContactForm((value) => !value)}>
+                {showContactForm ? 'Cancel new contact' : '+ Create contact'}
+              </button>
+            )}
+          </div>
+        </div>
+        {showContactForm && isEditable && (
+          <div className="qm-inline-card">
+            <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
+            <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
+            <label>Email<input type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
+            <label>Position / Designation<input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} /></label>
+            <label>Department<input value={contactForm.department} onChange={(event) => setContactForm({ ...contactForm, department: event.target.value })} /></label>
+            <label className="qm-checkbox"><input type="checkbox" checked={contactForm.is_primary} onChange={(event) => setContactForm({ ...contactForm, is_primary: event.target.checked })} /> Primary contact</label>
+            <button type="button" className="qm-primary" disabled={contactSaving || !contactForm.name.trim()} onClick={createQuoteContact}>
+              {contactSaving ? 'Creating contact...' : 'Create and select contact'}
+            </button>
+          </div>
+        )}
+        {isEditable && (
+          <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
+            {saving && hasUnsavedQuoteParty ? 'Saving customer/contact...' : hasUnsavedQuoteParty ? 'Save Customer & Contact' : 'Customer & Contact Saved'}
+          </button>
+        )}
+      </div>
       <div className="qm-panel qm-terms-panel">
         <div>
           <h3>Quotation Terms</h3>
