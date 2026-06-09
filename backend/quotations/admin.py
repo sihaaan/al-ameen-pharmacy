@@ -38,9 +38,9 @@ class CompanyAdmin(admin.ModelAdmin):
 
 @admin.register(CompanyContact)
 class CompanyContactAdmin(admin.ModelAdmin):
-    list_display = ["name", "company", "email", "phone", "role", "is_primary", "is_active"]
+    list_display = ["name", "company", "department", "role", "email", "phone", "is_primary", "is_active"]
     list_filter = ["is_primary", "is_active"]
-    search_fields = ["name", "company__name", "email", "phone"]
+    search_fields = ["name", "company__name", "email", "phone", "role", "department"]
     autocomplete_fields = ["company"]
 
 

@@ -45,6 +45,11 @@ const shouldShowMatchReason = (reason) => {
   return text && !/no safe deterministic match found/i.test(text);
 };
 
+const contactOptionLabel = (contact) => {
+  const details = [contact.role, contact.department].filter(Boolean).join(', ');
+  return details ? `${contact.name} - ${details}` : contact.name;
+};
+
 const InquiryManager = ({ onOpenQuote }) => {
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -576,7 +581,7 @@ const InquiryManager = ({ onOpenQuote }) => {
           <label><span className="qm-label-text">Contact</span>
             <select value={importForm.contact} onChange={(event) => setImportForm({ ...importForm, contact: event.target.value })}>
               <option value="">No contact</option>
-              {filteredImportContacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}
+              {filteredImportContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
             </select>
           </label>
         </div>
@@ -947,7 +952,7 @@ const InquiryManager = ({ onOpenQuote }) => {
           <label><span className="qm-label-text">Contact</span>
             <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
               <option value="">No contact</option>
-              {filteredContacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}
+              {filteredContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
             </select>
           </label>
           <label><span className="qm-label-text">Subject</span><input placeholder="Inquiry subject or LPO reference" value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} /></label>

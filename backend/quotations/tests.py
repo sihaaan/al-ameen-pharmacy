@@ -236,6 +236,26 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(excel_response.status_code, status.HTTP_200_OK)
         self.assertIn(f'filename="WORKFLOW_COMPANY-{quotation.quotation_number}.xlsx"', excel_response["Content-Disposition"])
 
+    def test_quotation_detail_includes_purchaser_contact_fields(self):
+        contact = CompanyContact.objects.create(
+            company=self.company,
+            name="Ahmed Khan",
+            role="Purchase Officer",
+            department="Clinic Supplies",
+            phone="+971501234567",
+            email="ahmed@example.com",
+        )
+        quotation = Quotation.objects.create(company=self.company, contact=contact, created_by=self.staff)
+
+        response = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["contact_name"], "Ahmed Khan")
+        self.assertEqual(response.data["contact_role"], "Purchase Officer")
+        self.assertEqual(response.data["contact_department"], "Clinic Supplies")
+        self.assertEqual(response.data["contact_phone"], "+971501234567")
+        self.assertEqual(response.data["contact_email"], "ahmed@example.com")
+
     def test_finalized_quote_cannot_be_edited(self):
         quotation = self.create_quote()
         line = self.create_valid_line(quotation)
@@ -3433,6 +3453,36 @@ class QuotationSettingsTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("Makharaafi International Technical Contracting", text)
         self.assertIn(quotation.quotation_number, text)
+
+    def test_pdf_shows_purchaser_contact_details(self):
+        contact = CompanyContact.objects.create(
+            company=self.company,
+            name="Ahmed Khan",
+            role="Purchase Officer",
+            department="Procurement",
+            phone="+971501234567",
+            email="ahmed@example.com",
+        )
+        quotation = Quotation.objects.create(company=self.company, contact=contact, created_by=self.staff)
+        QuotationLine.objects.create(
+            quotation=quotation,
+            product=self.product,
+            item_name_snapshot="Settings Item",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("25.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        text = " ".join(extract_pdf_text(response.content).split())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Attention Ahmed Khan", text)
+        self.assertIn("Position Purchase Officer", text)
+        self.assertIn("Department Procurement", text)
+        self.assertIn("Contact No. +971501234567 / ahmed@example.com", text)
 
     def test_pdf_hides_internal_line_notes_and_keeps_double_digit_serials_together(self):
         quotation = Quotation.objects.create(company=self.company, created_by=self.staff)

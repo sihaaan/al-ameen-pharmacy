@@ -13,6 +13,11 @@ const statusLabels = {
   cancelled: 'Cancelled',
 };
 
+const contactOptionLabel = (contact) => {
+  const details = [contact.role, contact.department].filter(Boolean).join(', ');
+  return details ? `${contact.name} - ${details}` : contact.name;
+};
+
 const QuotationList = ({ onOpenQuote }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -145,7 +150,7 @@ const QuotationList = ({ onOpenQuote }) => {
           <label>Contact
             <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
               <option value="">No contact</option>
-              {contactsForCompany.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}
+              {contactsForCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
             </select>
           </label>
           <label>Notes<textarea rows="4" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>

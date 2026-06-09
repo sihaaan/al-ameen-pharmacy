@@ -207,6 +207,12 @@
   color: #374151;
 }
 
+.qm-muted-line {
+  color: #64748b;
+  font-size: 13px;
+  margin-top: 2px;
+}
+
 .qm-price-cell {
   min-width: 132px;
 }

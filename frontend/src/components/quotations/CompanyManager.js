@@ -17,6 +17,7 @@ const emptyContact = {
   email: '',
   phone: '',
   role: '',
+  department: '',
   is_primary: false,
   is_active: true,
 };
@@ -231,7 +232,10 @@ const CompanyManager = () => {
               {(selectedCompany.contacts || []).map((contact) => (
                 <div key={contact.id} className="qm-contact-row">
                   <strong>{contact.name}</strong>
-                  <span>{contact.email || contact.phone || '-'}</span>
+                  <span>
+                    {[contact.role, contact.department].filter(Boolean).join(' - ') || 'Purchaser contact'}
+                    {(contact.phone || contact.email) ? ` | ${contact.phone || contact.email}` : ''}
+                  </span>
                   {contact.is_primary && <span className="qm-badge success">Primary</span>}
                 </div>
               ))}
@@ -240,7 +244,8 @@ const CompanyManager = () => {
               <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
               <label>Email<input type="email" value={contactForm.email} onChange={(event) => setContactForm({ ...contactForm, email: event.target.value })} /></label>
               <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
-              <label>Role<input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} /></label>
+              <label>Position / Designation<input value={contactForm.role} onChange={(event) => setContactForm({ ...contactForm, role: event.target.value })} /></label>
+              <label>Department<input value={contactForm.department} onChange={(event) => setContactForm({ ...contactForm, department: event.target.value })} /></label>
               <label className="qm-checkbox"><input type="checkbox" checked={contactForm.is_primary} onChange={(event) => setContactForm({ ...contactForm, is_primary: event.target.checked })} /> Primary</label>
               <button type="submit" className="qm-secondary" disabled={saving}>Add Contact</button>
             </form>

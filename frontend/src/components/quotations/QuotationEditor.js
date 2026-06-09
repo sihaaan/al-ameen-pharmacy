@@ -730,6 +730,13 @@ const QuotationEditor = ({ quoteId, onClose }) => {
           <button type="button" className="qm-secondary small" onClick={onClose}>Back to List</button>
           <h3>{quote.quotation_number}</h3>
           <p>{quote.company_name} - {quote.status_display} - Version {quote.version}</p>
+          {quote.contact_name && (
+            <p className="qm-muted-line">
+              Attention: {quote.contact_name}
+              {quote.contact_role ? ` - ${quote.contact_role}` : ''}
+              {quote.contact_department ? `, ${quote.contact_department}` : ''}
+            </p>
+          )}
         </div>
         <div className="qm-action-row">
           {quote.status === 'draft' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Submit Review', quotationAPI.quotes.submitReview)}>{actionInFlight === 'Submit Review' ? 'Submitting...' : 'Submit Review'}</button>}

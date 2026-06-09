@@ -44,6 +44,7 @@ class CompanyContact(models.Model):
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=50, blank=True)
     role = models.CharField(max_length=100, blank=True)
+    department = models.CharField(max_length=120, blank=True)
     is_primary = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

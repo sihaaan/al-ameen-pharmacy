@@ -74,6 +74,7 @@ class CompanyContactSerializer(serializers.ModelSerializer):
             "email",
             "phone",
             "role",
+            "department",
             "is_primary",
             "is_active",
             "created_at",
@@ -436,6 +437,10 @@ class InquiryLineSerializer(serializers.ModelSerializer):
 class InquirySerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
     contact_name = serializers.CharField(source="contact.name", read_only=True, allow_null=True)
+    contact_role = serializers.CharField(source="contact.role", read_only=True, allow_null=True)
+    contact_department = serializers.CharField(source="contact.department", read_only=True, allow_null=True)
+    contact_phone = serializers.CharField(source="contact.phone", read_only=True, allow_null=True)
+    contact_email = serializers.CharField(source="contact.email", read_only=True, allow_null=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     lines = InquiryLineSerializer(many=True, required=False)
     quotation_id = serializers.SerializerMethodField()
@@ -449,6 +454,10 @@ class InquirySerializer(serializers.ModelSerializer):
             "company_name",
             "contact",
             "contact_name",
+            "contact_role",
+            "contact_department",
+            "contact_phone",
+            "contact_email",
             "source",
             "source_type",
             "source_filename",
@@ -487,6 +496,10 @@ class InquirySerializer(serializers.ModelSerializer):
             "quotation_number",
             "company_name",
             "contact_name",
+            "contact_role",
+            "contact_department",
+            "contact_phone",
+            "contact_email",
             "created_at",
             "updated_at",
         ]
@@ -1162,6 +1175,10 @@ class QuotationLineSerializer(serializers.ModelSerializer):
 class QuotationSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
     contact_name = serializers.CharField(source="contact.name", read_only=True, allow_null=True)
+    contact_role = serializers.CharField(source="contact.role", read_only=True, allow_null=True)
+    contact_department = serializers.CharField(source="contact.department", read_only=True, allow_null=True)
+    contact_phone = serializers.CharField(source="contact.phone", read_only=True, allow_null=True)
+    contact_email = serializers.CharField(source="contact.email", read_only=True, allow_null=True)
     inquiry_subject = serializers.CharField(source="inquiry.subject", read_only=True, allow_null=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     finalized_by_username = serializers.CharField(source="finalized_by.username", read_only=True, allow_null=True)
@@ -1177,6 +1194,10 @@ class QuotationSerializer(serializers.ModelSerializer):
             "company_name",
             "contact",
             "contact_name",
+            "contact_role",
+            "contact_department",
+            "contact_phone",
+            "contact_email",
             "inquiry",
             "inquiry_subject",
             "quotation_number",
@@ -1208,6 +1229,10 @@ class QuotationSerializer(serializers.ModelSerializer):
             "id",
             "company_name",
             "contact_name",
+            "contact_role",
+            "contact_department",
+            "contact_phone",
+            "contact_email",
             "inquiry_subject",
             "quotation_number",
             "payment_terms_display",

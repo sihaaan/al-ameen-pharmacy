@@ -304,11 +304,21 @@ def build_quotation_pdf(quotation):
     def meta_value(value):
         return Paragraph(_text(value), styles["MetaValue"])
 
+    contact = quotation.contact
+    contact_number = " / ".join(
+        part for part in [
+            getattr(contact, "phone", "") if contact else "",
+            getattr(contact, "email", "") if contact else "",
+        ]
+        if part
+    )
     meta_rows = [
         [meta_label("Customer"), meta_value(quotation.company.name), meta_label("Quotation #"), meta_value(quotation.quotation_number)],
-        [meta_label("Contact"), meta_value(quotation.contact.name if quotation.contact else ""), meta_label("Date"), meta_value(quote_date)],
-        [meta_label("Currency"), meta_value(quotation.currency), meta_label("Valid Until"), meta_value(_valid_until(quotation, config))],
-        [meta_label("Status"), meta_value(quotation.get_status_display()), meta_label("Prepared By"), meta_value(quotation.created_by.username if quotation.created_by else "")],
+        [meta_label("Attention"), meta_value(contact.name if contact else ""), meta_label("Date"), meta_value(quote_date)],
+        [meta_label("Position"), meta_value(contact.role if contact else ""), meta_label("Valid Until"), meta_value(_valid_until(quotation, config))],
+        [meta_label("Department"), meta_value(contact.department if contact else ""), meta_label("Prepared By"), meta_value(quotation.created_by.username if quotation.created_by else "")],
+        [meta_label("Contact No."), meta_value(contact_number), meta_label("Currency"), meta_value(quotation.currency)],
+        [meta_label("Status"), meta_value(quotation.get_status_display()), "", ""],
     ]
     meta_table = Table(meta_rows, colWidths=[24 * mm, 76 * mm, 24 * mm, 54 * mm])
     meta_table.setStyle(

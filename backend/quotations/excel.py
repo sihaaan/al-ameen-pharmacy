@@ -58,8 +58,20 @@ def build_quotation_excel(quotation):
     sheet["A2"] = config.company_name or "Al Ameen Pharmacy"
     sheet["A2"].font = Font(bold=True, color=PRIMARY)
 
+    contact = quotation.contact
+    contact_number = " / ".join(
+        part for part in [
+            getattr(contact, "phone", "") if contact else "",
+            getattr(contact, "email", "") if contact else "",
+        ]
+        if part
+    )
     info_rows = [
         ("Customer", quotation.company.name),
+        ("Attention", contact.name if contact else "-"),
+        ("Position", contact.role if contact else "-"),
+        ("Department", contact.department if contact else "-"),
+        ("Contact No.", contact_number or "-"),
         ("Quotation #", quotation.quotation_number),
         ("Date", quote_date),
         ("Valid Until", valid_until),
@@ -77,7 +89,7 @@ def build_quotation_excel(quotation):
         if hasattr(value, "year"):
             value_cell.number_format = "dd/mm/yyyy"
 
-    table_start = 14
+    table_start = 18
     headers = ["S. No.", "Item Description", "Qty", "Unit", "Unit Price", "VAT %", "VAT Amount", "Line Total"]
     for column, header in enumerate(headers, start=1):
         cell = sheet.cell(row=table_start, column=column, value=header)
