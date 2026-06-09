@@ -3421,6 +3421,19 @@ class QuotationSettingsTests(APITestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertTrue(response.content.startswith(b"%PDF"))
 
+    def test_pdf_wraps_long_customer_name_in_metadata_table(self):
+        self.company.name = "Makharaafi International Technical Contracting and Facilities Management Services LLC"
+        self.company.save(update_fields=["name"])
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        text = " ".join(extract_pdf_text(response.content).split())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Makharaafi International Technical Contracting", text)
+        self.assertIn(quotation.quotation_number, text)
+
     def test_pdf_hides_internal_line_notes_and_keeps_double_digit_serials_together(self):
         quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
         for index in range(1, 13):

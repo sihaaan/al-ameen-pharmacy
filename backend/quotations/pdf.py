@@ -282,6 +282,8 @@ def build_quotation_pdf(quotation):
     styles.add(ParagraphStyle(name="ContactLine", parent=styles["SmallMuted"], fontSize=7.4, leading=9, alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="SmallMutedRight", parent=styles["SmallMuted"], fontSize=7.5, leading=10, alignment=TA_RIGHT))
     styles.add(ParagraphStyle(name="Small", parent=styles["Normal"], fontSize=8, leading=11, textColor=TEXT))
+    styles.add(ParagraphStyle(name="MetaLabel", parent=styles["Small"], fontName="Helvetica-Bold", fontSize=8.25, leading=10, textColor=MUTED))
+    styles.add(ParagraphStyle(name="MetaValue", parent=styles["Small"], fontSize=8.25, leading=10, textColor=TEXT, splitLongWords=True, spaceShrinkage=0.04))
     styles.add(ParagraphStyle(name="TableHeader", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=7.6, leading=9.2, textColor=colors.white, alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=7.8, leading=9.4, textColor=TEXT))
     styles.add(ParagraphStyle(name="TableCellCenter", parent=styles["TableCell"], alignment=TA_CENTER))
@@ -296,13 +298,19 @@ def build_quotation_pdf(quotation):
 
     elements.append(_build_header(config, quotation, quote_date, styles))
 
+    def meta_label(value):
+        return Paragraph(_text(value), styles["MetaLabel"])
+
+    def meta_value(value):
+        return Paragraph(_text(value), styles["MetaValue"])
+
     meta_rows = [
-        ["Customer", _text(quotation.company.name), "Quotation #", _text(quotation.quotation_number)],
-        ["Contact", _text(quotation.contact.name if quotation.contact else ""), "Date", _text(quote_date)],
-        ["Currency", _text(quotation.currency), "Valid Until", _text(_valid_until(quotation, config))],
-        ["Status", _text(quotation.get_status_display()), "Prepared By", _text(quotation.created_by.username if quotation.created_by else "")],
+        [meta_label("Customer"), meta_value(quotation.company.name), meta_label("Quotation #"), meta_value(quotation.quotation_number)],
+        [meta_label("Contact"), meta_value(quotation.contact.name if quotation.contact else ""), meta_label("Date"), meta_value(quote_date)],
+        [meta_label("Currency"), meta_value(quotation.currency), meta_label("Valid Until"), meta_value(_valid_until(quotation, config))],
+        [meta_label("Status"), meta_value(quotation.get_status_display()), meta_label("Prepared By"), meta_value(quotation.created_by.username if quotation.created_by else "")],
     ]
-    meta_table = Table(meta_rows, colWidths=[24 * mm, 66 * mm, 24 * mm, 64 * mm])
+    meta_table = Table(meta_rows, colWidths=[24 * mm, 76 * mm, 24 * mm, 54 * mm])
     meta_table.setStyle(
         TableStyle(
             [
@@ -311,17 +319,11 @@ def build_quotation_pdf(quotation):
                 ("BACKGROUND", (0, 0), (-1, -1), colors.white),
                 ("BACKGROUND", (0, 0), (0, -1), SOFT),
                 ("BACKGROUND", (2, 0), (2, -1), SOFT),
-                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
-                ("TEXTCOLOR", (0, 0), (0, -1), MUTED),
-                ("TEXTCOLOR", (2, 0), (2, -1), MUTED),
-                ("FONTSIZE", (0, 0), (-1, -1), 8.25),
-                ("LEADING", (0, 0), (-1, -1), 10),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 7),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
             ]
         )
     )
