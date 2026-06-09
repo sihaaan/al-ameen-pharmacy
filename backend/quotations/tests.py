@@ -405,11 +405,15 @@ class QuotationWorkflowTests(APITestCase):
         workbook = load_workbook(BytesIO(response.content), data_only=True)
         sheet = workbook["Quotation"]
         self.assertEqual(sheet["A1"].value, "Quotation Export")
-        self.assertEqual(sheet["A14"].value, "S. No.")
-        self.assertEqual(sheet["B14"].value, "Item Description")
-        self.assertEqual(sheet["B15"].value, "Bandage Pack")
-        self.assertEqual(sheet["H15"].value, 20)
-        self.assertEqual(sheet["G19"].value, "Grand Total")
+        header_row = next(
+            row_index
+            for row_index in range(1, sheet.max_row + 1)
+            if sheet.cell(row=row_index, column=1).value == "S. No."
+        )
+        self.assertEqual(sheet.cell(row=header_row, column=2).value, "Item Description")
+        self.assertEqual(sheet.cell(row=header_row + 1, column=2).value, "Bandage Pack")
+        self.assertEqual(sheet.cell(row=header_row + 1, column=8).value, 20)
+        self.assertEqual(sheet.cell(row=header_row + 5, column=7).value, "Grand Total")
         self.assertEqual(len(sheet.merged_cells.ranges), 0)
         self.assertIsNone(sheet.freeze_panes)
         self.assertIsNone(sheet.auto_filter.ref)
@@ -3480,9 +3484,10 @@ class QuotationSettingsTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("Attention Ahmed Khan", text)
-        self.assertIn("Position Purchase Officer", text)
-        self.assertIn("Department Procurement", text)
-        self.assertIn("Contact No. +971501234567 / ahmed@example.com", text)
+        self.assertNotIn("Position Purchase Officer", text)
+        self.assertNotIn("Department Procurement", text)
+        self.assertIn("Contact No. +971501234567", text)
+        self.assertIn("Contact Email ahmed@example.com", text)
 
     def test_pdf_hides_internal_line_notes_and_keeps_double_digit_serials_together(self):
         quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
