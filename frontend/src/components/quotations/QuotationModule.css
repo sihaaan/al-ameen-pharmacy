@@ -86,6 +86,20 @@
   align-items: start;
 }
 
+.qm-inquiry-party-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.qm-inquiry-party-grid .qm-company-picker-grid {
+  grid-template-columns: minmax(240px, 0.45fr) minmax(280px, 0.55fr) max-content;
+}
+
+.qm-inquiry-party-grid .qm-contact-control {
+  max-width: 980px;
+}
+
 .qm-panel,
 .qm-subpanel {
   border: 1px solid #e5e7eb;

@@ -629,7 +629,7 @@ const InquiryManager = ({ onOpenQuote }) => {
           </div>
         </div>
 
-        <div className="qm-grid-two">
+        <div className="qm-inquiry-party-grid">
           <CompanySelectWithCreate
             companies={companies}
             value={importForm.company}
