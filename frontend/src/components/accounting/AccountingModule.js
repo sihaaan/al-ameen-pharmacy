@@ -72,8 +72,10 @@ const AccountingModule = () => {
   const [uploadFile, setUploadFile] = useState(null);
   const [categoryFile, setCategoryFile] = useState(null);
   const [applyCategoryFile, setApplyCategoryFile] = useState(null);
+  const [blocklistFile, setBlocklistFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [applyingCategories, setApplyingCategories] = useState(false);
+  const [applyingBlocklist, setApplyingBlocklist] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingEmailId, setSavingEmailId] = useState(null);
@@ -90,6 +92,7 @@ const AccountingModule = () => {
   const uploadFileInputRef = useRef(null);
   const categoryFileInputRef = useRef(null);
   const applyCategoryInputRef = useRef(null);
+  const blocklistInputRef = useRef(null);
 
   const selectedImportId = selectedImport?.id;
   const filteredImport = useMemo(() => selectedImport || null, [selectedImport]);
@@ -238,6 +241,31 @@ const AccountingModule = () => {
       setError((await describeAccountingError(err, 'Apply category workbook', `POST /accounting/imports/${filteredImport.id}/apply_categories/`)).detail);
     } finally {
       setApplyingCategories(false);
+    }
+  };
+
+  const applyBlocklist = async (event) => {
+    event.preventDefault();
+    if (!blocklistFile) {
+      setError('Choose the accountant blocklist workbook first.');
+      return;
+    }
+    setApplyingBlocklist(true);
+    setNotice('');
+    setError('');
+    const formData = new FormData();
+    formData.append('file', blocklistFile);
+    try {
+      const response = await accountingAPI.imports.applyBlocklist(formData);
+      setNotice(response.data.message || 'Blocklist applied.');
+      setBlocklistFile(null);
+      if (blocklistInputRef.current) blocklistInputRef.current.value = '';
+      await loadImports();
+      await loadCustomers();
+    } catch (err) {
+      setError((await describeAccountingError(err, 'Apply accounting blocklist', 'POST /accounting/imports/apply_blocklist/')).detail);
+    } finally {
+      setApplyingBlocklist(false);
     }
   };
 
@@ -494,6 +522,16 @@ const AccountingModule = () => {
               {uploading ? 'Parsing...' : 'Upload and Parse'}
             </button>
           </form>
+          <form className="accounting-inline-form accounting-blocklist-form" onSubmit={applyBlocklist}>
+            <label>
+              Accountant blocklist
+              <input ref={blocklistInputRef} type="file" accept=".xlsx,.csv" onChange={(event) => setBlocklistFile(event.target.files?.[0] || null)} />
+            </label>
+            <button type="submit" className="accounting-secondary" disabled={applyingBlocklist}>
+              {applyingBlocklist ? 'Applying...' : 'Apply Blocklist'}
+            </button>
+          </form>
+          <p className="accounting-help-text">Blocklisted companies are marked ignored and excluded from statement ZIPs.</p>
         </section>
 
         <section className="accounting-panel">

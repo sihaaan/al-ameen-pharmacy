@@ -47,6 +47,10 @@ const emptyLine = {
   unit_price: '',
   vat_rate: '0',
   match_status: 'unresolved',
+  include_product_image: false,
+  product_image: '',
+  product_image_url: '',
+  has_product_image: false,
   notes: '',
 };
 
@@ -66,6 +70,8 @@ const normalizeDraft = (draft = {}) => ({
   unit_price: String(draft.unit_price || ''),
   vat_rate: normalizeVatRate(draft.vat_rate),
   match_status: String(draft.match_status || 'unresolved'),
+  include_product_image: !!draft.include_product_image,
+  product_image: String(draft.product_image || ''),
   notes: String(draft.notes || ''),
 });
 
@@ -80,6 +86,10 @@ const draftFromLine = (line) => ({
   unit_price: line.unit_price || '',
   vat_rate: normalizeVatRate(line.vat_rate),
   match_status: line.match_status || 'unresolved',
+  include_product_image: !!line.include_product_image,
+  product_image: line.product_image || '',
+  product_image_url: line.product_image_url || '',
+  has_product_image: !!line.has_product_image,
   notes: line.notes || '',
 });
 
@@ -313,6 +323,10 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       item_name_snapshot: item ? item.name : draft.item_name_snapshot,
       unit: draft.unit || item?.unit || '',
       match_status: productId ? 'confirmed' : 'unresolved',
+      product_image: '',
+      product_image_url: item?.primary_image_url || '',
+      has_product_image: !!item?.primary_image_url,
+      include_product_image: false,
     };
   };
 
@@ -402,6 +416,8 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const payloadForLine = (draft) => ({
     ...draft,
     product: draft.product || null,
+    product_image: draft.product_image || null,
+    include_product_image: !!draft.include_product_image,
     unit_price: draft.unit_price || null,
     match_status: draft.product && draft.match_status === 'unresolved' ? 'confirmed' : draft.match_status,
   });
@@ -746,6 +762,28 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     }
   };
 
+  const uploadImageForLine = async (lineId, file) => {
+    if (!file || saving || actionInFlight) return;
+    setSaving(true);
+    setActionInFlight(`image-${lineId}`);
+    setErrorInfo(null);
+    setLineFeedback(null);
+    const formData = new FormData();
+    formData.append('image', file);
+    try {
+      const response = await quotationAPI.lines.uploadProductImage(lineId, formData);
+      applyUpdatedLines([response.data.line]);
+      setLineFeedback({ type: 'success', message: response.data.message || 'Image saved for this Product.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Upload quotation line image', `POST /quotations/quote-lines/${lineId}/upload_product_image/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+      setActionInFlight('');
+    }
+  };
+
   const actionEndpoint = (label) => {
     const endpointNames = {
       'Submit Review': 'submit_review',
@@ -1071,6 +1109,30 @@ const QuotationEditor = ({ quoteId, onClose }) => {
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight} onClick={() => updateLineDraft(line.id, { match_status: draft.match_status === 'ignored' ? (draft.product ? 'confirmed' : 'unresolved') : 'ignored' })}>{draft.match_status === 'ignored' ? 'Unskip' : 'Skip'}</button>
                       <button type="button" className="qm-secondary small" onClick={() => setHistoryItem(draft.product || '')}>History</button>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !draft.product} onClick={() => rememberAlias(line.id)}>Remember Alias</button>
+                      <div className="qm-line-image-tools">
+                        <label className={`qm-line-image-toggle ${draft.include_product_image ? 'enabled' : ''}`}>
+                          <input
+                            type="checkbox"
+                            disabled={!isEditable || !draft.product || !draft.has_product_image}
+                            checked={!!draft.include_product_image}
+                            onChange={(event) => updateLineDraft(line.id, { include_product_image: event.target.checked })}
+                          />
+                          Image in PDF
+                        </label>
+                        <label className={`qm-secondary small qm-image-upload ${!isEditable || !draft.product || saving || actionInFlight ? 'disabled' : ''}`}>
+                          Upload
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            disabled={!isEditable || !draft.product || saving || actionInFlight}
+                            onChange={(event) => {
+                              const file = event.target.files?.[0];
+                              event.target.value = '';
+                              uploadImageForLine(line.id, file);
+                            }}
+                          />
+                        </label>
+                      </div>
                       <button type="button" className="qm-secondary small danger" disabled={!isEditable || saving || actionInFlight} onClick={() => deleteLine(line.id)}>Delete</button>
                     </td>
                   </tr>

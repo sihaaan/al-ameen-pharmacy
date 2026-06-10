@@ -56,6 +56,17 @@
   margin-top: 14px;
 }
 
+.accounting-blocklist-form {
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.accounting-help-text {
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .accounting-form label,
 .accounting-inline-form label,
 .accounting-edit-grid label {

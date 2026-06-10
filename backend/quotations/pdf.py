@@ -345,7 +345,8 @@ def build_quotation_pdf(quotation):
             Paragraph("Total", styles["TableHeader"]),
         ]
     ]
-    for index, line in enumerate(quotation.lines.order_by("sort_order", "id"), start=1):
+    lines = quotation.lines.select_related("product", "product_image").order_by("sort_order", "id")
+    for index, line in enumerate(lines, start=1):
         item_text = _text(line.item_name_snapshot)
         details = []
         description = _customer_line_detail(line.description)
@@ -353,10 +354,17 @@ def build_quotation_pdf(quotation):
             details.append(description)
         if details:
             item_text = f"{item_text}<br/>{'<br/>'.join(details)}"
+        item_cell = [Paragraph(item_text, styles["TableCell"])]
+        if line.include_product_image:
+            selected_image = line.product_image or (line.product.primary_image if line.product_id else None)
+            image_url = getattr(getattr(selected_image, "image", None), "url", "")
+            item_image = _image(image_url, max_width=28 * mm, max_height=22 * mm)
+            if item_image:
+                item_cell.extend([Spacer(1, 2), item_image])
         table_data.append(
             [
                 Paragraph(str(index), styles["TableCellCenter"]),
-                Paragraph(item_text, styles["TableCell"]),
+                item_cell,
                 Paragraph(_number(line.quantity), styles["TableCellRight"]),
                 Paragraph(_text(line.unit), styles["TableCell"]),
                 Paragraph(_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),

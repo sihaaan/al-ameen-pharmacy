@@ -11,7 +11,7 @@ from openpyxl import Workbook, load_workbook
 from pypdf import PdfReader
 from rest_framework.test import APITestCase
 
-from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
+from .models import AccountCustomer, AccountingBlocklistedCustomer, AccountingImport, AccountingImportCustomer
 from .parsers import parse_outstanding_upload, split_bill_reference
 from .permissions import accounting_permissions_queryset, set_user_accounting_access
 
@@ -143,6 +143,17 @@ def make_code_category_upload():
     buffer = BytesIO()
     workbook.save(buffer)
     return SimpleUploadedFile("categories-by-code.xlsx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def make_blocklist_upload():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "blocklist"
+    sheet.append(["Name", "Cat"])
+    sheet.append(["MILLENNIUM AIRPORT HOTEL", "Misc"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return SimpleUploadedFile("blocklist.xlsx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 class AccountingParserTests(TestCase):
@@ -372,6 +383,30 @@ class AccountingAPITests(APITestCase):
 
         self.assertEqual(apply_response.status_code, 200)
         self.assertEqual(AccountCustomer.objects.get(customer_code="083").category, "credit")
+
+    def test_blocklist_upload_excludes_matching_customers_from_due_counts(self):
+        self.client.force_authenticate(self.accountant)
+        response = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["due_customer_count"], 2)
+
+        block_response = self.client.post(
+            reverse("accounting-import-apply-blocklist"),
+            {"file": make_blocklist_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(block_response.status_code, 200)
+        self.assertEqual(AccountingBlocklistedCustomer.objects.count(), 1)
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
+        summary.refresh_from_db()
+        summary.customer.refresh_from_db()
+        summary.accounting_import.refresh_from_db()
+        self.assertTrue(summary.customer.is_ignored)
+        self.assertTrue(summary.is_ignored)
+        self.assertFalse(summary.is_due)
+        self.assertEqual(summary.status, AccountingImportCustomer.STATUS_IGNORED)
+        self.assertEqual(summary.accounting_import.due_customer_count, 1)
 
     def test_same_customer_name_with_different_codes_stays_separate(self):
         buffer = StringIO()

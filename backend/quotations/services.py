@@ -7,7 +7,7 @@ from django.db.models import Max, Sum
 from django.utils import timezone
 from django.utils.text import slugify
 
-from api.models import Product
+from api.models import Product, ProductImage
 
 from .matching import create_product_alias, suggest_product_for_text
 from .models import (
@@ -1062,7 +1062,20 @@ def bulk_update_quotation_lines(quotation, rows, actor):
         for line in quotation.lines.select_for_update().filter(id__in=rows_by_id.keys())
     }
     updated = []
-    allowed_fields = {"product", "quote_item", "item_name_snapshot", "description", "quantity", "unit", "unit_price", "vat_rate", "match_status", "notes"}
+    allowed_fields = {
+        "product",
+        "quote_item",
+        "product_image",
+        "include_product_image",
+        "item_name_snapshot",
+        "description",
+        "quantity",
+        "unit",
+        "unit_price",
+        "vat_rate",
+        "match_status",
+        "notes",
+    }
 
     def decimal_value(value, label, *, allow_null=False):
         if value in ("", None):
@@ -1082,8 +1095,13 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             if field not in payload:
                 continue
             value = payload[field]
-            if field in {"product", "quote_item"}:
+            if field in {"product", "quote_item", "product_image"}:
                 setattr(line, f"{field}_id", value or None)
+            elif field == "include_product_image":
+                if isinstance(value, str):
+                    line.include_product_image = value.strip().lower() in {"1", "true", "yes", "on"}
+                else:
+                    line.include_product_image = bool(value)
             elif field == "quantity":
                 line.quantity = decimal_value(value, "Quantity")
             elif field == "unit_price":
@@ -1095,6 +1113,16 @@ def bulk_update_quotation_lines(quotation, rows, actor):
                 line.vat_rate = vat_rate
             else:
                 setattr(line, field, value if value != "" else "")
+        if line.product_image_id:
+            image_product_id = ProductImage.objects.filter(pk=line.product_image_id).values_list("product_id", flat=True).first()
+            if not image_product_id:
+                raise ValidationError(f"Selected Product image for line {line_id} was not found.")
+            if line.product_id and image_product_id != line.product_id:
+                raise ValidationError(f"Selected Product image for line {line_id} does not belong to the matched Product.")
+        if line.include_product_image and not line.product_image_id and line.product_id:
+            primary_image = Product.objects.get(pk=line.product_id).primary_image
+            if primary_image:
+                line.product_image = primary_image
         if line.product_id and line.match_status == QuotationLine.MATCH_UNRESOLVED:
             line.match_status = QuotationLine.MATCH_CONFIRMED
         if not line.product_id and not line.quote_item_id and line.match_status == QuotationLine.MATCH_CONFIRMED:

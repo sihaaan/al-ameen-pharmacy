@@ -13,7 +13,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AccountCustomer, AccountingImport, AccountingImportCustomer
+from .models import AccountCustomer, AccountingBlocklistedCustomer, AccountingImport, AccountingImportCustomer
 from .formatting import parse_accounting_date, format_accounting_datetime
 from .excel import build_statement_workbook, statement_excel_filename
 from .pdf import build_statement_pdf
@@ -25,7 +25,9 @@ from .serializers import (
     AccountingImportSerializer,
 )
 from .services import (
+    apply_blocklist_upload,
     apply_category_upload_to_import,
+    blocklist_update_message,
     category_update_message,
     create_accounting_import,
     statement_filename,
@@ -89,6 +91,7 @@ class AccountingDashboardView(APIView):
                 "customer_count": customers.count(),
                 "email_missing_count": customers.filter(email="").count(),
                 "ignored_count": customers.filter(is_ignored=True).count(),
+                "blocklist_count": AccountingBlocklistedCustomer.objects.filter(is_active=True).count(),
                 "import_count": AccountingImport.objects.count(),
             }
         )
@@ -135,6 +138,21 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
         data["category_update"] = meta.get("category_update", {})
         data["category_update_message"] = meta.get("category_update_message", "")
         return Response(data, status=status.HTTP_200_OK if meta.get("duplicate") else status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def apply_blocklist(self, request):
+        blocklist_file = request.FILES.get("file")
+        try:
+            result = apply_blocklist_upload(blocklist_file=blocklist_file, actor=request.user)
+        except DjangoValidationError as exc:
+            return Response(validation_error_response(exc), status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {
+                "blocklist_update": result,
+                "blocklist_update_message": blocklist_update_message(result),
+                "message": blocklist_update_message(result),
+            }
+        )
 
     @action(detail=True, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def apply_categories(self, request, pk=None):

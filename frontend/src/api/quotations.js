@@ -164,6 +164,9 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/quote-lines/${id}/`, data),
     delete: (id) => axiosInstance.delete(`/quotations/quote-lines/${id}/`),
     createProduct: (id, data = {}) => axiosInstance.post(`/quotations/quote-lines/${id}/create_product/`, data),
+    uploadProductImage: (id, formData) => axiosInstance.post(`/quotations/quote-lines/${id}/upload_product_image/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
     rememberAlias: (id) => axiosInstance.post(`/quotations/quote-lines/${id}/remember_alias/`),
   },
   priceHistory: {

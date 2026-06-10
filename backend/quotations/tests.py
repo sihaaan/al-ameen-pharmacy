@@ -22,7 +22,7 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, 
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from api.models import Product
+from api.models import Product, ProductImage
 
 from .import_parsers import parse_text_preview
 from .import_rules import detect_header_row, parse_inquiry_line, parse_text_lines, split_quantity_unit
@@ -477,6 +477,31 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(line.match_status, QuotationLine.MATCH_CONFIRMED)
         self.assertEqual(product.status, "draft")
         self.assertFalse(product.show_price)
+
+    def test_quotation_line_can_upload_and_include_product_image(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                response = self.client.post(
+                    reverse("quotation-line-upload-product-image", args=[line.id]),
+                    {"image": make_png_upload("bandage.png")},
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                line.refresh_from_db()
+                self.assertTrue(line.include_product_image)
+                self.assertIsNotNone(line.product_image)
+                self.assertEqual(line.product_image.product, self.product)
+                self.assertEqual(ProductImage.objects.filter(product=self.product).count(), 1)
+
+                pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+                self.assertEqual(pdf_response.status_code, status.HTTP_200_OK)
 
     def test_bulk_create_products_dedupes_same_normalized_names(self):
         quotation = self.create_quote()

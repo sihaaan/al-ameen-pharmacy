@@ -820,8 +820,8 @@
 
 .line-table th:nth-child(11),
 .line-table td:nth-child(11) {
-  width: 260px;
-  min-width: 260px;
+  width: 300px;
+  min-width: 300px;
 }
 
 .qm-vat-cell {
@@ -836,6 +836,55 @@
   padding: 7px 6px;
   text-align: center;
   font-weight: 700;
+}
+
+.qm-line-image-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.qm-line-image-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.qm-line-image-toggle.enabled {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.qm-line-image-toggle input {
+  width: auto;
+  min-width: 0;
+}
+
+.qm-image-upload {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.qm-image-upload.disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.qm-image-upload input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .import-table {

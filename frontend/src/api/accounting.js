@@ -18,6 +18,10 @@ const accountingAPI = {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 60000,
     }),
+    applyBlocklist: (formData) => axiosInstance.post('/accounting/imports/apply_blocklist/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000,
+    }),
     statementsZip: (id, style = 'professional', customerIds = [], extraParams = {}) => axiosInstance.get(`/accounting/imports/${id}/statements_zip/`, {
       params: { style, customer_ids: customerIds.join(','), ...extraParams },
       responseType: 'blob',

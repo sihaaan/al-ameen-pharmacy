@@ -12,7 +12,7 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
-from api.models import Product
+from api.models import Product, ProductImage
 
 from .ai_parsing import (
     AIParseError,
@@ -716,7 +716,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationLineSerializer
-    queryset = QuotationLine.objects.select_related("quotation", "quotation__company", "quote_item", "product", "inquiry_line")
+    queryset = QuotationLine.objects.select_related("quotation", "quotation__company", "quote_item", "product", "product_image", "inquiry_line")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -798,6 +798,44 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 ),
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def upload_product_image(self, request, pk=None):
+        line = self.get_object()
+        try:
+            ensure_quotation_editable(line.quotation)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        if not line.product_id:
+            return Response({"detail": "Match this line to a Product before uploading an item image."}, status=status.HTTP_400_BAD_REQUEST)
+        image_file = request.FILES.get("image")
+        if not image_file:
+            return Response({"detail": "Choose an image file."}, status=status.HTTP_400_BAD_REQUEST)
+        has_primary = ProductImage.objects.filter(product=line.product, is_primary=True).exists()
+        product_image = ProductImage.objects.create(
+            product=line.product,
+            image=image_file,
+            alt_text=line.item_name_snapshot or line.product.name,
+            is_primary=not has_primary,
+            display_order=ProductImage.objects.filter(product=line.product).count(),
+            source_type="manual_upload",
+        )
+        line.product_image = product_image
+        line.include_product_image = True
+        line.save(update_fields=["product_image", "include_product_image", "updated_at"])
+        audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Uploaded Product image from quotation line.")
+        return Response(
+            {
+                "line": QuotationLineSerializer(line, context={"request": request}).data,
+                "image": {
+                    "id": product_image.id,
+                    "image_url": request.build_absolute_uri(product_image.image.url),
+                    "is_primary": product_image.is_primary,
+                },
+                "message": "Image saved to the Product and enabled for this quotation line.",
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 

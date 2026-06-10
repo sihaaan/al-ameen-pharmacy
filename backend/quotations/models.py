@@ -970,6 +970,14 @@ class QuotationLine(models.Model):
         blank=True,
         related_name="quotation_lines",
     )
+    product_image = models.ForeignKey(
+        "api.ProductImage",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_lines",
+    )
+    include_product_image = models.BooleanField(default=False)
     match_reason = models.CharField(max_length=255, blank=True)
     item_name_snapshot = models.CharField(max_length=255)
     description = models.TextField(blank=True)

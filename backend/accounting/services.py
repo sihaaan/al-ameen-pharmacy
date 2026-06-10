@@ -9,12 +9,19 @@ from django.utils import timezone
 from .formatting import format_accounting_date
 from .models import (
     AccountCustomer,
+    AccountingBlocklistedCustomer,
     AccountingCategory,
     AccountingImport,
     AccountingImportCustomer,
     AccountingInvoiceRow,
 )
-from .parsers import normalize_customer_name, parse_category_upload, parse_outstanding_upload, read_outstanding_source
+from .parsers import (
+    normalize_customer_name,
+    parse_blocklist_upload,
+    parse_category_upload,
+    parse_outstanding_upload,
+    read_outstanding_source,
+)
 
 
 def customer_lookup_key(row):
@@ -26,6 +33,7 @@ def customer_lookup_key(row):
 def find_or_create_customer(row, category_map=None, category_code_map=None):
     normalized_name = normalize_customer_name(row.customer_name)
     normalized_code = row.customer_code.strip().lower() if row.customer_code else ""
+    is_blocklisted = AccountingBlocklistedCustomer.objects.filter(normalized_name=normalized_name, is_active=True).exists()
     customer = None
     if row.customer_code:
         customer = AccountCustomer.objects.filter(customer_code__iexact=row.customer_code.strip()).first()
@@ -41,6 +49,7 @@ def find_or_create_customer(row, category_map=None, category_code_map=None):
             name=row.customer_name.strip(),
             normalized_name=normalized_name,
             category=mapped_category or AccountingCategory.UNKNOWN,
+            is_ignored=is_blocklisted,
         )
     else:
         changed = False
@@ -50,8 +59,11 @@ def find_or_create_customer(row, category_map=None, category_code_map=None):
         if mapped_category and mapped_category != AccountingCategory.UNKNOWN and customer.category != mapped_category:
             customer.category = mapped_category
             changed = True
+        if is_blocklisted and not customer.is_ignored:
+            customer.is_ignored = True
+            changed = True
         if changed:
-            customer.save(update_fields=["customer_code", "category", "updated_at"])
+            customer.save(update_fields=["customer_code", "category", "is_ignored", "updated_at"])
     return customer
 
 
@@ -132,6 +144,70 @@ def category_update_message(result):
         f"{result.get('unchanged', 0)} already up to date, "
         f"{result.get('unmatched', 0)} unmatched."
     )
+
+
+def blocklist_update_message(result):
+    if not result:
+        return ""
+    return (
+        f"Blocklist applied. Loaded {result.get('loaded', 0)} names: "
+        f"{result.get('created', 0)} new, "
+        f"{result.get('existing', 0)} already listed. "
+        f"{result.get('matched_customers', 0)} customer profiles and "
+        f"{result.get('matched_import_customers', 0)} import rows are now excluded."
+    )
+
+
+@transaction.atomic
+def apply_blocklist_upload(*, blocklist_file, actor=None):
+    parsed = parse_blocklist_upload(blocklist_file)
+    created = 0
+    existing = 0
+    normalized_names = []
+
+    for entry in parsed.entries:
+        blocklist_entry, was_created = AccountingBlocklistedCustomer.objects.update_or_create(
+            normalized_name=entry["normalized_name"],
+            defaults={
+                "name": entry["name"],
+                "category_hint": entry.get("category_hint", ""),
+                "source_filename": parsed.filename,
+                "is_active": True,
+                "created_by": actor if getattr(actor, "is_authenticated", False) else None,
+            },
+        )
+        normalized_names.append(blocklist_entry.normalized_name)
+        if was_created:
+            created += 1
+        else:
+            existing += 1
+
+    customers = AccountCustomer.objects.filter(normalized_name__in=normalized_names)
+    matched_customers = customers.count()
+    customers.update(is_ignored=True, updated_at=timezone.now())
+
+    summaries = AccountingImportCustomer.objects.filter(customer__normalized_name__in=normalized_names)
+    matched_import_customers = summaries.count()
+    affected_import_ids = list(summaries.values_list("accounting_import_id", flat=True).distinct())
+    summaries.update(
+        is_ignored=True,
+        is_due=False,
+        status=AccountingImportCustomer.STATUS_IGNORED,
+        updated_at=timezone.now(),
+    )
+    for import_record in AccountingImport.objects.filter(id__in=affected_import_ids):
+        refresh_import_counts(import_record)
+
+    return {
+        "filename": parsed.filename,
+        "sha256": parsed.sha256,
+        "loaded": len(parsed.entries),
+        "created": created,
+        "existing": existing,
+        "matched_customers": matched_customers,
+        "matched_import_customers": matched_import_customers,
+        "warnings": parsed.warnings[:50],
+    }
 
 
 def build_invoice_row(import_customer, row):

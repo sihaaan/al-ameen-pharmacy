@@ -48,6 +48,32 @@ class AccountCustomer(models.Model):
         return f"{self.customer_code} - {self.name}" if self.customer_code else self.name
 
 
+class AccountingBlocklistedCustomer(models.Model):
+    name = models.CharField(max_length=255)
+    normalized_name = models.CharField(max_length=255, unique=True, db_index=True)
+    category_hint = models.CharField(max_length=80, blank=True)
+    source_filename = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_accounting_blocklist_entries",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        indexes = [
+            models.Index(fields=["is_active", "normalized_name"]),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
 class AccountingImport(models.Model):
     STATUS_PARSED = "parsed"
     STATUS_REVIEWED = "reviewed"

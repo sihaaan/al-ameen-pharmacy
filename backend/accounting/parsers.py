@@ -18,6 +18,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 SUPPORTED_OUTSTANDING_EXTENSIONS = {".csv", ".xlsx"}
 SUPPORTED_CATEGORY_EXTENSIONS = {".xlsx"}
+SUPPORTED_BLOCKLIST_EXTENSIONS = {".csv", ".xlsx"}
 REPORT_DATE_RE = re.compile(r"as\s+on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.IGNORECASE)
 REPORT_DATE_TO_RE = re.compile(r"\bto\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", re.IGNORECASE)
 HEADER_ALIASES = {
@@ -92,6 +93,15 @@ class ParsedCategoryMap:
 
 
 @dataclass
+class ParsedBlocklist:
+    filename: str
+    sha256: str
+    entries: list[dict]
+    warnings: list[str]
+    parse_meta: dict
+
+
+@dataclass
 class UploadedAccountingSource:
     filename: str
     extension: str
@@ -156,6 +166,78 @@ def read_upload(uploaded_file, allowed_extensions):
 def read_outstanding_source(uploaded_file):
     filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_OUTSTANDING_EXTENSIONS)
     return UploadedAccountingSource(filename=filename, extension=extension, data=data, sha256=sha256)
+
+
+def _looks_like_blocklist_header(value):
+    normalized = normalize_header(value)
+    return normalized in {
+        "name",
+        "company",
+        "company name",
+        "customer",
+        "customer name",
+        "party",
+        "cat",
+        "category",
+        "type",
+        "blocked",
+        "blocklist",
+    }
+
+
+def _blocklist_entry_from_cells(cells):
+    values = [str(cell or "").strip() for cell in cells]
+    values = [value for value in values if value]
+    if not values:
+        return None
+    name = values[0]
+    if _looks_like_blocklist_header(name):
+        return None
+    normalized = normalize_customer_name(name)
+    if not normalized or len(normalized) < 2 or normalized.isdigit():
+        return None
+    return {
+        "name": name,
+        "normalized_name": normalized,
+        "category_hint": values[1] if len(values) > 1 and not _looks_like_blocklist_header(values[1]) else "",
+    }
+
+
+def parse_blocklist_upload(uploaded_file):
+    filename, extension, data, sha256 = read_upload(uploaded_file, SUPPORTED_BLOCKLIST_EXTENSIONS)
+    warnings = []
+    entries_by_name = {}
+
+    if extension == ".csv":
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("latin-1", errors="replace")
+        for row in csv.reader(io.StringIO(text)):
+            entry = _blocklist_entry_from_cells(row)
+            if entry:
+                entries_by_name.setdefault(entry["normalized_name"], entry)
+    else:
+        try:
+            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        except (InvalidFileException, OSError, ValueError) as exc:
+            raise ValidationError("Could not read the blocklist workbook.") from exc
+        for worksheet in workbook.worksheets:
+            for row in worksheet.iter_rows(values_only=True):
+                entry = _blocklist_entry_from_cells(row)
+                if entry:
+                    entries_by_name.setdefault(entry["normalized_name"], entry)
+
+    if not entries_by_name:
+        raise ValidationError("No company names were found in the blocklist file.")
+
+    return ParsedBlocklist(
+        filename=filename,
+        sha256=sha256,
+        entries=list(entries_by_name.values()),
+        warnings=warnings,
+        parse_meta={"entry_count": len(entries_by_name), "source_retention": "parsed_and_discarded"},
+    )
 
 
 def parse_date(value):

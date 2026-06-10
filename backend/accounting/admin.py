@@ -5,7 +5,7 @@ from django.contrib.auth.forms import UserChangeForm
 from django.contrib.auth.models import User
 from django import forms
 
-from .models import AccountCustomer, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
+from .models import AccountCustomer, AccountingBlocklistedCustomer, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
 from .permissions import set_user_accounting_access, user_has_accounting_access
 
 
@@ -73,6 +73,20 @@ class AccountCustomerAdmin(admin.ModelAdmin):
     list_filter = ("category", "is_ignored", "is_active")
     search_fields = ("customer_code", "name", "email")
     readonly_fields = ("normalized_name", "created_at", "updated_at")
+
+
+@admin.register(AccountingBlocklistedCustomer)
+class AccountingBlocklistedCustomerAdmin(admin.ModelAdmin):
+    list_display = ("name", "category_hint", "is_active", "source_filename", "updated_at")
+    list_filter = ("is_active", "category_hint")
+    search_fields = ("name", "normalized_name", "source_filename")
+    readonly_fields = ("normalized_name", "created_at", "updated_at")
+
+    def save_model(self, request, obj, form, change):
+        from .parsers import normalize_customer_name
+
+        obj.normalized_name = normalize_customer_name(obj.name)
+        super().save_model(request, obj, form, change)
 
 
 class AccountingInvoiceRowInline(admin.TabularInline):

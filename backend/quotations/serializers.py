@@ -5,7 +5,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
-from api.models import Product
+from api.models import Product, ProductImage
 from api.serializers import ProductListSerializer
 
 from .models import (
@@ -1114,6 +1114,13 @@ class QuotationLineSerializer(serializers.ModelSerializer):
     quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
     product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
     inquiry_line_raw_name = serializers.CharField(source="inquiry_line.raw_name", read_only=True, allow_null=True)
+    product_image = serializers.PrimaryKeyRelatedField(
+        queryset=ProductImage.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    product_image_url = serializers.SerializerMethodField()
+    has_product_image = serializers.SerializerMethodField()
 
     class Meta:
         model = QuotationLine
@@ -1126,6 +1133,10 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "quote_item_name",
             "product",
             "product_name",
+            "product_image",
+            "product_image_url",
+            "has_product_image",
+            "include_product_image",
             "match_reason",
             "item_name_snapshot",
             "description",
@@ -1147,6 +1158,8 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "inquiry_line_raw_name",
             "quote_item_name",
             "product_name",
+            "product_image_url",
+            "has_product_image",
             "line_subtotal",
             "vat_amount",
             "line_total",
@@ -1156,8 +1169,13 @@ class QuotationLineSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         product = attrs.get("product") or getattr(self.instance, "product", None)
+        product_image = attrs.get("product_image")
+        if product_image is None and self.instance:
+            product_image = self.instance.product_image
         quote_item = attrs.get("quote_item") or getattr(self.instance, "quote_item", None)
         item_name = attrs.get("item_name_snapshot") or getattr(self.instance, "item_name_snapshot", "")
+        if product_image and product and product_image.product_id != product.id:
+            raise serializers.ValidationError({"product_image": "Selected image must belong to the matched Product."})
         if not item_name and product:
             attrs["item_name_snapshot"] = product.name
         elif not item_name and quote_item:
@@ -1166,9 +1184,26 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"item_name_snapshot": "This field is required."})
         return attrs
 
+    def get_product_image_url(self, obj):
+        image = obj.product_image or (obj.product.primary_image if obj.product_id else None)
+        if not image or not image.image:
+            return ""
+        request = self.context.get("request")
+        if request:
+            return request.build_absolute_uri(image.image.url)
+        return image.image.url
+
+    def get_has_product_image(self, obj):
+        return bool(obj.product_image_id or (obj.product_id and obj.product.primary_image))
+
     def update(self, instance, validated_data):
         if "product" in validated_data and validated_data.get("product") != instance.product:
             validated_data.setdefault("match_reason", "Selected manually by staff.")
+            selected_image = validated_data.get("product_image", instance.product_image)
+            next_product = validated_data.get("product")
+            if selected_image and next_product and selected_image.product_id != next_product.id:
+                validated_data["product_image"] = None
+                validated_data["include_product_image"] = False
         return super().update(instance, validated_data)
 
 
