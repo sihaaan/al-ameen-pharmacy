@@ -105,6 +105,25 @@ class CompanySerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "normalized_name", "contacts", "created_at", "updated_at"]
 
 
+class CompanyListSerializer(serializers.ModelSerializer):
+    contact_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Company
+        fields = [
+            "id",
+            "name",
+            "email",
+            "phone",
+            "trn",
+            "is_active",
+            "contact_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
 class QuoteItemSerializer(serializers.ModelSerializer):
     """Product-backed item serializer for the staff quotation item catalog."""
     brand_name = serializers.CharField(source="brand.name", read_only=True, allow_null=True)
@@ -156,6 +175,36 @@ class QuoteItemSerializer(serializers.ModelSerializer):
             attrs.setdefault("status", "draft")
             attrs.setdefault("show_price", False)
         return attrs
+
+
+class QuoteItemListSerializer(serializers.ModelSerializer):
+    brand_name = serializers.CharField(source="brand.name", read_only=True, allow_null=True)
+    category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
+    unit = serializers.CharField(source="pack_size", read_only=True)
+    is_active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "sku",
+            "barcode",
+            "brand_name",
+            "category_name",
+            "price",
+            "dosage",
+            "pack_size",
+            "unit",
+            "active_ingredient",
+            "status",
+            "is_active",
+        ]
+        read_only_fields = fields
+
+    def get_is_active(self, obj):
+        return obj.status != "archived"
 
 
 class ProductAliasSerializer(serializers.ModelSerializer):
@@ -1291,6 +1340,43 @@ class QuotationSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             validated_data["created_by"] = request.user
         return super().create(validated_data)
+
+
+class QuotationListSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source="company.name", read_only=True)
+    contact_name = serializers.CharField(source="contact.name", read_only=True, allow_null=True)
+    inquiry_subject = serializers.CharField(source="inquiry.subject", read_only=True, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    payment_terms_display = serializers.CharField(source="get_payment_terms_display", read_only=True)
+
+    class Meta:
+        model = Quotation
+        fields = [
+            "id",
+            "company",
+            "company_name",
+            "contact",
+            "contact_name",
+            "inquiry",
+            "inquiry_subject",
+            "quotation_number",
+            "status",
+            "status_display",
+            "version",
+            "valid_until",
+            "currency",
+            "payment_terms",
+            "payment_terms_display",
+            "subtotal",
+            "vat_total",
+            "total",
+            "is_historical_import",
+            "created_by_username",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
 
 
 class CompanyPriceHistorySerializer(serializers.ModelSerializer):

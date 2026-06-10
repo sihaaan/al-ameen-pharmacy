@@ -67,7 +67,7 @@ const CompanyManager = () => {
     setContactForm(emptyContact);
   };
 
-  const editCompany = (company) => {
+  const applyCompanyToForm = (company) => {
     setSelectedCompany(company);
     setForm({
       name: company.name || '',
@@ -79,6 +79,19 @@ const CompanyManager = () => {
       is_active: company.is_active,
     });
     setContactForm(emptyContact);
+  };
+
+  const editCompany = async (company) => {
+    applyCompanyToForm({ ...company, contacts: company.contacts || [] });
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.companies.retrieve(company.id);
+      applyCompanyToForm(response.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load company details', `GET /quotations/companies/${company.id}/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    }
   };
 
   const saveCompany = async (event) => {
@@ -140,12 +153,8 @@ const CompanyManager = () => {
         ...contactForm,
         company: selectedCompany.id,
       });
-      const refreshed = await quotationAPI.companies.list();
-      setCompanies(refreshed.data);
-      const updated = refreshed.data.find((company) => company.id === selectedCompany.id);
-      if (updated) {
-        editCompany(updated);
-      }
+      const updated = await quotationAPI.companies.retrieve(selectedCompany.id);
+      applyCompanyToForm(updated.data);
     } catch (error) {
       const details = await describeQuotationError(error, 'Create company contact', 'POST /quotations/contacts/');
       setErrorInfo(details);

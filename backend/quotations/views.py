@@ -4,7 +4,7 @@ import re
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.views import APIView
@@ -55,6 +55,7 @@ from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_workbook
 from .serializers import (
     CompanyContactSerializer,
+    CompanyListSerializer,
     CompanyPriceHistorySerializer,
     CompanySerializer,
     HistoricalPriceImportLineSerializer,
@@ -66,10 +67,12 @@ from .serializers import (
     InquirySerializer,
     QuotationAuditLogSerializer,
     QuotationLineSerializer,
+    QuotationListSerializer,
     QuotationSettingsSerializer,
     QuotationSerializer,
     UserQuotationProfileSerializer,
     ProductAliasSerializer,
+    QuoteItemListSerializer,
     QuoteItemSerializer,
     serializer_error_from_django_validation,
 )
@@ -208,10 +211,19 @@ class QuotationDashboardView(APIView):
 
 class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = CompanySerializer
-    queryset = Company.objects.prefetch_related("contacts")
+    queryset = Company.objects.all()
+
+    def get_serializer_class(self):
+        if self.action == "list" and self.request.query_params.get("include_contacts") != "true":
+            return CompanyListSerializer
+        return CompanySerializer
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.action == "list" and self.request.query_params.get("include_contacts") != "true":
+            queryset = queryset.annotate(contact_count=Count("contacts", distinct=True))
+        else:
+            queryset = queryset.prefetch_related("contacts")
         search = self.request.query_params.get("search", "").strip()
         if search:
             queryset = queryset.filter(
@@ -286,7 +298,12 @@ class CompanyContactViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuoteItemSerializer
-    queryset = Product.objects.select_related("brand", "category").prefetch_related("images")
+    queryset = Product.objects.select_related("brand", "category")
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return QuoteItemListSerializer
+        return QuoteItemSerializer
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -512,10 +529,22 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationSerializer
     queryset = Quotation.objects.select_related(
         "company", "contact", "inquiry", "created_by", "finalized_by", "parent"
-    ).prefetch_related("lines", "lines__quote_item", "lines__product")
+    )
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return QuotationListSerializer
+        return QuotationSerializer
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.action != "list":
+            queryset = queryset.prefetch_related(
+                "lines",
+                "lines__quote_item",
+                "lines__product",
+                "lines__product__images",
+            )
         if self.request.query_params.get("include_historical") != "true":
             queryset = queryset.filter(is_historical_import=False)
         company_id = self.request.query_params.get("company")
@@ -531,7 +560,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 | Q(company__name__icontains=search)
                 | Q(inquiry__subject__icontains=search)
             )
-        return queryset
+        return queryset.order_by("-updated_at", "-id")
 
     def perform_create(self, serializer):
         quotation = serializer.save()

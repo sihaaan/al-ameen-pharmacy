@@ -137,6 +137,49 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.data["finalized"], 1)
         self.assertNotIn("lines", response.data)
 
+    def test_quotation_list_is_lightweight_but_detail_includes_lines(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        list_response = self.client.get(reverse("quotation-list"))
+        detail_response = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("lines", list_response.data[0])
+        self.assertIn("lines", detail_response.data)
+        self.assertEqual(len(detail_response.data["lines"]), 1)
+
+    def test_company_list_is_compact_but_detail_includes_contacts(self):
+        CompanyContact.objects.create(company=self.company, name="Buyer", email="buyer@example.com")
+
+        list_response = self.client.get(reverse("quotation-company-list"))
+        include_response = self.client.get(reverse("quotation-company-list"), {"include_contacts": "true"})
+        detail_response = self.client.get(reverse("quotation-company-detail", args=[self.company.id]))
+
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(include_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertNotIn("contacts", list_response.data[0])
+        self.assertEqual(list_response.data[0]["contact_count"], 1)
+        self.assertIn("contacts", include_response.data[0])
+        self.assertIn("contacts", detail_response.data)
+        self.assertEqual(detail_response.data["contacts"][0]["name"], "Buyer")
+
+    def test_item_list_uses_compact_product_payload(self):
+        self.product.short_description = "Short"
+        self.product.detailed_description = "Detailed product copy that is not needed for the list page."
+        self.product.save(update_fields=["short_description", "detailed_description"])
+
+        response = self.client.get(reverse("quotation-item-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0]["id"], self.product.id)
+        self.assertIn("slug", response.data[0])
+        self.assertIn("price", response.data[0])
+        self.assertNotIn("detailed_description", response.data[0])
+        self.assertNotIn("stock_quantity", response.data[0])
+
     def create_valid_line(self, quotation):
         return QuotationLine.objects.create(
             quotation=quotation,

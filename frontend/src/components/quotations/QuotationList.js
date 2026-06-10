@@ -30,6 +30,7 @@ const emptyContactForm = {
 const QuotationList = ({ onOpenQuote }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
+  const [contacts, setContacts] = useState([]);
   const [form, setForm] = useState({ company: '', contact: '', notes: '' });
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
@@ -37,6 +38,7 @@ const QuotationList = ({ onOpenQuote }) => {
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadingContacts, setLoadingContacts] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorInfo, setErrorInfo] = useState(null);
 
@@ -63,6 +65,25 @@ const QuotationList = ({ onOpenQuote }) => {
     load();
   }, []);
 
+  const loadContactsForCompany = async (companyId) => {
+    if (!companyId) {
+      setContacts([]);
+      return;
+    }
+    setLoadingContacts(true);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contacts.list({ company: companyId, active: 'true' });
+      setContacts(response.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load company contacts', `GET /quotations/contacts/?company=${companyId}`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setLoadingContacts(false);
+    }
+  };
+
   const filteredQuotes = useMemo(() => {
     const term = search.toLowerCase();
     return quotes.filter((quote) => {
@@ -85,6 +106,7 @@ const QuotationList = ({ onOpenQuote }) => {
         notes: form.notes,
       });
       setForm({ company: '', contact: '', notes: '' });
+      setContacts([]);
       if (onOpenQuote) onOpenQuote(response.data.id);
       await load();
     } catch (error) {
@@ -96,7 +118,6 @@ const QuotationList = ({ onOpenQuote }) => {
     }
   };
 
-  const contactsForCompany = companies.find((company) => String(company.id) === String(form.company))?.contacts || [];
   const rememberCompany = (company) => {
     setCompanies((current) => {
       const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
@@ -105,15 +126,10 @@ const QuotationList = ({ onOpenQuote }) => {
   };
 
   const rememberContact = (contact) => {
-    setCompanies((current) => current.map((company) => {
-      if (String(company.id) !== String(contact.company)) return company;
-      const contacts = company.contacts || [];
-      const withoutDuplicate = contacts.filter((candidate) => candidate.id !== contact.id);
-      return {
-        ...company,
-        contacts: [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name)),
-      };
-    }));
+    setContacts((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== contact.id);
+      return [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name));
+    });
   };
 
   const createContact = async () => {
@@ -194,14 +210,15 @@ const QuotationList = ({ onOpenQuote }) => {
               setForm({ ...form, company: companyId, contact: '' });
               setContactForm(emptyContactForm);
               setShowContactForm(false);
+              loadContactsForCompany(companyId);
             }}
             onCreated={rememberCompany}
           />
           <div className="qm-contact-control">
             <label>Contact
               <select value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
-                <option value="">No contact</option>
-                {contactsForCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
+                <option value="">{loadingContacts ? 'Loading contacts...' : 'No contact'}</option>
+                {contacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
               </select>
             </label>
             <button type="button" className="qm-secondary small" disabled={!form.company} onClick={() => setShowContactForm((value) => !value)}>

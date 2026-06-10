@@ -135,6 +135,8 @@ const quotationDownloadFilename = (quote, extension) => {
 const QuotationEditor = ({ quoteId, onClose }) => {
   const [quote, setQuote] = useState(null);
   const [companies, setCompanies] = useState([]);
+  const [contacts, setContacts] = useState([]);
+  const [loadingContacts, setLoadingContacts] = useState(false);
   const [quotePartyDraft, setQuotePartyDraft] = useState(partyDraftFromQuote());
   const [savedQuotePartyDraft, setSavedQuotePartyDraft] = useState(partyDraftFromQuote());
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
@@ -181,15 +183,19 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     setErrorInfo(null);
     try {
       const quoteRes = await quotationAPI.quotes.retrieve(quoteId);
-      const [itemsRes, companyItemsRes, companiesRes] = await Promise.all([
+      const [itemsRes, companyItemsRes, companiesRes, contactsRes] = await Promise.all([
         quotationAPI.items.list({ active: 'true' }),
         quotationAPI.items.list({ active: 'true', company_used: quoteRes.data.company }),
         quotationAPI.companies.list({ active: 'true' }),
+        quoteRes.data.company
+          ? quotationAPI.contacts.list({ company: quoteRes.data.company, active: 'true' })
+          : Promise.resolve({ data: [] }),
       ]);
       setLoadedQuote(quoteRes.data);
       setItems(itemsRes.data);
       setCompanyItems(companyItemsRes.data);
       setCompanies(companiesRes.data);
+      setContacts(contactsRes.data);
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/, GET /quotations/items/`);
       setErrorInfo(details);
@@ -211,7 +217,26 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   const hasUnsavedLines = changedLineIds.length > 0;
   const hasUnsavedQuoteParty = !partyDraftsMatch(quotePartyDraft, savedQuotePartyDraft);
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
-  const contactsForQuoteCompany = companies.find((company) => String(company.id) === String(quotePartyDraft.company))?.contacts || [];
+  const contactsForQuoteCompany = contacts;
+
+  const loadContactsForCompany = async (companyId) => {
+    if (!companyId) {
+      setContacts([]);
+      return;
+    }
+    setLoadingContacts(true);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contacts.list({ company: companyId, active: 'true' });
+      setContacts(response.data);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load company contacts', `GET /quotations/contacts/?company=${companyId}`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setLoadingContacts(false);
+    }
+  };
 
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
 
@@ -305,15 +330,10 @@ const QuotationEditor = ({ quoteId, onClose }) => {
   };
 
   const rememberContact = (contact) => {
-    setCompanies((current) => current.map((company) => {
-      if (String(company.id) !== String(contact.company)) return company;
-      const contacts = company.contacts || [];
-      const withoutDuplicate = contacts.filter((candidate) => candidate.id !== contact.id);
-      return {
-        ...company,
-        contacts: [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name)),
-      };
-    }));
+    setContacts((current) => {
+      const withoutDuplicate = current.filter((candidate) => candidate.id !== contact.id);
+      return [...withoutDuplicate, contact].sort((a, b) => a.name.localeCompare(b.name));
+    });
   };
 
   const productPatch = (draft, productId) => {
@@ -526,6 +546,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
       ]);
       setCompanyItems(companyItemsRes.data);
       setCompanies(companiesRes.data);
+      await loadContactsForCompany(response.data.company);
       setLineFeedback({ type: 'success', message: 'Customer and contact saved.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Save quotation customer/contact', `PATCH /quotations/quotes/${quote.id}/`);
@@ -945,17 +966,19 @@ const QuotationEditor = ({ quoteId, onClose }) => {
               updateQuotePartyDraft({ company: companyId, contact: '' });
               setContactForm(emptyContactForm);
               setShowContactForm(false);
+              loadContactsForCompany(companyId);
             }}
             onCreated={(company) => {
               rememberCompany(company);
               updateQuotePartyDraft({ company: company.id, contact: '' });
+              setContacts([]);
             }}
           />
           <div className="qm-contact-control">
             <label>
               <span className="qm-label-text">Contact / Purchaser</span>
               <select disabled={!isEditable || saving || Boolean(actionInFlight) || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })}>
-                <option value="">No contact</option>
+                <option value="">{loadingContacts ? 'Loading contacts...' : 'No contact'}</option>
                 {contactsForQuoteCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
               </select>
             </label>
