@@ -123,7 +123,7 @@ def _image(source, max_width, max_height):
         return ""
     try:
         image_width, image_height = ImageReader(image_source).getSize()
-        scale = min(max_width / image_width, max_height / image_height)
+        scale = min(max_width / image_width, max_height / image_height, 1)
         if hasattr(image_source, "seek"):
             image_source.seek(0)
         return Image(image_source, width=image_width * scale, height=image_height * scale)
@@ -133,6 +133,32 @@ def _image(source, max_width, max_height):
 
 def _logo(path, max_width=60 * mm, max_height=26 * mm):
     return _image(path, max_width=max_width, max_height=max_height)
+
+
+def _product_thumbnail(source):
+    item_image = _image(source, max_width=24 * mm, max_height=15 * mm)
+    if not item_image:
+        return ""
+    item_image.hAlign = "LEFT"
+    frame = Table(
+        [[item_image]],
+        colWidths=[27 * mm],
+        hAlign="LEFT",
+    )
+    frame.setStyle(
+        TableStyle(
+            [
+                ("BOX", (0, 0), (-1, -1), 0.25, LIGHT_BORDER),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+        )
+    )
+    return frame
 
 
 def _contact_parts(config):
@@ -358,9 +384,9 @@ def build_quotation_pdf(quotation):
         if line.include_product_image:
             selected_image = line.product_image or (line.product.primary_image if line.product_id else None)
             image_url = getattr(getattr(selected_image, "image", None), "url", "")
-            item_image = _image(image_url, max_width=28 * mm, max_height=22 * mm)
+            item_image = _product_thumbnail(image_url)
             if item_image:
-                item_cell.extend([Spacer(1, 2), item_image])
+                item_cell.extend([Spacer(1, 3), item_image])
         table_data.append(
             [
                 Paragraph(str(index), styles["TableCellCenter"]),
