@@ -2,7 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 from .formatting import format_accounting_date, format_accounting_datetime, format_accounting_period
-from .models import AccountCustomer, AccountingCategory, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
+from .models import AccountCustomer, AccountingBlocklistedCustomer, AccountingCategory, AccountingImport, AccountingImportCustomer, AccountingInvoiceRow
 from .parsers import normalize_customer_name
 from .services import email_preview_for_import_customer, statement_ledger
 
@@ -28,6 +28,44 @@ class AccountCustomerSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def update(self, instance, validated_data):
+        if "name" in validated_data:
+            validated_data["normalized_name"] = normalize_customer_name(validated_data["name"])
+        return super().update(instance, validated_data)
+
+
+class AccountingBlocklistedCustomerSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default="")
+
+    class Meta:
+        model = AccountingBlocklistedCustomer
+        fields = [
+            "id",
+            "name",
+            "normalized_name",
+            "category_hint",
+            "source_filename",
+            "is_active",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "normalized_name", "source_filename", "created_by", "created_by_name", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Company name is required.")
+        return value
+
+    def create(self, validated_data):
+        validated_data["normalized_name"] = normalize_customer_name(validated_data["name"])
+        request = self.context.get("request")
+        if request and getattr(request.user, "is_authenticated", False):
+            validated_data["created_by"] = request.user
+        return super().create(validated_data)
 
     def update(self, instance, validated_data):
         if "name" in validated_data:

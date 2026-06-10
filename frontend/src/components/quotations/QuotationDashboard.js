@@ -19,26 +19,13 @@ const QuotationDashboard = ({ onOpenQuotes }) => {
       setLoading(true);
       setErrorInfo(null);
       try {
-        const [companies, items, inquiries, quotes] = await Promise.all([
-          quotationAPI.companies.list(),
-          quotationAPI.items.list(),
-          quotationAPI.inquiries.list(),
-          quotationAPI.quotes.list(),
-        ]);
-        const quoteRows = quotes.data || [];
-        setStats({
-          companies: companies.data.length,
-          items: items.data.length,
-          inquiries: inquiries.data.length,
-          quotes: quoteRows.length,
-          pending: quoteRows.filter((quote) => ['draft', 'pending_review', 'approved'].includes(quote.status)).length,
-          finalized: quoteRows.filter((quote) => ['finalized', 'sent'].includes(quote.status)).length,
-        });
+        const response = await quotationAPI.dashboard.retrieve();
+        setStats(response.data);
       } catch (error) {
         const details = await describeQuotationError(
           error,
           'Load quotation dashboard',
-          'GET /quotations/companies/, /quotations/items/, /quotations/inquiries/, /quotations/quotes/'
+          'GET /quotations/dashboard/'
         );
         setErrorInfo(details);
         console.error(formatQuotationError(details), error);

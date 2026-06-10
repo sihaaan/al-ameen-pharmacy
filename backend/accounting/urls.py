@@ -5,6 +5,7 @@ from . import views
 
 router = DefaultRouter()
 router.register(r"customers", views.AccountCustomerViewSet, basename="accounting-customer")
+router.register(r"blocklist", views.AccountingBlocklistViewSet, basename="accounting-blocklist")
 router.register(r"imports", views.AccountingImportViewSet, basename="accounting-import")
 router.register(r"import-customers", views.AccountingImportCustomerViewSet, basename="accounting-import-customer")
 

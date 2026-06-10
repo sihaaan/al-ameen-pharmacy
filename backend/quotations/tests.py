@@ -119,6 +119,24 @@ class QuotationWorkflowTests(APITestCase):
     def create_quote(self):
         return Quotation.objects.create(company=self.company, created_by=self.staff)
 
+    def test_dashboard_endpoint_returns_lightweight_counts(self):
+        quote = self.create_quote()
+        quote.status = Quotation.STATUS_APPROVED
+        quote.save(update_fields=["status", "updated_at"])
+        Quotation.objects.create(company=self.company, created_by=self.staff, status=Quotation.STATUS_FINALIZED)
+        Inquiry.objects.create(company=self.company, created_by=self.staff, subject="Count test")
+
+        response = self.client.get(reverse("quotation-dashboard"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["companies"], 1)
+        self.assertEqual(response.data["items"], 1)
+        self.assertEqual(response.data["inquiries"], 1)
+        self.assertEqual(response.data["quotes"], 2)
+        self.assertEqual(response.data["pending"], 1)
+        self.assertEqual(response.data["finalized"], 1)
+        self.assertNotIn("lines", response.data)
+
     def create_valid_line(self, quotation):
         return QuotationLine.objects.create(
             quotation=quotation,

@@ -48,6 +48,12 @@ const accountingAPI = {
     list: (params = {}) => axiosInstance.get('/accounting/customers/', { params }),
     update: (id, data) => axiosInstance.patch(`/accounting/customers/${id}/`, data),
   },
+  blocklist: {
+    list: (params = {}) => axiosInstance.get('/accounting/blocklist/', { params }),
+    create: (data) => axiosInstance.post('/accounting/blocklist/', data),
+    update: (id, data) => axiosInstance.patch(`/accounting/blocklist/${id}/`, data),
+    delete: (id) => axiosInstance.delete(`/accounting/blocklist/${id}/`),
+  },
 };
 
 export default accountingAPI;

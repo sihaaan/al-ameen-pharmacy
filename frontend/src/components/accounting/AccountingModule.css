@@ -61,6 +61,86 @@
   border-top: 1px solid #e5e7eb;
 }
 
+.accounting-blocklist-manager {
+  margin-top: 14px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: #f8fffd;
+  padding: 12px;
+}
+
+.accounting-panel-heading.compact h4,
+.accounting-panel-heading.compact p {
+  margin: 0;
+}
+
+.accounting-panel-heading.compact h4 {
+  color: #111827;
+}
+
+.accounting-blocklist-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+}
+
+.accounting-blocklist-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.accounting-blocklist-editor input,
+.accounting-blocklist-search input {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #ffffff;
+  font: inherit;
+}
+
+.accounting-blocklist-search,
+.accounting-button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.accounting-blocklist-search {
+  margin-top: 10px;
+}
+
+.accounting-blocklist-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.accounting-blocklist-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.accounting-blocklist-row p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
 .accounting-help-text {
   margin-top: 8px;
   color: #64748b;

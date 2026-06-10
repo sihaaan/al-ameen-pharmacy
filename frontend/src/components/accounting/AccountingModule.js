@@ -73,9 +73,15 @@ const AccountingModule = () => {
   const [categoryFile, setCategoryFile] = useState(null);
   const [applyCategoryFile, setApplyCategoryFile] = useState(null);
   const [blocklistFile, setBlocklistFile] = useState(null);
+  const [blocklistEntries, setBlocklistEntries] = useState([]);
+  const [blocklistSearch, setBlocklistSearch] = useState('');
+  const [blocklistForm, setBlocklistForm] = useState({ name: '', category_hint: '' });
+  const [editingBlocklistId, setEditingBlocklistId] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [applyingCategories, setApplyingCategories] = useState(false);
   const [applyingBlocklist, setApplyingBlocklist] = useState(false);
+  const [savingBlocklist, setSavingBlocklist] = useState(false);
+  const [loadingBlocklist, setLoadingBlocklist] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingEmailId, setSavingEmailId] = useState(null);
@@ -109,6 +115,18 @@ const AccountingModule = () => {
     setDashboard(dashboardRes.data);
     setImports(importsRes.data);
     setSelectedImport((current) => (current ? importsRes.data.find((item) => item.id === current.id) || current : null));
+  };
+
+  const loadBlocklist = async (search = blocklistSearch) => {
+    setLoadingBlocklist(true);
+    try {
+      const response = await accountingAPI.blocklist.list({ active: 'true', ...(search ? { search } : {}) });
+      setBlocklistEntries(response.data || []);
+    } catch (err) {
+      setError((await describeAccountingError(err, 'Load accounting blocklist', 'GET /accounting/blocklist/')).detail);
+    } finally {
+      setLoadingBlocklist(false);
+    }
   };
 
   const loadCustomers = async () => {
@@ -158,6 +176,7 @@ const AccountingModule = () => {
     loadImports().catch(async (err) => {
       setError((await describeAccountingError(err, 'Load accounting dashboard', 'GET /accounting/dashboard/')).detail);
     });
+    loadBlocklist().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -261,11 +280,69 @@ const AccountingModule = () => {
       setBlocklistFile(null);
       if (blocklistInputRef.current) blocklistInputRef.current.value = '';
       await loadImports();
+      await loadBlocklist('');
       await loadCustomers();
     } catch (err) {
       setError((await describeAccountingError(err, 'Apply accounting blocklist', 'POST /accounting/imports/apply_blocklist/')).detail);
     } finally {
       setApplyingBlocklist(false);
+    }
+  };
+
+  const saveBlocklistEntry = async (event) => {
+    event.preventDefault();
+    const name = blocklistForm.name.trim();
+    if (!name) {
+      setError('Enter a company name for the blocklist.');
+      return;
+    }
+    setSavingBlocklist(true);
+    setNotice('');
+    setError('');
+    try {
+      const payload = { name, category_hint: blocklistForm.category_hint.trim(), is_active: true };
+      const response = editingBlocklistId
+        ? await accountingAPI.blocklist.update(editingBlocklistId, payload)
+        : await accountingAPI.blocklist.create(payload);
+      const update = response.data.blocklist_update || {};
+      setNotice(`${editingBlocklistId ? 'Blocklist entry updated' : 'Blocklist entry added'}. ${update.matched_customers || 0} customer profile(s) and ${update.matched_import_customers || 0} import row(s) are excluded.`);
+      setBlocklistForm({ name: '', category_hint: '' });
+      setEditingBlocklistId(null);
+      await loadImports();
+      await loadBlocklist('');
+      await loadCustomers();
+    } catch (err) {
+      setError((await describeAccountingError(err, 'Save accounting blocklist entry', editingBlocklistId ? `PATCH /accounting/blocklist/${editingBlocklistId}/` : 'POST /accounting/blocklist/')).detail);
+    } finally {
+      setSavingBlocklist(false);
+    }
+  };
+
+  const startEditBlocklist = (entry) => {
+    setEditingBlocklistId(entry.id);
+    setBlocklistForm({ name: entry.name || '', category_hint: entry.category_hint || '' });
+  };
+
+  const cancelBlocklistEdit = () => {
+    setEditingBlocklistId(null);
+    setBlocklistForm({ name: '', category_hint: '' });
+  };
+
+  const removeBlocklistEntry = async (entry) => {
+    if (!window.confirm(`Remove "${entry.name}" from the accounting blocklist? Existing ignored customers stay ignored unless you include them manually.`)) return;
+    setSavingBlocklist(true);
+    setError('');
+    setNotice('');
+    try {
+      await accountingAPI.blocklist.delete(entry.id);
+      setNotice(`${entry.name} removed from the active blocklist.`);
+      if (editingBlocklistId === entry.id) cancelBlocklistEdit();
+      await loadImports();
+      await loadBlocklist('');
+    } catch (err) {
+      setError((await describeAccountingError(err, 'Remove accounting blocklist entry', `DELETE /accounting/blocklist/${entry.id}/`)).detail);
+    } finally {
+      setSavingBlocklist(false);
     }
   };
 
@@ -524,14 +601,78 @@ const AccountingModule = () => {
           </form>
           <form className="accounting-inline-form accounting-blocklist-form" onSubmit={applyBlocklist}>
             <label>
-              Accountant blocklist
+              Upload accountant blocklist once
               <input ref={blocklistInputRef} type="file" accept=".xlsx,.csv" onChange={(event) => setBlocklistFile(event.target.files?.[0] || null)} />
             </label>
             <button type="submit" className="accounting-secondary" disabled={applyingBlocklist}>
               {applyingBlocklist ? 'Applying...' : 'Apply Blocklist'}
             </button>
           </form>
-          <p className="accounting-help-text">Blocklisted companies are marked ignored and excluded from statement ZIPs.</p>
+          <p className="accounting-help-text">Blocklisted companies are stored permanently. Future imports automatically mark matching customers ignored and exclude them from statement ZIPs.</p>
+          <div className="accounting-blocklist-manager">
+            <div className="accounting-panel-heading compact">
+              <div>
+                <h4>Blocklisted Companies</h4>
+                <p>{dashboard?.blocklist_count || blocklistEntries.length || 0} active entries</p>
+              </div>
+              <button type="button" className="accounting-secondary" onClick={() => loadBlocklist(blocklistSearch)} disabled={loadingBlocklist}>
+                {loadingBlocklist ? 'Loading...' : 'Refresh'}
+              </button>
+            </div>
+            <form className="accounting-blocklist-editor" onSubmit={saveBlocklistEntry}>
+              <label>
+                Company name
+                <input value={blocklistForm.name} onChange={(event) => setBlocklistForm((current) => ({ ...current, name: event.target.value }))} placeholder="Company to exclude" />
+              </label>
+              <label>
+                Note/category
+                <input value={blocklistForm.category_hint} onChange={(event) => setBlocklistForm((current) => ({ ...current, category_hint: event.target.value }))} placeholder="Optional" />
+              </label>
+              <div className="accounting-button-row">
+                <button type="submit" className="accounting-primary" disabled={savingBlocklist}>
+                  {savingBlocklist ? 'Saving...' : editingBlocklistId ? 'Save Entry' : 'Add Entry'}
+                </button>
+                {editingBlocklistId && (
+                  <button type="button" className="accounting-secondary" onClick={cancelBlocklistEdit}>Cancel</button>
+                )}
+              </div>
+            </form>
+            <div className="accounting-blocklist-search">
+              <input
+                value={blocklistSearch}
+                onChange={(event) => setBlocklistSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    loadBlocklist(event.currentTarget.value);
+                  }
+                }}
+                placeholder="Search active blocklist"
+              />
+              <button type="button" className="accounting-secondary" onClick={() => loadBlocklist(blocklistSearch)}>Search</button>
+            </div>
+            <div className="accounting-blocklist-list">
+              {loadingBlocklist && <div className="accounting-help-text">Loading blocklist...</div>}
+              {!loadingBlocklist && blocklistEntries.length === 0 && (
+                <div className="accounting-empty-state compact">No active blocklist entries yet.</div>
+              )}
+              {blocklistEntries.slice(0, 12).map((entry) => (
+                <div className="accounting-blocklist-row" key={entry.id}>
+                  <div>
+                    <strong>{entry.name}</strong>
+                    <p>{entry.category_hint || entry.source_filename || 'Manual entry'}</p>
+                  </div>
+                  <div className="accounting-button-row">
+                    <button type="button" className="accounting-secondary" onClick={() => startEditBlocklist(entry)}>Edit</button>
+                    <button type="button" className="accounting-danger" onClick={() => removeBlocklistEntry(entry)}>Remove</button>
+                  </div>
+                </div>
+              ))}
+              {blocklistEntries.length > 12 && (
+                <p className="accounting-help-text">Showing 12 entries. Use search to narrow the list.</p>
+              )}
+            </div>
+          </div>
         </section>
 
         <section className="accounting-panel">

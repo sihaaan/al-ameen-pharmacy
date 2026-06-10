@@ -57,6 +57,9 @@ export const formatQuotationError = (errorInfo) => (
 );
 
 const quotationAPI = {
+  dashboard: {
+    retrieve: () => axiosInstance.get('/quotations/dashboard/'),
+  },
   companies: {
     list: (params = {}) => axiosInstance.get('/quotations/companies/', { params }),
     create: (data) => axiosInstance.post('/quotations/companies/', data),

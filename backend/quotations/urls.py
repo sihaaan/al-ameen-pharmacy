@@ -20,6 +20,7 @@ router.register(r"price-history", views.CompanyPriceHistoryViewSet, basename="qu
 router.register(r"audit-logs", views.QuotationAuditLogViewSet, basename="quotation-audit-log")
 
 urlpatterns = [
+    path("dashboard/", views.QuotationDashboardView.as_view(), name="quotation-dashboard"),
     path("settings/", views.QuotationSettingsView.as_view(), name="quotation-settings"),
     path("my-signature/", views.UserQuotationProfileView.as_view(), name="quotation-my-signature"),
     path("", include(router.urls)),

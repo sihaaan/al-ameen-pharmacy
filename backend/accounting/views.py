@@ -4,6 +4,7 @@ from zipfile import ZIP_STORED, ZipFile
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, DecimalField, Max, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
@@ -20,11 +21,13 @@ from .pdf import build_statement_pdf
 from .permissions import IsAccountingUser
 from .serializers import (
     AccountCustomerSerializer,
+    AccountingBlocklistedCustomerSerializer,
     AccountingImportCustomerDetailSerializer,
     AccountingImportCustomerSerializer,
     AccountingImportSerializer,
 )
 from .services import (
+    apply_blocklist_names,
     apply_blocklist_upload,
     apply_category_upload_to_import,
     blocklist_update_message,
@@ -111,6 +114,59 @@ class AccountCustomerViewSet(AccountingBaseViewSet):
         if category:
             queryset = queryset.filter(category=category)
         return queryset.order_by("name")
+
+
+class AccountingBlocklistViewSet(AccountingBaseViewSet):
+    serializer_class = AccountingBlocklistedCustomerSerializer
+    queryset = AccountingBlocklistedCustomer.objects.select_related("created_by").all()
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        search = self.request.query_params.get("search", "").strip()
+        active = self.request.query_params.get("active", "true")
+        if active == "true":
+            queryset = queryset.filter(is_active=True)
+        elif active == "false":
+            queryset = queryset.filter(is_active=False)
+        if search:
+            queryset = queryset.filter(Q(name__icontains=search) | Q(category_hint__icontains=search))
+        return queryset.order_by("name")
+
+    def _save_and_apply(self, serializer):
+        try:
+            with transaction.atomic():
+                entry = serializer.save()
+                applied = apply_blocklist_names([entry.normalized_name]) if entry.is_active else {"matched_customers": 0, "matched_import_customers": 0}
+        except IntegrityError:
+            raise DjangoValidationError("This company is already on the accounting blocklist.")
+        data = AccountingBlocklistedCustomerSerializer(entry, context=self.get_serializer_context()).data
+        data["blocklist_update"] = applied
+        return data
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            data = self._save_and_apply(serializer)
+        except DjangoValidationError as exc:
+            return Response(validation_error_response(exc), status=status.HTTP_400_BAD_REQUEST)
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, *args, **kwargs):
+        serializer = self.get_serializer(self.get_object(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        try:
+            data = self._save_and_apply(serializer)
+        except DjangoValidationError as exc:
+            return Response(validation_error_response(exc), status=status.HTTP_400_BAD_REQUEST)
+        return Response(data)
+
+    def destroy(self, request, *args, **kwargs):
+        entry = self.get_object()
+        entry.is_active = False
+        entry.save(update_fields=["is_active", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):

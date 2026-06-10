@@ -408,6 +408,38 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(summary.status, AccountingImportCustomer.STATUS_IGNORED)
         self.assertEqual(summary.accounting_import.due_customer_count, 1)
 
+    def test_blocklist_entries_can_be_managed_and_apply_to_existing_imports(self):
+        self.client.force_authenticate(self.accountant)
+        upload_response = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+        self.assertEqual(upload_response.status_code, 201)
+
+        create_response = self.client.post(
+            reverse("accounting-blocklist-list"),
+            {"name": "MILLENNIUM AIRPORT HOTEL", "category_hint": "Internal branch"},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(create_response.data["blocklist_update"]["matched_customers"], 1)
+        self.assertEqual(AccountingBlocklistedCustomer.objects.filter(is_active=True).count(), 1)
+        summary = AccountingImportCustomer.objects.get(customer__name="MILLENNIUM AIRPORT HOTEL")
+        summary.accounting_import.refresh_from_db()
+        self.assertTrue(summary.is_ignored)
+        self.assertEqual(summary.accounting_import.due_customer_count, 1)
+
+        update_response = self.client.patch(
+            reverse("accounting-blocklist-detail", args=[create_response.data["id"]]),
+            {"category_hint": "Do not send"},
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(update_response.data["category_hint"], "Do not send")
+
+        delete_response = self.client.delete(reverse("accounting-blocklist-detail", args=[create_response.data["id"]]))
+        self.assertEqual(delete_response.status_code, 204)
+        self.assertFalse(AccountingBlocklistedCustomer.objects.get(pk=create_response.data["id"]).is_active)
+
     def test_same_customer_name_with_different_codes_stays_separate(self):
         buffer = StringIO()
         writer = csv.writer(buffer)

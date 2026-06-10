@@ -189,6 +189,23 @@ class UserQuotationProfileView(APIView):
         return Response(UserQuotationProfileSerializer(profile, context={"request": request}).data)
 
 
+class QuotationDashboardView(APIView):
+    permission_classes = [IsQuotationStaff]
+
+    def get(self, request):
+        quote_queryset = Quotation.objects.filter(is_historical_import=False)
+        return Response(
+            {
+                "companies": Company.objects.filter(is_active=True).count(),
+                "items": Product.objects.exclude(status="archived").count(),
+                "inquiries": Inquiry.objects.count(),
+                "quotes": quote_queryset.count(),
+                "pending": quote_queryset.filter(status__in=["draft", "pending_review", "approved"]).count(),
+                "finalized": quote_queryset.filter(status__in=["finalized", "sent"]).count(),
+            }
+        )
+
+
 class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = CompanySerializer
     queryset = Company.objects.prefetch_related("contacts")

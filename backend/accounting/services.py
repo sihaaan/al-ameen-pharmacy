@@ -158,6 +158,33 @@ def blocklist_update_message(result):
     )
 
 
+def apply_blocklist_names(normalized_names):
+    normalized_names = [name for name in normalized_names if name]
+    if not normalized_names:
+        return {"matched_customers": 0, "matched_import_customers": 0}
+
+    customers = AccountCustomer.objects.filter(normalized_name__in=normalized_names)
+    matched_customers = customers.count()
+    customers.update(is_ignored=True, updated_at=timezone.now())
+
+    summaries = AccountingImportCustomer.objects.filter(customer__normalized_name__in=normalized_names)
+    matched_import_customers = summaries.count()
+    affected_import_ids = list(summaries.values_list("accounting_import_id", flat=True).distinct())
+    summaries.update(
+        is_ignored=True,
+        is_due=False,
+        status=AccountingImportCustomer.STATUS_IGNORED,
+        updated_at=timezone.now(),
+    )
+    for import_record in AccountingImport.objects.filter(id__in=affected_import_ids):
+        refresh_import_counts(import_record)
+
+    return {
+        "matched_customers": matched_customers,
+        "matched_import_customers": matched_import_customers,
+    }
+
+
 @transaction.atomic
 def apply_blocklist_upload(*, blocklist_file, actor=None):
     parsed = parse_blocklist_upload(blocklist_file)
@@ -182,21 +209,7 @@ def apply_blocklist_upload(*, blocklist_file, actor=None):
         else:
             existing += 1
 
-    customers = AccountCustomer.objects.filter(normalized_name__in=normalized_names)
-    matched_customers = customers.count()
-    customers.update(is_ignored=True, updated_at=timezone.now())
-
-    summaries = AccountingImportCustomer.objects.filter(customer__normalized_name__in=normalized_names)
-    matched_import_customers = summaries.count()
-    affected_import_ids = list(summaries.values_list("accounting_import_id", flat=True).distinct())
-    summaries.update(
-        is_ignored=True,
-        is_due=False,
-        status=AccountingImportCustomer.STATUS_IGNORED,
-        updated_at=timezone.now(),
-    )
-    for import_record in AccountingImport.objects.filter(id__in=affected_import_ids):
-        refresh_import_counts(import_record)
+    applied = apply_blocklist_names(normalized_names)
 
     return {
         "filename": parsed.filename,
@@ -204,8 +217,8 @@ def apply_blocklist_upload(*, blocklist_file, actor=None):
         "loaded": len(parsed.entries),
         "created": created,
         "existing": existing,
-        "matched_customers": matched_customers,
-        "matched_import_customers": matched_import_customers,
+        "matched_customers": applied["matched_customers"],
+        "matched_import_customers": applied["matched_import_customers"],
         "warnings": parsed.warnings[:50],
     }
 
