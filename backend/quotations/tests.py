@@ -228,6 +228,14 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(CompanyPriceHistory.objects.count(), 1)
 
+    def test_quotation_number_generation_retries_after_collision(self):
+        Quotation.objects.create(company=self.company, created_by=self.staff, quotation_number="QT-COLLIDE")
+
+        with patch.object(Quotation, "_generate_quotation_number", side_effect=["QT-COLLIDE", "QT-COLLIDE-2"]):
+            quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
+
+        self.assertEqual(quotation.quotation_number, "QT-COLLIDE-2")
+
     def test_quote_product_price_uses_latest_company_history(self):
         historical_quote = self.create_quote()
         self.create_valid_line(historical_quote)
@@ -3563,6 +3571,29 @@ class QuotationSettingsTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_draft_pdf_includes_watermark(self):
+        quotation = self.create_valid_quote()
+        quotation.status = Quotation.STATUS_DRAFT
+        quotation.save(update_fields=["status", "updated_at"])
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        text = extract_pdf_text(response.content)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("DRAFT", text)
+
+    @override_settings(QUOTATION_LOGO_PATH="https://example.com/logo.png", QUOTATION_PDF_ALLOW_REMOTE_IMAGES=False)
+    @patch("quotations.pdf.urlopen")
+    def test_pdf_does_not_fetch_remote_images_by_default(self, mock_urlopen):
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_urlopen.assert_not_called()
 
     def test_pdf_wraps_long_customer_name_in_metadata_table(self):
         self.company.name = "Makharaafi International Technical Contracting and Facilities Management Services LLC"

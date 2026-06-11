@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -915,9 +915,24 @@ class Quotation(models.Model):
         return self.status in self.EDITABLE_STATUSES
 
     def save(self, *args, **kwargs):
-        if not self.quotation_number:
+        generated_number = not self.quotation_number
+        if generated_number:
             self.quotation_number = self._generate_quotation_number()
-        super().save(*args, **kwargs)
+        try:
+            with transaction.atomic():
+                super().save(*args, **kwargs)
+        except IntegrityError:
+            if not generated_number or not self._state.adding:
+                raise
+            for _ in range(3):
+                self.quotation_number = self._generate_quotation_number()
+                try:
+                    with transaction.atomic():
+                        super().save(*args, **kwargs)
+                    return
+                except IntegrityError:
+                    continue
+            raise
 
     @classmethod
     def _generate_quotation_number(cls):

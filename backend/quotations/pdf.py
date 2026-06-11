@@ -89,9 +89,12 @@ def _resolve_image_source(source):
     max_bytes = int(getattr(settings, "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", 2 * 1024 * 1024))
 
     if parsed.scheme in {"http", "https"}:
+        if not getattr(settings, "QUOTATION_PDF_ALLOW_REMOTE_IMAGES", False):
+            return None
         try:
             request = Request(source, headers={"User-Agent": "AlAmeenQuotationPDF/1.0"})
-            with urlopen(request, timeout=6) as response:
+            timeout = float(getattr(settings, "QUOTATION_PDF_REMOTE_IMAGE_TIMEOUT_SECONDS", 2.0))
+            with urlopen(request, timeout=timeout) as response:
                 image_bytes = response.read(max_bytes + 1)
             if len(image_bytes) > max_bytes:
                 return None
@@ -277,7 +280,25 @@ def _build_header(config, quotation, quote_date, styles):
     return header
 
 
+def _draw_draft_watermark(canvas, doc):
+    quotation = getattr(doc, "quotation", None)
+    if not quotation or quotation.status not in {quotation.STATUS_DRAFT, quotation.STATUS_PENDING_REVIEW, quotation.STATUS_APPROVED}:
+        return
+    canvas.saveState()
+    try:
+        canvas.setFillAlpha(0.08)
+    except AttributeError:
+        pass
+    canvas.setFillColor(MUTED)
+    canvas.setFont("Helvetica-Bold", 64)
+    canvas.translate(A4[0] / 2, A4[1] / 2)
+    canvas.rotate(35)
+    canvas.drawCentredString(0, 0, "DRAFT")
+    canvas.restoreState()
+
+
 def _footer(canvas, doc):
+    _draw_draft_watermark(canvas, doc)
     canvas.saveState()
     canvas.setStrokeColor(BORDER)
     canvas.setLineWidth(0.3)
@@ -302,6 +323,7 @@ def build_quotation_pdf(quotation):
         bottomMargin=18 * mm,
         title=quotation.quotation_number,
     )
+    doc.quotation = quotation
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="BrandName", parent=styles["Title"], fontSize=18, leading=22, textColor=primary))
     styles.add(ParagraphStyle(name="BrandArabic", parent=styles["Normal"], fontSize=10, leading=13, textColor=MUTED))
