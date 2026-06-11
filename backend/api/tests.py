@@ -10,6 +10,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from .emails import send_staff_order_notification_email
 from .models import Cart, CartItem, Order, OrderItem, Product
 from .throttles import PasswordResetRateThrottle
 
@@ -181,3 +182,35 @@ class CartOrderSafetyTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["user_email"], "buyer@example.com")
         self.assertEqual(response.data["username"], "")
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        FRONTEND_URL="https://shop.example.com",
+        ORDER_NOTIFICATION_EMAILS=["orders@example.com"],
+    )
+    def test_staff_order_notification_includes_admin_and_whatsapp_links(self):
+        order = Order.objects.create(
+            user=self.user,
+            full_name="Buyer",
+            email="buyer@example.com",
+            phone="0501234567",
+            address="Dubai",
+            city="Dubai",
+            emirate="Dubai",
+            total_amount=Decimal("12.50"),
+        )
+        OrderItem.objects.create(
+            order=order,
+            product=self.product,
+            product_name=self.product.name,
+            quantity=1,
+            price_at_purchase=Decimal("12.50"),
+        )
+
+        sent_count = send_staff_order_notification_email(order)
+
+        self.assertEqual(sent_count, 1)
+        self.assertEqual(mail.outbox[-1].to, ["orders@example.com"])
+        self.assertIn(order.order_number, mail.outbox[-1].subject)
+        self.assertIn("https://shop.example.com/admin", mail.outbox[-1].body)
+        self.assertIn("https://wa.me/971501234567", mail.outbox[-1].body)

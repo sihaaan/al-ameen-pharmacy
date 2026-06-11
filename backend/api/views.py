@@ -35,6 +35,7 @@ from .serializers import (
 )
 from .emails import (
     send_order_confirmation_email,
+    send_staff_order_notification_email,
     send_order_status_update_email,
     send_welcome_email,
     send_password_reset_email
@@ -52,9 +53,18 @@ logger = logging.getLogger(__name__)
 def _send_order_confirmation_after_commit(order_id):
     try:
         order = Order.objects.prefetch_related('items').get(pk=order_id)
+    except Order.DoesNotExist:
+        logger.warning("Order confirmation skipped because order %s no longer exists", order_id)
+        return
+
+    try:
         send_order_confirmation_email(order)
     except Exception as email_error:
         logger.warning("Order confirmation email failed for order %s: %s", order_id, email_error)
+    try:
+        send_staff_order_notification_email(order)
+    except Exception as email_error:
+        logger.warning("Staff order notification email failed for order %s: %s", order_id, email_error)
 
 
 def _send_order_status_after_commit(order_id, old_status):

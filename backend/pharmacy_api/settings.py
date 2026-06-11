@@ -271,6 +271,11 @@ EMAIL_USE_TLS = bool(int(os.environ.get('EMAIL_USE_TLS', '1')))
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@alameenpharmacy.com')
+ORDER_NOTIFICATION_EMAILS = [
+    email.strip()
+    for email in os.environ.get('ORDER_NOTIFICATION_EMAILS', '').split(',')
+    if email.strip()
+]
 
 # To use Gmail SMTP in production, add to .env:
 # EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
