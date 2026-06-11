@@ -518,6 +518,15 @@ class CartViewSet(viewsets.ViewSet):
     """Custom ViewSet for Cart operations."""
     permission_classes = [IsAuthenticated]
 
+    def _cart_product_block_reason(self, product):
+        if not product or product.status != 'active':
+            return 'This product is not currently available for online checkout.'
+        if product.requires_prescription:
+            return 'This product requires prescription review. Please send an inquiry instead of adding it to cart.'
+        if not product.show_price:
+            return 'This product is inquiry-only and cannot be added to cart directly.'
+        return ''
+
     def _parse_quantity(self, value, *, allow_zero=False):
         try:
             quantity = int(value)
@@ -555,11 +564,9 @@ class CartViewSet(viewsets.ViewSet):
             with transaction.atomic():
                 cart, _ = Cart.objects.select_for_update().get_or_create(user=request.user)
                 product = Product.objects.select_for_update().get(id=product_id, status='active')
-                if product.requires_prescription or not product.show_price:
-                    return Response(
-                        {'error': 'This product cannot be added to cart directly. Please send an inquiry.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                block_reason = self._cart_product_block_reason(product)
+                if block_reason:
+                    return Response({'error': block_reason}, status=status.HTTP_400_BAD_REQUEST)
                 if product.stock_quantity < quantity:
                     return Response(
                         {'error': f'Only {product.stock_quantity} items in stock'},
@@ -608,6 +615,10 @@ class CartViewSet(viewsets.ViewSet):
         if quantity <= 0:
             cart_item.delete()
             return Response({'message': 'Item removed from cart'})
+
+        block_reason = self._cart_product_block_reason(cart_item.product)
+        if block_reason:
+            return Response({'error': block_reason}, status=status.HTTP_400_BAD_REQUEST)
 
         if quantity > cart_item.product.stock_quantity:
             return Response(

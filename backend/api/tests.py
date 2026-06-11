@@ -146,6 +146,65 @@ class CartOrderSafetyTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"], "Quantity must be a whole number")
 
+    def test_cart_rejects_prescription_products(self):
+        self.product.requires_prescription = True
+        self.product.save(update_fields=["requires_prescription"])
+
+        response = self.client.post(reverse("cart-add-item"), {"product_id": self.product.id, "quantity": 1}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("prescription", response.data["error"].lower())
+        self.assertFalse(CartItem.objects.exists())
+
+    def test_cart_rejects_inquiry_only_products(self):
+        self.product.show_price = False
+        self.product.save(update_fields=["show_price"])
+
+        response = self.client.post(reverse("cart-add-item"), {"product_id": self.product.id, "quantity": 1}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("inquiry-only", response.data["error"])
+        self.assertFalse(CartItem.objects.exists())
+
+    def test_cart_update_rejects_stale_prescription_item(self):
+        cart, _ = Cart.objects.get_or_create(user=self.user)
+        cart_item = CartItem.objects.create(cart=cart, product=self.product, quantity=1)
+        self.product.requires_prescription = True
+        self.product.save(update_fields=["requires_prescription"])
+
+        response = self.client.patch(reverse("cart-update-item"), {"cart_item_id": cart_item.id, "quantity": 2}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("prescription", response.data["error"].lower())
+        cart_item.refresh_from_db()
+        self.assertEqual(cart_item.quantity, 1)
+
+    def test_checkout_rejects_stale_inquiry_only_item(self):
+        cart, _ = Cart.objects.get_or_create(user=self.user)
+        CartItem.objects.create(cart=cart, product=self.product, quantity=1)
+        self.product.show_price = False
+        self.product.save(update_fields=["show_price"])
+
+        response = self.client.post(
+            reverse("order-list"),
+            {
+                "full_name": "Buyer",
+                "email": "buyer@example.com",
+                "phone": "0501234567",
+                "address": "Dubai",
+                "city": "Dubai",
+                "emirate": "Dubai",
+                "payment_method": "cash_on_delivery",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(self.product.name, response.data["error"])
+        self.assertEqual(Order.objects.count(), 0)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock_quantity, 5)
+
     @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
     def test_checkout_creates_order_atomically_and_decrements_stock(self):
         cart, _ = Cart.objects.get_or_create(user=self.user)
