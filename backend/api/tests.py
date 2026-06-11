@@ -32,9 +32,13 @@ class DeploymentOriginSettingsTests(SimpleTestCase):
 
         self.assertEqual(origins, ["https://*.up.railway.app"])
 
-    def test_normalize_origin_rejects_paths_and_non_http_schemes(self):
-        with self.assertRaises(ImproperlyConfigured):
-            normalize_origin("https://example.com/admin")
+    def test_normalize_origin_extracts_origin_from_full_url(self):
+        self.assertEqual(
+            normalize_origin("https://example.com/admin/login?next=/"),
+            "https://example.com",
+        )
+
+    def test_normalize_origin_rejects_non_http_schemes(self):
         with self.assertRaises(ImproperlyConfigured):
             normalize_origin("ftp://example.com")
 

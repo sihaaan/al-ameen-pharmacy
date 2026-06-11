@@ -51,8 +51,6 @@ def normalize_origin(value, *, allow_wildcard=False):
         hostname = hostname[2:]
     if parsed.scheme not in {"http", "https"} or not hostname:
         raise ImproperlyConfigured(f"Invalid origin configured: {value!r}")
-    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
-        raise ImproperlyConfigured(f"Origin must not include a path or query string: {value!r}")
     if parsed.port:
         return f"{parsed.scheme}://{parsed.netloc.lower()}"
     return f"{parsed.scheme}://{parsed.netloc.lower()}"
