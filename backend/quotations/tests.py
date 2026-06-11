@@ -48,6 +48,7 @@ from .models import (
 from .pdf_config import get_quotation_pdf_config
 from .matching import apply_match_to_preview_line, suggest_product_for_text
 from .ocr import OCRProviderUnavailable, get_ocr_provider
+from .services import recalculate_quotation_totals
 
 
 def make_png_bytes(color=(15, 118, 110, 255)):
@@ -478,6 +479,38 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(len(sheet.merged_cells.ranges), 0)
         self.assertIsNone(sheet.freeze_panes)
         self.assertIsNone(sheet.auto_filter.ref)
+
+    def test_ignored_lines_are_excluded_from_totals_pdf_and_excel(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="Internal skipped item",
+            quantity=Decimal("3.000"),
+            unit="box",
+            unit_price=Decimal("99.00"),
+            vat_rate=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_IGNORED,
+        )
+
+        recalculate_quotation_totals(quotation)
+        quotation.refresh_from_db()
+
+        self.assertEqual(quotation.subtotal, Decimal("20.00"))
+        self.assertEqual(quotation.total, Decimal("20.00"))
+
+        pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        self.assertEqual(pdf_response.status_code, status.HTTP_200_OK)
+        pdf_text = extract_pdf_text(pdf_response.content)
+        self.assertIn("Bandage Pack", pdf_text)
+        self.assertNotIn("Internal skipped item", pdf_text)
+
+        excel_response = self.client.get(reverse("quotation-excel", args=[quotation.id]))
+        self.assertEqual(excel_response.status_code, status.HTTP_200_OK)
+        workbook = load_workbook(BytesIO(excel_response.content), data_only=True)
+        values = [cell.value for row in workbook["Quotation"].iter_rows() for cell in row]
+        self.assertIn("Bandage Pack", values)
+        self.assertNotIn("Internal skipped item", values)
 
     def test_quote_payment_terms_can_be_selected_and_exported(self):
         quotation = self.create_quote()

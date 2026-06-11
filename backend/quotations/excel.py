@@ -5,6 +5,7 @@ from django.utils import timezone
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
+from .models import QuotationLine
 from .pdf_config import get_quotation_pdf_config
 
 
@@ -99,7 +100,8 @@ def build_quotation_excel(quotation):
         cell.border = header_border
 
     money_format = "#,##0.00"
-    for index, line in enumerate(quotation.lines.order_by("sort_order", "id"), start=1):
+    lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).order_by("sort_order", "id")
+    for index, line in enumerate(lines, start=1):
         row = table_start + index
         values = [
             index,
@@ -125,7 +127,7 @@ def build_quotation_excel(quotation):
             elif column in {5, 7, 8}:
                 cell.number_format = money_format
 
-    last_line_row = table_start + max(quotation.lines.count(), 1)
+    last_line_row = table_start + max(lines.count(), 1)
     totals_start = last_line_row + 2
     totals = [
         ("Subtotal", _safe_number(quotation.subtotal)),

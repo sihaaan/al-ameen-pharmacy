@@ -50,7 +50,7 @@ def ensure_quotation_editable(quotation):
 
 
 def recalculate_quotation_totals(quotation):
-    totals = quotation.lines.aggregate(
+    totals = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).aggregate(
         subtotal=Sum("line_subtotal"),
         vat_total=Sum("vat_amount"),
         total=Sum("line_total"),

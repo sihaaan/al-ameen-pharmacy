@@ -16,6 +16,7 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .models import QuotationLine
 from .pdf_config import get_quotation_pdf_config
 
 
@@ -371,7 +372,7 @@ def build_quotation_pdf(quotation):
             Paragraph("Total", styles["TableHeader"]),
         ]
     ]
-    lines = quotation.lines.select_related("product", "product_image").order_by("sort_order", "id")
+    lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).select_related("product", "product_image").order_by("sort_order", "id")
     for index, line in enumerate(lines, start=1):
         item_text = _text(line.item_name_snapshot)
         details = []
@@ -424,7 +425,7 @@ def build_quotation_pdf(quotation):
         )
     )
     elements.append(line_table)
-    line_count = max(quotation.lines.count(), 1)
+    line_count = max(lines.count(), 1)
 
     totals_table = Table(
         [

@@ -44,10 +44,16 @@ def database_host(database_url):
 
 
 # ---- security & debug from env ----
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only")
-DEBUG = env_bool("DEBUG", True)
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+DEBUG = env_bool("DEBUG", False)
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "dev-only"
+    else:
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DEBUG=False.")
+ALLOWED_HOSTS = [host.strip() for host in os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if host.strip()]
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///db.sqlite3")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 # Safety guard: local DEBUG mode must not accidentally write to production Neon.
 # If you intentionally use a separate Neon development branch locally, set
@@ -162,7 +168,7 @@ QUOTATION_DEFAULT_TERMS = os.environ.get(
     "QUOTATION_DEFAULT_TERMS",
     "Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
 )
-QUOTATION_VALIDITY_DAYS = int(os.environ.get("QUOTATION_VALIDITY_DAYS", "14"))
+QUOTATION_VALIDITY_DAYS = int(os.environ.get("QUOTATION_VALIDITY_DAYS", "30"))
 QUOTATION_PAYMENT_TERMS = os.environ.get("QUOTATION_PAYMENT_TERMS", "Payment terms to be confirmed with the customer.")
 QUOTATION_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_IMPORT_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 QUOTATION_IMPORT_MAX_EXCEL_ROWS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_ROWS", "500"))
@@ -298,17 +304,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
-USE_TZ = True
-
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.2/howto/static-files/
-
-STATIC_URL = 'static/'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -341,3 +337,6 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.AllowAny",  # start open; we’ll lock views we need
     ),
 }
+REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"] = (
+    "rest_framework.permissions.IsAuthenticated",
+)

@@ -28,6 +28,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Passwords don't match!")
         return data
 
+    def validate_email(self, value):
+        email = (value or "").strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return email
+
     def create(self, validated_data):
         validated_data.pop('password_confirm')
         user = User.objects.create_user(
@@ -389,8 +395,12 @@ class OrderSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'user', 'username', 'user_email', 'order_number',
-            'status_display', 'payment_method_display', 'payment_status_display',
-            'stripe_payment_intent_id', 'created_at', 'updated_at'
+            'full_name', 'email', 'phone', 'address', 'city', 'emirate', 'delivery_notes',
+            'status', 'status_display',
+            'payment_method', 'payment_method_display',
+            'payment_status', 'payment_status_display',
+            'stripe_payment_intent_id', 'total_amount', 'items',
+            'created_at', 'updated_at', 'delivered_at'
         ]
 
 
