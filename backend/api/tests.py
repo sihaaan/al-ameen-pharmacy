@@ -12,7 +12,7 @@ from rest_framework.test import APITestCase
 
 from .emails import send_staff_order_notification_email
 from .models import Cart, CartItem, Order, OrderItem, Product
-from .throttles import PasswordResetRateThrottle
+from .throttles import LoginRateThrottle, PasswordResetRateThrottle
 
 
 class AuthSafetyTests(APITestCase):
@@ -71,6 +71,24 @@ class AuthSafetyTests(APITestCase):
         with patch.object(PasswordResetRateThrottle, "THROTTLE_RATES", {"password_reset": "1/hour"}):
             first_response = self.client.post(reverse("password-reset-request"), {"email": "nobody@example.com"})
             second_response = self.client.post(reverse("password-reset-request"), {"email": "nobody@example.com"})
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_jwt_login_is_throttled(self):
+        User.objects.create_user(username="buyer", email="buyer@example.com", password="StrongPass123!")
+
+        with patch.object(LoginRateThrottle, "THROTTLE_RATES", {"login": "1/hour"}):
+            first_response = self.client.post(
+                reverse("token_obtain_pair"),
+                {"username": "buyer", "password": "StrongPass123!"},
+                format="json",
+            )
+            second_response = self.client.post(
+                reverse("token_obtain_pair"),
+                {"username": "buyer", "password": "StrongPass123!"},
+                format="json",
+            )
 
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)

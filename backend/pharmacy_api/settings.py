@@ -354,6 +354,8 @@ REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"] = (
 )
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "registration": os.environ.get("REGISTRATION_THROTTLE_RATE", "20/hour"),
+    "login": os.environ.get("LOGIN_THROTTLE_RATE", "10/minute"),
+    "token_refresh": os.environ.get("TOKEN_REFRESH_THROTTLE_RATE", "30/minute"),
     "password_reset": os.environ.get("PASSWORD_RESET_THROTTLE_RATE", "5/hour"),
     "password_reset_confirm": os.environ.get("PASSWORD_RESET_CONFIRM_THROTTLE_RATE", "20/hour"),
 }

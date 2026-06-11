@@ -5,6 +5,14 @@ class RegistrationRateThrottle(UserRateThrottle):
     scope = "registration"
 
 
+class LoginRateThrottle(UserRateThrottle):
+    scope = "login"
+
+
+class TokenRefreshRateThrottle(UserRateThrottle):
+    scope = "token_refresh"
+
+
 class PasswordResetRateThrottle(UserRateThrottle):
     scope = "password_reset"
 
