@@ -342,3 +342,8 @@ REST_FRAMEWORK = {
 REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"] = (
     "rest_framework.permissions.IsAuthenticated",
 )
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    "registration": os.environ.get("REGISTRATION_THROTTLE_RATE", "20/hour"),
+    "password_reset": os.environ.get("PASSWORD_RESET_THROTTLE_RATE", "5/hour"),
+    "password_reset_confirm": os.environ.get("PASSWORD_RESET_CONFIRM_THROTTLE_RATE", "20/hour"),
+}

@@ -375,11 +375,21 @@ class OrderItemSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     """Complete order serializer."""
     items = OrderItemSerializer(many=True, read_only=True)
-    user_email = serializers.EmailField(source='user.email', read_only=True)
-    username = serializers.CharField(source='user.username', read_only=True)
+    user_email = serializers.SerializerMethodField()
+    username = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     payment_method_display = serializers.CharField(source='get_payment_method_display', read_only=True)
     payment_status_display = serializers.CharField(source='get_payment_status_display', read_only=True)
+
+    def get_user_email(self, obj):
+        if obj.user_id and obj.user:
+            return obj.user.email
+        return obj.email
+
+    def get_username(self, obj):
+        if obj.user_id and obj.user:
+            return obj.user.username
+        return ""
 
     class Meta:
         model = Order

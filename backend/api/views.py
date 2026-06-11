@@ -1,7 +1,7 @@
 import logging
 
 from rest_framework import viewsets, status, permissions, mixins
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth.models import User
@@ -39,6 +39,11 @@ from .emails import (
     send_welcome_email,
     send_password_reset_email
 )
+from .throttles import (
+    PasswordResetConfirmRateThrottle,
+    PasswordResetRateThrottle,
+    RegistrationRateThrottle,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,7 @@ def _send_order_status_after_commit(order_id, old_status):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([RegistrationRateThrottle])
 def register_user(request):
     """Register a new user account."""
     serializer = UserRegistrationSerializer(data=request.data)
@@ -93,6 +99,7 @@ def get_current_user(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([PasswordResetRateThrottle])
 def request_password_reset(request):
     """Request password reset - sends email with reset link."""
     email = request.data.get('email', '').strip()
@@ -129,6 +136,7 @@ def request_password_reset(request):
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
+@throttle_classes([PasswordResetConfirmRateThrottle])
 def reset_password_confirm(request):
     """Confirm password reset with token."""
     token = request.data.get('token', '').strip()

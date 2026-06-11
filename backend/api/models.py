@@ -533,7 +533,9 @@ class Order(models.Model):
 
     user = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name='orders'
     )
     order_number = models.CharField(max_length=50, unique=True, blank=True)
@@ -585,7 +587,8 @@ class Order(models.Model):
         ]
 
     def __str__(self):
-        return f"Order #{self.order_number} - {self.user.username}"
+        buyer = self.user.username if self.user_id and self.user else self.email or "deleted user"
+        return f"Order #{self.order_number} - {buyer}"
 
     def save(self, *args, **kwargs):
         if not self.order_number:

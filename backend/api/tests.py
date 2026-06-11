@@ -1,7 +1,9 @@
 import re
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.core import mail
 from django.test import override_settings
 from django.urls import reverse
@@ -9,9 +11,13 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import Cart, CartItem, Order, OrderItem, Product
+from .throttles import PasswordResetRateThrottle
 
 
 class AuthSafetyTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+
     def test_registration_rejects_duplicate_email_case_insensitively(self):
         User.objects.create_user(username="existing", email="buyer@example.com", password="pass")
 
@@ -58,6 +64,15 @@ class AuthSafetyTests(APITestCase):
             format="json",
         )
         self.assertEqual(reused_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_password_reset_request_is_throttled(self):
+        with patch.object(PasswordResetRateThrottle, "THROTTLE_RATES", {"password_reset": "1/hour"}):
+            first_response = self.client.post(reverse("password-reset-request"), {"email": "nobody@example.com"})
+            second_response = self.client.post(reverse("password-reset-request"), {"email": "nobody@example.com"})
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
 
 class CartOrderSafetyTests(APITestCase):
@@ -142,3 +157,27 @@ class CartOrderSafetyTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Cannot change order", response.data["error"])
+
+    def test_order_survives_user_deletion_and_stays_staff_visible(self):
+        order = Order.objects.create(
+            user=self.user,
+            full_name="Buyer",
+            email="buyer@example.com",
+            phone="0501234567",
+            address="Dubai",
+            city="Dubai",
+            emirate="Dubai",
+            total_amount=Decimal("12.50"),
+        )
+
+        self.user.delete()
+        order.refresh_from_db()
+
+        self.assertIsNone(order.user)
+
+        self.client.force_authenticate(self.staff)
+        response = self.client.get(reverse("order-detail", args=[order.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["user_email"], "buyer@example.com")
+        self.assertEqual(response.data["username"], "")
