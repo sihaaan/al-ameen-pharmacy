@@ -121,8 +121,11 @@ export const AuthProvider = ({ children }) => {
         refresh,
       });
 
-      const { access } = response.data;
+      const { access, refresh: rotatedRefresh } = response.data;
       localStorage.setItem('token', access);
+      if (rotatedRefresh) {
+        localStorage.setItem('refreshToken', rotatedRefresh);
+      }
       axios.defaults.headers.common['Authorization'] = `Bearer ${access}`;
 
       return true;

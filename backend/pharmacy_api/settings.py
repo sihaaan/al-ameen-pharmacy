@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+from datetime import timedelta
 from pathlib import Path
 import os
 import re
@@ -78,6 +79,7 @@ INSTALLED_APPS = [
     'django.contrib.admin','django.contrib.auth','django.contrib.contenttypes',
     'django.contrib.sessions','django.contrib.messages','django.contrib.staticfiles',
     'rest_framework','corsheaders',
+    'rest_framework_simplejwt.token_blacklist',
     'cloudinary_storage',  # Must be before django.contrib.staticfiles
     'cloudinary',
     'api',
@@ -358,4 +360,12 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "token_refresh": os.environ.get("TOKEN_REFRESH_THROTTLE_RATE", "30/minute"),
     "password_reset": os.environ.get("PASSWORD_RESET_THROTTLE_RATE", "5/hour"),
     "password_reset_confirm": os.environ.get("PASSWORD_RESET_CONFIRM_THROTTLE_RATE", "20/hour"),
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.environ.get("JWT_ACCESS_TOKEN_MINUTES", "30"))),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.environ.get("JWT_REFRESH_TOKEN_DAYS", "14"))),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
 }

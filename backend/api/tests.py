@@ -93,6 +93,39 @@ class AuthSafetyTests(APITestCase):
         self.assertEqual(first_response.status_code, status.HTTP_200_OK)
         self.assertEqual(second_response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
+    def test_jwt_refresh_rotates_and_blacklists_old_refresh_token(self):
+        User.objects.create_user(username="buyer", email="buyer@example.com", password="StrongPass123!")
+        token_response = self.client.post(
+            reverse("token_obtain_pair"),
+            {"username": "buyer", "password": "StrongPass123!"},
+            format="json",
+        )
+        original_refresh = token_response.data["refresh"]
+
+        refresh_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": original_refresh},
+            format="json",
+        )
+        reused_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": original_refresh},
+            format="json",
+        )
+        new_refresh_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": refresh_response.data["refresh"]},
+            format="json",
+        )
+
+        self.assertEqual(token_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(refresh_response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", refresh_response.data)
+        self.assertIn("refresh", refresh_response.data)
+        self.assertNotEqual(refresh_response.data["refresh"], original_refresh)
+        self.assertEqual(reused_response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(new_refresh_response.status_code, status.HTTP_200_OK)
+
 
 class CartOrderSafetyTests(APITestCase):
     def setUp(self):
