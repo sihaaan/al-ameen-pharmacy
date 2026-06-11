@@ -3594,6 +3594,33 @@ class QuotationSettingsTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         mock_urlopen.assert_not_called()
+        self.assertNotIn("Al Ameen Pharmacy", extract_pdf_text(response.content))
+
+    @override_settings(
+        QUOTATION_LOGO_PATH="https://res.cloudinary.com/demo/logo.png",
+        QUOTATION_PDF_ALLOW_REMOTE_IMAGES=False,
+        QUOTATION_PDF_ALLOWED_REMOTE_IMAGE_HOSTS=["res.cloudinary.com"],
+    )
+    @patch("quotations.pdf.urlopen")
+    def test_pdf_can_fetch_allowlisted_cloudinary_images(self, mock_urlopen):
+        class MockImageResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=-1):
+                return make_png_bytes()
+
+        mock_urlopen.return_value = MockImageResponse()
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_urlopen.assert_called_once()
 
     def test_pdf_wraps_long_customer_name_in_metadata_table(self):
         self.company.name = "Makharaafi International Technical Contracting and Facilities Management Services LLC"

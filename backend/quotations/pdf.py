@@ -89,7 +89,14 @@ def _resolve_image_source(source):
     max_bytes = int(getattr(settings, "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", 2 * 1024 * 1024))
 
     if parsed.scheme in {"http", "https"}:
-        if not getattr(settings, "QUOTATION_PDF_ALLOW_REMOTE_IMAGES", False):
+        allowed_hosts = {
+            str(host).strip().lower()
+            for host in getattr(settings, "QUOTATION_PDF_ALLOWED_REMOTE_IMAGE_HOSTS", [])
+            if str(host).strip()
+        }
+        host = (parsed.hostname or "").lower()
+        remote_allowed = getattr(settings, "QUOTATION_PDF_ALLOW_REMOTE_IMAGES", False) or host in allowed_hosts
+        if not remote_allowed:
             return None
         try:
             request = Request(source, headers={"User-Agent": "AlAmeenQuotationPDF/1.0"})
@@ -135,8 +142,23 @@ def _image(source, max_width, max_height):
         return ""
 
 
+def _bundled_logo_path():
+    candidate = Path(settings.BASE_DIR).parent / "frontend" / "public" / "brand" / "al-ameen-pharmacy-logo-dark.png"
+    return str(candidate) if candidate.exists() else ""
+
+
+def _brand_image(source, max_width, max_height):
+    image = _image(source, max_width=max_width, max_height=max_height)
+    if image:
+        return image
+    fallback = _bundled_logo_path()
+    if fallback and str(fallback) != str(source or ""):
+        return _image(fallback, max_width=max_width, max_height=max_height)
+    return ""
+
+
 def _logo(path, max_width=60 * mm, max_height=26 * mm):
-    return _image(path, max_width=max_width, max_height=max_height)
+    return _brand_image(path, max_width=max_width, max_height=max_height)
 
 
 def _product_thumbnail(source):
@@ -211,7 +233,7 @@ def _build_header(config, quotation, quote_date, styles):
     logo_flowable = (
         ""
         if logo_layout == "no_logo"
-        else _image(
+        else _brand_image(
             config.logo_path,
             max_width=78 * mm if logo_layout == "full_logo_only" else 60 * mm,
             max_height=28 * mm if logo_layout == "full_logo_only" else 26 * mm,
@@ -262,7 +284,7 @@ def _build_header(config, quotation, quote_date, styles):
     else:
         logo_width = 34 * mm if logo_layout == "icon_left_company_text" else 42 * mm
         logo_height = 20 * mm if logo_layout == "icon_left_company_text" else 22 * mm
-        small_logo = _image(config.logo_path, max_width=logo_width, max_height=logo_height)
+        small_logo = _brand_image(config.logo_path, max_width=logo_width, max_height=logo_height)
         header = Table(
             [[small_logo, _brand_lines(config, styles, include_contact=True), title_block]],
             colWidths=[logo_width + 4 * mm, 74 * mm, 60 * mm],

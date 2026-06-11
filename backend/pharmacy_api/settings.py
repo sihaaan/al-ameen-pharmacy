@@ -181,6 +181,11 @@ QUOTATION_LOGO_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_LOGO_MAX_UPLOAD_
 QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 QUOTATION_PDF_ALLOW_REMOTE_IMAGES = env_bool("QUOTATION_PDF_ALLOW_REMOTE_IMAGES", False)
 QUOTATION_PDF_REMOTE_IMAGE_TIMEOUT_SECONDS = float(os.environ.get("QUOTATION_PDF_REMOTE_IMAGE_TIMEOUT_SECONDS", "2.0"))
+QUOTATION_PDF_ALLOWED_REMOTE_IMAGE_HOSTS = [
+    host.strip().lower()
+    for host in os.environ.get("QUOTATION_PDF_ALLOWED_REMOTE_IMAGE_HOSTS", "res.cloudinary.com").split(",")
+    if host.strip()
+]
 
 # ---- quotation AI-assisted parsing ----
 # API keys stay in environment variables. Daily enable/disable controls live in
