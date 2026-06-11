@@ -12,7 +12,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .emails import send_staff_order_notification_email
-from .models import Cart, CartItem, Order, OrderItem, Product
+from .models import Cart, CartItem, Order, OrderItem, Product, ProductImage
 from .throttles import LoginRateThrottle, PasswordResetRateThrottle
 from pharmacy_api.settings import normalize_origin, unique_origins
 
@@ -352,3 +352,50 @@ class CartOrderSafetyTests(APITestCase):
         self.assertIn(order.order_number, mail.outbox[-1].subject)
         self.assertIn("https://shop.example.com/admin", mail.outbox[-1].body)
         self.assertIn("https://wa.me/971501234567", mail.outbox[-1].body)
+
+
+class ProductImageVisibilityTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="staff_images", password="pass", is_staff=True)
+        self.active_product = Product.objects.create(
+            name="Public Image Product",
+            price=Decimal("10.00"),
+            stock_quantity=5,
+            status="active",
+            show_price=True,
+        )
+        self.draft_product = Product.objects.create(
+            name="Draft Image Product",
+            price=Decimal("10.00"),
+            stock_quantity=5,
+            status="draft",
+            show_price=False,
+        )
+        self.active_image = ProductImage.objects.create(
+            product=self.active_product,
+            image="products/public.jpg",
+            alt_text="Public image",
+        )
+        self.draft_image = ProductImage.objects.create(
+            product=self.draft_product,
+            image="products/draft.jpg",
+            alt_text="Draft image",
+        )
+
+    def test_public_product_image_list_hides_draft_product_images(self):
+        response = self.client.get(reverse("product-image-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        image_ids = {item["id"] for item in response.data}
+        self.assertIn(self.active_image.id, image_ids)
+        self.assertNotIn(self.draft_image.id, image_ids)
+
+    def test_staff_product_image_list_can_include_draft_product_images(self):
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("product-image-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        image_ids = {item["id"] for item in response.data}
+        self.assertIn(self.active_image.id, image_ids)
+        self.assertIn(self.draft_image.id, image_ids)

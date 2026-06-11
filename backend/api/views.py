@@ -469,7 +469,9 @@ class ProductImageViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
 
     def get_queryset(self):
-        queryset = ProductImage.objects.all()
+        queryset = ProductImage.objects.select_related('product')
+        if not self.request.user.is_staff:
+            queryset = queryset.filter(product__status='active')
         product_id = self.request.query_params.get('product')
         if product_id:
             queryset = queryset.filter(product_id=product_id)
