@@ -3373,7 +3373,7 @@ class QuotationSettingsTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["company_name"], "Al Ameen Pharmacy")
-        self.assertEqual(response.data["payment_terms"], "Credit 30 days")
+        self.assertEqual(response.data["payment_terms"], "As per mutually agreed terms.")
         self.assertEqual(response.data["validity_days"], 30)
         self.assertEqual(QuotationSettings.objects.count(), 1)
 
@@ -3667,6 +3667,52 @@ class QuotationSettingsTests(APITestCase):
         self.assertNotIn("Department Procurement", text)
         self.assertIn("Contact No. +971501234567", text)
         self.assertIn("Contact Email ahmed@example.com", text)
+
+    def test_pdf_hides_empty_optional_customer_fields_and_shows_address_trn(self):
+        self.company.billing_address = "Office 12, Dubai Healthcare City, Dubai"
+        self.company.trn = "100234567800003"
+        self.company.save(update_fields=["billing_address", "trn"])
+        quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
+        QuotationLine.objects.create(
+            quotation=quotation,
+            product=self.product,
+            item_name_snapshot="Settings Item",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("25.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
+        text = " ".join(extract_pdf_text(response.content).split())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Customer Address Office 12, Dubai Healthcare City, Dubai", text)
+        self.assertIn("Customer TRN 100234567800003", text)
+        self.assertNotIn("Attention", text)
+        self.assertNotIn("Contact No.", text)
+        self.assertNotIn("Contact Email", text)
+
+    def test_excel_hides_empty_optional_customer_fields_and_shows_address_trn(self):
+        self.company.billing_address = "Office 12, Dubai Healthcare City, Dubai"
+        self.company.trn = "100234567800003"
+        self.company.save(update_fields=["billing_address", "trn"])
+        quotation = self.create_valid_quote()
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.get(reverse("quotation-excel", args=[quotation.id]))
+        workbook = load_workbook(BytesIO(response.content), data_only=True)
+        values = [cell.value for row in workbook["Quotation"].iter_rows() for cell in row if cell.value is not None]
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("Customer Address", values)
+        self.assertIn("Office 12, Dubai Healthcare City, Dubai", values)
+        self.assertIn("Customer TRN", values)
+        self.assertIn("100234567800003", values)
+        self.assertNotIn("Attention", values)
+        self.assertNotIn("Contact No.", values)
+        self.assertNotIn("Contact Email", values)
 
     def test_pdf_hides_internal_line_notes_and_keeps_double_digit_serials_together(self):
         quotation = Quotation.objects.create(company=self.company, created_by=self.staff)

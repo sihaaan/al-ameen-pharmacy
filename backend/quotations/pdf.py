@@ -378,13 +378,29 @@ def build_quotation_pdf(quotation):
     contact = quotation.contact
     contact_phone = getattr(contact, "phone", "") if contact else ""
     contact_email = getattr(contact, "email", "") if contact else ""
-    meta_rows = [
-        [meta_label("Customer"), meta_value(quotation.company.name), meta_label("Quotation #"), meta_value(quotation.quotation_number)],
-        [meta_label("Attention"), meta_value(contact.name if contact else ""), meta_label("Date"), meta_value(quote_date)],
-        [meta_label("Contact No."), meta_value(contact_phone), meta_label("Valid Until"), meta_value(_valid_until(quotation, config))],
-        [meta_label("Contact Email"), meta_value(contact_email), meta_label("Prepared By"), meta_value(quotation.created_by.username if quotation.created_by else "")],
-        [meta_label("Status"), meta_value(quotation.get_status_display()), meta_label("Currency"), meta_value(quotation.currency)],
+    meta_items = [
+        ("Customer", quotation.company.name),
+        ("Quotation #", quotation.quotation_number),
+        ("Customer Address", getattr(quotation.company, "billing_address", "")),
+        ("Customer TRN", getattr(quotation.company, "trn", "")),
+        ("Attention", contact.name if contact else ""),
+        ("Contact No.", contact_phone),
+        ("Contact Email", contact_email),
+        ("Date", quote_date),
+        ("Valid Until", _valid_until(quotation, config)),
+        ("Prepared By", quotation.created_by.username if quotation.created_by else ""),
+        ("Status", quotation.get_status_display()),
+        ("Currency", quotation.currency),
     ]
+    meta_items = [(label, value) for label, value in meta_items if str(value or "").strip()]
+    meta_rows = []
+    for index in range(0, len(meta_items), 2):
+        left_label, left_value = meta_items[index]
+        if index + 1 < len(meta_items):
+            right_label, right_value = meta_items[index + 1]
+        else:
+            right_label, right_value = "", ""
+        meta_rows.append([meta_label(left_label), meta_value(left_value), meta_label(right_label), meta_value(right_value)])
     meta_table = Table(meta_rows, colWidths=[24 * mm, 76 * mm, 24 * mm, 54 * mm])
     meta_table.setStyle(
         TableStyle(
