@@ -12,7 +12,7 @@ const emptySettings = {
   license_number: '',
   footer_note: '',
   default_terms: '',
-  payment_terms: 'Credit 30 days',
+  payment_terms: 'As per mutually agreed terms.',
   validity_days: 30,
   prepared_by_default: '',
   signature_label: 'Signature',

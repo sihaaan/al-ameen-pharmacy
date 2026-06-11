@@ -126,7 +126,7 @@ def get_quotation_pdf_config(quotation=None):
             "Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
         ),
         validity_days=int(getattr(settings, "QUOTATION_VALIDITY_DAYS", 30) or 30),
-        payment_terms=getattr(settings, "QUOTATION_PAYMENT_TERMS", "Credit 30 days"),
+        payment_terms=getattr(settings, "QUOTATION_PAYMENT_TERMS", "As per mutually agreed terms."),
         license_number="",
         prepared_by_default="",
         signature_label="Signature",

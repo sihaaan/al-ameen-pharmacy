@@ -253,7 +253,7 @@ class QuotationSettings(models.Model):
         default="Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
         blank=True,
     )
-    payment_terms = models.TextField(default="Credit 30 days", blank=True)
+    payment_terms = models.TextField(default="As per mutually agreed terms.", blank=True)
     validity_days = models.PositiveIntegerField(default=30)
     prepared_by_default = models.CharField(max_length=255, blank=True)
     signature_label = models.CharField(max_length=120, default="Signature", blank=True)
@@ -869,7 +869,7 @@ class Quotation(models.Model):
     payment_terms = models.CharField(
         max_length=40,
         choices=PAYMENT_TERM_CHOICES,
-        default=PAYMENT_CREDIT_30,
+        default=PAYMENT_AS_PER_AGREEMENT,
     )
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))

@@ -94,7 +94,7 @@ const draftFromLine = (line) => ({
 });
 
 const termsDraftFromQuote = (quote = {}) => ({
-  payment_terms: quote.payment_terms || 'credit_30_days',
+  payment_terms: quote.payment_terms || 'as_per_agreement',
   valid_until: quote.valid_until || '',
 });
 
@@ -509,7 +509,7 @@ const QuotationEditor = ({ quoteId, onClose }) => {
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.update(quote.id, {
-        payment_terms: quoteTermsDraft.payment_terms || 'credit_30_days',
+        payment_terms: quoteTermsDraft.payment_terms || 'as_per_agreement',
         valid_until: quoteTermsDraft.valid_until || null,
       });
       setQuote(response.data);

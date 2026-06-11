@@ -524,6 +524,8 @@ class QuotationWorkflowTests(APITestCase):
         quotation = self.create_quote()
         self.create_valid_line(quotation)
 
+        self.assertEqual(quotation.payment_terms, Quotation.PAYMENT_AS_PER_AGREEMENT)
+
         update_response = self.client.patch(
             reverse("quotation-detail", args=[quotation.id]),
             {"payment_terms": Quotation.PAYMENT_PDC_60},

@@ -169,7 +169,7 @@ QUOTATION_DEFAULT_TERMS = os.environ.get(
     "Prices are subject to stock availability and final confirmation. This quotation is confidential and intended for the named customer only.",
 )
 QUOTATION_VALIDITY_DAYS = int(os.environ.get("QUOTATION_VALIDITY_DAYS", "30"))
-QUOTATION_PAYMENT_TERMS = os.environ.get("QUOTATION_PAYMENT_TERMS", "Payment terms to be confirmed with the customer.")
+QUOTATION_PAYMENT_TERMS = os.environ.get("QUOTATION_PAYMENT_TERMS", "As per mutually agreed terms.")
 QUOTATION_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_IMPORT_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 QUOTATION_IMPORT_MAX_EXCEL_ROWS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_ROWS", "500"))
 QUOTATION_IMPORT_MAX_EXCEL_SHEETS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_SHEETS", "10"))
