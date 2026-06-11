@@ -3672,7 +3672,8 @@ class QuotationSettingsTests(APITestCase):
         self.company.billing_address = "Office 12, Dubai Healthcare City, Dubai"
         self.company.trn = "100234567800003"
         self.company.save(update_fields=["billing_address", "trn"])
-        quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
+        contact = CompanyContact.objects.create(company=self.company, name="-", phone="-", email="-")
+        quotation = Quotation.objects.create(company=self.company, contact=contact, created_by=self.staff)
         QuotationLine.objects.create(
             quotation=quotation,
             product=self.product,

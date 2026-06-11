@@ -41,6 +41,13 @@ def _text(value, fallback="-"):
     return escape(value.strip() or fallback)
 
 
+def _optional_text(value):
+    value = "" if value is None else str(value).strip()
+    if value.lower() in {"", "-", "—", "n/a", "na", "none", "null"}:
+        return ""
+    return value
+
+
 def _money(currency, value):
     return f"{currency} {value or 0:.2f}"
 
@@ -381,11 +388,11 @@ def build_quotation_pdf(quotation):
     meta_items = [
         ("Customer", quotation.company.name),
         ("Quotation #", quotation.quotation_number),
-        ("Customer Address", getattr(quotation.company, "billing_address", "")),
-        ("Customer TRN", getattr(quotation.company, "trn", "")),
-        ("Attention", contact.name if contact else ""),
-        ("Contact No.", contact_phone),
-        ("Contact Email", contact_email),
+        ("Customer Address", _optional_text(getattr(quotation.company, "billing_address", ""))),
+        ("Customer TRN", _optional_text(getattr(quotation.company, "trn", ""))),
+        ("Attention", _optional_text(contact.name if contact else "")),
+        ("Contact No.", _optional_text(contact_phone)),
+        ("Contact Email", _optional_text(contact_email)),
         ("Date", quote_date),
         ("Valid Until", _valid_until(quotation, config)),
         ("Prepared By", quotation.created_by.username if quotation.created_by else ""),

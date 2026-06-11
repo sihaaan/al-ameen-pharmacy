@@ -39,6 +39,13 @@ def _safe_number(value):
     return float(value or 0)
 
 
+def _optional_text(value):
+    value = "" if value is None else str(value).strip()
+    if value.lower() in {"", "-", "—", "n/a", "na", "none", "null"}:
+        return ""
+    return value
+
+
 def build_quotation_excel(quotation):
     config = get_quotation_pdf_config()
     quote_date = _local_date(quotation.created_at)
@@ -62,11 +69,11 @@ def build_quotation_excel(quotation):
     contact = quotation.contact
     info_rows = [
         ("Customer", quotation.company.name),
-        ("Customer Address", getattr(quotation.company, "billing_address", "")),
-        ("Customer TRN", getattr(quotation.company, "trn", "")),
-        ("Attention", contact.name if contact else ""),
-        ("Contact No.", getattr(contact, "phone", "") if contact else ""),
-        ("Contact Email", getattr(contact, "email", "") if contact else ""),
+        ("Customer Address", _optional_text(getattr(quotation.company, "billing_address", ""))),
+        ("Customer TRN", _optional_text(getattr(quotation.company, "trn", ""))),
+        ("Attention", _optional_text(contact.name if contact else "")),
+        ("Contact No.", _optional_text(getattr(contact, "phone", "") if contact else "")),
+        ("Contact Email", _optional_text(getattr(contact, "email", "") if contact else "")),
         ("Quotation #", quotation.quotation_number),
         ("Date", quote_date),
         ("Valid Until", valid_until),
