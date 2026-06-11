@@ -4,8 +4,9 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.cache import cache
+from django.core.exceptions import ImproperlyConfigured
 from django.core import mail
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -13,6 +14,29 @@ from rest_framework.test import APITestCase
 from .emails import send_staff_order_notification_email
 from .models import Cart, CartItem, Order, OrderItem, Product
 from .throttles import LoginRateThrottle, PasswordResetRateThrottle
+from pharmacy_api.settings import normalize_origin, unique_origins
+
+
+class DeploymentOriginSettingsTests(SimpleTestCase):
+    def test_unique_origins_trims_slashes_whitespace_and_duplicates(self):
+        origins = unique_origins([
+            " https://example.com/ ",
+            "https://example.com",
+            "http://localhost:3000/",
+        ])
+
+        self.assertEqual(origins, ["https://example.com", "http://localhost:3000"])
+
+    def test_unique_origins_accepts_csrf_wildcard_when_allowed(self):
+        origins = unique_origins(["https://*.up.railway.app/"], allow_wildcard=True)
+
+        self.assertEqual(origins, ["https://*.up.railway.app"])
+
+    def test_normalize_origin_rejects_paths_and_non_http_schemes(self):
+        with self.assertRaises(ImproperlyConfigured):
+            normalize_origin("https://example.com/admin")
+        with self.assertRaises(ImproperlyConfigured):
+            normalize_origin("ftp://example.com")
 
 
 class AuthSafetyTests(APITestCase):

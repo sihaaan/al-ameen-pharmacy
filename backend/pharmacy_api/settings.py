@@ -37,6 +37,36 @@ def env_list(name):
     return [item.strip().lower() for item in os.environ.get(name, "").split(",") if item.strip()]
 
 
+def env_csv(name, default=""):
+    return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
+
+
+def normalize_origin(value, *, allow_wildcard=False):
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    hostname = parsed.hostname or ""
+    if allow_wildcard and hostname.startswith("*."):
+        hostname = hostname[2:]
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise ImproperlyConfigured(f"Invalid origin configured: {value!r}")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ImproperlyConfigured(f"Origin must not include a path or query string: {value!r}")
+    if parsed.port:
+        return f"{parsed.scheme}://{parsed.netloc.lower()}"
+    return f"{parsed.scheme}://{parsed.netloc.lower()}"
+
+
+def unique_origins(values, *, allow_wildcard=False):
+    origins = []
+    for value in values:
+        origin = normalize_origin(value, allow_wildcard=allow_wildcard)
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
 def database_host(database_url):
     if not database_url:
         return ""
@@ -101,11 +131,15 @@ MIDDLEWARE = [
 ]
 
 # CORS Configuration
-# For development, allow localhost. For production, set CORS_ALLOWED_ORIGINS in .env
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000'  # Development default
-).split(',')
+# FRONTEND_URL is included automatically so Railway/custom-domain deploys do
+# not need the same origin repeated in multiple environment variables.
+CORS_ALLOWED_ORIGINS = unique_origins(
+    env_csv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    )
+    + [FRONTEND_URL]
+)
 
 CORS_ALLOW_CREDENTIALS = True
 ROOT_URLCONF = 'pharmacy_api.urls'
@@ -336,11 +370,16 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True  # Only send CSRF cookies over HTTPS
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # For reverse proxy
 
-    # CSRF trusted origins for Railway deployment
-    CSRF_TRUSTED_ORIGINS = [
-        'https://*.up.railway.app',
-        'https://*.railway.app',
-    ]
+    # CSRF trusted origins for Railway deployment and configured frontends.
+    CSRF_TRUSTED_ORIGINS = unique_origins(
+        env_csv("CSRF_TRUSTED_ORIGINS")
+        + [
+            FRONTEND_URL,
+            "https://*.up.railway.app",
+            "https://*.railway.app",
+        ],
+        allow_wildcard=True,
+    )
 
 # ---- rest framework ----
 REST_FRAMEWORK = {
