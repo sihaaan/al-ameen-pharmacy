@@ -74,7 +74,7 @@ pyxlsb==1.0.10
 # redis==5.2.1
 
 # Monitoring & Error Tracking
-# sentry-sdk==2.19.2
+sentry-sdk==2.19.2
 
 # API Documentation
 # drf-spectacular==0.28.0

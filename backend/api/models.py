@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator
 from django.utils.text import slugify
@@ -591,12 +591,32 @@ class Order(models.Model):
         return f"Order #{self.order_number} - {buyer}"
 
     def save(self, *args, **kwargs):
-        if not self.order_number:
-            from django.utils import timezone
-            timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
-            random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-            self.order_number = f"ORD-{timestamp}-{random_str}"
-        super().save(*args, **kwargs)
+        generated_number = not self.order_number
+        if generated_number:
+            self.order_number = self._generate_order_number()
+        try:
+            with transaction.atomic():
+                super().save(*args, **kwargs)
+        except IntegrityError:
+            if not generated_number or not self._state.adding:
+                raise
+            for _ in range(5):
+                self.order_number = self._generate_order_number()
+                try:
+                    with transaction.atomic():
+                        super().save(*args, **kwargs)
+                    return
+                except IntegrityError:
+                    continue
+            raise
+
+    @classmethod
+    def _generate_order_number(cls):
+        from django.utils import timezone
+
+        timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
+        random_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        return f"ORD-{timestamp}-{random_str}"
 
 
 class OrderItem(models.Model):

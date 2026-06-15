@@ -220,6 +220,7 @@ QUOTATION_PDF_ALLOWED_REMOTE_IMAGE_HOSTS = [
     for host in os.environ.get("QUOTATION_PDF_ALLOWED_REMOTE_IMAGE_HOSTS", "res.cloudinary.com").split(",")
     if host.strip()
 ]
+PRODUCT_IMAGE_MAX_UPLOAD_BYTES = int(os.environ.get("PRODUCT_IMAGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 
 # ---- quotation AI-assisted parsing ----
 # API keys stay in environment variables. Daily enable/disable controls live in
@@ -391,6 +392,7 @@ REST_FRAMEWORK = {
 REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"] = (
     "rest_framework.permissions.IsAuthenticated",
 )
+REST_FRAMEWORK["EXCEPTION_HANDLER"] = "pharmacy_api.exception_handlers.json_exception_handler"
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     "registration": os.environ.get("REGISTRATION_THROTTLE_RATE", "20/hour"),
     "login": os.environ.get("LOGIN_THROTTLE_RATE", "10/minute"),
@@ -405,4 +407,45 @@ SIMPLE_JWT = {
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_LOGIN": True,
+}
+
+# ---- monitoring and logging ----
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "").strip()
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "production" if not DEBUG else "development"),
+        traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.0")),
+        send_default_pii=False,
+    )
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.environ.get("DJANGO_LOG_LEVEL", "INFO"),
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": os.environ.get("DJANGO_REQUEST_LOG_LEVEL", "ERROR"),
+            "propagate": False,
+        },
+    },
 }

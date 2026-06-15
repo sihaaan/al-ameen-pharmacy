@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.exceptions import ImproperlyConfigured
 from django.core import mail
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
 from rest_framework import status
@@ -353,6 +354,33 @@ class CartOrderSafetyTests(APITestCase):
         self.assertIn("https://shop.example.com/admin", mail.outbox[-1].body)
         self.assertIn("https://wa.me/971501234567", mail.outbox[-1].body)
 
+    def test_order_number_generation_retries_after_collision(self):
+        Order.objects.create(
+            user=self.user,
+            full_name="Buyer",
+            email="buyer@example.com",
+            phone="0501234567",
+            address="Dubai",
+            city="Dubai",
+            emirate="Dubai",
+            total_amount=Decimal("12.50"),
+            order_number="ORD-COLLIDE",
+        )
+
+        with patch.object(Order, "_generate_order_number", side_effect=["ORD-COLLIDE", "ORD-UNIQUE"]):
+            order = Order.objects.create(
+                user=self.user,
+                full_name="Buyer",
+                email="buyer@example.com",
+                phone="0501234567",
+                address="Dubai",
+                city="Dubai",
+                emirate="Dubai",
+                total_amount=Decimal("12.50"),
+            )
+
+        self.assertEqual(order.order_number, "ORD-UNIQUE")
+
 
 class ProductImageVisibilityTests(APITestCase):
     def setUp(self):
@@ -399,3 +427,22 @@ class ProductImageVisibilityTests(APITestCase):
         image_ids = {item["id"] for item in response.data}
         self.assertIn(self.active_image.id, image_ids)
         self.assertIn(self.draft_image.id, image_ids)
+
+    def test_product_create_rejects_invalid_image_without_creating_product(self):
+        self.client.force_authenticate(self.staff)
+        upload = SimpleUploadedFile("bad.png", b"not a real png", content_type="image/png")
+
+        response = self.client.post(
+            reverse("product-list"),
+            {
+                "name": "Invalid Image Product",
+                "price": "10.00",
+                "stock_quantity": 1,
+                "status": "draft",
+                "image": upload,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Product.objects.filter(name="Invalid Image Product").exists())
