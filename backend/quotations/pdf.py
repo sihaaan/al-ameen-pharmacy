@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
@@ -88,6 +89,16 @@ def _payment_terms(quotation, config):
     return config.payment_terms
 
 
+@lru_cache(maxsize=128)
+def _fetch_remote_image_bytes(source, max_bytes, timeout):
+    request = Request(source, headers={"User-Agent": "AlAmeenQuotationPDF/1.0"})
+    with urlopen(request, timeout=timeout) as response:
+        image_bytes = response.read(max_bytes + 1)
+    if len(image_bytes) > max_bytes:
+        return None
+    return image_bytes
+
+
 def _resolve_image_source(source):
     if not source:
         return None
@@ -106,11 +117,9 @@ def _resolve_image_source(source):
         if not remote_allowed:
             return None
         try:
-            request = Request(source, headers={"User-Agent": "AlAmeenQuotationPDF/1.0"})
             timeout = float(getattr(settings, "QUOTATION_PDF_REMOTE_IMAGE_TIMEOUT_SECONDS", 2.0))
-            with urlopen(request, timeout=timeout) as response:
-                image_bytes = response.read(max_bytes + 1)
-            if len(image_bytes) > max_bytes:
+            image_bytes = _fetch_remote_image_bytes(source, max_bytes, timeout)
+            if not image_bytes:
                 return None
             return BytesIO(image_bytes)
         except Exception:

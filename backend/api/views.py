@@ -45,6 +45,7 @@ from .throttles import (
     PasswordResetRateThrottle,
     RegistrationRateThrottle,
 )
+from .upload_validation import validate_image_upload
 
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         """
         if not image_file:
             return
+        validate_image_upload(image_file, label="Product image")
 
         # Unset any existing primary images for this product
         ProductImage.objects.filter(product=product, is_primary=True).update(is_primary=False)
@@ -290,6 +292,8 @@ class ProductViewSet(viewsets.ModelViewSet):
         """Create product with optional image upload."""
         # Extract image from request before serializer validation
         image_file = request.FILES.get('image')
+        if image_file:
+            validate_image_upload(image_file, label="Product image")
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -311,6 +315,8 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         # Extract image from request before serializer validation
         image_file = request.FILES.get('image')
+        if image_file:
+            validate_image_upload(image_file, label="Product image")
 
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)

@@ -5,6 +5,7 @@ from .models import (
     Supplier, ProductSupplier,
     Cart, CartItem, Address, Order, OrderItem
 )
+from .upload_validation import validate_image_upload
 
 
 # ====================
@@ -154,6 +155,9 @@ class ProductImageSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.image.url)
             return obj.image.url
         return None
+
+    def validate_image(self, value):
+        return validate_image_upload(value, label="Product image")
 
 
 # ====================
