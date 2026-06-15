@@ -307,6 +307,62 @@
   color: #047857;
 }
 
+.qm-compact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qm-compact-list li {
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #f9fafb;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-outcome-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.qm-outcome-form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.qm-outcome-form-grid .span-two {
+  grid-column: 1 / -1;
+}
+
+.qm-outcome .qm-table td {
+  vertical-align: top;
+}
+
+.qm-outcome .qm-table input,
+.qm-outcome .qm-table select {
+  min-width: 120px;
+}
+
+.qm-outcome .qm-table small {
+  display: inline-block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .qm-controls,
 .qm-action-row,
 .qm-row-actions {

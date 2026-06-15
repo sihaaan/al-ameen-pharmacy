@@ -1,11 +1,14 @@
 import json
 import logging
 import re
+from datetime import timedelta
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import HttpResponse
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.views import APIView
 from rest_framework.decorators import action
@@ -46,6 +49,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
@@ -69,6 +73,7 @@ from .serializers import (
     QuotationAuditLogSerializer,
     QuotationLineSerializer,
     QuotationListSerializer,
+    QuotationOutcomePOImportSerializer,
     QuotationSettingsSerializer,
     QuotationSerializer,
     UserQuotationProfileSerializer,
@@ -81,6 +86,7 @@ from .services import (
     audit_log,
     apply_product_matches_to_historical_import,
     build_quotation_delete_snapshot,
+    build_po_outcome_suggestions,
     bulk_create_quote_items_for_historical_import,
     bulk_create_products_from_quotation_lines,
     bulk_update_quotation_lines,
@@ -90,15 +96,18 @@ from .services import (
     create_imported_inquiry,
     create_product_from_quotation_line,
     create_quotation_from_inquiry,
+    ensure_outcome_reviewable,
     ensure_quotation_editable,
     find_historical_import_duplicates,
     finalize_quotation,
+    outcome_summary_for_quotation,
     remember_historical_import_line_alias,
     remember_inquiry_line_alias,
     remember_quotation_line_alias,
     recalculate_quotation_totals,
     revise_quotation,
     transition_quotation_status,
+    update_quotation_outcome,
 )
 from .private_storage import read_private_ref
 
@@ -207,6 +216,226 @@ class QuotationDashboardView(APIView):
                 "quotes": quote_queryset.count(),
                 "pending": quote_queryset.filter(status__in=["draft", "pending_review", "approved"]).count(),
                 "finalized": quote_queryset.filter(status__in=["finalized", "sent"]).count(),
+            }
+        )
+
+
+def _decimal_response(value):
+    if value is None:
+        return None
+    return str(Decimal(value or 0).quantize(Decimal("0.01")))
+
+
+def _percentage(numerator, denominator):
+    denominator = Decimal(denominator or 0)
+    if denominator <= 0:
+        return 0
+    return round(float((Decimal(numerator or 0) / denominator) * Decimal("100")), 2)
+
+
+def _analysis_base_queryset(request):
+    queryset = Quotation.objects.filter(
+        is_historical_import=False,
+        status__in=[Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT],
+    ).select_related("company", "created_by")
+    start = request.query_params.get("start") or request.query_params.get("date_from")
+    end = request.query_params.get("end") or request.query_params.get("date_to")
+    if start:
+        queryset = queryset.filter(created_at__date__gte=start)
+    if end:
+        queryset = queryset.filter(created_at__date__lte=end)
+    company = request.query_params.get("company")
+    if company:
+        queryset = queryset.filter(company_id=company)
+    prepared_by = request.query_params.get("prepared_by")
+    if prepared_by:
+        queryset = queryset.filter(created_by_id=prepared_by)
+    outcome_status = request.query_params.get("outcome_status")
+    if outcome_status:
+        queryset = queryset.filter(outcome_status=outcome_status)
+    return queryset
+
+
+class QuotationAnalysisDashboardView(APIView):
+    permission_classes = [IsQuotationStaff]
+
+    def get(self, request):
+        queryset = _analysis_base_queryset(request)
+        line_queryset = QuotationLine.objects.filter(quotation__in=queryset).exclude(match_status=QuotationLine.MATCH_IGNORED)
+        product = request.query_params.get("product")
+        if product:
+            line_queryset = line_queryset.filter(Q(product_id=product) | Q(quote_item_id=product))
+        reason = request.query_params.get("reason")
+        if reason:
+            line_queryset = line_queryset.filter(outcome_reason=reason)
+
+        lines = list(
+            line_queryset.select_related("quotation", "quotation__company", "quotation__created_by", "product", "quote_item")
+        )
+        quoted_value = sum((line.line_total or Decimal("0.00")) for line in lines)
+        accepted_value = sum((line.accepted_total or Decimal("0.00")) for line in lines)
+        lost_value = sum((line.lost_value or Decimal("0.00")) for line in lines)
+        pending_value = sum(
+            (quote.total or Decimal("0.00"))
+            for quote in queryset
+            if quote.outcome_status == Quotation.OUTCOME_PENDING
+        )
+        accepted_lines = sum(1 for line in lines if (line.accepted_total or 0) > 0)
+        closed_quotes = [quote for quote in queryset if quote.outcome_closed_at]
+        avg_days_to_close = None
+        close_durations = []
+        for quote in closed_quotes:
+            start_date = quote.sent_at or quote.finalized_at or quote.created_at
+            if start_date:
+                close_durations.append((quote.outcome_closed_at - start_date).days)
+        if close_durations:
+            avg_days_to_close = round(sum(close_durations) / len(close_durations), 1)
+
+        today = timezone.localdate()
+        overdue_followups = queryset.filter(
+            outcome_status=Quotation.OUTCOME_PENDING,
+            next_follow_up_date__lt=today,
+        ).count()
+
+        def item_label(line):
+            if line.product_id:
+                return line.product.name
+            if line.quote_item_id:
+                return line.quote_item.name
+            return line.item_name_snapshot
+
+        def grouped_lines(filter_fn, label_fn, value_fn=lambda line: line.lost_value or Decimal("0.00"), limit=10):
+            buckets = {}
+            for line in lines:
+                if not filter_fn(line):
+                    continue
+                label = label_fn(line) or "Unknown"
+                entry = buckets.setdefault(label, {"label": label, "count": 0, "value": Decimal("0.00")})
+                entry["count"] += 1
+                entry["value"] += Decimal(value_fn(line) or 0)
+            return [
+                {**entry, "value": _decimal_response(entry["value"])}
+                for entry in sorted(buckets.values(), key=lambda item: (item["value"], item["count"]), reverse=True)[:limit]
+            ]
+
+        customers = {}
+        staff = {}
+        for quote in queryset:
+            summary = outcome_summary_for_quotation(quote)
+            customer_entry = customers.setdefault(
+                quote.company.name,
+                {"label": quote.company.name, "quoted": Decimal("0.00"), "accepted": Decimal("0.00"), "lost": Decimal("0.00")},
+            )
+            staff_name = quote.created_by.username if quote.created_by_id else "Unassigned"
+            staff_entry = staff.setdefault(
+                staff_name,
+                {"label": staff_name, "quoted": Decimal("0.00"), "accepted": Decimal("0.00"), "lost": Decimal("0.00")},
+            )
+            for entry in [customer_entry, staff_entry]:
+                entry["quoted"] += summary["quoted_value"]
+                entry["accepted"] += summary["accepted_value"]
+                entry["lost"] += summary["lost_value"]
+
+        def score_rows(rows, reverse=True):
+            result = []
+            for entry in rows.values():
+                result.append(
+                    {
+                        "label": entry["label"],
+                        "quoted": _decimal_response(entry["quoted"]),
+                        "accepted": _decimal_response(entry["accepted"]),
+                        "lost": _decimal_response(entry["lost"]),
+                        "value_win_rate": _percentage(entry["accepted"], entry["quoted"]),
+                    }
+                )
+            return sorted(result, key=lambda item: item["value_win_rate"], reverse=reverse)[:10]
+
+        reason_labels = dict(QuotationLine.OUTCOME_REASON_CHOICES)
+        reason_buckets = {}
+        for line in lines:
+            if not line.outcome_reason:
+                continue
+            entry = reason_buckets.setdefault(
+                line.outcome_reason,
+                {
+                    "reason": line.outcome_reason,
+                    "reason_display": reason_labels.get(line.outcome_reason, line.outcome_reason),
+                    "lines": 0,
+                    "lost_value": Decimal("0.00"),
+                },
+            )
+            entry["lines"] += 1
+            entry["lost_value"] += Decimal(line.lost_value or 0)
+        lost_by_reason = [
+            {**entry, "lost_value": _decimal_response(entry["lost_value"])}
+            for entry in sorted(reason_buckets.values(), key=lambda item: (item["lost_value"], item["lines"]), reverse=True)[:10]
+        ]
+        pending_by_customer = {}
+        for quote in queryset.filter(outcome_status=Quotation.OUTCOME_PENDING):
+            entry = pending_by_customer.setdefault(quote.company.name, {"label": quote.company.name, "value": Decimal("0.00"), "count": 0})
+            entry["value"] += Decimal(quote.total or 0)
+            entry["count"] += 1
+
+        return Response(
+            {
+                "cards": {
+                    "total_quoted_value": _decimal_response(quoted_value),
+                    "accepted_value": _decimal_response(accepted_value),
+                    "lost_value": _decimal_response(lost_value),
+                    "value_win_rate": _percentage(accepted_value, quoted_value),
+                    "line_win_rate": round((accepted_lines / len(lines)) * 100, 2) if lines else 0,
+                    "pending_quotation_value": _decimal_response(pending_value),
+                    "overdue_followups": overdue_followups,
+                    "average_days_to_close": avg_days_to_close,
+                },
+                "tables": {
+                    "top_rejected_products": grouped_lines(
+                        lambda line: line.outcome_status == QuotationLine.OUTCOME_REJECTED,
+                        item_label,
+                    ),
+                    "top_unavailable_products": grouped_lines(
+                        lambda line: line.outcome_status == QuotationLine.OUTCOME_UNAVAILABLE_MISSING,
+                        item_label,
+                    ),
+                    "top_substituted_products": grouped_lines(
+                        lambda line: line.outcome_status == QuotationLine.OUTCOME_SUBSTITUTED,
+                        item_label,
+                    ),
+                    "best_converting_customers": score_rows(customers, reverse=True),
+                    "worst_converting_customers": score_rows(customers, reverse=False),
+                    "staff_performance": score_rows(staff, reverse=True),
+                    "lost_value_by_reason": lost_by_reason,
+                    "pending_value_by_customer": [
+                        {**entry, "value": _decimal_response(entry["value"])}
+                        for entry in sorted(pending_by_customer.values(), key=lambda item: item["value"], reverse=True)[:10]
+                    ],
+                },
+            }
+        )
+
+
+class QuotationFollowupsView(APIView):
+    permission_classes = [IsQuotationStaff]
+
+    def get(self, request):
+        today = timezone.localdate()
+        stale_cutoff = timezone.now() - timedelta(days=7)
+        base = Quotation.objects.filter(
+            is_historical_import=False,
+            status__in=[Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT],
+            outcome_status=Quotation.OUTCOME_PENDING,
+        ).select_related("company", "created_by")
+        due_today = base.filter(next_follow_up_date=today)
+        overdue = base.filter(next_follow_up_date__lt=today)
+        no_outcome = base.filter(Q(sent_at__lt=stale_cutoff) | Q(finalized_at__lt=stale_cutoff))
+        high_value = base.order_by("-total")[:10]
+        serializer_context = {"request": request}
+        return Response(
+            {
+                "due_today": QuotationListSerializer(due_today, many=True, context=serializer_context).data,
+                "overdue": QuotationListSerializer(overdue, many=True, context=serializer_context).data,
+                "sent_no_outcome_after_7_days": QuotationListSerializer(no_outcome, many=True, context=serializer_context).data,
+                "high_value_pending": QuotationListSerializer(high_value, many=True, context=serializer_context).data,
             }
         )
 
@@ -747,6 +976,109 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 "quoted_at": "",
             }
         )
+
+    @action(detail=True, methods=["get", "patch"], parser_classes=[JSONParser])
+    def outcome(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            ensure_outcome_reviewable(quotation)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        if request.method.lower() == "patch":
+            try:
+                quotation = update_quotation_outcome(quotation, request.data or {}, request.user)
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
+            quotation.refresh_from_db()
+        quotation = (
+            Quotation.objects.select_related(
+                "company",
+                "contact",
+                "inquiry",
+                "created_by",
+                "finalized_by",
+                "outcome_closed_by",
+                "outcome_last_updated_by",
+            )
+            .prefetch_related("lines", "lines__quote_item", "lines__product", "lines__product__images")
+            .get(pk=quotation.pk)
+        )
+        serializer = self.get_serializer(quotation)
+        return Response(
+            {
+                "quotation": serializer.data,
+                "summary": outcome_summary_for_quotation(quotation),
+                "line_outcome_statuses": [
+                    {"value": value, "label": label} for value, label in QuotationLine.OUTCOME_STATUS_CHOICES
+                ],
+                "outcome_statuses": [
+                    {"value": value, "label": label} for value, label in Quotation.OUTCOME_STATUS_CHOICES
+                ],
+                "reasons": [
+                    {"value": value, "label": label} for value, label in QuotationLine.OUTCOME_REASON_CHOICES
+                ],
+                "contact_methods": [
+                    {"value": value, "label": label} for value, label in Quotation.FOLLOWUP_CONTACT_METHOD_CHOICES
+                ],
+                "follow_up_statuses": [
+                    {"value": value, "label": label} for value, label in Quotation.FOLLOWUP_STATUS_CHOICES
+                ],
+            }
+        )
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
+    def parse_outcome_po(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            if quotation.status not in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
+                raise DjangoValidationError("Only finalized or sent quotations can use PO outcome parsing.")
+            uploaded = request.FILES.get("file")
+            raw_text = request.data.get("text") or request.data.get("raw_text") or ""
+            raw_html = request.data.get("html") or request.data.get("raw_html") or ""
+            if uploaded:
+                filename = (uploaded.name or "").lower()
+                if filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    return Response(
+                        {
+                            "detail": "Image PO parsing is not available in this environment yet. Upload PDF/Excel or paste PO text.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                preview = parse_file_preview(uploaded)
+                source_type = QuotationOutcomePOImport.SOURCE_FILE
+            elif raw_text or raw_html:
+                preview = parse_text_preview(raw_text, raw_html=raw_html)
+                source_type = QuotationOutcomePOImport.SOURCE_PASTED_TEXT
+            else:
+                return Response({"detail": "Upload a PO file or paste PO text."}, status=status.HTTP_400_BAD_REQUEST)
+
+            warnings = list(preview.get("warnings") or [])
+            use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
+            if use_ai:
+                try:
+                    preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
+                except AIParseError as exc:
+                    warnings.append(str(exc))
+
+            suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(quotation, preview)
+            po_import = QuotationOutcomePOImport.objects.create(
+                quotation=quotation,
+                source_type=source_type,
+                source_filename=preview.get("source_filename", ""),
+                source_sha256=preview.get("source_sha256", ""),
+                source_file_ref=preview.get("source_file_ref", ""),
+                parse_method=preview.get("parse_method", ""),
+                parsed_rows=preview.get("lines") or [],
+                suggestions=suggestions,
+                unmatched_po_rows=unmatched,
+                missing_quote_line_ids=missing_line_ids,
+                warnings=warnings,
+                created_by=request.user if request.user.is_authenticated else None,
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        serializer = QuotationOutcomePOImportSerializer(po_import, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def bulk_update_lines(self, request, pk=None):

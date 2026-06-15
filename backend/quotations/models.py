@@ -839,6 +839,47 @@ class Quotation(models.Model):
     ]
     EDITABLE_STATUSES = {STATUS_DRAFT, STATUS_PENDING_REVIEW, STATUS_APPROVED}
 
+    OUTCOME_PENDING = "pending"
+    OUTCOME_WON = "won"
+    OUTCOME_LOST = "lost"
+    OUTCOME_PARTIAL = "partial"
+    OUTCOME_EXPIRED = "expired"
+    OUTCOME_CANCELLED = "cancelled"
+    OUTCOME_STATUS_CHOICES = [
+        (OUTCOME_PENDING, "Pending"),
+        (OUTCOME_WON, "Won"),
+        (OUTCOME_LOST, "Lost"),
+        (OUTCOME_PARTIAL, "Partial"),
+        (OUTCOME_EXPIRED, "Expired"),
+        (OUTCOME_CANCELLED, "Cancelled"),
+    ]
+
+    FOLLOWUP_OPEN = "open"
+    FOLLOWUP_DUE = "due"
+    FOLLOWUP_OVERDUE = "overdue"
+    FOLLOWUP_DONE = "done"
+    FOLLOWUP_NOT_REQUIRED = "not_required"
+    FOLLOWUP_STATUS_CHOICES = [
+        (FOLLOWUP_OPEN, "Open"),
+        (FOLLOWUP_DUE, "Due"),
+        (FOLLOWUP_OVERDUE, "Overdue"),
+        (FOLLOWUP_DONE, "Done"),
+        (FOLLOWUP_NOT_REQUIRED, "Not required"),
+    ]
+
+    CONTACT_CALL = "call"
+    CONTACT_WHATSAPP = "whatsapp"
+    CONTACT_EMAIL = "email"
+    CONTACT_VISIT = "visit"
+    CONTACT_OTHER = "other"
+    FOLLOWUP_CONTACT_METHOD_CHOICES = [
+        (CONTACT_CALL, "Call"),
+        (CONTACT_WHATSAPP, "WhatsApp"),
+        (CONTACT_EMAIL, "Email"),
+        (CONTACT_VISIT, "Visit"),
+        (CONTACT_OTHER, "Other"),
+    ]
+
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="quotations")
     contact = models.ForeignKey(
         CompanyContact,
@@ -892,6 +933,45 @@ class Quotation(models.Model):
     )
     finalized_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
+    outcome_status = models.CharField(
+        max_length=30,
+        choices=OUTCOME_STATUS_CHOICES,
+        default=OUTCOME_PENDING,
+        db_index=True,
+    )
+    outcome_status_is_manual = models.BooleanField(default=False)
+    outcome_date = models.DateField(null=True, blank=True)
+    outcome_notes = models.TextField(blank=True)
+    outcome_closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="closed_quotation_outcomes",
+    )
+    outcome_closed_at = models.DateTimeField(null=True, blank=True)
+    outcome_last_updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_quotation_outcomes",
+    )
+    outcome_last_updated_at = models.DateTimeField(null=True, blank=True)
+    last_contacted_at = models.DateTimeField(null=True, blank=True)
+    next_follow_up_date = models.DateField(null=True, blank=True, db_index=True)
+    follow_up_status = models.CharField(
+        max_length=30,
+        choices=FOLLOWUP_STATUS_CHOICES,
+        default=FOLLOWUP_OPEN,
+        db_index=True,
+    )
+    follow_up_notes = models.TextField(blank=True)
+    follow_up_contact_method = models.CharField(
+        max_length=30,
+        choices=FOLLOWUP_CONTACT_METHOD_CHOICES,
+        blank=True,
+    )
     is_historical_import = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -905,6 +985,8 @@ class Quotation(models.Model):
             models.Index(fields=["created_by"]),
             models.Index(fields=["parent", "version"]),
             models.Index(fields=["is_historical_import"]),
+            models.Index(fields=["outcome_status", "created_at"]),
+            models.Index(fields=["follow_up_status", "next_follow_up_date"]),
         ]
 
     def __str__(self):
@@ -962,6 +1044,44 @@ class QuotationLine(models.Model):
     MATCH_CONFIRMED = InquiryLine.MATCH_CONFIRMED
     MATCH_IGNORED = InquiryLine.MATCH_IGNORED
     MATCH_STATUS_CHOICES = InquiryLine.MATCH_STATUS_CHOICES
+
+    OUTCOME_PENDING = "pending"
+    OUTCOME_ACCEPTED = "accepted"
+    OUTCOME_REJECTED = "rejected"
+    OUTCOME_UNAVAILABLE_MISSING = "unavailable_missing"
+    OUTCOME_SUBSTITUTED = "substituted"
+    OUTCOME_QUANTITY_CHANGED = "quantity_changed"
+    OUTCOME_STATUS_CHOICES = [
+        (OUTCOME_PENDING, "Pending"),
+        (OUTCOME_ACCEPTED, "Accepted"),
+        (OUTCOME_REJECTED, "Rejected"),
+        (OUTCOME_UNAVAILABLE_MISSING, "Unavailable / missing"),
+        (OUTCOME_SUBSTITUTED, "Substituted"),
+        (OUTCOME_QUANTITY_CHANGED, "Quantity changed"),
+    ]
+
+    REASON_PRICE_TOO_HIGH = "price_too_high"
+    REASON_NOT_AVAILABLE = "not_available"
+    REASON_NO_LONGER_REQUIRED = "customer_no_longer_required"
+    REASON_COMPETITOR_SELECTED = "competitor_selected"
+    REASON_ALTERNATE_BRAND = "alternate_brand_selected"
+    REASON_QUANTITY_CHANGED = "quantity_changed"
+    REASON_DELIVERY_TIME = "delivery_time_issue"
+    REASON_CUSTOMER_CANCELLED = "customer_cancelled"
+    REASON_NO_RESPONSE = "no_response"
+    REASON_UNKNOWN = "unknown"
+    OUTCOME_REASON_CHOICES = [
+        (REASON_PRICE_TOO_HIGH, "Price too high"),
+        (REASON_NOT_AVAILABLE, "Not available"),
+        (REASON_NO_LONGER_REQUIRED, "Customer no longer required"),
+        (REASON_COMPETITOR_SELECTED, "Competitor selected"),
+        (REASON_ALTERNATE_BRAND, "Alternate brand selected"),
+        (REASON_QUANTITY_CHANGED, "Quantity changed"),
+        (REASON_DELIVERY_TIME, "Delivery time issue"),
+        (REASON_CUSTOMER_CANCELLED, "Customer cancelled"),
+        (REASON_NO_RESPONSE, "No response"),
+        (REASON_UNKNOWN, "Unknown"),
+    ]
 
     quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="lines")
     inquiry_line = models.ForeignKey(
@@ -1021,6 +1141,21 @@ class QuotationLine(models.Model):
     )
     sort_order = models.PositiveIntegerField(default=0)
     notes = models.TextField(blank=True)
+    outcome_status = models.CharField(
+        max_length=30,
+        choices=OUTCOME_STATUS_CHOICES,
+        default=OUTCOME_PENDING,
+        db_index=True,
+    )
+    accepted_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    accepted_unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    accepted_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    lost_value = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    outcome_reason = models.CharField(max_length=40, choices=OUTCOME_REASON_CHOICES, blank=True)
+    outcome_notes = models.TextField(blank=True)
+    quoted_gross_profit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    accepted_gross_profit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    lost_gross_profit = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1031,6 +1166,8 @@ class QuotationLine(models.Model):
             models.Index(fields=["quote_item"]),
             models.Index(fields=["product"]),
             models.Index(fields=["match_status"]),
+            models.Index(fields=["outcome_status"]),
+            models.Index(fields=["outcome_reason"]),
         ]
 
     def __str__(self):
@@ -1052,6 +1189,55 @@ class QuotationLine(models.Model):
             self.vat_amount = vat.quantize(Decimal("0.01"))
             self.line_total = (self.line_subtotal + self.vat_amount).quantize(Decimal("0.01"))
         super().save(*args, **kwargs)
+
+
+class QuotationOutcomePOImport(models.Model):
+    SOURCE_PASTED_TEXT = "pasted_text"
+    SOURCE_FILE = "file"
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_PASTED_TEXT, "Pasted text"),
+        (SOURCE_FILE, "File"),
+    ]
+
+    STATUS_PARSED = "parsed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PARSED, "Parsed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="outcome_po_imports")
+    source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES)
+    source_filename = models.CharField(max_length=255, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    source_file_ref = models.CharField(max_length=500, blank=True)
+    parse_method = models.CharField(max_length=100, blank=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PARSED)
+    parsed_rows = models.JSONField(default=list, blank=True)
+    suggestions = models.JSONField(default=list, blank=True)
+    unmatched_po_rows = models.JSONField(default=list, blank=True)
+    missing_quote_line_ids = models.JSONField(default=list, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_outcome_po_imports",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["quotation", "created_at"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["source_sha256"]),
+        ]
+
+    def __str__(self):
+        return f"PO outcome import for {self.quotation}"
 
 
 class CompanyPriceHistory(models.Model):
@@ -1112,6 +1298,8 @@ class QuotationAuditLog(models.Model):
     ACTION_REVISED = "revised"
     ACTION_PDF_DOWNLOADED = "pdf_downloaded"
     ACTION_IMPORTED = "imported"
+    ACTION_OUTCOME_UPDATED = "outcome_updated"
+    ACTION_FOLLOWUP_UPDATED = "followup_updated"
     ACTION_CHOICES = [
         (ACTION_CREATED, "Created"),
         (ACTION_UPDATED, "Updated"),
@@ -1121,6 +1309,8 @@ class QuotationAuditLog(models.Model):
         (ACTION_REVISED, "Revised"),
         (ACTION_PDF_DOWNLOADED, "PDF Downloaded"),
         (ACTION_IMPORTED, "Imported"),
+        (ACTION_OUTCOME_UPDATED, "Outcome Updated"),
+        (ACTION_FOLLOWUP_UPDATED, "Follow-up Updated"),
     ]
 
     actor = models.ForeignKey(

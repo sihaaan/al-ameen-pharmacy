@@ -59,6 +59,10 @@ export const formatQuotationError = (errorInfo) => (
 const quotationAPI = {
   dashboard: {
     retrieve: () => axiosInstance.get('/quotations/dashboard/'),
+    analysis: (params = {}) => axiosInstance.get('/quotations/dashboard/analysis/', { params }),
+  },
+  followups: {
+    list: (params = {}) => axiosInstance.get('/quotations/followups/', { params }),
   },
   companies: {
     list: (params = {}) => axiosInstance.get('/quotations/companies/', { params }),
@@ -158,6 +162,13 @@ const quotationAPI = {
     bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_update_lines/`, data),
     bulkCreateProductsForLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_create_products_for_lines/`, data),
     productPrice: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_price/`, { params }),
+    outcome: (id) => axiosInstance.get(`/quotations/quotes/${id}/outcome/`),
+    updateOutcome: (id, data) => axiosInstance.patch(`/quotations/quotes/${id}/outcome/`, data),
+    parseOutcomePO: (id, data, isMultipart = false) => axiosInstance.post(
+      `/quotations/quotes/${id}/parse_outcome_po/`,
+      data,
+      isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined
+    ),
     markSent: (id) => axiosInstance.post(`/quotations/quotes/${id}/mark_sent/`),
     revise: (id) => axiosInstance.post(`/quotations/quotes/${id}/revise/`),
     cancel: (id) => axiosInstance.post(`/quotations/quotes/${id}/cancel/`),

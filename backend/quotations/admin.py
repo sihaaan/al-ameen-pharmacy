@@ -15,6 +15,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
@@ -251,21 +252,52 @@ class QuotationLineInline(admin.TabularInline):
 
 @admin.register(Quotation)
 class QuotationAdmin(admin.ModelAdmin):
-    list_display = ["quotation_number", "company", "status", "version", "total", "is_historical_import", "created_at"]
-    list_filter = ["status", "is_historical_import", "created_at"]
+    list_display = ["quotation_number", "company", "status", "outcome_status", "version", "total", "is_historical_import", "created_at"]
+    list_filter = ["status", "outcome_status", "follow_up_status", "is_historical_import", "created_at"]
     search_fields = ["quotation_number", "company__name", "inquiry__subject"]
-    autocomplete_fields = ["company", "contact", "inquiry", "parent", "created_by", "finalized_by"]
-    readonly_fields = ["quotation_number", "subtotal", "vat_total", "total", "finalized_at", "sent_at", "created_at", "updated_at"]
+    autocomplete_fields = ["company", "contact", "inquiry", "parent", "created_by", "finalized_by", "outcome_closed_by", "outcome_last_updated_by"]
+    readonly_fields = [
+        "quotation_number",
+        "subtotal",
+        "vat_total",
+        "total",
+        "finalized_at",
+        "sent_at",
+        "outcome_closed_at",
+        "outcome_last_updated_at",
+        "created_at",
+        "updated_at",
+    ]
     inlines = [QuotationLineInline]
 
 
 @admin.register(QuotationLine)
 class QuotationLineAdmin(admin.ModelAdmin):
-    list_display = ["item_name_snapshot", "quotation", "quantity", "unit_price", "line_total", "match_status"]
-    list_filter = ["match_status"]
+    list_display = ["item_name_snapshot", "quotation", "quantity", "unit_price", "line_total", "match_status", "outcome_status"]
+    list_filter = ["match_status", "outcome_status", "outcome_reason"]
     search_fields = ["item_name_snapshot", "quotation__quotation_number", "product__name", "quote_item__name"]
     autocomplete_fields = ["quotation", "product", "quote_item", "inquiry_line"]
-    readonly_fields = ["line_subtotal", "vat_amount", "line_total", "created_at", "updated_at"]
+    readonly_fields = ["line_subtotal", "vat_amount", "line_total", "accepted_total", "lost_value", "created_at", "updated_at"]
+
+
+@admin.register(QuotationOutcomePOImport)
+class QuotationOutcomePOImportAdmin(admin.ModelAdmin):
+    list_display = ["quotation", "source_type", "source_filename", "status", "created_by", "created_at"]
+    list_filter = ["source_type", "status", "created_at"]
+    search_fields = ["quotation__quotation_number", "source_filename", "source_sha256"]
+    autocomplete_fields = ["quotation", "created_by"]
+    readonly_fields = [
+        "source_sha256",
+        "source_file_ref",
+        "parse_method",
+        "parsed_rows",
+        "suggestions",
+        "unmatched_po_rows",
+        "missing_quote_line_ids",
+        "warnings",
+        "created_at",
+        "updated_at",
+    ]
 
 
 @admin.register(CompanyPriceHistory)

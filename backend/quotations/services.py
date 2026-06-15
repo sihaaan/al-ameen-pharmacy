@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
@@ -7,7 +7,7 @@ from django.db.models import Max, Sum
 from django.utils import timezone
 from django.utils.text import slugify
 
-from api.models import Product, ProductImage
+from api.models import Product, ProductImage, ProductSupplier
 
 from .matching import create_product_alias, suggest_product_for_text
 from .models import (
@@ -60,6 +60,458 @@ def recalculate_quotation_totals(quotation):
     quotation.total = totals["total"] or Decimal("0.00")
     quotation.save(update_fields=["subtotal", "vat_total", "total", "updated_at"])
     return quotation
+
+
+OUTCOME_CLOSED_STATUSES = {
+    Quotation.OUTCOME_WON,
+    Quotation.OUTCOME_LOST,
+    Quotation.OUTCOME_PARTIAL,
+    Quotation.OUTCOME_EXPIRED,
+    Quotation.OUTCOME_CANCELLED,
+}
+
+
+def _decimal_or_none(value):
+    if value in ("", None):
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception as exc:
+        raise ValidationError("Enter a valid number.") from exc
+
+
+def _decimal_or_zero(value):
+    parsed = _decimal_or_none(value)
+    return parsed if parsed is not None else Decimal("0.00")
+
+
+def _money(value):
+    return Decimal(value or 0).quantize(Decimal("0.01"))
+
+
+def _line_outcome_snapshot(line):
+    return {
+        "id": line.id,
+        "item_name": line.item_name_snapshot,
+        "outcome_status": line.outcome_status,
+        "accepted_quantity": _snapshot_decimal(line.accepted_quantity),
+        "accepted_unit_price": _snapshot_decimal(line.accepted_unit_price),
+        "accepted_total": _snapshot_decimal(line.accepted_total),
+        "lost_value": _snapshot_decimal(line.lost_value),
+        "outcome_reason": line.outcome_reason,
+        "outcome_notes": line.outcome_notes,
+        "quoted_gross_profit": _snapshot_decimal(line.quoted_gross_profit),
+        "accepted_gross_profit": _snapshot_decimal(line.accepted_gross_profit),
+        "lost_gross_profit": _snapshot_decimal(line.lost_gross_profit),
+    }
+
+
+def _quotation_outcome_snapshot(quotation):
+    return {
+        "outcome_status": quotation.outcome_status,
+        "outcome_status_is_manual": quotation.outcome_status_is_manual,
+        "outcome_date": _snapshot_date(quotation.outcome_date),
+        "outcome_notes": quotation.outcome_notes,
+        "last_contacted_at": quotation.last_contacted_at.isoformat() if quotation.last_contacted_at else None,
+        "next_follow_up_date": _snapshot_date(quotation.next_follow_up_date),
+        "follow_up_status": quotation.follow_up_status,
+        "follow_up_contact_method": quotation.follow_up_contact_method,
+        "follow_up_notes": quotation.follow_up_notes,
+    }
+
+
+def latest_product_cost(product):
+    if not product:
+        return None
+    link = (
+        ProductSupplier.objects.filter(product=product, last_purchase_price__isnull=False)
+        .order_by("-is_preferred", "-updated_at", "-id")
+        .first()
+    )
+    return link.last_purchase_price if link else None
+
+
+def recalculate_line_outcome(line, *, save=True):
+    quoted_total = _money(line.line_total)
+    accepted_total = Decimal("0.00")
+    accepted_qty = line.accepted_quantity
+    accepted_unit_price = line.accepted_unit_price
+
+    if line.outcome_status == QuotationLine.OUTCOME_ACCEPTED:
+        accepted_qty = accepted_qty if accepted_qty is not None else line.quantity
+        accepted_unit_price = accepted_unit_price if accepted_unit_price is not None else line.unit_price
+    elif line.outcome_status == QuotationLine.OUTCOME_QUANTITY_CHANGED:
+        accepted_qty = accepted_qty if accepted_qty is not None else Decimal("0.000")
+        accepted_unit_price = accepted_unit_price if accepted_unit_price is not None else line.unit_price
+    elif line.outcome_status in {
+        QuotationLine.OUTCOME_REJECTED,
+        QuotationLine.OUTCOME_UNAVAILABLE_MISSING,
+        QuotationLine.OUTCOME_SUBSTITUTED,
+        QuotationLine.OUTCOME_PENDING,
+    }:
+        accepted_qty = None if line.outcome_status == QuotationLine.OUTCOME_PENDING else Decimal("0.000")
+        accepted_unit_price = None if line.outcome_status == QuotationLine.OUTCOME_PENDING else Decimal("0.00")
+
+    if accepted_qty is not None and accepted_unit_price is not None:
+        accepted_subtotal = Decimal(accepted_qty) * Decimal(accepted_unit_price)
+        accepted_vat = accepted_subtotal * (Decimal(line.vat_rate or 0) / Decimal("100"))
+        accepted_total = _money(accepted_subtotal + accepted_vat)
+    else:
+        accepted_subtotal = Decimal("0.00")
+
+    if (
+        line.outcome_status == QuotationLine.OUTCOME_ACCEPTED
+        and accepted_qty is not None
+        and line.quantity is not None
+        and accepted_qty < line.quantity
+    ):
+        line.outcome_status = QuotationLine.OUTCOME_QUANTITY_CHANGED
+        if not line.outcome_reason:
+            line.outcome_reason = QuotationLine.REASON_QUANTITY_CHANGED
+
+    line.accepted_quantity = accepted_qty
+    line.accepted_unit_price = accepted_unit_price
+    line.accepted_total = accepted_total
+    line.lost_value = max(quoted_total - accepted_total, Decimal("0.00")).quantize(Decimal("0.01"))
+
+    cost = latest_product_cost(line.product)
+    if cost is not None and line.unit_price is not None:
+        line.quoted_gross_profit = _money((Decimal(line.unit_price) - Decimal(cost)) * Decimal(line.quantity or 0))
+        if accepted_qty is not None and accepted_unit_price is not None:
+            line.accepted_gross_profit = _money((Decimal(accepted_unit_price) - Decimal(cost)) * Decimal(accepted_qty))
+        else:
+            line.accepted_gross_profit = Decimal("0.00")
+        line.lost_gross_profit = max(
+            Decimal(line.quoted_gross_profit or 0) - Decimal(line.accepted_gross_profit or 0),
+            Decimal("0.00"),
+        ).quantize(Decimal("0.01"))
+    else:
+        line.quoted_gross_profit = None
+        line.accepted_gross_profit = None
+        line.lost_gross_profit = None
+
+    if save:
+        line.save(
+            update_fields=[
+                "outcome_status",
+                "accepted_quantity",
+                "accepted_unit_price",
+                "accepted_total",
+                "lost_value",
+                "outcome_reason",
+                "outcome_notes",
+                "quoted_gross_profit",
+                "accepted_gross_profit",
+                "lost_gross_profit",
+                "updated_at",
+            ]
+        )
+    return line
+
+
+def derive_quotation_outcome(lines):
+    active = [line for line in lines if line.match_status != QuotationLine.MATCH_IGNORED]
+    if not active:
+        return Quotation.OUTCOME_PENDING
+    if any(line.outcome_status == QuotationLine.OUTCOME_PENDING for line in active):
+        return Quotation.OUTCOME_PENDING
+    accepted_value = sum((line.accepted_total or Decimal("0.00")) for line in active)
+    if accepted_value <= 0:
+        return Quotation.OUTCOME_LOST
+    all_full = all(
+        line.outcome_status == QuotationLine.OUTCOME_ACCEPTED
+        and line.accepted_quantity is not None
+        and line.quantity is not None
+        and line.accepted_quantity >= line.quantity
+        for line in active
+    )
+    return Quotation.OUTCOME_WON if all_full else Quotation.OUTCOME_PARTIAL
+
+
+def refresh_quotation_outcome(quotation, *, actor=None, manual_status=None, manual_note=None, force_manual=False):
+    lines = list(quotation.lines.select_related("product").order_by("sort_order", "id"))
+    for line in lines:
+        recalculate_line_outcome(line, save=True)
+
+    previous_status = quotation.outcome_status
+    if force_manual:
+        if manual_status not in dict(Quotation.OUTCOME_STATUS_CHOICES):
+            raise ValidationError("Select a valid outcome status.")
+        if manual_status != derive_quotation_outcome(lines) and not (manual_note or quotation.outcome_notes):
+            raise ValidationError("Enter an outcome note when overriding the calculated outcome.")
+        quotation.outcome_status = manual_status
+        quotation.outcome_status_is_manual = True
+    elif not quotation.outcome_status_is_manual:
+        quotation.outcome_status = derive_quotation_outcome(lines)
+
+    if manual_note is not None:
+        quotation.outcome_notes = manual_note
+    if quotation.outcome_status in OUTCOME_CLOSED_STATUSES:
+        quotation.outcome_date = quotation.outcome_date or timezone.localdate()
+        quotation.outcome_closed_at = quotation.outcome_closed_at or timezone.now()
+        if actor and getattr(actor, "is_authenticated", False) and not quotation.outcome_closed_by_id:
+            quotation.outcome_closed_by = actor
+    elif previous_status in OUTCOME_CLOSED_STATUSES and quotation.outcome_status == Quotation.OUTCOME_PENDING:
+        quotation.outcome_date = None
+        quotation.outcome_closed_at = None
+        quotation.outcome_closed_by = None
+    quotation.outcome_last_updated_at = timezone.now()
+    quotation.outcome_last_updated_by = actor if getattr(actor, "is_authenticated", False) else None
+    quotation.save(
+        update_fields=[
+            "outcome_status",
+            "outcome_status_is_manual",
+            "outcome_date",
+            "outcome_notes",
+            "outcome_closed_at",
+            "outcome_closed_by",
+            "outcome_last_updated_at",
+            "outcome_last_updated_by",
+            "updated_at",
+        ]
+    )
+    return quotation
+
+
+def ensure_outcome_reviewable(quotation):
+    if quotation.status not in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
+        raise ValidationError("Only finalized or sent quotations can have outcomes reviewed.")
+
+
+@transaction.atomic
+def update_quotation_outcome(quotation, data, actor):
+    quotation = Quotation.objects.select_for_update().select_related("company").get(pk=quotation.pk)
+    ensure_outcome_reviewable(quotation)
+    lines_by_id = {
+        line.id: line
+        for line in quotation.lines.select_for_update().select_related("product", "quote_item").order_by("sort_order", "id")
+    }
+    before = {
+        "quotation": _quotation_outcome_snapshot(quotation),
+        "lines": [_line_outcome_snapshot(line) for line in lines_by_id.values()],
+    }
+
+    touched = []
+    bulk_action = (data.get("bulk_action") or "").strip()
+    line_ids = [int(value) for value in data.get("line_ids", []) if str(value).isdigit()]
+    selected_lines = [lines_by_id[line_id] for line_id in line_ids if line_id in lines_by_id]
+    active_lines = [line for line in lines_by_id.values() if line.match_status != QuotationLine.MATCH_IGNORED]
+    reason = data.get("reason") or ""
+
+    if bulk_action == "mark_all_accepted":
+        selected_lines = active_lines
+        bulk_action = "mark_selected_accepted"
+
+    for line in selected_lines:
+        if bulk_action == "mark_selected_accepted":
+            line.outcome_status = QuotationLine.OUTCOME_ACCEPTED
+            line.accepted_quantity = line.quantity
+            line.accepted_unit_price = line.unit_price
+        elif bulk_action == "mark_selected_rejected":
+            line.outcome_status = QuotationLine.OUTCOME_REJECTED
+            line.outcome_reason = reason or line.outcome_reason or QuotationLine.REASON_UNKNOWN
+        elif bulk_action == "mark_selected_unavailable":
+            line.outcome_status = QuotationLine.OUTCOME_UNAVAILABLE_MISSING
+            line.outcome_reason = reason or line.outcome_reason or QuotationLine.REASON_NOT_AVAILABLE
+        elif bulk_action == "mark_selected_substituted":
+            line.outcome_status = QuotationLine.OUTCOME_SUBSTITUTED
+            line.outcome_reason = reason or line.outcome_reason or QuotationLine.REASON_ALTERNATE_BRAND
+        elif bulk_action == "apply_reason":
+            line.outcome_reason = reason
+        if bulk_action:
+            recalculate_line_outcome(line, save=True)
+            touched.append(line.id)
+
+    for row in data.get("line_updates") or []:
+        try:
+            line_id = int(row.get("id"))
+        except (TypeError, ValueError):
+            continue
+        line = lines_by_id.get(line_id)
+        if not line:
+            continue
+        if "outcome_status" in row:
+            if row["outcome_status"] not in dict(QuotationLine.OUTCOME_STATUS_CHOICES):
+                raise ValidationError("Select a valid line outcome status.")
+            line.outcome_status = row["outcome_status"]
+        if "accepted_quantity" in row:
+            line.accepted_quantity = _decimal_or_none(row.get("accepted_quantity"))
+        if "accepted_unit_price" in row:
+            line.accepted_unit_price = _decimal_or_none(row.get("accepted_unit_price"))
+        if "outcome_reason" in row:
+            line.outcome_reason = row.get("outcome_reason") or ""
+        if "outcome_notes" in row:
+            line.outcome_notes = row.get("outcome_notes") or ""
+        if line.outcome_status in {QuotationLine.OUTCOME_ACCEPTED, QuotationLine.OUTCOME_QUANTITY_CHANGED}:
+            line.accepted_quantity = line.accepted_quantity if line.accepted_quantity is not None else line.quantity
+            line.accepted_unit_price = line.accepted_unit_price if line.accepted_unit_price is not None else line.unit_price
+        recalculate_line_outcome(line, save=True)
+        touched.append(line.id)
+
+    followup_changed = False
+    for field in ["follow_up_status", "follow_up_notes", "follow_up_contact_method", "next_follow_up_date"]:
+        if field in data:
+            setattr(quotation, field, data.get(field) or ("" if field != "next_follow_up_date" else None))
+            followup_changed = True
+    if data.get("last_contacted_now"):
+        quotation.last_contacted_at = timezone.now()
+        followup_changed = True
+    if followup_changed:
+        quotation.save(
+            update_fields=[
+                "follow_up_status",
+                "follow_up_notes",
+                "follow_up_contact_method",
+                "next_follow_up_date",
+                "last_contacted_at",
+                "updated_at",
+            ]
+        )
+
+    force_manual = bool(data.get("manual_outcome"))
+    manual_status = data.get("outcome_status") or quotation.outcome_status
+    manual_note = data.get("outcome_notes") if "outcome_notes" in data else None
+    quotation = refresh_quotation_outcome(
+        quotation,
+        actor=actor,
+        manual_status=manual_status,
+        manual_note=manual_note,
+        force_manual=force_manual,
+    )
+
+    after_lines = list(quotation.lines.select_related("product", "quote_item").order_by("sort_order", "id"))
+    changes = {
+        "before": before,
+        "after": {
+            "quotation": _quotation_outcome_snapshot(quotation),
+            "lines": [_line_outcome_snapshot(line) for line in after_lines],
+        },
+        "touched_line_ids": sorted(set(touched)),
+    }
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_OUTCOME_UPDATED if not followup_changed else QuotationAuditLog.ACTION_FOLLOWUP_UPDATED,
+        quotation,
+        message=f"Updated quotation outcome for {quotation.quotation_number}.",
+        changes=changes,
+    )
+    return quotation
+
+
+def outcome_summary_for_quotation(quotation):
+    lines = [line for line in quotation.lines.all() if line.match_status != QuotationLine.MATCH_IGNORED]
+    quoted_value = sum((line.line_total or Decimal("0.00")) for line in lines)
+    accepted_value = sum((line.accepted_total or Decimal("0.00")) for line in lines)
+    lost_value = sum((line.lost_value or Decimal("0.00")) for line in lines)
+    accepted_lines = sum(1 for line in lines if (line.accepted_total or 0) > 0)
+    rejected_lines = sum(
+        1
+        for line in lines
+        if line.outcome_status
+        in {
+            QuotationLine.OUTCOME_REJECTED,
+            QuotationLine.OUTCOME_UNAVAILABLE_MISSING,
+            QuotationLine.OUTCOME_SUBSTITUTED,
+        }
+    )
+    pending_lines = sum(1 for line in lines if line.outcome_status == QuotationLine.OUTCOME_PENDING)
+    quoted_profit = sum((line.quoted_gross_profit or Decimal("0.00")) for line in lines if line.quoted_gross_profit is not None)
+    accepted_profit = sum((line.accepted_gross_profit or Decimal("0.00")) for line in lines if line.accepted_gross_profit is not None)
+    lost_profit = sum((line.lost_gross_profit or Decimal("0.00")) for line in lines if line.lost_gross_profit is not None)
+    has_profit = any(line.quoted_gross_profit is not None for line in lines)
+    return {
+        "quoted_value": _money(quoted_value),
+        "accepted_value": _money(accepted_value),
+        "lost_value": _money(lost_value),
+        "value_win_rate": round(float((accepted_value / quoted_value) * 100), 2) if quoted_value else 0,
+        "line_win_rate": round((accepted_lines / len(lines)) * 100, 2) if lines else 0,
+        "accepted_lines_count": accepted_lines,
+        "rejected_missing_lines_count": rejected_lines,
+        "pending_lines_count": pending_lines,
+        "line_count": len(lines),
+        "quoted_gross_profit": _money(quoted_profit) if has_profit else None,
+        "accepted_gross_profit": _money(accepted_profit) if has_profit else None,
+        "lost_gross_profit": _money(lost_profit) if has_profit else None,
+        "gross_profit_win_rate": round(float((accepted_profit / quoted_profit) * 100), 2) if has_profit and quoted_profit else None,
+    }
+
+
+def _text_match_score(left, right):
+    left_norm = normalize_label(left)
+    right_norm = normalize_label(right)
+    if not left_norm or not right_norm:
+        return 0
+    if left_norm == right_norm:
+        return 100
+    if left_norm in right_norm or right_norm in left_norm:
+        return 88
+    left_tokens = set(left_norm.split())
+    right_tokens = set(right_norm.split())
+    if not left_tokens or not right_tokens:
+        return 0
+    overlap = len(left_tokens & right_tokens)
+    total = len(left_tokens | right_tokens)
+    return int((overlap / total) * 100)
+
+
+def build_po_outcome_suggestions(quotation, preview):
+    quote_lines = [
+        line
+        for line in quotation.lines.select_related("product", "quote_item").order_by("sort_order", "id")
+        if line.match_status != QuotationLine.MATCH_IGNORED
+    ]
+    matched_quote_line_ids = set()
+    suggestions = []
+    unmatched = []
+    rows = preview.get("lines") or []
+    for index, row in enumerate(rows, start=1):
+        item_name = row.get("requested_item_name") or row.get("raw_name") or ""
+        quantity = _decimal_or_none(row.get("quantity"))
+        unit_price = _decimal_or_none(row.get("unit_price"))
+        best = None
+        best_score = 0
+        for line in quote_lines:
+            candidates = [line.item_name_snapshot]
+            if line.product_id:
+                candidates.append(line.product.name)
+            if line.quote_item_id:
+                candidates.append(line.quote_item.name)
+            score = max(_text_match_score(item_name, candidate) for candidate in candidates if candidate)
+            if score > best_score:
+                best_score = score
+                best = line
+        if best and best_score >= 60:
+            matched_quote_line_ids.add(best.id)
+            suggested_quantity = quantity if quantity is not None else best.quantity
+            suggested_unit_price = unit_price if unit_price is not None else best.unit_price
+            suggestions.append(
+                {
+                    "po_row_number": index,
+                    "po_row_index": index,
+                    "po_row": row,
+                    "po_item_name": item_name,
+                    "po_quantity": str(quantity) if quantity is not None else "",
+                    "po_unit_price": str(unit_price) if unit_price is not None else "",
+                    "quotation_line": best.id,
+                    "quotation_line_id": best.id,
+                    "quotation_item_name": best.item_name_snapshot,
+                    "quotation_line_label": best.item_name_snapshot,
+                    "suggested_outcome_status": (
+                        QuotationLine.OUTCOME_QUANTITY_CHANGED
+                        if suggested_quantity is not None and suggested_quantity < best.quantity
+                        else QuotationLine.OUTCOME_ACCEPTED
+                    ),
+                    "suggested_accepted_quantity": str(suggested_quantity) if suggested_quantity is not None else "",
+                    "suggested_accepted_unit_price": str(suggested_unit_price) if suggested_unit_price is not None else "",
+                    "confidence": min(best_score, 99),
+                    "match_strength": "high" if best_score >= 85 else "medium",
+                    "reason": "Matched PO item to the closest quotation line for staff review.",
+                }
+            )
+        else:
+            unmatched.append({"po_row_number": index, "po_item_name": item_name, "reason": "PO item not found in quotation."})
+    missing_line_ids = [line.id for line in quote_lines if line.id not in matched_quote_line_ids]
+    return suggestions, unmatched, missing_line_ids
 
 
 def _snapshot_decimal(value):
@@ -1409,6 +1861,9 @@ def transition_quotation_status(quotation, actor, target_status):
     update_fields = ["status", "updated_at"]
     if target_status == Quotation.STATUS_SENT:
         quotation.sent_at = timezone.now()
+        if not quotation.next_follow_up_date:
+            quotation.next_follow_up_date = timezone.localdate() + timedelta(days=7)
+            update_fields.append("next_follow_up_date")
         update_fields.append("sent_at")
     quotation.save(update_fields=update_fields)
     audit_log(

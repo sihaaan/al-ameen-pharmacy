@@ -13,6 +13,15 @@ const statusLabels = {
   cancelled: 'Cancelled',
 };
 
+const outcomeLabels = {
+  pending: 'Pending',
+  won: 'Won',
+  lost: 'Lost',
+  partial: 'Partial',
+  expired: 'Expired',
+  cancelled: 'Cancelled',
+};
+
 const contactOptionLabel = (contact) => {
   const details = [contact.role, contact.department].filter(Boolean).join(', ');
   return details ? `${contact.name} - ${details}` : contact.name;
@@ -27,7 +36,7 @@ const emptyContactForm = {
   is_primary: false,
 };
 
-const QuotationList = ({ onOpenQuote }) => {
+const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -180,9 +189,11 @@ const QuotationList = ({ onOpenQuote }) => {
                 <th>Company</th>
                 <th>Prepared By</th>
                 <th>Status</th>
+                <th>Outcome</th>
                 <th>Version</th>
                 <th>Total</th>
                 <th>Updated</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -192,9 +203,24 @@ const QuotationList = ({ onOpenQuote }) => {
                   <td>{quote.company_name}</td>
                   <td>{quote.created_by_username || '-'}</td>
                   <td><span className={`qm-badge status-${quote.status}`}>{statusLabels[quote.status] || quote.status}</span></td>
+                  <td><span className={`qm-badge status-${quote.outcome_status || 'pending'}`}>{outcomeLabels[quote.outcome_status] || quote.outcome_status || 'Pending'}</span></td>
                   <td>{quote.version}</td>
                   <td>{quote.currency} {parseFloat(quote.total || 0).toFixed(2)}</td>
                   <td>{new Date(quote.updated_at).toLocaleDateString('en-AE')}</td>
+                  <td>
+                    {['finalized', 'sent'].includes(quote.status) ? (
+                      <button
+                        type="button"
+                        className="qm-secondary small"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onReviewOutcome(quote.id);
+                        }}
+                      >
+                        Review Outcome
+                      </button>
+                    ) : '-'}
+                  </td>
                 </tr>
               ))}
             </tbody>

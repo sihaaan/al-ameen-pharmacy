@@ -4,6 +4,7 @@ import QuoteItemManager from './QuoteItemManager';
 import InquiryManager from './InquiryManager';
 import QuotationList from './QuotationList';
 import QuotationEditor from './QuotationEditor';
+import QuotationOutcomeReview from './QuotationOutcomeReview';
 import QuotationDashboard from './QuotationDashboard';
 import PriceHistoryPanel from './PriceHistoryPanel';
 import AuditLogPanel from './AuditLogPanel';
@@ -26,17 +27,26 @@ const tabs = [
 const QuotationModule = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [editingQuoteId, setEditingQuoteId] = useState(null);
+  const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const refresh = () => setRefreshKey((value) => value + 1);
 
   const openQuote = (quoteId) => {
     setEditingQuoteId(quoteId);
+    setReviewingOutcomeQuoteId(null);
+    setActiveTab('quotes');
+  };
+
+  const openOutcome = (quoteId) => {
+    setReviewingOutcomeQuoteId(quoteId);
+    setEditingQuoteId(null);
     setActiveTab('quotes');
   };
 
   const closeQuote = () => {
     setEditingQuoteId(null);
+    setReviewingOutcomeQuoteId(null);
     refresh();
   };
 
@@ -57,7 +67,10 @@ const QuotationModule = () => {
             className={`qm-tab ${activeTab === tab.id ? 'active' : ''}`}
             onClick={() => {
               setActiveTab(tab.id);
-              if (tab.id !== 'quotes') setEditingQuoteId(null);
+              if (tab.id !== 'quotes') {
+                setEditingQuoteId(null);
+                setReviewingOutcomeQuoteId(null);
+              }
             }}
           >
             {tab.label}
@@ -71,10 +84,12 @@ const QuotationModule = () => {
         {activeTab === 'items' && <QuoteItemManager />}
         {activeTab === 'inquiries' && <InquiryManager onOpenQuote={openQuote} />}
         {activeTab === 'quotes' && (
-          editingQuoteId ? (
-            <QuotationEditor quoteId={editingQuoteId} onClose={closeQuote} />
+          reviewingOutcomeQuoteId ? (
+            <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} />
+          ) : editingQuoteId ? (
+            <QuotationEditor quoteId={editingQuoteId} onClose={closeQuote} onReviewOutcome={openOutcome} />
           ) : (
-            <QuotationList key={refreshKey} onOpenQuote={openQuote} />
+            <QuotationList key={refreshKey} onOpenQuote={openQuote} onReviewOutcome={openOutcome} />
           )
         )}
         {activeTab === 'history' && <PriceHistoryPanel />}

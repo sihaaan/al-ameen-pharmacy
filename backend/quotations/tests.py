@@ -331,6 +331,135 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(CompanyPriceHistory.objects.count(), 1)
 
+    def test_outcome_review_requires_finalized_or_sent_quote(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        response = self.client.get(reverse("quotation-outcome", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mark_all_accepted_calculates_won_outcome(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+
+        response = self.client.patch(
+            reverse("quotation-outcome", args=[quotation.id]),
+            {"bulk_action": "mark_all_accepted"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        quotation.refresh_from_db()
+        self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_ACCEPTED)
+        self.assertEqual(line.accepted_total, line.line_total)
+        self.assertEqual(line.lost_value, Decimal("0.00"))
+        self.assertEqual(quotation.outcome_status, Quotation.OUTCOME_WON)
+
+    def test_partial_accepted_quantity_calculates_lost_value_and_partial_status(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+
+        response = self.client.patch(
+            reverse("quotation-outcome", args=[quotation.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                        "accepted_quantity": "1.000",
+                        "accepted_unit_price": "10.00",
+                    }
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        quotation.refresh_from_db()
+        self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_QUANTITY_CHANGED)
+        self.assertEqual(line.accepted_total, Decimal("10.00"))
+        self.assertEqual(line.lost_value, Decimal("10.00"))
+        self.assertEqual(quotation.outcome_status, Quotation.OUTCOME_PARTIAL)
+
+    def test_manual_outcome_override_requires_note_when_different_from_calculated_status(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+
+        response = self.client.patch(
+            reverse("quotation-outcome", args=[quotation.id]),
+            {"manual_outcome": True, "outcome_status": Quotation.OUTCOME_CANCELLED, "outcome_notes": ""},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_po_outcome_parse_returns_review_suggestions_without_saving_outcomes(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        html = """
+        <table>
+          <tr><th>Item</th><th>Qty</th><th>Unit</th><th>Price</th></tr>
+          <tr><td>Bandage Pack</td><td>2</td><td>box</td><td>10</td></tr>
+          <tr><td>Extra PO Item</td><td>1</td><td>box</td><td>5</td></tr>
+        </table>
+        """
+
+        response = self.client.post(
+            reverse("quotation-parse-outcome-po", args=[quotation.id]),
+            {"text": "Bandage Pack 2 box 10\nExtra PO Item 1 box 5", "html": html, "use_ai": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertGreaterEqual(len(response.data["suggestions"]), 1)
+        self.assertEqual(response.data["suggestions"][0]["quotation_line_id"], line.id)
+        line.refresh_from_db()
+        self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_PENDING)
+        self.assertTrue(response.data["unmatched_po_rows"])
+
+    def test_analysis_dashboard_and_followups_expose_outcome_metrics(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        quotation.status = Quotation.STATUS_SENT
+        quotation.next_follow_up_date = date(2026, 1, 1)
+        quotation.save(update_fields=["status", "next_follow_up_date", "updated_at"])
+        self.client.patch(
+            reverse("quotation-outcome", args=[quotation.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": line.id,
+                        "outcome_status": QuotationLine.OUTCOME_REJECTED,
+                        "outcome_reason": QuotationLine.REASON_PRICE_TOO_HIGH,
+                    }
+                ]
+            },
+            format="json",
+        )
+        pending_quote = self.create_quote()
+        self.create_valid_line(pending_quote)
+        self.client.post(reverse("quotation-finalize", args=[pending_quote.id]))
+        pending_quote.status = Quotation.STATUS_SENT
+        pending_quote.next_follow_up_date = date(2026, 1, 1)
+        pending_quote.save(update_fields=["status", "next_follow_up_date", "updated_at"])
+
+        analysis = self.client.get(reverse("quotation-analysis-dashboard"), {"reason": QuotationLine.REASON_PRICE_TOO_HIGH})
+        followups = self.client.get(reverse("quotation-followups"))
+
+        self.assertEqual(analysis.status_code, status.HTTP_200_OK)
+        self.assertEqual(analysis.data["cards"]["lost_value"], "20.00")
+        self.assertEqual(analysis.data["tables"]["lost_value_by_reason"][0]["reason"], QuotationLine.REASON_PRICE_TOO_HIGH)
+        self.assertEqual(followups.status_code, status.HTTP_200_OK)
+        self.assertEqual(followups.data["overdue"][0]["id"], pending_quote.id)
+
     def test_quotation_number_generation_retries_after_collision(self):
         Quotation.objects.create(company=self.company, created_by=self.staff, quotation_number="QT-COLLIDE")
 

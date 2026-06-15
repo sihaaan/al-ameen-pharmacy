@@ -22,6 +22,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
     QuoteItem,
@@ -1223,6 +1224,8 @@ class QuotationLineSerializer(serializers.ModelSerializer):
     )
     product_image_url = serializers.SerializerMethodField()
     has_product_image = serializers.SerializerMethodField()
+    outcome_status_display = serializers.CharField(source="get_outcome_status_display", read_only=True)
+    outcome_reason_display = serializers.CharField(source="get_outcome_reason_display", read_only=True)
 
     class Meta:
         model = QuotationLine
@@ -1252,6 +1255,18 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "match_status",
             "sort_order",
             "notes",
+            "outcome_status",
+            "outcome_status_display",
+            "accepted_quantity",
+            "accepted_unit_price",
+            "accepted_total",
+            "lost_value",
+            "outcome_reason",
+            "outcome_reason_display",
+            "outcome_notes",
+            "quoted_gross_profit",
+            "accepted_gross_profit",
+            "lost_gross_profit",
             "created_at",
             "updated_at",
         ]
@@ -1265,6 +1280,18 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "line_subtotal",
             "vat_amount",
             "line_total",
+            "outcome_status_display",
+            "outcome_status",
+            "accepted_quantity",
+            "accepted_unit_price",
+            "accepted_total",
+            "lost_value",
+            "outcome_reason",
+            "outcome_reason_display",
+            "outcome_notes",
+            "quoted_gross_profit",
+            "accepted_gross_profit",
+            "lost_gross_profit",
             "created_at",
             "updated_at",
         ]
@@ -1321,6 +1348,11 @@ class QuotationSerializer(serializers.ModelSerializer):
     finalized_by_username = serializers.CharField(source="finalized_by.username", read_only=True, allow_null=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     payment_terms_display = serializers.CharField(source="get_payment_terms_display", read_only=True)
+    outcome_status_display = serializers.CharField(source="get_outcome_status_display", read_only=True)
+    follow_up_status_display = serializers.CharField(source="get_follow_up_status_display", read_only=True)
+    follow_up_contact_method_display = serializers.CharField(source="get_follow_up_contact_method_display", read_only=True)
+    outcome_closed_by_username = serializers.CharField(source="outcome_closed_by.username", read_only=True, allow_null=True)
+    outcome_last_updated_by_username = serializers.CharField(source="outcome_last_updated_by.username", read_only=True, allow_null=True)
     lines = QuotationLineSerializer(many=True, read_only=True)
 
     class Meta:
@@ -1357,6 +1389,24 @@ class QuotationSerializer(serializers.ModelSerializer):
             "finalized_by_username",
             "finalized_at",
             "sent_at",
+            "outcome_status",
+            "outcome_status_display",
+            "outcome_status_is_manual",
+            "outcome_date",
+            "outcome_notes",
+            "outcome_closed_by",
+            "outcome_closed_by_username",
+            "outcome_closed_at",
+            "outcome_last_updated_by",
+            "outcome_last_updated_by_username",
+            "outcome_last_updated_at",
+            "last_contacted_at",
+            "next_follow_up_date",
+            "follow_up_status",
+            "follow_up_status_display",
+            "follow_up_notes",
+            "follow_up_contact_method",
+            "follow_up_contact_method_display",
             "is_historical_import",
             "lines",
             "created_at",
@@ -1382,6 +1432,24 @@ class QuotationSerializer(serializers.ModelSerializer):
             "finalized_by_username",
             "finalized_at",
             "sent_at",
+            "outcome_status_display",
+            "outcome_status",
+            "outcome_status_is_manual",
+            "outcome_date",
+            "outcome_notes",
+            "outcome_closed_by",
+            "outcome_closed_by_username",
+            "outcome_closed_at",
+            "outcome_last_updated_by",
+            "outcome_last_updated_by_username",
+            "outcome_last_updated_at",
+            "last_contacted_at",
+            "next_follow_up_date",
+            "follow_up_status",
+            "follow_up_status_display",
+            "follow_up_notes",
+            "follow_up_contact_method",
+            "follow_up_contact_method_display",
             "is_historical_import",
             "lines",
             "created_at",
@@ -1402,6 +1470,8 @@ class QuotationListSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     payment_terms_display = serializers.CharField(source="get_payment_terms_display", read_only=True)
+    outcome_status_display = serializers.CharField(source="get_outcome_status_display", read_only=True)
+    follow_up_status_display = serializers.CharField(source="get_follow_up_status_display", read_only=True)
 
     class Meta:
         model = Quotation
@@ -1421,10 +1491,42 @@ class QuotationListSerializer(serializers.ModelSerializer):
             "currency",
             "payment_terms",
             "payment_terms_display",
+            "outcome_status",
+            "outcome_status_display",
+            "outcome_date",
+            "next_follow_up_date",
+            "follow_up_status",
+            "follow_up_status_display",
             "subtotal",
             "vat_total",
             "total",
             "is_historical_import",
+            "created_by_username",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = QuotationOutcomePOImport
+        fields = [
+            "id",
+            "quotation",
+            "source_type",
+            "source_filename",
+            "source_sha256",
+            "parse_method",
+            "status",
+            "parsed_rows",
+            "suggestions",
+            "unmatched_po_rows",
+            "missing_quote_line_ids",
+            "warnings",
+            "created_by",
             "created_by_username",
             "created_at",
             "updated_at",
