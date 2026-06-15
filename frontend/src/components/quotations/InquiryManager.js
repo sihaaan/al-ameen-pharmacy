@@ -722,74 +722,85 @@ const InquiryManager = ({ onOpenQuote }) => {
         )}
 
         <div className="qm-price-reference-box">
-          <div className="qm-price-reference-copy">
-            <h4>Optional: Fill Prices from Dad's Reference</h4>
-            <p>Use a previous company Excel/PDF file or pasted price section to fill only unit price and VAT before saving.</p>
-          </div>
-          <div className="qm-price-reference-controls">
-            <div className="qm-reference-tabs" role="tablist" aria-label="Price reference source">
-              <button
-                type="button"
-                className={priceReferenceMode === 'file' ? 'active' : ''}
-                onClick={() => setPriceReferenceMode('file')}
-              >
-                Upload file
-              </button>
-              <button
-                type="button"
-                className={priceReferenceMode === 'paste' ? 'active' : ''}
-                onClick={() => setPriceReferenceMode('paste')}
-              >
-                Paste rows
-              </button>
+          <div className="qm-price-reference-header">
+            <div className="qm-price-reference-copy">
+              <h4>Optional: Fill Prices from Dad's Reference</h4>
+              <p>Use a previous company Excel/PDF file or pasted price section to fill only unit price and VAT before saving.</p>
             </div>
-            {priceReferenceMode === 'file' ? (
-              <label>
-                <span className="qm-label-text">Price reference file</span>
+            <span className="qm-price-reference-pill">Price + VAT only</span>
+          </div>
+          <div className="qm-price-reference-body">
+            <div className="qm-price-reference-source">
+              <span className="qm-mini-label">Source</span>
+              <div className="qm-reference-tabs" role="tablist" aria-label="Price reference source">
+                <button
+                  type="button"
+                  className={priceReferenceMode === 'file' ? 'active' : ''}
+                  onClick={() => setPriceReferenceMode('file')}
+                >
+                  Upload file
+                </button>
+                <button
+                  type="button"
+                  className={priceReferenceMode === 'paste' ? 'active' : ''}
+                  onClick={() => setPriceReferenceMode('paste')}
+                >
+                  Paste rows
+                </button>
+              </div>
+            </div>
+            <div className="qm-price-reference-input">
+              {priceReferenceMode === 'file' ? (
+                <label>
+                  <span className="qm-label-text">Price reference file</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.xlsb,.pdf"
+                    onChange={(event) => setPriceReferenceFile(event.target.files?.[0] || null)}
+                  />
+                </label>
+              ) : (
+                <label>
+                  <span className="qm-label-text">Pasted price reference</span>
+                  <textarea
+                    rows="4"
+                    value={priceReferenceText}
+                    onPaste={(event) => {
+                      const html = event.clipboardData?.getData('text/html') || '';
+                      setPriceReferenceHtml(html.includes('<table') ? html : '');
+                    }}
+                    onChange={(event) => {
+                      setPriceReferenceText(event.target.value);
+                      if (!event.target.value) setPriceReferenceHtml('');
+                    }}
+                    placeholder="Paste Dad's priced rows here..."
+                  />
+                </label>
+              )}
+              <label className="qm-checkbox qm-price-reference-ai">
                 <input
-                  type="file"
-                  accept=".xlsx,.xls,.xlsb,.pdf"
-                  onChange={(event) => setPriceReferenceFile(event.target.files?.[0] || null)}
+                  type="checkbox"
+                  checked={priceReferenceUseAi}
+                  onChange={(event) => setPriceReferenceUseAi(event.target.checked)}
                 />
+                Use AI cleanup when available
               </label>
-            ) : (
-              <label>
-                <span className="qm-label-text">Pasted price reference</span>
-                <textarea
-                  rows="4"
-                  value={priceReferenceText}
-                  onPaste={(event) => {
-                    const html = event.clipboardData?.getData('text/html') || '';
-                    setPriceReferenceHtml(html.includes('<table') ? html : '');
-                  }}
-                  onChange={(event) => {
-                    setPriceReferenceText(event.target.value);
-                    if (!event.target.value) setPriceReferenceHtml('');
-                  }}
-                  placeholder="Paste Dad's priced rows here..."
-                />
-              </label>
-            )}
-            <label className="qm-checkbox">
-              <input
-                type="checkbox"
-                checked={priceReferenceUseAi}
-                onChange={(event) => setPriceReferenceUseAi(event.target.checked)}
-              />
-              Use AI cleanup when available
-            </label>
-            <button
-              type="button"
-              className="qm-secondary qm-price-reference-action"
-              disabled={
-                priceReferenceApplying ||
-                !importPreview?.lines?.length ||
-                (priceReferenceMode === 'file' ? !priceReferenceFile : !priceReferenceText.trim())
-              }
-              onClick={applyPriceReference}
-            >
-              {priceReferenceApplying ? 'Applying prices...' : 'Apply Price Reference'}
-            </button>
+            </div>
+            <div className="qm-price-reference-submit">
+              <button
+                type="button"
+                className="qm-primary qm-price-reference-action"
+                disabled={
+                  priceReferenceApplying ||
+                  !importPreview?.lines?.length ||
+                  (priceReferenceMode === 'file' ? !priceReferenceFile : !priceReferenceText.trim())
+                }
+                onClick={applyPriceReference}
+              >
+                {priceReferenceApplying ? 'Applying prices...' : 'Apply Price Reference'}
+              </button>
+              <small>Matches by item name.</small>
+            </div>
           </div>
         </div>
 
