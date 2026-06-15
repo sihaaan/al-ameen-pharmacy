@@ -651,12 +651,17 @@ const AccountingModule = () => {
               />
               <button type="button" className="accounting-secondary" onClick={() => loadBlocklist(blocklistSearch)}>Search</button>
             </div>
+            {!loadingBlocklist && blocklistEntries.length > 0 && (
+              <p className="accounting-help-text">
+                Showing {blocklistEntries.length} {blocklistSearch ? 'matching' : 'active'} entr{blocklistEntries.length === 1 ? 'y' : 'ies'}. Scroll the list to review/edit.
+              </p>
+            )}
             <div className="accounting-blocklist-list">
               {loadingBlocklist && <div className="accounting-help-text">Loading blocklist...</div>}
               {!loadingBlocklist && blocklistEntries.length === 0 && (
                 <div className="accounting-empty-state compact">No active blocklist entries yet.</div>
               )}
-              {blocklistEntries.slice(0, 12).map((entry) => (
+              {blocklistEntries.map((entry) => (
                 <div className="accounting-blocklist-row" key={entry.id}>
                   <div>
                     <strong>{entry.name}</strong>
@@ -668,9 +673,6 @@ const AccountingModule = () => {
                   </div>
                 </div>
               ))}
-              {blocklistEntries.length > 12 && (
-                <p className="accounting-help-text">Showing 12 entries. Use search to narrow the list.</p>
-              )}
             </div>
           </div>
         </section>

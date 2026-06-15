@@ -120,7 +120,7 @@
   display: grid;
   gap: 8px;
   margin-top: 10px;
-  max-height: 320px;
+  max-height: 460px;
   overflow: auto;
 }
 
