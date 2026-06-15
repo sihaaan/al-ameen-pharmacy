@@ -62,6 +62,58 @@ def recalculate_quotation_totals(quotation):
     return quotation
 
 
+def _snapshot_decimal(value):
+    return str(value) if value is not None else None
+
+
+def _snapshot_date(value):
+    return value.isoformat() if value else None
+
+
+def build_quotation_delete_snapshot(quotation):
+    lines = quotation.lines.select_related("product", "quote_item").order_by("sort_order", "id")
+    return {
+        "quotation": {
+            "id": quotation.id,
+            "quotation_number": quotation.quotation_number,
+            "status": quotation.status,
+            "version": quotation.version,
+            "company_id": quotation.company_id,
+            "company_name": quotation.company.name if quotation.company_id else "",
+            "contact_id": quotation.contact_id,
+            "contact_name": quotation.contact.name if quotation.contact_id else "",
+            "inquiry_id": quotation.inquiry_id,
+            "valid_until": _snapshot_date(quotation.valid_until),
+            "currency": quotation.currency,
+            "payment_terms": quotation.payment_terms,
+            "subtotal": _snapshot_decimal(quotation.subtotal),
+            "vat_total": _snapshot_decimal(quotation.vat_total),
+            "total": _snapshot_decimal(quotation.total),
+        },
+        "lines": [
+            {
+                "id": line.id,
+                "sort_order": line.sort_order,
+                "item_name_snapshot": line.item_name_snapshot,
+                "product_id": line.product_id,
+                "product_name": line.product.name if line.product_id else "",
+                "quote_item_id": line.quote_item_id,
+                "quote_item_name": line.quote_item.name if line.quote_item_id else "",
+                "quantity": _snapshot_decimal(line.quantity),
+                "unit": line.unit,
+                "unit_price": _snapshot_decimal(line.unit_price),
+                "vat_rate": _snapshot_decimal(line.vat_rate),
+                "line_subtotal": _snapshot_decimal(line.line_subtotal),
+                "vat_amount": _snapshot_decimal(line.vat_amount),
+                "line_total": _snapshot_decimal(line.line_total),
+                "match_status": line.match_status,
+                "notes": line.notes,
+            }
+            for line in lines
+        ],
+    }
+
+
 def _product_name_from_line(line, override_name=""):
     name = (override_name or "").strip()
     if not name:

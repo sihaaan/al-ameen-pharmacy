@@ -153,6 +153,50 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(len(detail_response.data["lines"]), 1)
         self.assertEqual(list_response.data[0]["created_by_username"], self.staff.username)
 
+    def test_delete_draft_quotation_keeps_audit_snapshot_and_reopens_single_inquiry(self):
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            created_by=self.staff,
+            subject="Disposable supplies",
+            status=Inquiry.STATUS_QUOTED,
+        )
+        quotation = Quotation.objects.create(company=self.company, inquiry=inquiry, created_by=self.staff)
+        line = self.create_valid_line(quotation)
+        quotation_id = quotation.id
+        line_id = line.id
+
+        response = self.client.delete(reverse("quotation-detail", args=[quotation_id]))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Quotation.objects.filter(id=quotation_id).exists())
+        self.assertFalse(QuotationLine.objects.filter(id=line_id).exists())
+        inquiry.refresh_from_db()
+        self.assertEqual(inquiry.status, Inquiry.STATUS_DRAFT)
+
+        audit = QuotationAuditLog.objects.get(action=QuotationAuditLog.ACTION_DELETED, target_id=quotation_id)
+        snapshot = audit.changes["snapshot"]
+        self.assertEqual(snapshot["quotation"]["quotation_number"], quotation.quotation_number)
+        self.assertEqual(snapshot["quotation"]["inquiry_id"], inquiry.id)
+        self.assertEqual(snapshot["lines"][0]["item_name_snapshot"], "Bandage Pack")
+        self.assertEqual(snapshot["lines"][0]["line_total"], "20.00")
+        self.assertIsNone(audit.quotation_id)
+
+    def test_delete_draft_quotation_does_not_reopen_inquiry_with_other_quotes(self):
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            created_by=self.staff,
+            subject="Disposable supplies",
+            status=Inquiry.STATUS_QUOTED,
+        )
+        old_quote = Quotation.objects.create(company=self.company, inquiry=inquiry, created_by=self.staff)
+        Quotation.objects.create(company=self.company, inquiry=inquiry, created_by=self.staff)
+
+        response = self.client.delete(reverse("quotation-detail", args=[old_quote.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        inquiry.refresh_from_db()
+        self.assertEqual(inquiry.status, Inquiry.STATUS_QUOTED)
+
     def test_audit_log_filters_can_hide_repetitive_line_activity(self):
         quotation = self.create_quote()
         line = self.create_valid_line(quotation)

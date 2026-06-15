@@ -3,7 +3,7 @@ import logging
 import re
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import HttpResponse
 from rest_framework import status, viewsets
@@ -80,6 +80,7 @@ from .serializers import (
 from .services import (
     audit_log,
     apply_product_matches_to_historical_import,
+    build_quotation_delete_snapshot,
     bulk_create_quote_items_for_historical_import,
     bulk_create_products_from_quotation_lines,
     bulk_update_quotation_lines,
@@ -608,8 +609,26 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             ensure_quotation_editable(quotation)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
-        audit_log(request.user, QuotationAuditLog.ACTION_DELETED, quotation, message="Deleted quotation.")
-        return super().destroy(request, *args, **kwargs)
+        with transaction.atomic():
+            snapshot = build_quotation_delete_snapshot(quotation)
+            inquiry = quotation.inquiry
+            should_reset_inquiry = (
+                inquiry is not None
+                and inquiry.status == Inquiry.STATUS_QUOTED
+                and not inquiry.quotations.exclude(pk=quotation.pk).exists()
+            )
+            audit_log(
+                request.user,
+                QuotationAuditLog.ACTION_DELETED,
+                quotation,
+                message="Deleted draft quotation with snapshot.",
+                changes={"snapshot": snapshot},
+            )
+            quotation.delete()
+            if should_reset_inquiry:
+                inquiry.status = Inquiry.STATUS_DRAFT
+                inquiry.save(update_fields=["status", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def submit_review(self, request, pk=None):
