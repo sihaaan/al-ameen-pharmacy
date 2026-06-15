@@ -345,8 +345,6 @@ def apply_price_reference_to_preview(preview, reference_rows):
         if best and best_score >= 0.82:
             line["unit_price"] = str(best.unit_price)
             line["vat_rate"] = str(best.vat_rate)
-            if not line.get("unit") and best.unit:
-                line["unit"] = best.unit
             line["price_reference_match"] = _row_payload(best, best_score)
             line["price_reference_status"] = "matched"
             line["parse_status"] = line.get("parse_status") or "parsed"

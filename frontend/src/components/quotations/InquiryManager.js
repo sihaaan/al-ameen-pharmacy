@@ -446,10 +446,12 @@ const InquiryManager = ({ onOpenQuote }) => {
         result_source: response.data.result_source || importPreview.result_source || 'deterministic_parse',
         lines: responseLines.map((line, index) => {
           const currentLine = currentLines[index] || {};
+          const hasCurrentQuantity = Object.prototype.hasOwnProperty.call(currentLine, 'quantity');
+          const hasCurrentUnit = Object.prototype.hasOwnProperty.call(currentLine, 'unit');
           return {
             ...line,
-            quantity: currentLine.quantity ?? line.quantity ?? '',
-            unit: currentLine.unit || line.unit || '',
+            quantity: hasCurrentQuantity ? currentLine.quantity : line.quantity ?? '',
+            unit: hasCurrentUnit ? currentLine.unit : line.unit ?? '',
           };
         }),
       });
@@ -720,9 +722,9 @@ const InquiryManager = ({ onOpenQuote }) => {
         )}
 
         <div className="qm-price-reference-box">
-          <div>
+          <div className="qm-price-reference-copy">
             <h4>Optional: Fill Prices from Dad's Reference</h4>
-            <p>Use a previous company Excel/PDF file or paste a price section to fill unit prices before saving the inquiry.</p>
+            <p>Use a previous company Excel/PDF file or pasted price section to fill only unit price and VAT before saving.</p>
           </div>
           <div className="qm-price-reference-controls">
             <div className="qm-reference-tabs" role="tablist" aria-label="Price reference source">
@@ -776,19 +778,19 @@ const InquiryManager = ({ onOpenQuote }) => {
               />
               Use AI cleanup when available
             </label>
+            <button
+              type="button"
+              className="qm-secondary qm-price-reference-action"
+              disabled={
+                priceReferenceApplying ||
+                !importPreview?.lines?.length ||
+                (priceReferenceMode === 'file' ? !priceReferenceFile : !priceReferenceText.trim())
+              }
+              onClick={applyPriceReference}
+            >
+              {priceReferenceApplying ? 'Applying prices...' : 'Apply Price Reference'}
+            </button>
           </div>
-          <button
-            type="button"
-            className="qm-secondary"
-            disabled={
-              priceReferenceApplying ||
-              !importPreview?.lines?.length ||
-              (priceReferenceMode === 'file' ? !priceReferenceFile : !priceReferenceText.trim())
-            }
-            onClick={applyPriceReference}
-          >
-            {priceReferenceApplying ? 'Applying prices...' : 'Apply Price Reference'}
-          </button>
         </div>
 
         {importNotice && <div className={`qm-feedback ${importNotice.type}`}>{importNotice.message}</div>}

@@ -1375,14 +1375,18 @@
 
 .qm-price-reference-box {
   display: grid;
-  grid-template-columns: minmax(220px, 0.9fr) minmax(300px, 1.2fr) auto;
-  gap: 12px;
-  align-items: end;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  align-items: stretch;
   margin-top: 12px;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid #a7f3d0;
   border-radius: 8px;
   background: #ecfdf5;
+}
+
+.qm-price-reference-copy {
+  max-width: 760px;
 }
 
 .qm-price-reference-box h4 {
@@ -1397,7 +1401,13 @@
 
 .qm-price-reference-controls {
   display: grid;
-  gap: 10px;
+  grid-template-columns: auto minmax(280px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .qm-reference-tabs {
@@ -1423,6 +1433,16 @@
   background: #ffffff;
   color: #00796b;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.qm-price-reference-controls .qm-checkbox {
+  grid-column: 2 / span 2;
+  align-self: center;
+}
+
+.qm-price-reference-action {
+  min-height: 42px;
+  white-space: nowrap;
 }
 
 .qm-import-preview {
@@ -3003,6 +3023,14 @@
 
   .qm-price-reference-box {
     grid-template-columns: 1fr;
+  }
+
+  .qm-price-reference-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-price-reference-controls .qm-checkbox {
+    grid-column: auto;
   }
 
   .qm-mode-tabs {

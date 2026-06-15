@@ -477,7 +477,7 @@ class QuotationWorkflowTests(APITestCase):
         preview = {
             "source_type": "pasted_text",
             "lines": [
-                {"raw_name": "Pulse Oximeter", "quantity": "2", "unit": "NUM", "parse_status": "parsed"},
+                {"raw_name": "Pulse Oximeter", "quantity": "2", "unit": "", "parse_status": "parsed"},
                 {"raw_name": "Unknown Clinic Item", "quantity": "5", "unit": "PCS", "parse_status": "parsed"},
             ],
         }
@@ -498,7 +498,7 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["price_reference_summary"]["matched_count"], 1)
         self.assertEqual(response.data["lines"][0]["quantity"], "2")
-        self.assertEqual(response.data["lines"][0]["unit"], "NUM")
+        self.assertEqual(response.data["lines"][0]["unit"], "")
         self.assertEqual(response.data["lines"][0]["unit_price"], "55.00")
         self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
 
