@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+import re
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -30,10 +31,77 @@ def customer_lookup_key(row):
     return ("name", normalize_customer_name(row.customer_name))
 
 
-def find_or_create_customer(row, category_map=None, category_code_map=None):
+BLOCKLIST_GENERIC_SINGLE_TOKENS = {
+    "branch",
+    "card",
+    "cash",
+    "clinic",
+    "company",
+    "credit",
+    "customer",
+    "hospital",
+    "insurance",
+    "misc",
+    "pharmacy",
+    "school",
+}
+BLOCKLIST_BUSINESS_SUFFIX_TOKENS = {
+    "co",
+    "company",
+    "est",
+    "establishment",
+    "llc",
+    "limited",
+    "ltd",
+}
+
+
+def _normalized_tokens(value):
+    return re.findall(r"[a-z0-9]+", value or "")
+
+
+def _blocklist_match_tokens(normalized_name):
+    tokens = _normalized_tokens(normalized_name)
+    while tokens and tokens[-1] in BLOCKLIST_BUSINESS_SUFFIX_TOKENS:
+        tokens.pop()
+    return tokens
+
+
+def blocklist_name_matches(customer_normalized_name, blocklist_normalized_name):
+    if not customer_normalized_name or not blocklist_normalized_name:
+        return False
+    if customer_normalized_name == blocklist_normalized_name:
+        return True
+
+    customer_tokens = _normalized_tokens(customer_normalized_name)
+    blocklist_tokens = _blocklist_match_tokens(blocklist_normalized_name)
+    if not customer_tokens or not blocklist_tokens:
+        return False
+
+    if len(blocklist_tokens) == 1:
+        token = blocklist_tokens[0]
+        return (
+            len(token) >= 5
+            and token not in BLOCKLIST_GENERIC_SINGLE_TOKENS
+            and token in customer_tokens
+        )
+
+    return " ".join(blocklist_tokens) in " ".join(customer_tokens)
+
+
+def is_name_blocklisted(normalized_name, active_blocklist_names=None):
+    if active_blocklist_names is None:
+        active_blocklist_names = AccountingBlocklistedCustomer.objects.filter(is_active=True).values_list(
+            "normalized_name",
+            flat=True,
+        )
+    return any(blocklist_name_matches(normalized_name, blocklist_name) for blocklist_name in active_blocklist_names)
+
+
+def find_or_create_customer(row, category_map=None, category_code_map=None, active_blocklist_names=None):
     normalized_name = normalize_customer_name(row.customer_name)
     normalized_code = row.customer_code.strip().lower() if row.customer_code else ""
-    is_blocklisted = AccountingBlocklistedCustomer.objects.filter(normalized_name=normalized_name, is_active=True).exists()
+    is_blocklisted = is_name_blocklisted(normalized_name, active_blocklist_names)
     customer = None
     if row.customer_code:
         customer = AccountCustomer.objects.filter(customer_code__iexact=row.customer_code.strip()).first()
@@ -159,15 +227,20 @@ def blocklist_update_message(result):
 
 
 def apply_blocklist_names(normalized_names):
-    normalized_names = [name for name in normalized_names if name]
+    normalized_names = [name for name in dict.fromkeys(normalized_names) if name]
     if not normalized_names:
         return {"matched_customers": 0, "matched_import_customers": 0}
 
-    customers = AccountCustomer.objects.filter(normalized_name__in=normalized_names)
+    matched_customer_ids = [
+        customer.id
+        for customer in AccountCustomer.objects.filter(is_active=True).only("id", "normalized_name")
+        if is_name_blocklisted(customer.normalized_name, normalized_names)
+    ]
+    customers = AccountCustomer.objects.filter(id__in=matched_customer_ids)
     matched_customers = customers.count()
     customers.update(is_ignored=True, updated_at=timezone.now())
 
-    summaries = AccountingImportCustomer.objects.filter(customer__normalized_name__in=normalized_names)
+    summaries = AccountingImportCustomer.objects.filter(customer_id__in=matched_customer_ids)
     matched_import_customers = summaries.count()
     affected_import_ids = list(summaries.values_list("accounting_import_id", flat=True).distinct())
     summaries.update(
@@ -274,6 +347,9 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
     parsed_category = parse_category_upload(category_file) if category_file else None
     category_map = parsed_category.entries if parsed_category else {}
     category_code_map = parsed_category.code_entries if parsed_category else {}
+    active_blocklist_names = list(
+        AccountingBlocklistedCustomer.objects.filter(is_active=True).values_list("normalized_name", flat=True)
+    )
     grouped = defaultdict(list)
     for row in parsed.rows:
         grouped[customer_lookup_key(row)].append(row)
@@ -303,7 +379,7 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
     invoice_rows_by_summary = []
     for rows in grouped.values():
         first = rows[0]
-        customer = find_or_create_customer(first, category_map, category_code_map)
+        customer = find_or_create_customer(first, category_map, category_code_map, active_blocklist_names)
         bucket_0_30 = sum((row.bucket_0_30 for row in rows), Decimal("0.00"))
         bucket_30_60 = sum((row.bucket_30_60 for row in rows), Decimal("0.00"))
         bucket_60_90 = sum((row.bucket_60_90 for row in rows), Decimal("0.00"))

@@ -440,6 +440,77 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(delete_response.status_code, 204)
         self.assertFalse(AccountingBlocklistedCustomer.objects.get(pk=create_response.data["id"]).is_active)
 
+    def test_blocklist_applies_to_clear_customer_name_variants(self):
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(make_agewise_row("901", "INTERMASS TRADING LLC - BRANCH 01", "INV-1", "03/02/2026", "100.00", "0.00", "100.00", "0.00", "0.00", "100.00", "80"))
+        writer.writerow(make_agewise_row("902", "GENERIC CLINIC CUSTOMER", "INV-2", "03/02/2026", "200.00", "0.00", "200.00", "0.00", "0.00", "200.00", "80"))
+        upload = SimpleUploadedFile("blocklist-variants.csv", buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(self.accountant)
+        upload_response = self.client.post(reverse("accounting-import-upload"), {"file": upload}, format="multipart")
+        self.assertEqual(upload_response.status_code, 201)
+        self.assertEqual(upload_response.data["due_customer_count"], 2)
+
+        block_response = self.client.post(
+            reverse("accounting-blocklist-list"),
+            {"name": "INTERMASS", "category_hint": "Do not send"},
+            format="json",
+        )
+
+        self.assertEqual(block_response.status_code, 201)
+        self.assertEqual(block_response.data["blocklist_update"]["matched_customers"], 1)
+        blocked = AccountingImportCustomer.objects.get(customer__customer_code="901")
+        allowed = AccountingImportCustomer.objects.get(customer__customer_code="902")
+        blocked.accounting_import.refresh_from_db()
+        self.assertTrue(blocked.is_ignored)
+        self.assertFalse(blocked.is_due)
+        self.assertFalse(allowed.is_ignored)
+        self.assertTrue(allowed.is_due)
+        self.assertEqual(blocked.accounting_import.due_customer_count, 1)
+
+    def test_generic_single_word_blocklist_does_not_overmatch_variants(self):
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(make_agewise_row("903", "DUBAI CLINIC CUSTOMER", "INV-1", "03/02/2026", "100.00", "0.00", "100.00", "0.00", "0.00", "100.00", "80"))
+        upload = SimpleUploadedFile("generic-blocklist.csv", buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+        self.client.force_authenticate(self.accountant)
+        upload_response = self.client.post(reverse("accounting-import-upload"), {"file": upload}, format="multipart")
+        self.assertEqual(upload_response.status_code, 201)
+
+        block_response = self.client.post(
+            reverse("accounting-blocklist-list"),
+            {"name": "CLINIC", "category_hint": "Too broad"},
+            format="json",
+        )
+
+        self.assertEqual(block_response.status_code, 201)
+        self.assertEqual(block_response.data["blocklist_update"]["matched_customers"], 0)
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="903")
+        self.assertFalse(summary.is_ignored)
+        self.assertTrue(summary.is_due)
+
+    def test_existing_blocklist_variant_applies_to_future_imports(self):
+        self.client.force_authenticate(self.accountant)
+        self.client.post(
+            reverse("accounting-blocklist-list"),
+            {"name": "INTERMASS", "category_hint": "Do not send"},
+            format="json",
+        )
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(make_agewise_row("904", "INTERMASS TRADING LLC - BRANCH 02", "INV-1", "03/02/2026", "100.00", "0.00", "100.00", "0.00", "0.00", "100.00", "80"))
+        upload = SimpleUploadedFile("future-blocklist.csv", buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+        upload_response = self.client.post(reverse("accounting-import-upload"), {"file": upload}, format="multipart")
+
+        self.assertEqual(upload_response.status_code, 201)
+        self.assertEqual(upload_response.data["due_customer_count"], 0)
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="904")
+        self.assertTrue(summary.is_ignored)
+        self.assertFalse(summary.is_due)
+
     def test_same_customer_name_with_different_codes_stays_separate(self):
         buffer = StringIO()
         writer = csv.writer(buffer)
