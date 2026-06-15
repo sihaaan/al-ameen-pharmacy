@@ -39,6 +39,7 @@ from .models import (
     Inquiry,
     InquiryLine,
     Quotation,
+    QuotationAuditLog,
     QuotationLine,
     QuotationSettings,
     UserQuotationProfile,
@@ -150,6 +151,39 @@ class QuotationWorkflowTests(APITestCase):
         self.assertNotIn("lines", list_response.data[0])
         self.assertIn("lines", detail_response.data)
         self.assertEqual(len(detail_response.data["lines"]), 1)
+        self.assertEqual(list_response.data[0]["created_by_username"], self.staff.username)
+
+    def test_audit_log_filters_can_hide_repetitive_line_activity(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        QuotationAuditLog.objects.create(
+            actor=self.staff,
+            action=QuotationAuditLog.ACTION_UPDATED,
+            target_type="QuotationLine",
+            target_id=line.id,
+            company=self.company,
+            quotation=quotation,
+            message="Updated quotation line.",
+        )
+        QuotationAuditLog.objects.create(
+            actor=self.staff,
+            action=QuotationAuditLog.ACTION_FINALIZED,
+            target_type="Quotation",
+            target_id=quotation.id,
+            company=self.company,
+            quotation=quotation,
+            message="Finalized quotation.",
+        )
+
+        compact_response = self.client.get(reverse("quotation-audit-log-list"), {"important": "true"})
+        full_response = self.client.get(reverse("quotation-audit-log-list"))
+
+        self.assertEqual(compact_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(full_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(compact_response.data), 1)
+        self.assertEqual(compact_response.data[0]["action"], QuotationAuditLog.ACTION_FINALIZED)
+        self.assertEqual(compact_response.data[0]["action_display"], "Finalized")
+        self.assertEqual(len(full_response.data), 2)
 
     def test_company_list_is_compact_but_detail_includes_contacts(self):
         CompanyContact.objects.create(company=self.company, name="Buyer", email="buyer@example.com")

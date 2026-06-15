@@ -418,6 +418,31 @@
   flex: 1 1 360px;
 }
 
+.qm-audit-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0;
+}
+
+.qm-audit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid #ccfbf1;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.qm-audit-toggle input {
+  width: auto;
+}
+
 .qm-import-panel label,
 .qm-form {
   display: flex;
@@ -650,6 +675,22 @@
 .qm-table tbody tr:hover,
 .qm-table tbody tr.selected {
   background: #f0fdfa;
+}
+
+.qm-audit-table tbody tr {
+  cursor: default;
+}
+
+.qm-audit-table td small {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.qm-nowrap {
+  white-space: nowrap;
 }
 
 .qm-table .qm-check-cell {

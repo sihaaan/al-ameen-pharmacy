@@ -1508,13 +1508,53 @@ class CompanyPriceHistoryViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelVie
 class QuotationAuditLogViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):
     serializer_class = QuotationAuditLogSerializer
     queryset = QuotationAuditLog.objects.select_related("actor", "company", "quotation")
+    noisy_target_types = {
+        "InquiryLine",
+        "QuotationLine",
+        "HistoricalPriceImportLine",
+        "HistoricalImportAISuggestion",
+    }
+    noisy_actions = {
+        QuotationAuditLog.ACTION_PDF_DOWNLOADED,
+    }
+
+    @staticmethod
+    def _truthy_param(value):
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        quotation_id = self.request.query_params.get("quotation")
-        company_id = self.request.query_params.get("company")
+        params = self.request.query_params
+        quotation_id = params.get("quotation")
+        company_id = params.get("company")
+        action = params.get("action")
+        actor_id = params.get("actor")
+        target_type = params.get("target_type")
+        search = (params.get("search") or "").strip()
+
         if quotation_id:
             queryset = queryset.filter(quotation_id=quotation_id)
         if company_id:
             queryset = queryset.filter(company_id=company_id)
-        return queryset
+        if action:
+            queryset = queryset.filter(action=action)
+        if actor_id:
+            queryset = queryset.filter(actor_id=actor_id)
+        if target_type:
+            queryset = queryset.filter(target_type=target_type)
+        if self._truthy_param(params.get("important")):
+            queryset = queryset.exclude(target_type__in=self.noisy_target_types).exclude(action__in=self.noisy_actions)
+        if search:
+            queryset = queryset.filter(
+                Q(message__icontains=search)
+                | Q(actor__username__icontains=search)
+                | Q(company__name__icontains=search)
+                | Q(quotation__quotation_number__icontains=search)
+                | Q(target_type__icontains=search)
+            )
+
+        try:
+            limit = min(max(int(params.get("limit", 150)), 1), 500)
+        except (TypeError, ValueError):
+            limit = 150
+        return queryset[:limit]

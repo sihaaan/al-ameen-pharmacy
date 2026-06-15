@@ -90,7 +90,8 @@ const QuotationList = ({ onOpenQuote }) => {
       const statusMatch = !statusFilter || quote.status === statusFilter;
       const searchMatch = !term ||
         quote.quotation_number.toLowerCase().includes(term) ||
-        quote.company_name.toLowerCase().includes(term);
+        quote.company_name.toLowerCase().includes(term) ||
+        (quote.created_by_username || '').toLowerCase().includes(term);
       return statusMatch && searchMatch;
     });
   }, [quotes, statusFilter, search]);
@@ -177,6 +178,7 @@ const QuotationList = ({ onOpenQuote }) => {
               <tr>
                 <th>Number</th>
                 <th>Company</th>
+                <th>Prepared By</th>
                 <th>Status</th>
                 <th>Version</th>
                 <th>Total</th>
@@ -188,6 +190,7 @@ const QuotationList = ({ onOpenQuote }) => {
                 <tr key={quote.id} onClick={() => onOpenQuote(quote.id)}>
                   <td><strong>{quote.quotation_number}</strong></td>
                   <td>{quote.company_name}</td>
+                  <td>{quote.created_by_username || '-'}</td>
                   <td><span className={`qm-badge status-${quote.status}`}>{statusLabels[quote.status] || quote.status}</span></td>
                   <td>{quote.version}</td>
                   <td>{quote.currency} {parseFloat(quote.total || 0).toFixed(2)}</td>

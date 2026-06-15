@@ -1435,6 +1435,7 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
 
 class QuotationAuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source="actor.username", read_only=True, allow_null=True)
+    action_display = serializers.CharField(source="get_action_display", read_only=True)
     company_name = serializers.CharField(source="company.name", read_only=True, allow_null=True)
     quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True, allow_null=True)
 
@@ -1445,6 +1446,7 @@ class QuotationAuditLogSerializer(serializers.ModelSerializer):
             "actor",
             "actor_username",
             "action",
+            "action_display",
             "target_type",
             "target_id",
             "company",
@@ -1460,6 +1462,7 @@ class QuotationAuditLogSerializer(serializers.ModelSerializer):
             "actor",
             "actor_username",
             "action",
+            "action_display",
             "target_type",
             "target_id",
             "company",
