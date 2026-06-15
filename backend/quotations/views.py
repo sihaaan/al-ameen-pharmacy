@@ -53,7 +53,7 @@ from .models import (
 from .excel import build_quotation_excel
 from .pdf import build_quotation_pdf
 from .permissions import IsQuotationStaff
-from .price_reference import apply_price_reference_to_preview, parse_price_reference_workbook
+from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
 from .serializers import (
     CompanyContactSerializer,
     CompanyListSerializer,
@@ -446,7 +446,13 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         if not isinstance(preview, dict) or not isinstance(preview.get("lines"), list):
             return Response({"detail": "A parsed inquiry preview with lines is required before applying price references."}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            reference_rows, reference_meta = parse_price_reference_workbook(request.FILES.get("file"))
+            reference_rows, reference_meta = parse_price_reference_source(
+                request.FILES.get("file"),
+                raw_text=request.data.get("raw_text") or "",
+                raw_html=request.data.get("raw_html") or "",
+                use_ai=str(request.data.get("use_ai") or "").lower() in {"1", "true", "yes", "on"},
+                actor=request.user,
+            )
             updated_preview = apply_price_reference_to_preview(preview, reference_rows)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)

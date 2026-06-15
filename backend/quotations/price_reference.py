@@ -7,11 +7,15 @@ from pathlib import Path
 from django.core.exceptions import ValidationError
 from openpyxl import load_workbook
 
+from .ai_parsing import AIParseError, clean_preview_with_ai
 from .import_parsers import read_upload_bytes
+from .import_parsers import parse_file_preview, parse_text_preview
 from .models import normalize_label
 
 
-PRICE_REFERENCE_EXTENSIONS = {".xlsx"}
+PRICE_REFERENCE_WORKBOOK_EXTENSIONS = {".xlsx"}
+PRICE_REFERENCE_PREVIEW_EXTENSIONS = {".pdf", ".xls", ".xlsb"}
+PRICE_REFERENCE_FILE_EXTENSIONS = PRICE_REFERENCE_WORKBOOK_EXTENSIONS | PRICE_REFERENCE_PREVIEW_EXTENSIONS
 PRICE_HEADER_ALIASES = {
     "serial": {"sno", "s no", "sl no", "sr no", "serial", "#"},
     "item": {"item", "items", "item description", "item desc", "description", "material description"},
@@ -168,7 +172,7 @@ def parse_price_reference_workbook(uploaded_file):
     data = read_upload_bytes(uploaded_file)
     filename = Path(uploaded_file.name or "").name
     extension = Path(filename).suffix.lower()
-    if extension not in PRICE_REFERENCE_EXTENSIONS:
+    if extension not in PRICE_REFERENCE_WORKBOOK_EXTENSIONS:
         raise ValidationError("Upload an .xlsx price reference workbook.")
     try:
         workbook = load_workbook(BytesIO(data), data_only=True, read_only=True)
@@ -207,6 +211,79 @@ def parse_price_reference_workbook(uploaded_file):
     if not rows:
         warnings.append("No item price rows were detected in the reference workbook.")
     return rows, {"filename": filename, "row_count": len(rows), "warnings": warnings}
+
+
+def _reference_rows_from_preview(preview):
+    rows = []
+    warnings = list(preview.get("warnings") or [])
+    sequence = 0
+    for index, line in enumerate(preview.get("lines") or [], start=1):
+        if (line.get("parse_status") or line.get("status")) == "ignored":
+            continue
+        item_name = line.get("raw_name") or line.get("item_name") or ""
+        unit_price = _money(line.get("unit_price"))
+        if not _looks_like_item(item_name) or unit_price is None:
+            continue
+        rows.append(
+            PriceReferenceRow(
+                item_name=_clean_cell(item_name)[:255],
+                unit=_clean_cell(line.get("unit"))[:50],
+                quantity=_quantity(line.get("quantity")),
+                unit_price=unit_price,
+                vat_rate=_money(line.get("vat_rate")) or Decimal("0.00"),
+                vat_amount=_money(line.get("vat_amount")),
+                total=_money(line.get("line_total") or line.get("total")),
+                sheet_name=preview.get("source_filename") or preview.get("source_type") or "Price reference",
+                row_number=index,
+                sequence=sequence,
+                raw_values=[
+                    _clean_cell(item_name),
+                    _clean_cell(line.get("quantity")),
+                    _clean_cell(line.get("unit")),
+                    _clean_cell(line.get("unit_price")),
+                    _clean_cell(line.get("line_total") or line.get("total")),
+                ],
+            )
+        )
+        sequence += 1
+    if not rows:
+        warnings.append("No item price rows were detected in the price reference source.")
+    return rows, {
+        "filename": preview.get("source_filename") or preview.get("source_type") or "Pasted price reference",
+        "row_count": len(rows),
+        "warnings": warnings,
+        "parse_method": preview.get("parse_method", ""),
+        "source_type": preview.get("source_type", ""),
+        "ai_status": preview.get("ai_status", ""),
+        "ai_status_label": preview.get("ai_status_label", ""),
+    }
+
+
+def parse_price_reference_source(uploaded_file=None, *, raw_text="", raw_html="", use_ai=False, actor=None):
+    if uploaded_file:
+        filename = Path(uploaded_file.name or "").name
+        extension = Path(filename).suffix.lower()
+        if extension in PRICE_REFERENCE_WORKBOOK_EXTENSIONS:
+            return parse_price_reference_workbook(uploaded_file)
+        if extension not in PRICE_REFERENCE_FILE_EXTENSIONS:
+            raise ValidationError("Upload an .xlsx workbook, .xls/.xlsb workbook, or .pdf price reference file.")
+        preview = parse_file_preview(uploaded_file)
+    elif str(raw_text or "").strip():
+        preview = parse_text_preview(raw_text, raw_html=raw_html)
+    else:
+        raise ValidationError("Upload a price reference file or paste price reference text.")
+
+    ai_warning = ""
+    if use_ai:
+        try:
+            preview = clean_preview_with_ai(preview, actor=actor, requested_mode="auto", allow_vision=True)
+        except AIParseError as exc:
+            ai_warning = f"AI price reference parsing was unavailable; deterministic parse was used. Detail: {exc}"
+
+    rows, meta = _reference_rows_from_preview(preview)
+    if ai_warning:
+        meta.setdefault("warnings", []).append(ai_warning)
+    return rows, meta
 
 
 def _tokens(value):

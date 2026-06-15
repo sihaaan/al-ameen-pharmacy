@@ -1375,7 +1375,7 @@
 
 .qm-price-reference-box {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(260px, 420px) auto;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(300px, 1.2fr) auto;
   gap: 12px;
   align-items: end;
   margin-top: 12px;
@@ -1393,6 +1393,36 @@
 .qm-price-reference-box p {
   margin: 0;
   color: #4b5563;
+}
+
+.qm-price-reference-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.qm-reference-tabs {
+  display: inline-flex;
+  width: fit-content;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: #f3f4f6;
+}
+
+.qm-reference-tabs button {
+  border: 0;
+  border-radius: 7px;
+  padding: 9px 13px;
+  background: transparent;
+  color: #334155;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.qm-reference-tabs button.active {
+  background: #ffffff;
+  color: #00796b;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
 }
 
 .qm-import-preview {

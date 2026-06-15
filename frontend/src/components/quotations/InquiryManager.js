@@ -80,7 +80,11 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [importMode, setImportMode] = useState('paste');
   const [importForm, setImportForm] = useState(emptyImportForm);
   const [importFile, setImportFile] = useState(null);
+  const [priceReferenceMode, setPriceReferenceMode] = useState('file');
   const [priceReferenceFile, setPriceReferenceFile] = useState(null);
+  const [priceReferenceText, setPriceReferenceText] = useState('');
+  const [priceReferenceHtml, setPriceReferenceHtml] = useState('');
+  const [priceReferenceUseAi, setPriceReferenceUseAi] = useState(true);
   const [importPreview, setImportPreview] = useState(null);
   const [savedImportedInquiry, setSavedImportedInquiry] = useState(null);
   const [importParsing, setImportParsing] = useState(false);
@@ -407,21 +411,31 @@ const InquiryManager = ({ onOpenQuote }) => {
     }
   };
 
-  const applyPriceReferenceWorkbook = async () => {
+  const applyPriceReference = async () => {
     if (priceReferenceApplying) return;
     if (!importPreview?.lines?.length) {
-      setImportNotice({ type: 'error', message: 'Parse an inquiry before applying a price workbook.' });
+      setImportNotice({ type: 'error', message: 'Parse an inquiry before applying a price reference.' });
       return;
     }
-    if (!priceReferenceFile) {
-      setImportNotice({ type: 'error', message: 'Choose Dad’s Excel price workbook first.' });
+    if (priceReferenceMode === 'file' && !priceReferenceFile) {
+      setImportNotice({ type: 'error', message: "Choose Dad's Excel or PDF price reference first." });
+      return;
+    }
+    if (priceReferenceMode === 'paste' && !priceReferenceText.trim()) {
+      setImportNotice({ type: 'error', message: "Paste Dad's price reference rows first." });
       return;
     }
     setPriceReferenceApplying(true);
     setErrorInfo(null);
     setImportNotice(null);
     const formData = new FormData();
-    formData.append('file', priceReferenceFile);
+    if (priceReferenceMode === 'file') {
+      formData.append('file', priceReferenceFile);
+    } else {
+      formData.append('raw_text', priceReferenceText);
+      formData.append('raw_html', priceReferenceHtml);
+    }
+    formData.append('use_ai', priceReferenceUseAi ? 'true' : 'false');
     formData.append('preview', JSON.stringify(importPreview));
     try {
       const response = await quotationAPI.inquiries.applyPriceReference(formData);
@@ -442,10 +456,10 @@ const InquiryManager = ({ onOpenQuote }) => {
       const summary = response.data.price_reference_summary || {};
       setImportNotice({
         type: 'success',
-        message: `Price workbook applied. ${summary.matched_count || 0} prices filled, ${summary.needs_review_count || 0} likely matches need review, ${summary.unmatched_count || 0} unmatched.`,
+        message: `Price reference applied. ${summary.matched_count || 0} prices filled, ${summary.needs_review_count || 0} likely matches need review, ${summary.unmatched_count || 0} unmatched.`,
       });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Apply inquiry price workbook', 'POST /quotations/inquiries/apply_price_reference/');
+      const details = await describeQuotationError(error, 'Apply inquiry price reference', 'POST /quotations/inquiries/apply_price_reference/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -707,24 +721,73 @@ const InquiryManager = ({ onOpenQuote }) => {
 
         <div className="qm-price-reference-box">
           <div>
-            <h4>Optional: Fill Prices from Dad’s Workbook</h4>
-            <p>Upload a previous company Excel file to fill unit prices for matching inquiry items before saving the inquiry.</p>
+            <h4>Optional: Fill Prices from Dad's Reference</h4>
+            <p>Use a previous company Excel/PDF file or paste a price section to fill unit prices before saving the inquiry.</p>
           </div>
-          <label>
-            <span className="qm-label-text">Price reference workbook</span>
-            <input
-              type="file"
-              accept=".xlsx"
-              onChange={(event) => setPriceReferenceFile(event.target.files?.[0] || null)}
-            />
-          </label>
+          <div className="qm-price-reference-controls">
+            <div className="qm-reference-tabs" role="tablist" aria-label="Price reference source">
+              <button
+                type="button"
+                className={priceReferenceMode === 'file' ? 'active' : ''}
+                onClick={() => setPriceReferenceMode('file')}
+              >
+                Upload file
+              </button>
+              <button
+                type="button"
+                className={priceReferenceMode === 'paste' ? 'active' : ''}
+                onClick={() => setPriceReferenceMode('paste')}
+              >
+                Paste rows
+              </button>
+            </div>
+            {priceReferenceMode === 'file' ? (
+              <label>
+                <span className="qm-label-text">Price reference file</span>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.xlsb,.pdf"
+                  onChange={(event) => setPriceReferenceFile(event.target.files?.[0] || null)}
+                />
+              </label>
+            ) : (
+              <label>
+                <span className="qm-label-text">Pasted price reference</span>
+                <textarea
+                  rows="4"
+                  value={priceReferenceText}
+                  onPaste={(event) => {
+                    const html = event.clipboardData?.getData('text/html') || '';
+                    setPriceReferenceHtml(html.includes('<table') ? html : '');
+                  }}
+                  onChange={(event) => {
+                    setPriceReferenceText(event.target.value);
+                    if (!event.target.value) setPriceReferenceHtml('');
+                  }}
+                  placeholder="Paste Dad's priced rows here..."
+                />
+              </label>
+            )}
+            <label className="qm-checkbox">
+              <input
+                type="checkbox"
+                checked={priceReferenceUseAi}
+                onChange={(event) => setPriceReferenceUseAi(event.target.checked)}
+              />
+              Use AI cleanup when available
+            </label>
+          </div>
           <button
             type="button"
             className="qm-secondary"
-            disabled={priceReferenceApplying || !priceReferenceFile || !importPreview?.lines?.length}
-            onClick={applyPriceReferenceWorkbook}
+            disabled={
+              priceReferenceApplying ||
+              !importPreview?.lines?.length ||
+              (priceReferenceMode === 'file' ? !priceReferenceFile : !priceReferenceText.trim())
+            }
+            onClick={applyPriceReference}
           >
-            {priceReferenceApplying ? 'Applying prices...' : 'Apply Workbook Prices'}
+            {priceReferenceApplying ? 'Applying prices...' : 'Apply Price Reference'}
           </button>
         </div>
 

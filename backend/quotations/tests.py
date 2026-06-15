@@ -473,6 +473,35 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.data["lines"][0]["price_reference_status"], "matched")
         self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
 
+    def test_price_reference_pasted_text_fills_prices_and_preserves_quantity(self):
+        preview = {
+            "source_type": "pasted_text",
+            "lines": [
+                {"raw_name": "Pulse Oximeter", "quantity": "2", "unit": "NUM", "parse_status": "parsed"},
+                {"raw_name": "Unknown Clinic Item", "quantity": "5", "unit": "PCS", "parse_status": "parsed"},
+            ],
+        }
+        raw_text = "\n".join(
+            [
+                "S. No.\tItem Description\tQty\tUOM\tPrice",
+                "1\tPulse Oximeter\t1\tNUM\t55",
+                "2\tGlucometer\t1\tNUM\t145",
+            ]
+        )
+
+        response = self.client.post(
+            reverse("quotation-inquiry-apply-price-reference"),
+            {"raw_text": raw_text, "preview": json.dumps(preview), "use_ai": "false"},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["price_reference_summary"]["matched_count"], 1)
+        self.assertEqual(response.data["lines"][0]["quantity"], "2")
+        self.assertEqual(response.data["lines"][0]["unit"], "NUM")
+        self.assertEqual(response.data["lines"][0]["unit_price"], "55.00")
+        self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
+
     def test_imported_inquiry_prices_carry_into_created_quote_lines(self):
         response = self.client.post(
             reverse("quotation-inquiry-create-imported"),

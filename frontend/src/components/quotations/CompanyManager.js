@@ -32,6 +32,9 @@ const CompanyManager = () => {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
+  const [similarCompanies, setSimilarCompanies] = useState([]);
+  const [checkingSimilar, setCheckingSimilar] = useState(false);
+  const [allowSimilarCreate, setAllowSimilarCreate] = useState(false);
 
   const loadCompanies = async () => {
     setLoading(true);
@@ -52,6 +55,35 @@ const CompanyManager = () => {
     loadCompanies();
   }, []);
 
+  useEffect(() => {
+    if (selectedCompany) return undefined;
+    const name = form.name.trim();
+    setAllowSimilarCreate(false);
+    if (name.length < 3) {
+      setSimilarCompanies([]);
+      setCheckingSimilar(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setCheckingSimilar(true);
+    const timer = setTimeout(async () => {
+      try {
+        const response = await quotationAPI.companies.similar({ name, active: 'true' });
+        if (!cancelled) setSimilarCompanies(response.data.suggestions || []);
+      } catch (error) {
+        if (!cancelled) setSimilarCompanies([]);
+      } finally {
+        if (!cancelled) setCheckingSimilar(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [form.name, selectedCompany]);
+
   const filteredCompanies = useMemo(() => {
     const term = search.toLowerCase();
     return companies.filter((company) =>
@@ -65,6 +97,9 @@ const CompanyManager = () => {
     setSelectedCompany(null);
     setForm(emptyCompany);
     setContactForm(emptyContact);
+    setSimilarCompanies([]);
+    setCheckingSimilar(false);
+    setAllowSimilarCreate(false);
   };
 
   const applyCompanyToForm = (company) => {
@@ -79,6 +114,9 @@ const CompanyManager = () => {
       is_active: company.is_active,
     });
     setContactForm(emptyContact);
+    setSimilarCompanies([]);
+    setCheckingSimilar(false);
+    setAllowSimilarCreate(false);
   };
 
   const editCompany = async (company) => {
@@ -103,11 +141,33 @@ const CompanyManager = () => {
       if (selectedCompany) {
         await quotationAPI.companies.update(selectedCompany.id, form);
       } else {
-        await quotationAPI.companies.create(form);
+        await quotationAPI.companies.create({ ...form, allow_similar: allowSimilarCreate });
       }
+      setNotice({
+        type: 'success',
+        message: selectedCompany
+          ? 'Company updated.'
+          : allowSimilarCreate
+            ? 'Company created after duplicate check.'
+            : 'Company created.',
+      });
       reset();
       await loadCompanies();
     } catch (error) {
+      const backendData = error?.response?.data || {};
+      const suggestions = backendData.similar_companies || [];
+      if (!selectedCompany && suggestions.length) {
+        setSimilarCompanies(suggestions);
+        setAllowSimilarCreate(Boolean(backendData.requires_confirmation));
+        setNotice({
+          type: 'warning',
+          message: backendData.requires_confirmation
+            ? 'This looks like an existing company. Select it, or click Create anyway if this is truly different.'
+            : 'This company already exists. Select the existing company below.',
+        });
+        setErrorInfo(null);
+        return;
+      }
       const details = await describeQuotationError(
         error,
         selectedCompany ? 'Update company' : 'Create company',
@@ -218,6 +278,28 @@ const CompanyManager = () => {
         </div>
         <form onSubmit={saveCompany} className="qm-form">
           <label>Name<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+          {!selectedCompany && (checkingSimilar || similarCompanies.length > 0) && (
+            <div className="qm-duplicate-suggestions">
+              <div className="qm-duplicate-suggestions-heading">
+                <strong>Possible existing company</strong>
+                <span>{checkingSimilar ? 'Checking...' : `${similarCompanies.length} suggestion${similarCompanies.length === 1 ? '' : 's'}`}</span>
+              </div>
+              {similarCompanies.map((company) => (
+                <div className="qm-duplicate-suggestion" key={company.id}>
+                  <div>
+                    <strong>{company.name}</strong>
+                    <small>{company.reason} Match score {company.score}%</small>
+                    {(company.phone || company.email || company.trn) && (
+                      <small>{[company.phone, company.email, company.trn && `TRN ${company.trn}`].filter(Boolean).join(' | ')}</small>
+                    )}
+                  </div>
+                  <button type="button" className="qm-secondary small" onClick={() => editCompany(company)}>
+                    Select existing
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <label>Email<input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
           <label>Phone<input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
           <label>TRN<input value={form.trn} onChange={(event) => setForm({ ...form, trn: event.target.value })} /></label>
@@ -225,7 +307,7 @@ const CompanyManager = () => {
           <label>Notes<textarea rows="2" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label>
           <label className="qm-checkbox"><input type="checkbox" checked={form.is_active} onChange={(event) => setForm({ ...form, is_active: event.target.checked })} /> Active</label>
           <div className="qm-action-row">
-            <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving...' : 'Save Company'}</button>
+            <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving...' : allowSimilarCreate && !selectedCompany ? 'Create anyway' : 'Save Company'}</button>
             {selectedCompany && (
               <button type="button" className="qm-secondary danger" disabled={saving} onClick={deleteOrDeactivateCompany}>
                 Delete / Deactivate
