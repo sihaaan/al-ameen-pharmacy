@@ -224,6 +224,46 @@
   min-height: 42px;
 }
 
+.qm-duplicate-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 12px;
+  padding: 12px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+}
+
+.qm-duplicate-suggestions-heading,
+.qm-duplicate-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.qm-duplicate-suggestions-heading span {
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-duplicate-suggestion {
+  padding: 9px;
+  border: 1px solid #fde68a;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.qm-duplicate-suggestion small {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .qm-terms-panel h3 {
   margin: 0 0 4px;
 }

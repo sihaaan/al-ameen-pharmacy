@@ -62,6 +62,7 @@ const quotationAPI = {
   },
   companies: {
     list: (params = {}) => axiosInstance.get('/quotations/companies/', { params }),
+    similar: (params = {}) => axiosInstance.get('/quotations/companies/similar/', { params }),
     retrieve: (id) => axiosInstance.get(`/quotations/companies/${id}/`),
     create: (data) => axiosInstance.post('/quotations/companies/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/companies/${id}/`, data),

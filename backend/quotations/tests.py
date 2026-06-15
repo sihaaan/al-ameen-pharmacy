@@ -201,6 +201,31 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIn("contacts", detail_response.data)
         self.assertEqual(detail_response.data["contacts"][0]["name"], "Buyer")
 
+    def test_company_similar_endpoint_strips_legal_suffixes(self):
+        intermass = Company.objects.create(name="Intermass")
+
+        response = self.client.get(reverse("quotation-company-similar"), {"name": "Intermass Corp"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["suggestions"][0]["id"], intermass.id)
+        self.assertGreaterEqual(response.data["suggestions"][0]["score"], 90)
+
+    def test_creating_high_confidence_similar_company_requires_confirmation(self):
+        Company.objects.create(name="Intermass")
+
+        blocked_response = self.client.post(reverse("quotation-company-list"), {"name": "Intermass Corp"}, format="json")
+        confirmed_response = self.client.post(
+            reverse("quotation-company-list"),
+            {"name": "Intermass Corp", "allow_similar": True},
+            format="json",
+        )
+
+        self.assertEqual(blocked_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(blocked_response.data["requires_confirmation"])
+        self.assertEqual(blocked_response.data["similar_companies"][0]["name"], "Intermass")
+        self.assertEqual(confirmed_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(confirmed_response.data["name"], "Intermass Corp")
+
     def test_item_list_uses_compact_product_payload(self):
         self.product.short_description = "Short"
         self.product.detailed_description = "Detailed product copy that is not needed for the list page."

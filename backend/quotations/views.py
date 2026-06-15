@@ -29,6 +29,7 @@ from .ai_learning import (
     generate_historical_import_learning_suggestions,
     refresh_historical_import_batch_summary,
 )
+from .company_matching import find_similar_companies
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
 from .matching import apply_match_to_preview_line
@@ -243,6 +244,17 @@ class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         company = serializer.save()
         audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, company, message="Updated company.")
+
+    @action(detail=False, methods=["get"])
+    def similar(self, request):
+        name = (request.query_params.get("name") or "").strip()
+        if len(name) < 3:
+            return Response({"suggestions": []})
+        queryset = self.get_queryset()
+        if request.query_params.get("active") != "false":
+            queryset = queryset.filter(is_active=True)
+        suggestions = find_similar_companies(name, queryset=queryset, threshold=70, limit=8)
+        return Response({"suggestions": suggestions})
 
     def destroy(self, request, *args, **kwargs):
         company = self.get_object()

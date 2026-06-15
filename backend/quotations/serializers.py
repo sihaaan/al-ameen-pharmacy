@@ -8,6 +8,7 @@ from rest_framework import serializers
 from api.models import Product, ProductImage
 from api.serializers import ProductListSerializer
 
+from .company_matching import find_similar_companies
 from .models import (
     Company,
     CompanyContact,
@@ -25,6 +26,7 @@ from .models import (
     UserQuotationProfile,
     QuoteItem,
     ProductAlias,
+    normalize_label,
 )
 
 
@@ -85,12 +87,14 @@ class CompanyContactSerializer(serializers.ModelSerializer):
 
 class CompanySerializer(serializers.ModelSerializer):
     contacts = CompanyContactSerializer(many=True, read_only=True)
+    allow_similar = serializers.BooleanField(write_only=True, required=False, default=False)
 
     class Meta:
         model = Company
         fields = [
             "id",
             "name",
+            "allow_similar",
             "normalized_name",
             "email",
             "phone",
@@ -103,6 +107,55 @@ class CompanySerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "normalized_name", "contacts", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        name = attrs.get("name") or getattr(self.instance, "name", "")
+        allow_similar = attrs.pop("allow_similar", False)
+        if not name:
+            return attrs
+
+        queryset = Company.objects.all()
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+
+        normalized_name = normalize_label(name)
+        exact_match = queryset.filter(normalized_name=normalized_name).first()
+        if exact_match:
+            raise serializers.ValidationError(
+                {
+                    "name": [f"Company already exists as {exact_match.name}."],
+                    "similar_companies": [
+                        {
+                            "id": exact_match.id,
+                            "name": exact_match.name,
+                            "email": exact_match.email,
+                            "phone": exact_match.phone,
+                            "trn": exact_match.trn,
+                            "score": 100,
+                            "reason": "Exact company name match.",
+                            "is_active": exact_match.is_active,
+                        }
+                    ],
+                }
+            )
+
+        similar_companies = find_similar_companies(name, queryset=queryset, threshold=84)
+        high_confidence_duplicate = next((company for company in similar_companies if company["score"] >= 92), None)
+        if high_confidence_duplicate and not allow_similar:
+            raise serializers.ValidationError(
+                {
+                    "name": [
+                        (
+                            f"This looks very similar to {high_confidence_duplicate['name']}. "
+                            "Select the existing company or confirm that this is a different company."
+                        )
+                    ],
+                    "similar_companies": similar_companies,
+                    "requires_confirmation": True,
+                }
+            )
+        return attrs
 
 
 class CompanyListSerializer(serializers.ModelSerializer):

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
@@ -32,6 +32,9 @@ const CompanySelectWithCreate = ({
   const [isCreating, setIsCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(emptyCompanyForm);
+  const [similarCompanies, setSimilarCompanies] = useState([]);
+  const [checkingSimilar, setCheckingSimilar] = useState(false);
+  const [allowSimilarCreate, setAllowSimilarCreate] = useState(false);
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState(null);
 
@@ -50,6 +53,35 @@ const CompanySelectWithCreate = ({
     () => companies.find((company) => String(company.id) === String(value)),
     [companies, value]
   );
+
+  useEffect(() => {
+    if (!isCreating) return undefined;
+    const name = form.name.trim();
+    setAllowSimilarCreate(false);
+    if (name.length < 3) {
+      setSimilarCompanies([]);
+      setCheckingSimilar(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setCheckingSimilar(true);
+    const timer = setTimeout(async () => {
+      try {
+        const response = await quotationAPI.companies.similar({ name, active: 'true' });
+        if (!cancelled) setSimilarCompanies(response.data.suggestions || []);
+      } catch (error) {
+        if (!cancelled) setSimilarCompanies([]);
+      } finally {
+        if (!cancelled) setCheckingSimilar(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [form.name, isCreating]);
 
   const openCreate = () => {
     setErrorInfo(null);
@@ -85,7 +117,19 @@ const CompanySelectWithCreate = ({
   const cancelCreate = () => {
     setIsCreating(false);
     setForm(emptyCompanyForm);
+    setSimilarCompanies([]);
+    setAllowSimilarCreate(false);
     setErrorInfo(null);
+  };
+
+  const selectExistingCompany = (company) => {
+    if (onChange) onChange(String(company.id), company);
+    setSearch('');
+    setForm(emptyCompanyForm);
+    setSimilarCompanies([]);
+    setAllowSimilarCreate(false);
+    setIsCreating(false);
+    setNotice({ type: 'success', message: `Selected existing company ${company.name}.` });
   };
 
   const saveCompany = async () => {
@@ -102,15 +146,32 @@ const CompanySelectWithCreate = ({
         ...form,
         name: form.name.trim(),
         is_active: true,
+        allow_similar: allowSimilarCreate,
       });
       const company = response.data;
       if (onCreated) onCreated(company);
       if (onChange) onChange(String(company.id), company);
       setSearch('');
       setForm(emptyCompanyForm);
+      setSimilarCompanies([]);
+      setAllowSimilarCreate(false);
       setIsCreating(false);
-      setNotice({ type: 'success', message: 'Company created and selected.' });
+      setNotice({ type: 'success', message: allowSimilarCreate ? 'Company created after duplicate check and selected.' : 'Company created and selected.' });
     } catch (error) {
+      const backendData = error?.response?.data || {};
+      const suggestions = backendData.similar_companies || [];
+      if (suggestions.length) {
+        setSimilarCompanies(suggestions);
+        setAllowSimilarCreate(Boolean(backendData.requires_confirmation));
+        setNotice({
+          type: 'warning',
+          message: backendData.requires_confirmation
+            ? 'This looks like an existing company. Select it, or click Create anyway if this is truly different.'
+            : 'This company already exists. Select the existing company below.',
+        });
+        setErrorInfo(null);
+        return;
+      }
       const details = await describeQuotationError(error, 'Create company inline', 'POST /quotations/companies/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -180,7 +241,11 @@ const CompanySelectWithCreate = ({
           <div className="qm-grid-two">
             <label>
               <span className="qm-label-text">Company name <span className="qm-required">*</span></span>
-              <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Company name" />
+              <input
+                value={form.name}
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+                placeholder="Company name"
+              />
             </label>
             <label>
               <span className="qm-label-text">Email</span>
@@ -195,13 +260,35 @@ const CompanySelectWithCreate = ({
               <input value={form.trn} onChange={(event) => setForm({ ...form, trn: event.target.value })} placeholder="TRN if available" />
             </label>
           </div>
+          {(checkingSimilar || similarCompanies.length > 0) && (
+            <div className="qm-duplicate-suggestions">
+              <div className="qm-duplicate-suggestions-heading">
+                <strong>Possible existing company</strong>
+                <span>{checkingSimilar ? 'Checking...' : `${similarCompanies.length} suggestion${similarCompanies.length === 1 ? '' : 's'}`}</span>
+              </div>
+              {similarCompanies.map((company) => (
+                <div className="qm-duplicate-suggestion" key={company.id}>
+                  <div>
+                    <strong>{company.name}</strong>
+                    <small>{company.reason} Match score {company.score}%</small>
+                    {(company.phone || company.email || company.trn) && (
+                      <small>{[company.phone, company.email, company.trn && `TRN ${company.trn}`].filter(Boolean).join(' | ')}</small>
+                    )}
+                  </div>
+                  <button type="button" className="qm-secondary small" onClick={() => selectExistingCompany(company)}>
+                    Select existing
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <label>
             <span className="qm-label-text">Billing address</span>
             <textarea rows="2" value={form.billing_address} onChange={(event) => setForm({ ...form, billing_address: event.target.value })} />
           </label>
           <div className="qm-action-row">
             <button type="button" className="qm-primary" disabled={saving} onClick={saveCompany}>
-              {saving ? 'Creating...' : 'Create Company'}
+              {saving ? 'Creating...' : allowSimilarCreate ? 'Create anyway' : 'Create Company'}
             </button>
             <button type="button" className="qm-secondary" onClick={cancelCreate} disabled={saving}>Cancel</button>
           </div>
