@@ -193,6 +193,8 @@ class AccountingImportViewSet(viewsets.ReadOnlyModelViewSet):
         data["previous_import_id"] = meta.get("previous_import_id")
         data["category_update"] = meta.get("category_update", {})
         data["category_update_message"] = meta.get("category_update_message", "")
+        data["blocklist_update"] = meta.get("blocklist_update", {})
+        data["blocklist_update_message"] = meta.get("blocklist_update_message", "")
         return Response(data, status=status.HTTP_200_OK if meta.get("duplicate") else status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])

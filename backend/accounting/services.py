@@ -258,6 +258,46 @@ def apply_blocklist_names(normalized_names):
     }
 
 
+def apply_active_blocklist_to_import(import_record):
+    active_names = list(
+        AccountingBlocklistedCustomer.objects.filter(is_active=True).values_list("normalized_name", flat=True)
+    )
+    if not active_names:
+        return {"matched_customers": 0, "matched_import_customers": 0}
+    summaries = list(import_record.customers.select_related("customer").only(
+        "id",
+        "customer_name",
+        "is_ignored",
+        "customer__id",
+        "customer__normalized_name",
+        "customer__is_ignored",
+    ))
+    matched_summary_ids = []
+    matched_customer_ids = []
+    for summary in summaries:
+        normalized_name = summary.customer.normalized_name or normalize_customer_name(summary.customer_name)
+        if is_name_blocklisted(normalized_name, active_names):
+            matched_summary_ids.append(summary.id)
+            matched_customer_ids.append(summary.customer_id)
+
+    if not matched_summary_ids:
+        return {"matched_customers": 0, "matched_import_customers": 0}
+
+    now = timezone.now()
+    AccountCustomer.objects.filter(id__in=set(matched_customer_ids)).update(is_ignored=True, updated_at=now)
+    AccountingImportCustomer.objects.filter(id__in=matched_summary_ids).update(
+        is_ignored=True,
+        is_due=False,
+        status=AccountingImportCustomer.STATUS_IGNORED,
+        updated_at=now,
+    )
+    refresh_import_counts(import_record)
+    return {
+        "matched_customers": len(set(matched_customer_ids)),
+        "matched_import_customers": len(matched_summary_ids),
+    }
+
+
 @transaction.atomic
 def apply_blocklist_upload(*, blocklist_file, actor=None):
     parsed = parse_blocklist_upload(blocklist_file)
@@ -328,19 +368,24 @@ def create_accounting_import(*, outstanding_file, category_file=None, actor=None
         .first()
     )
     if duplicate:
+        blocklist_meta = apply_active_blocklist_to_import(duplicate)
         category_meta = {}
         if category_file:
             parsed_category = parse_category_upload(category_file)
             category_meta = apply_category_map_to_import(duplicate, parsed_category)
+        duplicate.refresh_from_db()
         return duplicate, {
             "duplicate": True,
             "message": (
                 "This outstanding file has already been uploaded before. No duplicate import was created."
                 + (f" {category_update_message(category_meta)}" if category_meta else "")
+                + (f" {blocklist_update_message(blocklist_meta)}" if blocklist_meta.get("matched_import_customers") else "")
             ),
             "previous_import_id": duplicate.id,
             "category_update": category_meta,
             "category_update_message": category_update_message(category_meta),
+            "blocklist_update": blocklist_meta,
+            "blocklist_update_message": blocklist_update_message(blocklist_meta) if blocklist_meta.get("matched_import_customers") else "",
         }
 
     parsed = parse_outstanding_upload(source=source)

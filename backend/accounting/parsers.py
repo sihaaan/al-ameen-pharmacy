@@ -171,6 +171,12 @@ def read_outstanding_source(uploaded_file):
 def _looks_like_blocklist_header(value):
     normalized = normalize_header(value)
     return normalized in {
+        "sl no",
+        "s no",
+        "sr no",
+        "serial",
+        "serial no",
+        "no",
         "name",
         "company",
         "company name",
@@ -185,13 +191,19 @@ def _looks_like_blocklist_header(value):
     }
 
 
-def _blocklist_entry_from_cells(cells):
-    values = [str(cell or "").strip() for cell in cells]
-    values = [value for value in values if value]
-    if not values:
-        return None
-    name = values[0]
-    if _looks_like_blocklist_header(name):
+def _looks_like_serial_value(value):
+    text = str(value or "").strip()
+    return bool(re.fullmatch(r"\d+(?:\.0+)?", text))
+
+
+def _looks_like_category_value(value):
+    return normalize_customer_name(value) in CATEGORY_VALUES
+
+
+def _blocklist_entry_from_values(name, category_hint=""):
+    name = str(name or "").strip()
+    category_hint = str(category_hint or "").strip()
+    if not name or _looks_like_blocklist_header(name):
         return None
     normalized = normalize_customer_name(name)
     if not normalized or len(normalized) < 2 or normalized.isdigit():
@@ -199,8 +211,61 @@ def _blocklist_entry_from_cells(cells):
     return {
         "name": name,
         "normalized_name": normalized,
-        "category_hint": values[1] if len(values) > 1 and not _looks_like_blocklist_header(values[1]) else "",
+        "category_hint": category_hint if category_hint and not _looks_like_blocklist_header(category_hint) else "",
     }
+
+
+def _blocklist_entry_from_cells(cells):
+    values = [str(cell or "").strip() for cell in cells]
+    values = [value for value in values if value]
+    if not values:
+        return None
+    for index, value in enumerate(values):
+        if _looks_like_blocklist_header(value) or _looks_like_serial_value(value):
+            continue
+        if _looks_like_category_value(value) and any(not _looks_like_category_value(candidate) for candidate in values[index + 1 :]):
+            continue
+        category_hint = ""
+        for candidate in values[index + 1 :]:
+            if not _looks_like_serial_value(candidate) and not _looks_like_blocklist_header(candidate):
+                category_hint = candidate
+                break
+        entry = _blocklist_entry_from_values(value, category_hint)
+        if entry:
+            return entry
+    return None
+
+
+def _blocklist_entries_from_rows(rows):
+    entries_by_name = {}
+    header_row = None
+    name_index = None
+    category_index = None
+    for index, row in enumerate(rows[:30]):
+        normalized = [normalize_header(cell) for cell in row]
+        for col, header in enumerate(normalized):
+            if header in {"name", "company", "company name", "customer", "customer name", "party", "blocked", "blocklist"}:
+                name_index = col
+            if header in {"cat", "category", "type"}:
+                category_index = col
+        if name_index is not None:
+            header_row = index
+            break
+
+    if header_row is not None and name_index is not None:
+        for row in rows[header_row + 1 :]:
+            name = row[name_index] if len(row) > name_index else ""
+            category_hint = row[category_index] if category_index is not None and len(row) > category_index else ""
+            entry = _blocklist_entry_from_values(name, category_hint)
+            if entry:
+                entries_by_name.setdefault(entry["normalized_name"], entry)
+        return entries_by_name
+
+    for row in rows:
+        entry = _blocklist_entry_from_cells(row)
+        if entry:
+            entries_by_name.setdefault(entry["normalized_name"], entry)
+    return entries_by_name
 
 
 def parse_blocklist_upload(uploaded_file):
@@ -213,20 +278,14 @@ def parse_blocklist_upload(uploaded_file):
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             text = data.decode("latin-1", errors="replace")
-        for row in csv.reader(io.StringIO(text)):
-            entry = _blocklist_entry_from_cells(row)
-            if entry:
-                entries_by_name.setdefault(entry["normalized_name"], entry)
+        entries_by_name.update(_blocklist_entries_from_rows(list(csv.reader(io.StringIO(text)))))
     else:
         try:
             workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         except (InvalidFileException, OSError, ValueError) as exc:
             raise ValidationError("Could not read the blocklist workbook.") from exc
         for worksheet in workbook.worksheets:
-            for row in worksheet.iter_rows(values_only=True):
-                entry = _blocklist_entry_from_cells(row)
-                if entry:
-                    entries_by_name.setdefault(entry["normalized_name"], entry)
+            entries_by_name.update(_blocklist_entries_from_rows(list(worksheet.iter_rows(values_only=True))))
 
     if not entries_by_name:
         raise ValidationError("No company names were found in the blocklist file.")

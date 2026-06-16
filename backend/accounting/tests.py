@@ -12,7 +12,7 @@ from pypdf import PdfReader
 from rest_framework.test import APITestCase
 
 from .models import AccountCustomer, AccountingBlocklistedCustomer, AccountingImport, AccountingImportCustomer
-from .parsers import parse_outstanding_upload, split_bill_reference
+from .parsers import normalize_customer_name, parse_outstanding_upload, split_bill_reference
 from .permissions import accounting_permissions_queryset, set_user_accounting_access
 
 
@@ -154,6 +154,18 @@ def make_blocklist_upload():
     buffer = BytesIO()
     workbook.save(buffer)
     return SimpleUploadedFile("blocklist.xlsx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def make_serial_blocklist_upload():
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "blocklist"
+    sheet.append(["S. No.", "Company Name", "Category"])
+    sheet.append([1, "INTERMASS", "Branch"])
+    sheet.append([2, "MILLENNIUM AIRPORT HOTEL", "Misc"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return SimpleUploadedFile("blocklist-with-serial.xlsx", buffer.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 class AccountingParserTests(TestCase):
@@ -508,6 +520,52 @@ class AccountingAPITests(APITestCase):
         self.assertEqual(upload_response.status_code, 201)
         self.assertEqual(upload_response.data["due_customer_count"], 0)
         summary = AccountingImportCustomer.objects.get(customer__customer_code="904")
+        self.assertTrue(summary.is_ignored)
+        self.assertFalse(summary.is_due)
+
+    def test_serial_number_blocklist_workbook_applies_to_future_imports(self):
+        self.client.force_authenticate(self.accountant)
+        block_response = self.client.post(
+            reverse("accounting-import-apply-blocklist"),
+            {"file": make_serial_blocklist_upload()},
+            format="multipart",
+        )
+        self.assertEqual(block_response.status_code, 200)
+        self.assertEqual(block_response.data["blocklist_update"]["loaded"], 2)
+        self.assertTrue(AccountingBlocklistedCustomer.objects.filter(normalized_name="intermass").exists())
+
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(make_agewise_row("904", "INTERMASS TRADING LLC - BRANCH 02", "INV-1", "03/02/2026", "100.00", "0.00", "100.00", "0.00", "0.00", "100.00", "80"))
+        upload = SimpleUploadedFile("future-serial-blocklist.csv", buffer.getvalue().encode("utf-8"), content_type="text/csv")
+
+        upload_response = self.client.post(reverse("accounting-import-upload"), {"file": upload}, format="multipart")
+
+        self.assertEqual(upload_response.status_code, 201)
+        self.assertEqual(upload_response.data["due_customer_count"], 0)
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="904")
+        self.assertTrue(summary.is_ignored)
+        self.assertEqual(summary.status, AccountingImportCustomer.STATUS_IGNORED)
+
+    def test_duplicate_import_reapplies_current_active_blocklist(self):
+        self.client.force_authenticate(self.accountant)
+        first = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.data["due_customer_count"], 2)
+        AccountingBlocklistedCustomer.objects.create(
+            name="MILLENNIUM AIRPORT HOTEL",
+            normalized_name=normalize_customer_name("MILLENNIUM AIRPORT HOTEL"),
+            category_hint="Block after original import",
+            is_active=True,
+        )
+
+        duplicate = self.client.post(reverse("accounting-import-upload"), {"file": make_agewise_upload()}, format="multipart")
+
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertTrue(duplicate.data["duplicate"])
+        self.assertEqual(duplicate.data["due_customer_count"], 1)
+        self.assertEqual(duplicate.data["blocklist_update"]["matched_import_customers"], 1)
+        summary = AccountingImportCustomer.objects.get(customer__customer_code="083")
         self.assertTrue(summary.is_ignored)
         self.assertFalse(summary.is_due)
 
