@@ -192,6 +192,7 @@ const quotationAPI = {
     retrieve: (id) => axiosInstance.get(`/quotations/proformas/${id}/`),
     create: (data) => axiosInstance.post('/quotations/proformas/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/proformas/${id}/`, data),
+    delete: (id) => axiosInstance.delete(`/quotations/proformas/${id}/`),
     uploadLpo: (id, data, isMultipart = false) => axiosInstance.post(
       `/quotations/proformas/${id}/upload_lpo/`,
       data,

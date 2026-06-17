@@ -68,6 +68,8 @@ const ProformaInvoiceManager = () => {
   const [saving, setSaving] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [deleteCandidateId, setDeleteCandidateId] = useState(null);
   const [feedback, setFeedback] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
@@ -127,7 +129,7 @@ const ProformaInvoiceManager = () => {
       setCompanies(companiesRes.data);
       setProformas(proformasRes.data);
     } catch (error) {
-      const details = await describeQuotationError(error, 'Load Proforma Invoices', 'GET /quotations/companies/, /quotations/proformas/');
+      const details = await describeQuotationError(error, 'Load Proforma Tax Invoices', 'GET /quotations/companies/, /quotations/proformas/');
       setErrorInfo(details);
     } finally {
       setLoading(false);
@@ -155,7 +157,7 @@ const ProformaInvoiceManager = () => {
       })));
       loadContactsForCompany(proforma.company);
     } catch (error) {
-      const details = await describeQuotationError(error, 'Open Proforma Invoice', `GET /quotations/proformas/${id}/`);
+      const details = await describeQuotationError(error, 'Open Proforma Tax Invoice', `GET /quotations/proformas/${id}/`);
       setErrorInfo(details);
     }
   };
@@ -181,7 +183,7 @@ const ProformaInvoiceManager = () => {
       await loadProformas();
       await openProforma(response.data.id);
     } catch (error) {
-      const details = await describeQuotationError(error, 'Create Proforma Invoice', 'POST /quotations/proformas/');
+      const details = await describeQuotationError(error, 'Create Proforma Tax Invoice', 'POST /quotations/proformas/');
       setErrorInfo(details);
     } finally {
       setSaving(false);
@@ -206,7 +208,7 @@ const ProformaInvoiceManager = () => {
       await loadProformas();
       setFeedback({ type: 'success', message: 'Proforma details saved.' });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Save Proforma Invoice details', `PATCH /quotations/proformas/${selected.id}/`);
+      const details = await describeQuotationError(error, 'Save Proforma Tax Invoice details', `PATCH /quotations/proformas/${selected.id}/`);
       setErrorInfo(details);
     } finally {
       setSaving(false);
@@ -296,7 +298,7 @@ const ProformaInvoiceManager = () => {
       setFeedback({ type: 'success', message: 'Proforma lines saved.' });
       return proforma;
     } catch (error) {
-      const details = await describeQuotationError(error, 'Save Proforma Invoice lines', `POST /quotations/proformas/${selected.id}/bulk_update_lines/`);
+      const details = await describeQuotationError(error, 'Save Proforma Tax Invoice lines', `POST /quotations/proformas/${selected.id}/bulk_update_lines/`);
       setErrorInfo(details);
       return null;
     } finally {
@@ -323,12 +325,42 @@ const ProformaInvoiceManager = () => {
       window.URL.revokeObjectURL(url);
       await openProforma(saved.id);
       await loadProformas();
-      setFeedback({ type: 'success', message: 'Proforma Invoice downloaded.' });
+      setFeedback({ type: 'success', message: 'Proforma Tax Invoice downloaded.' });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Download standalone Proforma Invoice', `GET /quotations/proformas/${selected.id}/pdf/`);
+      const details = await describeQuotationError(error, 'Download standalone Proforma Tax Invoice', `GET /quotations/proformas/${selected.id}/pdf/`);
       setErrorInfo(details);
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const deleteDraftProforma = async (proforma) => {
+    if (!proforma || proforma.status !== 'draft' || deletingId) return;
+    if (deleteCandidateId !== proforma.id) {
+      setDeleteCandidateId(proforma.id);
+      setFeedback({ type: 'info', message: `Click Delete again to remove draft ${proforma.proforma_number}. Issued Proforma Tax Invoices are kept for audit.` });
+      return;
+    }
+    setDeletingId(proforma.id);
+    setErrorInfo(null);
+    setFeedback(null);
+    try {
+      await quotationAPI.proformas.delete(proforma.id);
+      if (selectedId === proforma.id) {
+        setSelectedId(null);
+        setSelected(null);
+        setLineDrafts([]);
+        setForm(emptyForm);
+        setContacts([]);
+      }
+      setDeleteCandidateId(null);
+      await loadProformas();
+      setFeedback({ type: 'success', message: `Draft Proforma Tax Invoice ${proforma.proforma_number} deleted.` });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Delete draft Proforma Tax Invoice', `DELETE /quotations/proformas/${proforma.id}/`);
+      setErrorInfo(details);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -340,8 +372,8 @@ const ProformaInvoiceManager = () => {
       <div className="qm-panel qm-proforma-hero">
         <div>
           <span className="qm-step-kicker">LPO to Proforma</span>
-          <h3>Standalone Proforma Invoices</h3>
-          <p>Create a Proforma Invoice directly from a customer LPO, even when no quotation exists.</p>
+          <h3>Standalone Proforma Tax Invoices</h3>
+          <p>Create a Proforma Tax Invoice directly from a customer LPO, even when no quotation exists.</p>
         </div>
         <div className="qm-proforma-hero-stats">
           <span><strong>{proformas.length}</strong> tracked</span>
@@ -354,7 +386,7 @@ const ProformaInvoiceManager = () => {
         <div className="qm-panel">
           <div className="qm-panel-heading">
             <div>
-              <h3>Recent Proformas</h3>
+              <h3>Recent Proforma Tax Invoices</h3>
               <p>Select an existing PI or create a new one from an LPO.</p>
             </div>
             <button type="button" className="qm-secondary small" onClick={loadInitial} disabled={loading}>Refresh</button>
@@ -370,11 +402,18 @@ const ProformaInvoiceManager = () => {
           </div>
           <div className="qm-proforma-list">
             {filteredProformas.map((proforma) => (
-              <button
+              <div
                 key={proforma.id}
-                type="button"
                 className={`qm-proforma-list-item ${selectedId === proforma.id ? 'active' : ''}`}
                 onClick={() => openProforma(proforma.id)}
+                role="button"
+                tabIndex="0"
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    openProforma(proforma.id);
+                  }
+                }}
               >
                 <strong>{proforma.proforma_number}</strong>
                 <span>{proforma.company_name}</span>
@@ -382,9 +421,22 @@ const ProformaInvoiceManager = () => {
                   {proforma.lpo_number ? `LPO ${proforma.lpo_number}` : 'No LPO number yet'} - {formatDate(proforma.proforma_date)}
                 </small>
                 <span className={`qm-badge status-${proforma.status}`}>{proforma.status_display || proforma.status}</span>
-              </button>
+                {proforma.status === 'draft' && (
+                  <button
+                    type="button"
+                    className={`qm-proforma-delete ${deleteCandidateId === proforma.id ? 'confirm' : ''}`}
+                    disabled={deletingId === proforma.id}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      deleteDraftProforma(proforma);
+                    }}
+                  >
+                    {deletingId === proforma.id ? 'Deleting...' : deleteCandidateId === proforma.id ? 'Confirm delete' : 'Delete draft'}
+                  </button>
+                )}
+              </div>
             ))}
-            {!filteredProformas.length && <p className="qm-muted">{loading ? 'Loading...' : 'No Proforma Invoices found.'}</p>}
+            {!filteredProformas.length && <p className="qm-muted">{loading ? 'Loading...' : 'No Proforma Tax Invoices found.'}</p>}
           </div>
         </div>
 
@@ -425,7 +477,7 @@ const ProformaInvoiceManager = () => {
               </div>
               <div className="qm-proforma-start-actions">
                 <div>
-                  <strong>{selected ? selected.proforma_number : 'New Proforma Invoice'}</strong>
+                  <strong>{selected ? selected.proforma_number : 'New Proforma Tax Invoice'}</strong>
                   <span>{selected ? 'Save customer/contact changes or create another PI from the selected customer.' : 'Create the draft first, then upload or paste the LPO.'}</span>
                 </div>
                 <div className="qm-actions">
@@ -435,7 +487,7 @@ const ProformaInvoiceManager = () => {
                     </button>
                   )}
                   <button type="submit" className="qm-primary" disabled={!form.company || saving}>
-                    {saving ? 'Creating...' : selected ? 'Create Another Proforma' : 'Create New Proforma'}
+                    {saving ? 'Creating...' : selected ? 'Create Another Proforma Tax Invoice' : 'Create New Proforma Tax Invoice'}
                   </button>
                 </div>
               </div>
@@ -478,7 +530,7 @@ const ProformaInvoiceManager = () => {
                 <div className="qm-panel-heading">
                   <div>
                     <h3>3. Review Lines</h3>
-                    <p>Edit parsed lines before downloading the Proforma Invoice.</p>
+                    <p>Edit parsed lines before downloading the Proforma Tax Invoice.</p>
                   </div>
                   <div className="qm-actions">
                     <button type="button" className="qm-secondary small" onClick={addLine}>Add Line</button>
@@ -556,8 +608,8 @@ const ProformaInvoiceManager = () => {
             </>
           ) : (
             <div className="qm-panel qm-empty-state">
-              <h3>Select or create a Proforma Invoice</h3>
-              <p>Start by choosing the company and creating a draft PI, or open a recent Proforma Invoice from the list.</p>
+              <h3>Select or create a Proforma Tax Invoice</h3>
+              <p>Start by choosing the company and creating a draft PI, or open a recent Proforma Tax Invoice from the list.</p>
             </div>
           )}
         </div>

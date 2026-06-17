@@ -1387,7 +1387,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 "outcome_suggestions": suggestions,
                 "unmatched_lpo_rows": unmatched,
                 "missing_quote_line_ids": missing_line_ids,
-                "message": "LPO recorded. Review the detected details, then download the Proforma Invoice.",
+                "message": "LPO recorded. Review the detected details, then download the Proforma Tax Invoice.",
             },
             status=status.HTTP_201_CREATED,
         )
@@ -1397,7 +1397,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         quotation = self.get_object()
         if quotation.status not in {Quotation.STATUS_APPROVED, Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
             return Response(
-                {"detail": "Approve or finalize this quotation before downloading a Proforma Invoice."},
+                {"detail": "Approve or finalize this quotation before downloading a Proforma Tax Invoice."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         lpo_id = request.query_params.get("lpo")
@@ -1412,7 +1412,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             lpo = lpos.first()
         if not lpo:
             return Response(
-                {"detail": "Record the customer's LPO before downloading a Proforma Invoice."},
+                {"detail": "Record the customer's LPO before downloading a Proforma Tax Invoice."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1421,7 +1421,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             request.user,
             QuotationAuditLog.ACTION_PROFORMA_DOWNLOADED,
             quotation,
-            message=f"Downloaded Proforma Invoice for {quotation.quotation_number}.",
+            message=f"Downloaded Proforma Tax Invoice for {quotation.quotation_number}.",
             changes={"lpo_id": lpo.id, "lpo_number": lpo.lpo_number},
         )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
@@ -1544,7 +1544,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             proforma,
             company=proforma.company,
             quotation=proforma.quotation,
-            message=f"Created Proforma Invoice {proforma.proforma_number}.",
+            message=f"Created Proforma Tax Invoice {proforma.proforma_number}.",
         )
 
     def perform_update(self, serializer):
@@ -1555,8 +1555,30 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             proforma,
             company=proforma.company,
             quotation=proforma.quotation,
-            message=f"Updated Proforma Invoice {proforma.proforma_number}.",
+            message=f"Updated Proforma Tax Invoice {proforma.proforma_number}.",
         )
+
+    def destroy(self, request, *args, **kwargs):
+        proforma = self.get_object()
+        if proforma.status != ProformaInvoice.STATUS_DRAFT:
+            return Response(
+                {"detail": "Only draft Proforma Tax Invoices can be deleted. Issued documents are kept for audit history."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        proforma_number = proforma.proforma_number
+        company = proforma.company
+        quotation = proforma.quotation
+        response = super().destroy(request, *args, **kwargs)
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_DELETED,
+            None,
+            company=company,
+            quotation=quotation,
+            message=f"Deleted draft Proforma Tax Invoice {proforma_number}.",
+            changes={"proforma": proforma_number},
+        )
+        return response
 
     @action(detail=True, methods=["post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
     def upload_lpo(self, request, pk=None):
@@ -1651,7 +1673,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 proforma,
                 company=proforma.company,
                 quotation=proforma.quotation,
-                message=f"Parsed LPO for Proforma Invoice {proforma.proforma_number}.",
+                message=f"Parsed LPO for Proforma Tax Invoice {proforma.proforma_number}.",
                 changes={
                     "proforma": proforma.proforma_number,
                     "lpo_number": proforma.lpo_number,
@@ -1716,7 +1738,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             proforma,
             company=proforma.company,
             quotation=proforma.quotation,
-            message=f"Saved Proforma Invoice lines: {len(updated)} updated, {len(created)} added, {deleted} removed.",
+            message=f"Saved Proforma Tax Invoice lines: {len(updated)} updated, {len(created)} added, {deleted} removed.",
             changes={"updated": len(updated), "created": len(created), "deleted": deleted},
         )
         proforma.refresh_from_db()
@@ -1726,7 +1748,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def pdf(self, request, pk=None):
         proforma = self.get_object()
         if not proforma.lines.exists():
-            return Response({"detail": "Add or parse at least one line before downloading the Proforma Invoice."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Add or parse at least one line before downloading the Proforma Tax Invoice."}, status=status.HTTP_400_BAD_REQUEST)
         pdf_bytes = build_standalone_proforma_invoice_pdf(proforma)
         if proforma.status == ProformaInvoice.STATUS_DRAFT:
             proforma.status = ProformaInvoice.STATUS_ISSUED
@@ -1739,7 +1761,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             proforma,
             company=proforma.company,
             quotation=proforma.quotation,
-            message=f"Downloaded standalone Proforma Invoice {proforma.proforma_number}.",
+            message=f"Downloaded standalone Proforma Tax Invoice {proforma.proforma_number}.",
             changes={"proforma": proforma.proforma_number, "lpo_number": proforma.lpo_number},
         )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")

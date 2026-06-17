@@ -639,8 +639,8 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
             quotation,
             invoice_date,
             styles,
-            document_title="PROFORMA INVOICE",
-            reference_label="Proforma No",
+            document_title="PROFORMA TAX INVOICE",
+            reference_label="Proforma Tax Invoice No",
             reference_number=proforma_number,
         )
     )
@@ -851,8 +851,8 @@ def build_standalone_proforma_invoice_pdf(proforma):
             header_reference,
             invoice_date,
             styles,
-            document_title="PROFORMA INVOICE",
-            reference_label="Proforma No",
+            document_title="PROFORMA TAX INVOICE",
+            reference_label="Proforma Tax Invoice No",
             reference_number=proforma.proforma_number,
         )
     )

@@ -947,7 +947,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setLpoText('');
       setLpoFeedback({
         type: 'success',
-        message: response.data.message || 'LPO recorded. Review details and download the Proforma Invoice.',
+        message: response.data.message || 'LPO recorded. Review details and download the Proforma Tax Invoice.',
       });
     } catch (error) {
       const details = await describeQuotationError(error, 'Upload LPO', `POST /quotations/quotes/${quote.id}/upload_lpo/`);
@@ -999,11 +999,11 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       link.click();
       link.remove();
       window.URL.revokeObjectURL(url);
-      setLpoFeedback({ type: 'success', message: 'Proforma Invoice downloaded.' });
+      setLpoFeedback({ type: 'success', message: 'Proforma Tax Invoice downloaded.' });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Download Proforma Invoice', `GET /quotations/quotes/${quote.id}/proforma_pdf/`);
+      const details = await describeQuotationError(error, 'Download Proforma Tax Invoice', `GET /quotations/quotes/${quote.id}/proforma_pdf/`);
       setErrorInfo(details);
-      setLpoFeedback({ type: 'error', message: details.detail || 'Could not download Proforma Invoice.' });
+      setLpoFeedback({ type: 'error', message: details.detail || 'Could not download Proforma Tax Invoice.' });
       console.error(formatQuotationError(details), error);
     } finally {
       setProformaDownloadLoading(false);
@@ -1074,8 +1074,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         <div className="qm-panel qm-lpo-workflow">
           <div className="qm-panel-heading">
             <div>
-              <h3>LPO & Proforma Invoice</h3>
-              <p>Record the customer LPO, verify the detected details, then download a Proforma Invoice for advance-payment processing.</p>
+              <h3>LPO & Proforma Tax Invoice</h3>
+              <p>Record the customer LPO, verify the detected details, then download a Proforma Tax Invoice for advance-payment processing.</p>
             </div>
             <div className="qm-lpo-status-pill">{latestLpo ? `LPO ${latestLpo.status_display || latestLpo.status}` : 'No LPO recorded'}</div>
           </div>
@@ -1144,15 +1144,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                   </button>
                 </>
               ) : (
-                <div className="qm-empty compact">No LPO recorded yet. Upload or paste the customer LPO to unlock Proforma Invoice download.</div>
+                <div className="qm-empty compact">No LPO recorded yet. Upload or paste the customer LPO to unlock Proforma Tax Invoice download.</div>
               )}
             </div>
             <div className="qm-lpo-card">
               <span className="qm-step-kicker">Step 3</span>
               <h4>Download proforma</h4>
-              <p>Uses the same official layout as the quotation, with Proforma Invoice title, quote reference, LPO details, totals, payment note, signature and stamp.</p>
+              <p>Uses the same official layout as the quotation, with Proforma Tax Invoice title, quote reference, LPO details, totals, signature and stamp.</p>
               <button type="button" className="qm-primary" disabled={!latestLpo || proformaDownloadLoading} onClick={downloadProforma}>
-                {proformaDownloadLoading ? 'Preparing Proforma...' : 'Download Proforma Invoice'}
+                {proformaDownloadLoading ? 'Preparing Proforma...' : 'Download Proforma Tax Invoice'}
               </button>
               <small>No email is sent. This only prepares the PDF for staff to review and share.</small>
             </div>

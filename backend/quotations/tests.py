@@ -375,6 +375,7 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response["Content-Type"], "application/pdf")
         text = extract_pdf_text(response.content)
         self.assertIn("PROFORMA", text)
+        self.assertIn("TAX", text)
         self.assertIn("INVOICE", text)
         self.assertIn("LPO-77", text)
         self.assertIn("Bandage Pack", text)
@@ -432,11 +433,33 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(proforma.status, ProformaInvoice.STATUS_ISSUED)
         text = extract_pdf_text(pdf_response.content)
         self.assertIn("PROFORMA", text)
+        self.assertIn("TAX", text)
         self.assertIn("INVOICE", text)
         self.assertIn("Bandage Pack", text)
         self.assertIn(proforma.proforma_number, text)
         self.assertNotIn("Payment Note", text)
         self.assertNotIn("Payment Terms", text)
+
+    def test_draft_standalone_proforma_can_be_deleted(self):
+        proforma = ProformaInvoice.objects.create(company=self.company, created_by=self.staff)
+
+        response = self.client.delete(reverse("quotation-standalone-proforma-detail", args=[proforma.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ProformaInvoice.objects.filter(id=proforma.id).exists())
+
+    def test_issued_standalone_proforma_cannot_be_deleted(self):
+        proforma = ProformaInvoice.objects.create(
+            company=self.company,
+            created_by=self.staff,
+            status=ProformaInvoice.STATUS_ISSUED,
+        )
+
+        response = self.client.delete(reverse("quotation-standalone-proforma-detail", args=[proforma.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(ProformaInvoice.objects.filter(id=proforma.id).exists())
+        self.assertIn("Only draft", response.data["detail"])
 
     def test_standalone_proforma_upload_lpo_parses_review_lines(self):
         proforma = ProformaInvoice.objects.create(company=self.company, created_by=self.staff)

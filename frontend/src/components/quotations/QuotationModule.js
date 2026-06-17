@@ -19,7 +19,7 @@ const tabs = [
   { id: 'items', label: 'Products / Items' },
   { id: 'inquiries', label: 'Inquiries' },
   { id: 'quotes', label: 'Quotations' },
-  { id: 'proformas', label: 'Proforma Invoices' },
+  { id: 'proformas', label: 'Proforma Tax Invoices' },
   { id: 'history', label: 'Price History' },
   { id: 'historical-imports', label: 'Historical Imports' },
   { id: 'audit', label: 'Audit Logs' },
