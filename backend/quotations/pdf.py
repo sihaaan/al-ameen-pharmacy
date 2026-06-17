@@ -668,7 +668,6 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
         ("LPO Date", getattr(lpo, "lpo_date", None)),
         ("Prepared By", quotation.created_by.username if quotation.created_by else ""),
         ("Currency", quotation.currency),
-        ("Payment Terms", _payment_terms(quotation, config)),
     ]
     meta_items = [(label, value) for label, value in meta_items if str(value or "").strip()]
     meta_rows = []
@@ -792,28 +791,12 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
     elements.append(KeepTogether([Spacer(1, 10), totals_table]))
 
     elements.append(Spacer(1, 12))
-    footer_data = [
-        [
-            [
-                Paragraph("Payment Note", styles["SectionTitle"]),
-                Paragraph(
-                    "This proforma invoice is issued for payment processing against the accepted quotation/LPO. "
-                    "It is not a tax invoice.",
-                    styles["Small"],
-                ),
-                Spacer(1, 4),
-                Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
-                Paragraph("<b>Reference:</b> Please mention the quotation or proforma number when arranging payment.", styles["Small"]),
-            ],
-            _signature_flowables(config, styles, quotation),
-        ]
-    ]
-    footer_table = Table(footer_data, colWidths=[112 * mm, 60 * mm])
+    footer_data = [[_signature_flowables(config, styles, quotation)]]
+    footer_table = Table(footer_data, colWidths=[60 * mm], hAlign="RIGHT")
     footer_table.setStyle(
         TableStyle(
             [
                 ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
-                ("INNERGRID", (0, 0), (-1, -1), 0.25, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("BACKGROUND", (0, 0), (-1, -1), SOFT),
                 ("LEFTPADDING", (0, 0), (-1, -1), 8),

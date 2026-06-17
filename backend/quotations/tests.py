@@ -376,7 +376,9 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIn("INVOICE", text)
         self.assertIn("LPO-77", text)
         self.assertIn("Bandage Pack", text)
-        self.assertIn("not a tax invoice", text)
+        self.assertNotIn("Payment Note", text)
+        self.assertNotIn("Payment Terms", text)
+        self.assertNotIn("not a tax invoice", text)
 
     def test_cannot_finalize_invalid_quote(self):
         quotation = self.create_quote()
