@@ -791,12 +791,21 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
     elements.append(KeepTogether([Spacer(1, 10), totals_table]))
 
     elements.append(Spacer(1, 12))
-    footer_data = [[_signature_flowables(config, styles, quotation, approval_width=62 * mm)]]
-    footer_table = Table(footer_data, colWidths=[78 * mm], hAlign="RIGHT")
+    footer_data = [
+        [
+            [
+                Paragraph("Prepared / Approved By", styles["SectionTitle"]),
+                Paragraph("For Al Ameen Pharmacy LLC", styles["SmallMuted"]),
+            ],
+            _signature_flowables(config, styles, quotation, approval_width=72 * mm, include_title=False),
+        ]
+    ]
+    footer_table = Table(footer_data, colWidths=[82 * mm, 90 * mm])
     footer_table.setStyle(
         TableStyle(
             [
                 ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("BACKGROUND", (0, 0), (-1, -1), SOFT),
                 ("LEFTPADDING", (0, 0), (-1, -1), 8),
@@ -992,12 +1001,21 @@ def build_standalone_proforma_invoice_pdf(proforma):
         elements.append(Paragraph(_text(proforma.notes), styles["Small"]))
 
     elements.append(Spacer(1, 12))
-    footer_data = [[_signature_flowables(config, styles, proforma.quotation, approval_width=62 * mm)]]
-    footer_table = Table(footer_data, colWidths=[78 * mm], hAlign="RIGHT")
+    footer_data = [
+        [
+            [
+                Paragraph("Prepared / Approved By", styles["SectionTitle"]),
+                Paragraph("For Al Ameen Pharmacy LLC", styles["SmallMuted"]),
+            ],
+            _signature_flowables(config, styles, proforma.quotation, approval_width=72 * mm, include_title=False),
+        ]
+    ]
+    footer_table = Table(footer_data, colWidths=[82 * mm, 90 * mm])
     footer_table.setStyle(
         TableStyle(
             [
                 ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("BACKGROUND", (0, 0), (-1, -1), SOFT),
                 ("LEFTPADDING", (0, 0), (-1, -1), 8),
@@ -1017,8 +1035,10 @@ def build_standalone_proforma_invoice_pdf(proforma):
     return buffer.getvalue()
 
 
-def _signature_flowables(config, styles, quotation=None, approval_width=52 * mm, visual_height=18 * mm):
-    flowables = [Paragraph("Prepared / Approved By", styles["SectionTitle"])]
+def _signature_flowables(config, styles, quotation=None, approval_width=52 * mm, visual_height=18 * mm, include_title=True):
+    flowables = []
+    if include_title:
+        flowables.append(Paragraph("Prepared / Approved By", styles["SectionTitle"]))
 
     approval_cells = []
     if config.show_signature_area:
@@ -1030,7 +1050,8 @@ def _signature_flowables(config, styles, quotation=None, approval_width=52 * mm,
         stamp_label = _approval_label(config.stamp_label, "Company Stamp", {"stamp"})
         approval_cells.append(_approval_cell(stamp_image, stamp_label, styles, visual_height))
     if approval_cells:
-        flowables.append(Spacer(1, 8))
+        if include_title:
+            flowables.append(Spacer(1, 8))
         column_width = approval_width / len(approval_cells)
         approval_table = Table([approval_cells], colWidths=[column_width] * len(approval_cells))
         approval_table.setStyle(
