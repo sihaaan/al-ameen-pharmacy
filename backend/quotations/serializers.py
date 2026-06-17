@@ -19,6 +19,8 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    ProformaInvoice,
+    ProformaInvoiceLine,
     Quotation,
     QuotationAuditLog,
     QuotationLine,
@@ -1548,6 +1550,142 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class ProformaInvoiceLineSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = ProformaInvoiceLine
+        fields = [
+            "id",
+            "proforma",
+            "product",
+            "product_name",
+            "item_name",
+            "description",
+            "quantity",
+            "unit",
+            "unit_price",
+            "vat_rate",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "sort_order",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "proforma",
+            "product_name",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class ProformaInvoiceSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source="company.name", read_only=True)
+    company_billing_address = serializers.CharField(source="company.billing_address", read_only=True, allow_blank=True)
+    company_trn = serializers.CharField(source="company.trn", read_only=True, allow_blank=True)
+    contact_name = serializers.CharField(source="contact.name", read_only=True, allow_null=True)
+    contact_phone = serializers.CharField(source="contact.phone", read_only=True, allow_null=True)
+    contact_email = serializers.CharField(source="contact.email", read_only=True, allow_null=True)
+    quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    issued_by_username = serializers.CharField(source="issued_by.username", read_only=True, allow_null=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    parsed_row_count = serializers.SerializerMethodField()
+    lines = ProformaInvoiceLineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ProformaInvoice
+        fields = [
+            "id",
+            "company",
+            "company_name",
+            "company_billing_address",
+            "company_trn",
+            "contact",
+            "contact_name",
+            "contact_phone",
+            "contact_email",
+            "quotation",
+            "quotation_number",
+            "proforma_number",
+            "status",
+            "status_display",
+            "proforma_date",
+            "currency",
+            "lpo_number",
+            "lpo_date",
+            "source_type",
+            "source_filename",
+            "source_sha256",
+            "source_file_size",
+            "parse_method",
+            "parsed_meta",
+            "parsed_rows",
+            "parsed_row_count",
+            "warnings",
+            "subtotal",
+            "vat_total",
+            "total",
+            "notes",
+            "created_by",
+            "created_by_username",
+            "issued_by",
+            "issued_by_username",
+            "issued_at",
+            "lines",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "company_name",
+            "company_billing_address",
+            "company_trn",
+            "contact_name",
+            "contact_phone",
+            "contact_email",
+            "quotation_number",
+            "proforma_number",
+            "status_display",
+            "source_type",
+            "source_filename",
+            "source_sha256",
+            "source_file_size",
+            "parse_method",
+            "parsed_meta",
+            "parsed_rows",
+            "parsed_row_count",
+            "warnings",
+            "subtotal",
+            "vat_total",
+            "total",
+            "created_by",
+            "created_by_username",
+            "issued_by",
+            "issued_by_username",
+            "issued_at",
+            "lines",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_parsed_row_count(self, obj):
+        return len(obj.parsed_rows or [])
+
+    def create(self, validated_data):
+        request = self.context.get("request")
+        if request and request.user.is_authenticated:
+            validated_data["created_by"] = request.user
+        return super().create(validated_data)
 
 
 class QuotationLPOSerializer(serializers.ModelSerializer):

@@ -108,6 +108,205 @@
   padding: 18px;
 }
 
+.qm-proforma {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.qm-proforma-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  border-color: #99f6e4;
+  background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 72%);
+}
+
+.qm-proforma-hero h3 {
+  margin-top: 8px;
+}
+
+.qm-proforma-hero-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(90px, 1fr));
+  gap: 10px;
+  min-width: 320px;
+}
+
+.qm-proforma-hero-stats span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-proforma-hero-stats strong {
+  color: #0f766e;
+  font-size: 22px;
+}
+
+.qm-proforma-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.qm-proforma-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.qm-proforma-start {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(280px, 0.8fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.qm-proforma-start > label,
+.qm-proforma-start > button {
+  grid-column: 1 / -1;
+}
+
+.qm-proforma-start .qm-company-picker-grid,
+.qm-proforma-start .qm-contact-control {
+  min-width: 0;
+}
+
+.qm-proforma-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 640px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.qm-proforma-list-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #111827;
+  text-align: left;
+  cursor: pointer;
+}
+
+.qm-proforma-list-item:hover,
+.qm-proforma-list-item.active {
+  border-color: #14b8a6;
+  background: #f0fdfa;
+}
+
+.qm-proforma-list-item strong,
+.qm-proforma-list-item span:not(.qm-badge),
+.qm-proforma-list-item small {
+  grid-column: 1;
+}
+
+.qm-proforma-list-item small {
+  color: #64748b;
+  font-weight: 700;
+}
+
+.qm-proforma-list-item .qm-badge {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
+}
+
+.qm-proforma-upload-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.7fr) minmax(360px, 1.3fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.qm-proforma-upload-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-proforma-upload-grid .qm-checkbox {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+}
+
+.qm-proforma-total-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+
+.qm-proforma-total-card span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-proforma-total-card strong {
+  color: #0f766e;
+  font-size: 20px;
+}
+
+.qm-table.qm-proforma-lines-table th:nth-child(2),
+.qm-table.qm-proforma-lines-table td:nth-child(2) {
+  min-width: 300px;
+}
+
+.qm-table.qm-proforma-lines-table td:nth-child(2) {
+  display: grid;
+  gap: 6px;
+}
+
+.qm-table.qm-proforma-lines-table th:nth-child(3),
+.qm-table.qm-proforma-lines-table td:nth-child(3),
+.qm-table.qm-proforma-lines-table th:nth-child(4),
+.qm-table.qm-proforma-lines-table td:nth-child(4),
+.qm-table.qm-proforma-lines-table th:nth-child(6),
+.qm-table.qm-proforma-lines-table td:nth-child(6) {
+  width: 90px;
+}
+
+.qm-table.qm-proforma-lines-table th:nth-child(5),
+.qm-table.qm-proforma-lines-table td:nth-child(5),
+.qm-table.qm-proforma-lines-table th:nth-child(7),
+.qm-table.qm-proforma-lines-table td:nth-child(7) {
+  width: 130px;
+}
+
+.qm-empty-state {
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border-style: dashed;
+  background: #f9fafb;
+}
+
 .qm-subpanel {
   margin-top: 18px;
   background: #f9fafb;

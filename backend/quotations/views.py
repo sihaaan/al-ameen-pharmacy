@@ -47,6 +47,8 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    ProformaInvoice,
+    ProformaInvoiceLine,
     Quotation,
     QuotationAuditLog,
     QuotationLine,
@@ -57,7 +59,7 @@ from .models import (
     ProductAlias,
 )
 from .excel import build_quotation_excel
-from .pdf import build_proforma_invoice_pdf, build_quotation_pdf
+from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_pdf, build_quotation_pdf
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
 from .serializers import (
@@ -77,6 +79,8 @@ from .serializers import (
     QuotationLPOSerializer,
     QuotationListSerializer,
     QuotationOutcomePOImportSerializer,
+    ProformaInvoiceLineSerializer,
+    ProformaInvoiceSerializer,
     QuotationSettingsSerializer,
     QuotationSerializer,
     UserQuotationProfileSerializer,
@@ -139,6 +143,13 @@ def _proforma_download_filename(quotation):
     company_part = _safe_download_name_part(getattr(quotation.company, "name", ""))
     quote_part = _safe_download_name_part(quotation.quotation_number) or "QUOTATION"
     basename = f"{company_part}-PROFORMA-{quote_part}" if company_part else f"PROFORMA-{quote_part}"
+    return f"{basename}.pdf"
+
+
+def _standalone_proforma_download_filename(proforma):
+    company_part = _safe_download_name_part(getattr(proforma.company, "name", ""))
+    proforma_part = _safe_download_name_part(proforma.proforma_number) or "PROFORMA"
+    basename = f"{company_part}-{proforma_part}" if company_part else proforma_part
     return f"{basename}.pdf"
 
 
@@ -254,6 +265,74 @@ def _extract_lpo_details(preview):
             "detected_lpo_date": lpo_date.isoformat() if lpo_date else "",
         },
     }
+
+
+def _preview_decimal(value, default=None):
+    if value in (None, ""):
+        return default
+    cleaned = re.sub(r"[^0-9.\-]", "", str(value))
+    if cleaned in {"", "-", ".", "-."}:
+        return default
+    try:
+        return Decimal(cleaned)
+    except Exception:
+        return default
+
+
+def _preview_line_text(row):
+    for key in ("requested_item_name", "raw_name", "item_name", "description", "raw_line"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value[:255]
+    return ""
+
+
+def _proforma_line_from_preview(row, index):
+    item_name = _preview_line_text(row)
+    if not item_name:
+        return None
+    quantity = _preview_decimal(row.get("quantity") or row.get("qty"), Decimal("1.000"))
+    if quantity is None or quantity <= 0:
+        quantity = Decimal("1.000")
+    unit_price = _preview_decimal(
+        row.get("unit_price")
+        or row.get("price")
+        or row.get("rate")
+        or row.get("amount")
+        or row.get("total")
+    )
+    total = _preview_decimal(row.get("line_total") or row.get("total") or row.get("amount"))
+    if unit_price is None and total is not None and quantity:
+        unit_price = (total / quantity).quantize(Decimal("0.01"))
+    vat_rate = _preview_decimal(row.get("vat_rate") or row.get("vat") or row.get("tax"), Decimal("0.00"))
+    if vat_rate is None:
+        vat_rate = Decimal("0.00")
+    if vat_rate > 100:
+        vat_rate = Decimal("0.00")
+    return {
+        "item_name": item_name,
+        "description": str(row.get("description") or "").strip(),
+        "quantity": quantity,
+        "unit": str(row.get("unit") or row.get("uom") or "").strip()[:50],
+        "unit_price": unit_price,
+        "vat_rate": vat_rate,
+        "sort_order": index,
+    }
+
+
+def _recalculate_proforma_totals(proforma):
+    subtotal = Decimal("0.00")
+    vat_total = Decimal("0.00")
+    total = Decimal("0.00")
+    for line in ProformaInvoiceLine.objects.filter(proforma=proforma):
+        subtotal += Decimal(line.line_subtotal or 0)
+        vat_total += Decimal(line.vat_amount or 0)
+        total += Decimal(line.line_total or 0)
+    proforma.subtotal = subtotal.quantize(Decimal("0.01"))
+    proforma.vat_total = vat_total.quantize(Decimal("0.01"))
+    proforma.total = total.quantize(Decimal("0.01"))
+    proforma.save(update_fields=["subtotal", "vat_total", "total", "updated_at"])
+    return proforma
 
 
 class QuotationBaseViewSet:
@@ -1430,6 +1509,242 @@ class QuotationLPOViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             changes={"lpo_number": lpo.lpo_number, "source_filename": lpo.source_filename},
         )
         return super().destroy(request, *args, **kwargs)
+
+
+class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = ProformaInvoiceSerializer
+    queryset = ProformaInvoice.objects.select_related(
+        "company", "contact", "quotation", "created_by", "issued_by"
+    ).prefetch_related("lines", "lines__product")
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        company_id = self.request.query_params.get("company")
+        status_filter = self.request.query_params.get("status")
+        search = self.request.query_params.get("search", "").strip()
+        if company_id:
+            queryset = queryset.filter(company_id=company_id)
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        if search:
+            queryset = queryset.filter(
+                Q(proforma_number__icontains=search)
+                | Q(company__name__icontains=search)
+                | Q(quotation__quotation_number__icontains=search)
+                | Q(lpo_number__icontains=search)
+                | Q(source_filename__icontains=search)
+            )
+        return queryset.order_by("-updated_at", "-id")
+
+    def perform_create(self, serializer):
+        proforma = serializer.save()
+        audit_log(
+            self.request.user,
+            QuotationAuditLog.ACTION_CREATED,
+            proforma,
+            company=proforma.company,
+            quotation=proforma.quotation,
+            message=f"Created Proforma Invoice {proforma.proforma_number}.",
+        )
+
+    def perform_update(self, serializer):
+        proforma = serializer.save()
+        audit_log(
+            self.request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            proforma,
+            company=proforma.company,
+            quotation=proforma.quotation,
+            message=f"Updated Proforma Invoice {proforma.proforma_number}.",
+        )
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
+    def upload_lpo(self, request, pk=None):
+        proforma = self.get_object()
+        try:
+            uploaded = request.FILES.get("file")
+            raw_text = request.data.get("text") or request.data.get("raw_text") or ""
+            raw_html = request.data.get("html") or request.data.get("raw_html") or ""
+            source_file_size = 0
+            if uploaded:
+                filename = (uploaded.name or "").lower()
+                if filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    return Response(
+                        {"detail": "Image LPO parsing is not available here yet. Upload PDF/Excel or paste the LPO text."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                source_file_size = int(getattr(uploaded, "size", 0) or 0)
+                preview = parse_file_preview(uploaded)
+                source_type = ProformaInvoice.SOURCE_FILE
+            elif raw_text or raw_html:
+                preview = parse_text_preview(raw_text, raw_html=raw_html)
+                source_file_size = len(str(raw_text or raw_html).encode("utf-8"))
+                source_type = ProformaInvoice.SOURCE_PASTED_TEXT
+            else:
+                return Response({"detail": "Upload an LPO file or paste LPO text."}, status=status.HTTP_400_BAD_REQUEST)
+
+            source_context = {
+                "original_text": preview.get("original_text") or "",
+                "source_filename": preview.get("source_filename") or "",
+                "source_sha256": preview.get("source_sha256") or "",
+                "source_file_ref": preview.get("source_file_ref") or "",
+            }
+            warnings = list(preview.get("warnings") or [])
+            use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
+            if use_ai:
+                try:
+                    preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
+                except AIParseError as exc:
+                    warnings.append(str(exc))
+            for key, value in source_context.items():
+                if value and not preview.get(key):
+                    preview[key] = value
+
+            details = _extract_lpo_details(preview)
+            if not details["lpo_number"]:
+                warnings.append("LPO number was not detected. Enter it manually if the customer provided one.")
+            if not details["lpo_date"]:
+                warnings.append("LPO date was not detected. Enter it manually if needed.")
+
+            parsed_rows = preview.get("lines") or []
+            with transaction.atomic():
+                proforma.source_type = source_type
+                proforma.source_filename = preview.get("source_filename", "")
+                proforma.source_sha256 = preview.get("source_sha256", "")
+                proforma.source_file_ref = preview.get("source_file_ref", "")
+                proforma.source_file_size = source_file_size
+                proforma.parse_method = preview.get("parse_method", "")
+                proforma.lpo_number = details["lpo_number"]
+                proforma.lpo_date = details["lpo_date"]
+                proforma.parsed_meta = details["parsed_meta"]
+                proforma.parsed_rows = parsed_rows
+                proforma.warnings = warnings
+                proforma.save(
+                    update_fields=[
+                        "source_type",
+                        "source_filename",
+                        "source_sha256",
+                        "source_file_ref",
+                        "source_file_size",
+                        "parse_method",
+                        "lpo_number",
+                        "lpo_date",
+                        "parsed_meta",
+                        "parsed_rows",
+                        "warnings",
+                        "updated_at",
+                    ]
+                )
+                proforma.lines.all().delete()
+                created_lines = []
+                for index, row in enumerate(parsed_rows, start=1):
+                    line_data = _proforma_line_from_preview(row, index)
+                    if not line_data:
+                        continue
+                    created_lines.append(ProformaInvoiceLine.objects.create(proforma=proforma, **line_data))
+                _recalculate_proforma_totals(proforma)
+                proforma.refresh_from_db()
+
+            audit_log(
+                request.user,
+                QuotationAuditLog.ACTION_LPO_UPLOADED,
+                proforma,
+                company=proforma.company,
+                quotation=proforma.quotation,
+                message=f"Parsed LPO for Proforma Invoice {proforma.proforma_number}.",
+                changes={
+                    "proforma": proforma.proforma_number,
+                    "lpo_number": proforma.lpo_number,
+                    "lpo_date": proforma.lpo_date.isoformat() if proforma.lpo_date else "",
+                    "source_filename": proforma.source_filename,
+                    "line_count": len(created_lines),
+                },
+            )
+        except (DjangoValidationError, ValueError) as exc:
+            return self.handle_workflow_error(exc)
+
+        serializer = self.get_serializer(proforma)
+        return Response(
+            {
+                "proforma": serializer.data,
+                "message": f"LPO parsed. {proforma.lines.count()} line(s) are ready for review.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def bulk_update_lines(self, request, pk=None):
+        proforma = self.get_object()
+        payload = request.data.get("lines") or []
+        if not isinstance(payload, list):
+            return Response({"detail": "Send a list of lines to update."}, status=status.HTTP_400_BAD_REQUEST)
+        updated = []
+        created = []
+        deleted = 0
+        line_map = {line.id: line for line in proforma.lines.all()}
+        try:
+            with transaction.atomic():
+                for line_data in payload:
+                    line_id = line_data.get("id")
+                    line = None
+                    if line_id:
+                        try:
+                            line = line_map.get(int(line_id))
+                        except (TypeError, ValueError):
+                            line = None
+                    if line and line_data.get("_delete"):
+                        line.delete()
+                        deleted += 1
+                        continue
+                    if not line and line_data.get("_delete"):
+                        continue
+                    if line:
+                        serializer = ProformaInvoiceLineSerializer(line, data=line_data, partial=True, context={"request": request})
+                        serializer.is_valid(raise_exception=True)
+                        updated.append(serializer.save())
+                    else:
+                        serializer = ProformaInvoiceLineSerializer(data=line_data, context={"request": request})
+                        serializer.is_valid(raise_exception=True)
+                        created.append(serializer.save(proforma=proforma))
+                _recalculate_proforma_totals(proforma)
+        except (DjangoValidationError, ValueError) as exc:
+            return self.handle_workflow_error(exc)
+
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            proforma,
+            company=proforma.company,
+            quotation=proforma.quotation,
+            message=f"Saved Proforma Invoice lines: {len(updated)} updated, {len(created)} added, {deleted} removed.",
+            changes={"updated": len(updated), "created": len(created), "deleted": deleted},
+        )
+        proforma.refresh_from_db()
+        return Response(self.get_serializer(proforma).data)
+
+    @action(detail=True, methods=["get"])
+    def pdf(self, request, pk=None):
+        proforma = self.get_object()
+        if not proforma.lines.exists():
+            return Response({"detail": "Add or parse at least one line before downloading the Proforma Invoice."}, status=status.HTTP_400_BAD_REQUEST)
+        pdf_bytes = build_standalone_proforma_invoice_pdf(proforma)
+        if proforma.status == ProformaInvoice.STATUS_DRAFT:
+            proforma.status = ProformaInvoice.STATUS_ISSUED
+            proforma.issued_by = request.user if request.user.is_authenticated else None
+            proforma.issued_at = timezone.now()
+            proforma.save(update_fields=["status", "issued_by", "issued_at", "updated_at"])
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_PROFORMA_DOWNLOADED,
+            proforma,
+            company=proforma.company,
+            quotation=proforma.quotation,
+            message=f"Downloaded standalone Proforma Invoice {proforma.proforma_number}.",
+            changes={"proforma": proforma.proforma_number, "lpo_number": proforma.lpo_number},
+        )
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{_standalone_proforma_download_filename(proforma)}"'
+        return response
 
 
 class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

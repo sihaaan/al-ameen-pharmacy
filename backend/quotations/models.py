@@ -1298,6 +1298,192 @@ class QuotationLPO(models.Model):
         return f"{label} for {self.quotation}"
 
 
+class ProformaInvoice(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_ISSUED = "issued"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_ISSUED, "Issued"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    SOURCE_FILE = "file"
+    SOURCE_PASTED_TEXT = "pasted_text"
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_FILE, "File"),
+        (SOURCE_PASTED_TEXT, "Pasted text"),
+    ]
+
+    company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="proforma_invoices")
+    contact = models.ForeignKey(
+        CompanyContact,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="proforma_invoices",
+    )
+    quotation = models.ForeignKey(
+        Quotation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="standalone_proformas",
+    )
+    proforma_number = models.CharField(max_length=50, unique=True, blank=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_DRAFT, db_index=True)
+    proforma_date = models.DateField(default=timezone.localdate, db_index=True)
+    currency = models.CharField(max_length=3, default="AED")
+    lpo_number = models.CharField(max_length=120, blank=True, db_index=True)
+    lpo_date = models.DateField(null=True, blank=True, db_index=True)
+    source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES, blank=True)
+    source_filename = models.CharField(max_length=255, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    source_file_ref = models.CharField(max_length=500, blank=True)
+    source_file_size = models.PositiveIntegerField(default=0)
+    parse_method = models.CharField(max_length=100, blank=True)
+    parsed_meta = models.JSONField(default=dict, blank=True)
+    parsed_rows = models.JSONField(default=list, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_proforma_invoices",
+    )
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="issued_proforma_invoices",
+    )
+    issued_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["proforma_number"]),
+            models.Index(fields=["company", "status"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["lpo_number"]),
+            models.Index(fields=["lpo_date"]),
+            models.Index(fields=["source_sha256"]),
+        ]
+
+    def __str__(self):
+        return self.proforma_number or f"Proforma #{self.pk}"
+
+    def save(self, *args, **kwargs):
+        generated_number = not self.proforma_number
+        if generated_number:
+            self.proforma_number = self._generate_proforma_number()
+        try:
+            with transaction.atomic():
+                super().save(*args, **kwargs)
+        except IntegrityError:
+            if not generated_number or not self._state.adding:
+                raise
+            for _ in range(3):
+                self.proforma_number = self._generate_proforma_number()
+                try:
+                    with transaction.atomic():
+                        super().save(*args, **kwargs)
+                    return
+                except IntegrityError:
+                    continue
+            raise
+
+    @classmethod
+    def _generate_proforma_number(cls):
+        date_part = timezone.now().strftime("%Y%m%d")
+        base = f"PI-{date_part}"
+        last = (
+            cls.objects.filter(proforma_number__startswith=base)
+            .order_by("-proforma_number")
+            .values_list("proforma_number", flat=True)
+            .first()
+        )
+        if not last:
+            return f"{base}-0001"
+        try:
+            next_number = int(last.rsplit("-", 1)[1]) + 1
+        except (IndexError, ValueError):
+            next_number = cls.objects.filter(proforma_number__startswith=base).count() + 1
+        candidate = f"{base}-{next_number:04d}"
+        while cls.objects.filter(proforma_number=candidate).exists():
+            next_number += 1
+            candidate = f"{base}-{next_number:04d}"
+        return candidate
+
+
+class ProformaInvoiceLine(models.Model):
+    proforma = models.ForeignKey(ProformaInvoice, on_delete=models.CASCADE, related_name="lines")
+    product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="proforma_invoice_lines",
+    )
+    item_name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        default=Decimal("1.000"),
+        validators=[MinValueValidator(Decimal("0.001"))],
+    )
+    unit = models.CharField(max_length=50, blank=True)
+    unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    line_subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    vat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    line_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    sort_order = models.PositiveIntegerField(default=0)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+        indexes = [
+            models.Index(fields=["proforma", "sort_order"]),
+            models.Index(fields=["product"]),
+        ]
+
+    def __str__(self):
+        return f"{self.proforma} - {self.item_name}"
+
+    def save(self, *args, **kwargs):
+        if self.product and not self.item_name:
+            self.item_name = self.product.name
+        if self.unit_price is None:
+            self.line_subtotal = Decimal("0.00")
+            self.vat_amount = Decimal("0.00")
+            self.line_total = Decimal("0.00")
+        else:
+            subtotal = Decimal(self.quantity) * Decimal(self.unit_price)
+            vat = subtotal * (Decimal(self.vat_rate) / Decimal("100"))
+            self.line_subtotal = subtotal.quantize(Decimal("0.01"))
+            self.vat_amount = vat.quantize(Decimal("0.01"))
+            self.line_total = (self.line_subtotal + self.vat_amount).quantize(Decimal("0.01"))
+        super().save(*args, **kwargs)
+
+
 class CompanyPriceHistory(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="price_history")
     quote_item = models.ForeignKey(

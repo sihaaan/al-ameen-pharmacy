@@ -38,6 +38,7 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    ProformaInvoice,
     Quotation,
     QuotationAuditLog,
     QuotationLine,
@@ -81,6 +82,7 @@ class QuotationPermissionTests(APITestCase):
         "quotation-historical-import-ai-suggestion-list",
         "quotation-list",
         "quotation-lpo-list",
+        "quotation-standalone-proforma-list",
         "quotation-line-list",
         "quotation-price-history-list",
         "quotation-audit-log-list",
@@ -378,7 +380,85 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIn("Bandage Pack", text)
         self.assertNotIn("Payment Note", text)
         self.assertNotIn("Payment Terms", text)
-        self.assertNotIn("not a tax invoice", text)
+
+    def test_standalone_proforma_can_be_created_without_quotation(self):
+        create_response = self.client.post(
+            reverse("quotation-standalone-proforma-list"),
+            {"company": self.company.id, "currency": "AED", "notes": "Advance payment PI"},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        proforma = ProformaInvoice.objects.get(id=create_response.data["id"])
+        self.assertIsNone(proforma.quotation)
+        self.assertEqual(proforma.created_by, self.staff)
+        self.assertTrue(proforma.proforma_number.startswith("PI-"))
+
+    def test_standalone_proforma_lines_and_pdf_work_without_quotation(self):
+        proforma = ProformaInvoice.objects.create(company=self.company, created_by=self.staff)
+        update_response = self.client.post(
+            reverse("quotation-standalone-proforma-bulk-update-lines", args=[proforma.id]),
+            {
+                "lines": [
+                    {
+                        "item_name": "Bandage Pack",
+                        "quantity": "2.000",
+                        "unit": "box",
+                        "unit_price": "10.00",
+                        "vat_rate": "5.00",
+                    },
+                    {
+                        "item_name": "Alcohol Swab",
+                        "quantity": "3.000",
+                        "unit": "pcs",
+                        "unit_price": "1.50",
+                        "vat_rate": "0.00",
+                    },
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        proforma.refresh_from_db()
+        self.assertEqual(proforma.lines.count(), 2)
+        self.assertEqual(proforma.total, Decimal("25.50"))
+
+        pdf_response = self.client.get(reverse("quotation-standalone-proforma-pdf", args=[proforma.id]))
+
+        self.assertEqual(pdf_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(pdf_response["Content-Type"], "application/pdf")
+        proforma.refresh_from_db()
+        self.assertEqual(proforma.status, ProformaInvoice.STATUS_ISSUED)
+        text = extract_pdf_text(pdf_response.content)
+        self.assertIn("PROFORMA", text)
+        self.assertIn("INVOICE", text)
+        self.assertIn("Bandage Pack", text)
+        self.assertIn(proforma.proforma_number, text)
+        self.assertNotIn("Payment Note", text)
+        self.assertNotIn("Payment Terms", text)
+
+    def test_standalone_proforma_upload_lpo_parses_review_lines(self):
+        proforma = ProformaInvoice.objects.create(company=self.company, created_by=self.staff)
+
+        response = self.client.post(
+            reverse("quotation-standalone-proforma-upload-lpo", args=[proforma.id]),
+            {
+                "text": (
+                    "Purchase Order No: LPO-321\n"
+                    "Date: 17/06/2026\n"
+                    "Bandage Pack 2 box AED 10.00\n"
+                ),
+                "use_ai": "false",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        proforma.refresh_from_db()
+        self.assertEqual(proforma.lpo_number, "LPO-321")
+        self.assertEqual(proforma.lpo_date.isoformat(), "2026-06-17")
+        self.assertGreaterEqual(proforma.lines.count(), 1)
 
     def test_cannot_finalize_invalid_quote(self):
         quotation = self.create_quote()

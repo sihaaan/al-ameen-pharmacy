@@ -187,6 +187,19 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/lpos/${id}/`, data),
     delete: (id) => axiosInstance.delete(`/quotations/lpos/${id}/`),
   },
+  proformas: {
+    list: (params = {}) => axiosInstance.get('/quotations/proformas/', { params }),
+    retrieve: (id) => axiosInstance.get(`/quotations/proformas/${id}/`),
+    create: (data) => axiosInstance.post('/quotations/proformas/', data),
+    update: (id, data) => axiosInstance.patch(`/quotations/proformas/${id}/`, data),
+    uploadLpo: (id, data, isMultipart = false) => axiosInstance.post(
+      `/quotations/proformas/${id}/upload_lpo/`,
+      data,
+      isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined
+    ),
+    bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/proformas/${id}/bulk_update_lines/`, data),
+    pdf: (id) => axiosInstance.get(`/quotations/proformas/${id}/pdf/`, { responseType: 'blob' }),
+  },
   lines: {
     create: (data) => axiosInstance.post('/quotations/quote-lines/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/quote-lines/${id}/`, data),

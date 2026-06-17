@@ -12,6 +12,8 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    ProformaInvoice,
+    ProformaInvoiceLine,
     Quotation,
     QuotationAuditLog,
     QuotationLine,
@@ -319,6 +321,39 @@ class QuotationLPOAdmin(admin.ModelAdmin):
         "warnings",
         "received_by",
         "received_at",
+        "created_at",
+        "updated_at",
+    ]
+
+
+class ProformaInvoiceLineInline(admin.TabularInline):
+    model = ProformaInvoiceLine
+    extra = 0
+    autocomplete_fields = ["product"]
+    readonly_fields = ["line_subtotal", "vat_amount", "line_total", "created_at", "updated_at"]
+
+
+@admin.register(ProformaInvoice)
+class ProformaInvoiceAdmin(admin.ModelAdmin):
+    list_display = ["proforma_number", "company", "quotation", "lpo_number", "lpo_date", "status", "total", "created_by", "created_at"]
+    list_filter = ["status", "proforma_date", "lpo_date", "created_at"]
+    search_fields = ["proforma_number", "company__name", "quotation__quotation_number", "lpo_number", "source_filename"]
+    autocomplete_fields = ["company", "contact", "quotation", "created_by", "issued_by"]
+    inlines = [ProformaInvoiceLineInline]
+    readonly_fields = [
+        "proforma_number",
+        "source_type",
+        "source_filename",
+        "source_sha256",
+        "source_file_ref",
+        "source_file_size",
+        "parse_method",
+        "parsed_meta",
+        "parsed_rows",
+        "warnings",
+        "subtotal",
+        "vat_total",
+        "total",
         "created_at",
         "updated_at",
     ]

@@ -6,6 +6,7 @@ import QuotationList from './QuotationList';
 import QuotationEditor from './QuotationEditor';
 import QuotationOutcomeReview from './QuotationOutcomeReview';
 import QuotationDashboard from './QuotationDashboard';
+import ProformaInvoiceManager from './ProformaInvoiceManager';
 import PriceHistoryPanel from './PriceHistoryPanel';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationSettings from './QuotationSettings';
@@ -18,6 +19,7 @@ const tabs = [
   { id: 'items', label: 'Products / Items' },
   { id: 'inquiries', label: 'Inquiries' },
   { id: 'quotes', label: 'Quotations' },
+  { id: 'proformas', label: 'Proforma Invoices' },
   { id: 'history', label: 'Price History' },
   { id: 'historical-imports', label: 'Historical Imports' },
   { id: 'audit', label: 'Audit Logs' },
@@ -92,6 +94,7 @@ const QuotationModule = () => {
             <QuotationList key={refreshKey} onOpenQuote={openQuote} onReviewOutcome={openOutcome} />
           )
         )}
+        {activeTab === 'proformas' && <ProformaInvoiceManager />}
         {activeTab === 'history' && <PriceHistoryPanel />}
         {activeTab === 'historical-imports' && <HistoricalImportManager />}
         {activeTab === 'audit' && <AuditLogPanel />}
