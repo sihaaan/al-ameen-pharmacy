@@ -321,6 +321,36 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(quotation.outcome_status, Quotation.OUTCOME_PENDING)
         self.assertIn("outcome_suggestions", response.data)
 
+    def test_upload_lpo_ignores_po_box_when_detecting_purchase_order_number(self):
+        quotation = self.create_quote()
+        quotation.status = Quotation.STATUS_APPROVED
+        quotation.save(update_fields=["status", "updated_at"])
+        self.create_valid_line(quotation)
+
+        response = self.client.post(
+            reverse("quotation-upload-lpo", args=[quotation.id]),
+            {
+                "text": (
+                    "SOBHA CONSTRUCTIONS LLC\n"
+                    "P.O.BOX - 25654, DUBAI - UNITED ARAB EMIRATES\n"
+                    "MATERIAL PURCHASE ORDER\n"
+                    "PO No\n"
+                    "MPO-104F078-26-0142\n"
+                    "PO Date\n"
+                    "10-Jun-2026\n"
+                    "Purchase Order # : MPO-104F078-26-0142\n"
+                    "Sprays Deep Freeze Spray Bot 25.00 14.000 350.00\n"
+                ),
+                "use_ai": "false",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        lpo = QuotationLPO.objects.get(quotation=quotation)
+        self.assertEqual(lpo.lpo_number, "MPO-104F078-26-0142")
+        self.assertEqual(lpo.lpo_date.isoformat(), "2026-06-10")
+
     def test_proforma_pdf_requires_lpo_and_uses_standard_quote_lines(self):
         quotation = self.create_quote()
         quotation.status = Quotation.STATUS_APPROVED

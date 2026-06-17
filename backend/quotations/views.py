@@ -163,12 +163,39 @@ def _parse_lpo_business_date(value):
     parsed = parse_date(raw)
     if parsed:
         return parsed
-    for pattern in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d%m%Y", "%Y%m%d"):
+    for pattern in (
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d.%m.%Y",
+        "%d%m%Y",
+        "%Y%m%d",
+        "%d-%b-%Y",
+        "%d %b %Y",
+        "%d.%b.%Y",
+        "%d/%b/%Y",
+        "%d-%B-%Y",
+        "%d %B %Y",
+        "%d.%B.%Y",
+        "%d/%B/%Y",
+    ):
         try:
             return datetime.strptime(raw, pattern).date()
         except ValueError:
             continue
     return None
+
+
+def _clean_lpo_number_candidate(value):
+    candidate = str(value or "").strip().strip(" .:-#")
+    candidate = re.sub(r"\s+", "", candidate)
+    candidate = candidate.upper()
+    if not candidate or candidate in {"BOX", "P.O.BOX", "POBOX", "PBOX"}:
+        return ""
+    if not re.search(r"\d", candidate):
+        return ""
+    if len(candidate) < 3 or len(candidate) > 120:
+        return ""
+    return candidate
 
 
 def _extract_lpo_details(preview):
@@ -179,17 +206,22 @@ def _extract_lpo_details(preview):
 
     for key in ["lpo_number", "po_number", "purchase_order_number", "document_number"]:
         if meta.get(key):
-            lpo_number = str(meta.get(key)).strip()
-            break
+            lpo_number = _clean_lpo_number_candidate(meta.get(key))
+            if lpo_number:
+                break
 
     if not lpo_number:
-        match = re.search(
-            r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-.]{2,})",
-            text,
-            re.IGNORECASE,
-        )
-        if match:
-            lpo_number = match.group(1).strip(" .:-")
+        number_patterns = [
+            r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
+            r"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
+            r"\b(LPO[-\/.]?[A-Z0-9][A-Z0-9\/\-.]{2,})\b",
+        ]
+        for pattern in number_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                lpo_number = _clean_lpo_number_candidate(match.group(1))
+                if lpo_number:
+                    break
 
     for key in ["lpo_date", "po_date", "purchase_order_date", "document_date", "date"]:
         lpo_date = _parse_lpo_business_date(meta.get(key))
@@ -197,7 +229,13 @@ def _extract_lpo_details(preview):
             break
 
     if not lpo_date:
-        date_match = re.search(r"\b(\d{4}-\d{2}-\d{2}|\d{2}[\/\-.]\d{2}[\/\-.]\d{4})\b", text)
+        date_token = r"(\d{4}-\d{2}-\d{2}|\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{1,2}[\/\-. ](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[\/\-. ]\d{2,4})"
+        labelled_date_match = re.search(
+            rf"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*DATE\s*[:\-]?\s*(?:\r?\n\s*)?{date_token}",
+            text,
+            re.IGNORECASE,
+        )
+        date_match = labelled_date_match or re.search(rf"\b{date_token}\b", text, re.IGNORECASE)
         if date_match:
             lpo_date = _parse_lpo_business_date(date_match.group(1))
 
