@@ -791,8 +791,8 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
     elements.append(KeepTogether([Spacer(1, 10), totals_table]))
 
     elements.append(Spacer(1, 12))
-    footer_data = [[_signature_flowables(config, styles, quotation)]]
-    footer_table = Table(footer_data, colWidths=[60 * mm], hAlign="RIGHT")
+    footer_data = [[_signature_flowables(config, styles, quotation, approval_width=62 * mm)]]
+    footer_table = Table(footer_data, colWidths=[78 * mm], hAlign="RIGHT")
     footer_table.setStyle(
         TableStyle(
             [
@@ -992,8 +992,8 @@ def build_standalone_proforma_invoice_pdf(proforma):
         elements.append(Paragraph(_text(proforma.notes), styles["Small"]))
 
     elements.append(Spacer(1, 12))
-    footer_data = [[_signature_flowables(config, styles, proforma.quotation)]]
-    footer_table = Table(footer_data, colWidths=[60 * mm], hAlign="RIGHT")
+    footer_data = [[_signature_flowables(config, styles, proforma.quotation, approval_width=62 * mm)]]
+    footer_table = Table(footer_data, colWidths=[78 * mm], hAlign="RIGHT")
     footer_table.setStyle(
         TableStyle(
             [
@@ -1017,21 +1017,21 @@ def build_standalone_proforma_invoice_pdf(proforma):
     return buffer.getvalue()
 
 
-def _signature_flowables(config, styles, quotation=None):
+def _signature_flowables(config, styles, quotation=None, approval_width=52 * mm, visual_height=18 * mm):
     flowables = [Paragraph("Prepared / Approved By", styles["SectionTitle"])]
 
     approval_cells = []
     if config.show_signature_area:
-        signature_image = _image(config.signature_image_path, max_width=28 * mm, max_height=13 * mm)
+        signature_image = _image(config.signature_image_path, max_width=30 * mm, max_height=visual_height)
         signature_label = _approval_label(config.signature_label, "Authorized Signature", {"signature"})
-        approval_cells.append(_approval_cell(signature_image, signature_label, styles))
+        approval_cells.append(_approval_cell(signature_image, signature_label, styles, visual_height))
     if config.show_stamp_area:
-        stamp_image = _image(config.stamp_image_path, max_width=24 * mm, max_height=24 * mm)
+        stamp_image = _image(config.stamp_image_path, max_width=30 * mm, max_height=visual_height)
         stamp_label = _approval_label(config.stamp_label, "Company Stamp", {"stamp"})
-        approval_cells.append(_approval_cell(stamp_image, stamp_label, styles))
+        approval_cells.append(_approval_cell(stamp_image, stamp_label, styles, visual_height))
     if approval_cells:
         flowables.append(Spacer(1, 8))
-        column_width = (52 * mm) / len(approval_cells)
+        column_width = approval_width / len(approval_cells)
         approval_table = Table([approval_cells], colWidths=[column_width] * len(approval_cells))
         approval_table.setStyle(
             TableStyle(
@@ -1049,18 +1049,32 @@ def _signature_flowables(config, styles, quotation=None):
     return flowables
 
 
-def _approval_cell(image, label, styles):
+def _approval_cell(image, label, styles, visual_height):
+    visual = image if image else Paragraph("______________", styles["ApprovalLine"])
+    visual_table = Table([[visual]], colWidths=[28 * mm], rowHeights=[visual_height])
+    visual_table.setStyle(
+        TableStyle(
+            [
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "BOTTOM" if not image else "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    label_paragraph = Paragraph(label, ParagraphStyle(name="ApprovalLabel", parent=styles["SmallMuted"], alignment=TA_CENTER))
     if image:
         return [
-            image,
+            visual_table,
             Spacer(1, 3),
-            Paragraph(label, ParagraphStyle(name="ApprovalLabel", parent=styles["SmallMuted"], alignment=TA_CENTER)),
+            label_paragraph,
         ]
     return [
-        Spacer(1, 8),
-        Paragraph("______________", styles["ApprovalLine"]),
-        Spacer(1, 2),
-        Paragraph(label, ParagraphStyle(name="ApprovalPlaceholder", parent=styles["SmallMuted"], alignment=TA_CENTER)),
+        visual_table,
+        Spacer(1, 3),
+        label_paragraph,
     ]
 
 
