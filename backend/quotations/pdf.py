@@ -236,15 +236,34 @@ def _brand_lines(config, styles, include_contact=True):
     return lines
 
 
-def _quotation_title_block(quotation, quote_date, styles):
+def _quotation_title_block(
+    quotation,
+    quote_date,
+    styles,
+    *,
+    document_title="QUOTATION",
+    reference_label="Quote No",
+    reference_number=None,
+):
+    reference_number = reference_number or quotation.quotation_number
+    title_style = styles["QuoteTitleSmall"] if len(str(document_title or "")) > 12 else styles["QuoteTitle"]
     return [
-        Paragraph("<b>QUOTATION</b>", styles["QuoteTitle"]),
-        Paragraph(f"Quote No: {_text(quotation.quotation_number)}", styles["SmallMutedRight"]),
+        Paragraph(f"<b>{_text(document_title)}</b>", title_style),
+        Paragraph(f"{_text(reference_label)}: {_text(reference_number)}", styles["SmallMutedRight"]),
         Paragraph(f"Date: {_text(quote_date)}", styles["SmallMutedRight"]),
     ]
 
 
-def _build_header(config, quotation, quote_date, styles):
+def _build_header(
+    config,
+    quotation,
+    quote_date,
+    styles,
+    *,
+    document_title="QUOTATION",
+    reference_label="Quote No",
+    reference_number=None,
+):
     logo_layout = config.logo_layout or "full_logo_only"
     logo_flowable = (
         ""
@@ -255,7 +274,14 @@ def _build_header(config, quotation, quote_date, styles):
             max_height=28 * mm if logo_layout == "full_logo_only" else 26 * mm,
         )
     )
-    title_block = _quotation_title_block(quotation, quote_date, styles)
+    title_block = _quotation_title_block(
+        quotation,
+        quote_date,
+        styles,
+        document_title=document_title,
+        reference_label=reference_label,
+        reference_number=reference_number,
+    )
 
     if logo_layout == "full_logo_only" and logo_flowable:
         contact = _contact_block(config, styles, inline=True)
@@ -347,21 +373,7 @@ def _footer(canvas, doc):
     canvas.restoreState()
 
 
-def build_quotation_pdf(quotation):
-    config = get_quotation_pdf_config(quotation=quotation)
-    primary = colors.HexColor(config.primary_color or "#0F766E")
-    accent = colors.HexColor(config.accent_color or "#ECFDF5")
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=16 * mm,
-        leftMargin=16 * mm,
-        topMargin=14 * mm,
-        bottomMargin=18 * mm,
-        title=quotation.quotation_number,
-    )
-    doc.quotation = quotation
+def _pdf_styles(primary):
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="BrandName", parent=styles["Title"], fontSize=18, leading=22, textColor=primary))
     styles.add(ParagraphStyle(name="BrandArabic", parent=styles["Normal"], fontSize=10, leading=13, textColor=MUTED))
@@ -378,8 +390,27 @@ def build_quotation_pdf(quotation):
     styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=7.8, leading=9.4, splitLongWords=False, spaceShrinkage=0.03))
     styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading4"], fontSize=10, leading=12, textColor=primary))
     styles.add(ParagraphStyle(name="QuoteTitle", parent=styles["Title"], alignment=TA_RIGHT, fontSize=18, leading=22, textColor=TEXT))
+    styles.add(ParagraphStyle(name="QuoteTitleSmall", parent=styles["QuoteTitle"], fontSize=13.5, leading=16))
     styles.add(ParagraphStyle(name="ApprovalLine", parent=styles["SmallMuted"], alignment=TA_CENTER, fontSize=8, leading=9, textColor=MUTED))
+    return styles
 
+
+def build_quotation_pdf(quotation):
+    config = get_quotation_pdf_config(quotation=quotation)
+    primary = colors.HexColor(config.primary_color or "#0F766E")
+    accent = colors.HexColor(config.accent_color or "#ECFDF5")
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=18 * mm,
+        title=quotation.quotation_number,
+    )
+    doc.quotation = quotation
+    styles = _pdf_styles(primary)
     elements = []
     quote_date = _local_date(quotation.created_at)
 
@@ -414,9 +445,12 @@ def build_quotation_pdf(quotation):
         left_label, left_value = meta_items[index]
         if index + 1 < len(meta_items):
             right_label, right_value = meta_items[index + 1]
+            right_label_cell = meta_label(right_label)
+            right_value_cell = meta_value(right_value)
         else:
-            right_label, right_value = "", ""
-        meta_rows.append([meta_label(left_label), meta_value(left_value), meta_label(right_label), meta_value(right_value)])
+            right_label_cell = Paragraph("", styles["MetaLabel"])
+            right_value_cell = Paragraph("", styles["MetaValue"])
+        meta_rows.append([meta_label(left_label), meta_value(left_value), right_label_cell, right_value_cell])
     meta_table = Table(meta_rows, colWidths=[24 * mm, 76 * mm, 24 * mm, 54 * mm])
     meta_table.setStyle(
         TableStyle(
@@ -543,6 +577,233 @@ def build_quotation_pdf(quotation):
                 Spacer(1, 4),
                 Paragraph(f"<b>Validity:</b> {config.validity_days} days from quotation date unless otherwise stated.", styles["Small"]),
                 Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
+            ],
+            _signature_flowables(config, styles, quotation),
+        ]
+    ]
+    footer_table = Table(footer_data, colWidths=[112 * mm, 60 * mm])
+    footer_table.setStyle(
+        TableStyle(
+            [
+                ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, BORDER),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BACKGROUND", (0, 0), (-1, -1), SOFT),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    elements.append(footer_table)
+    if config.footer_note:
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph(_text(config.footer_note), styles["SmallMuted"]))
+
+    doc.build(elements, onFirstPage=_footer, onLaterPages=_footer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _proforma_number(quotation):
+    number = str(quotation.quotation_number or "").strip()
+    if number.startswith("QT-"):
+        return number.replace("QT-", "PI-", 1)
+    return f"PI-{number or quotation.pk}"
+
+
+def build_proforma_invoice_pdf(quotation, lpo=None):
+    config = get_quotation_pdf_config(quotation=quotation)
+    primary = colors.HexColor(config.primary_color or "#0F766E")
+    accent = colors.HexColor(config.accent_color or "#ECFDF5")
+    proforma_number = _proforma_number(quotation)
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=18 * mm,
+        title=proforma_number,
+    )
+    doc.quotation = None
+    styles = _pdf_styles(primary)
+    elements = []
+    invoice_date = timezone.localdate()
+
+    elements.append(
+        _build_header(
+            config,
+            quotation,
+            invoice_date,
+            styles,
+            document_title="PROFORMA INVOICE",
+            reference_label="Proforma No",
+            reference_number=proforma_number,
+        )
+    )
+
+    def meta_label(value):
+        return Paragraph(_text(value), styles["MetaLabel"])
+
+    def meta_value(value):
+        return Paragraph(_text(value), styles["MetaValue"])
+
+    contact = quotation.contact
+    contact_phone = getattr(contact, "phone", "") if contact else ""
+    contact_email = getattr(contact, "email", "") if contact else ""
+    meta_items = [
+        ("Customer", quotation.company.name),
+        ("Proforma #", proforma_number),
+        ("Customer Address", _optional_text(getattr(quotation.company, "billing_address", ""))),
+        ("Customer TRN", _optional_text(getattr(quotation.company, "trn", ""))),
+        ("Attention", _optional_text(contact.name if contact else "")),
+        ("Contact No.", _optional_text(contact_phone)),
+        ("Contact Email", _optional_text(contact_email)),
+        ("Date", invoice_date),
+        ("Quote Ref", quotation.quotation_number),
+        ("LPO No.", _optional_text(getattr(lpo, "lpo_number", ""))),
+        ("LPO Date", getattr(lpo, "lpo_date", None)),
+        ("Prepared By", quotation.created_by.username if quotation.created_by else ""),
+        ("Currency", quotation.currency),
+        ("Payment Terms", _payment_terms(quotation, config)),
+    ]
+    meta_items = [(label, value) for label, value in meta_items if str(value or "").strip()]
+    meta_rows = []
+    for index in range(0, len(meta_items), 2):
+        left_label, left_value = meta_items[index]
+        if index + 1 < len(meta_items):
+            right_label, right_value = meta_items[index + 1]
+            right_label_cell = meta_label(right_label)
+            right_value_cell = meta_value(right_value)
+        else:
+            right_label_cell = Paragraph("", styles["MetaLabel"])
+            right_value_cell = Paragraph("", styles["MetaValue"])
+        meta_rows.append([meta_label(left_label), meta_value(left_value), right_label_cell, right_value_cell])
+
+    meta_table = Table(meta_rows, colWidths=[24 * mm, 76 * mm, 24 * mm, 54 * mm])
+    meta_table.setStyle(
+        TableStyle(
+            [
+                ("BOX", (0, 0), (-1, -1), 0.35, LIGHT_BORDER),
+                ("INNERGRID", (0, 0), (-1, -1), 0.2, LIGHT_BORDER),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                ("BACKGROUND", (0, 0), (0, -1), SOFT),
+                ("BACKGROUND", (2, 0), (2, -1), SOFT),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 4.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
+            ]
+        )
+    )
+    elements.append(meta_table)
+    elements.append(Spacer(1, 8))
+
+    table_data = [
+        [
+            Paragraph("#", styles["TableHeader"]),
+            Paragraph("Item Description", styles["TableHeader"]),
+            Paragraph("Qty", styles["TableHeader"]),
+            Paragraph("Unit", styles["TableHeader"]),
+            Paragraph("Unit Price", styles["TableHeader"]),
+            Paragraph("VAT", styles["TableHeader"]),
+            Paragraph("Total", styles["TableHeader"]),
+        ]
+    ]
+    lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).select_related("product", "product_image").order_by("sort_order", "id")
+    for index, line in enumerate(lines, start=1):
+        item_text = _text(line.item_name_snapshot)
+        description = _customer_line_detail(line.description)
+        if description and description != item_text:
+            item_text = f"{item_text}<br/>{description}"
+        item_cell = [Paragraph(item_text, styles["TableCell"])]
+        if line.include_product_image:
+            selected_image = line.product_image or (line.product.primary_image if line.product_id else None)
+            image_url = getattr(getattr(selected_image, "image", None), "url", "")
+            item_image = _product_thumbnail(image_url)
+            if item_image:
+                item_cell.extend([Spacer(1, 3), item_image])
+        table_data.append(
+            [
+                Paragraph(str(index), styles["TableCellCenter"]),
+                item_cell,
+                Paragraph(_number(line.quantity), styles["TableCellRight"]),
+                Paragraph(_text(line.unit), styles["TableCell"]),
+                Paragraph(_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
+                Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
+                Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
+            ]
+        )
+
+    line_table = Table(
+        table_data,
+        colWidths=[10 * mm, 73 * mm, 14 * mm, 15 * mm, 26 * mm, 25 * mm, 25 * mm],
+        repeatRows=1,
+    )
+    line_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), primary),
+                ("GRID", (0, 0), (-1, -1), 0.25, BORDER),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (4, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (4, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (0, -1), 3),
+                ("RIGHTPADDING", (0, 0), (0, -1), 3),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+            ]
+        )
+    )
+    elements.append(line_table)
+
+    totals_table = Table(
+        [
+            ["Subtotal", _money(quotation.currency, quotation.subtotal)],
+            ["VAT", _money(quotation.currency, quotation.vat_total)],
+            ["Grand Total", _money(quotation.currency, quotation.total)],
+        ],
+        colWidths=[34 * mm, 36 * mm],
+        hAlign="RIGHT",
+    )
+    totals_table.setStyle(
+        TableStyle(
+            [
+                ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, BORDER),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+                ("BACKGROUND", (0, -1), (-1, -1), accent),
+                ("TEXTCOLOR", (0, -1), (-1, -1), primary),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    elements.append(KeepTogether([Spacer(1, 10), totals_table]))
+
+    elements.append(Spacer(1, 12))
+    footer_data = [
+        [
+            [
+                Paragraph("Payment Note", styles["SectionTitle"]),
+                Paragraph(
+                    "This proforma invoice is issued for payment processing against the accepted quotation/LPO. "
+                    "It is not a tax invoice.",
+                    styles["Small"],
+                ),
+                Spacer(1, 4),
+                Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
+                Paragraph("<b>Reference:</b> Please mention the quotation or proforma number when arranging payment.", styles["Small"]),
             ],
             _signature_flowables(config, styles, quotation),
         ]

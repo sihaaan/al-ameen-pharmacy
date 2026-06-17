@@ -22,6 +22,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationLPO,
     QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
@@ -1353,6 +1354,8 @@ class QuotationSerializer(serializers.ModelSerializer):
     follow_up_contact_method_display = serializers.CharField(source="get_follow_up_contact_method_display", read_only=True)
     outcome_closed_by_username = serializers.CharField(source="outcome_closed_by.username", read_only=True, allow_null=True)
     outcome_last_updated_by_username = serializers.CharField(source="outcome_last_updated_by.username", read_only=True, allow_null=True)
+    latest_lpo = serializers.SerializerMethodField()
+    lpo_count = serializers.SerializerMethodField()
     lines = QuotationLineSerializer(many=True, read_only=True)
 
     class Meta:
@@ -1407,6 +1410,8 @@ class QuotationSerializer(serializers.ModelSerializer):
             "follow_up_notes",
             "follow_up_contact_method",
             "follow_up_contact_method_display",
+            "latest_lpo",
+            "lpo_count",
             "is_historical_import",
             "lines",
             "created_at",
@@ -1450,6 +1455,8 @@ class QuotationSerializer(serializers.ModelSerializer):
             "follow_up_notes",
             "follow_up_contact_method",
             "follow_up_contact_method_display",
+            "latest_lpo",
+            "lpo_count",
             "is_historical_import",
             "lines",
             "created_at",
@@ -1461,6 +1468,15 @@ class QuotationSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             validated_data["created_by"] = request.user
         return super().create(validated_data)
+
+    def get_latest_lpo(self, obj):
+        lpo = obj.lpos.order_by("-received_at", "-id").first()
+        if not lpo:
+            return None
+        return QuotationLPOSerializer(lpo, context=self.context).data
+
+    def get_lpo_count(self, obj):
+        return obj.lpos.count()
 
 
 class QuotationListSerializer(serializers.ModelSerializer):
@@ -1532,6 +1548,62 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class QuotationLPOSerializer(serializers.ModelSerializer):
+    received_by_username = serializers.CharField(source="received_by.username", read_only=True, allow_null=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    source_type_display = serializers.CharField(source="get_source_type_display", read_only=True)
+    parsed_row_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuotationLPO
+        fields = [
+            "id",
+            "quotation",
+            "source_type",
+            "source_type_display",
+            "source_filename",
+            "source_sha256",
+            "source_file_size",
+            "parse_method",
+            "lpo_number",
+            "lpo_date",
+            "status",
+            "status_display",
+            "parsed_meta",
+            "parsed_rows",
+            "parsed_row_count",
+            "warnings",
+            "notes",
+            "received_by",
+            "received_by_username",
+            "received_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "quotation",
+            "source_type",
+            "source_type_display",
+            "source_filename",
+            "source_sha256",
+            "source_file_size",
+            "parse_method",
+            "parsed_meta",
+            "parsed_rows",
+            "parsed_row_count",
+            "warnings",
+            "received_by",
+            "received_by_username",
+            "received_at",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_parsed_row_count(self, obj):
+        return len(obj.parsed_rows or [])
 
 
 class CompanyPriceHistorySerializer(serializers.ModelSerializer):

@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -9,6 +9,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.views import APIView
 from rest_framework.decorators import action
@@ -49,13 +50,14 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationLPO,
     QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
 )
 from .excel import build_quotation_excel
-from .pdf import build_quotation_pdf
+from .pdf import build_proforma_invoice_pdf, build_quotation_pdf
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
 from .serializers import (
@@ -72,6 +74,7 @@ from .serializers import (
     InquirySerializer,
     QuotationAuditLogSerializer,
     QuotationLineSerializer,
+    QuotationLPOSerializer,
     QuotationListSerializer,
     QuotationOutcomePOImportSerializer,
     QuotationSettingsSerializer,
@@ -130,6 +133,89 @@ def _quotation_download_filename(quotation, extension):
     quote_part = _safe_download_name_part(quotation.quotation_number) or "QUOTATION"
     basename = f"{company_part}-{quote_part}" if company_part else quote_part
     return f"{basename}.{extension}"
+
+
+def _proforma_download_filename(quotation):
+    company_part = _safe_download_name_part(getattr(quotation.company, "name", ""))
+    quote_part = _safe_download_name_part(quotation.quotation_number) or "QUOTATION"
+    basename = f"{company_part}-PROFORMA-{quote_part}" if company_part else f"PROFORMA-{quote_part}"
+    return f"{basename}.pdf"
+
+
+def _preview_text_blob(preview):
+    chunks = [
+        str(preview.get("original_text") or ""),
+        str(preview.get("source_filename") or ""),
+        json.dumps(preview.get("meta") or {}, default=str),
+    ]
+    for row in preview.get("lines") or []:
+        chunks.extend(
+            str(row.get(key) or "")
+            for key in ["raw_line", "raw_name", "requested_item_name", "description", "item_name"]
+        )
+    return "\n".join(part for part in chunks if part)
+
+
+def _parse_lpo_business_date(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = parse_date(raw)
+    if parsed:
+        return parsed
+    for pattern in ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d%m%Y", "%Y%m%d"):
+        try:
+            return datetime.strptime(raw, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_lpo_details(preview):
+    text = _preview_text_blob(preview)
+    meta = dict(preview.get("meta") or {})
+    lpo_number = ""
+    lpo_date = None
+
+    for key in ["lpo_number", "po_number", "purchase_order_number", "document_number"]:
+        if meta.get(key):
+            lpo_number = str(meta.get(key)).strip()
+            break
+
+    if not lpo_number:
+        match = re.search(
+            r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9\/\-.]{2,})",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            lpo_number = match.group(1).strip(" .:-")
+
+    for key in ["lpo_date", "po_date", "purchase_order_date", "document_date", "date"]:
+        lpo_date = _parse_lpo_business_date(meta.get(key))
+        if lpo_date:
+            break
+
+    if not lpo_date:
+        date_match = re.search(r"\b(\d{4}-\d{2}-\d{2}|\d{2}[\/\-.]\d{2}[\/\-.]\d{4})\b", text)
+        if date_match:
+            lpo_date = _parse_lpo_business_date(date_match.group(1))
+
+    if not lpo_date:
+        filename = str(preview.get("source_filename") or "")
+        compact_match = re.search(r"(?<!\d)(\d{8})(?!\d)", filename)
+        if compact_match:
+            lpo_date = _parse_lpo_business_date(compact_match.group(1))
+
+    return {
+        "lpo_number": lpo_number[:120],
+        "lpo_date": lpo_date,
+        "parsed_meta": {
+            **meta,
+            "detected_lpo_number": lpo_number,
+            "detected_lpo_date": lpo_date.isoformat() if lpo_date else "",
+        },
+    }
 
 
 class QuotationBaseViewSet:
@@ -1080,6 +1166,151 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         serializer = QuotationOutcomePOImportSerializer(po_import, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["get"])
+    def lpos(self, request, pk=None):
+        quotation = self.get_object()
+        lpos = quotation.lpos.select_related("received_by").order_by("-received_at", "-id")
+        serializer = QuotationLPOSerializer(lpos, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
+    def upload_lpo(self, request, pk=None):
+        quotation = self.get_object()
+        if quotation.status not in {Quotation.STATUS_APPROVED, Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
+            return Response(
+                {"detail": "Approve or finalize this quotation before recording an LPO."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            uploaded = request.FILES.get("file")
+            raw_text = request.data.get("text") or request.data.get("raw_text") or ""
+            raw_html = request.data.get("html") or request.data.get("raw_html") or ""
+            source_file_size = 0
+            if uploaded:
+                filename = (uploaded.name or "").lower()
+                if filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    return Response(
+                        {
+                            "detail": "Image LPO parsing is not available here yet. Upload PDF/Excel or paste the LPO text.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                source_file_size = int(getattr(uploaded, "size", 0) or 0)
+                preview = parse_file_preview(uploaded)
+                source_type = QuotationLPO.SOURCE_FILE
+            elif raw_text or raw_html:
+                preview = parse_text_preview(raw_text, raw_html=raw_html)
+                source_file_size = len(str(raw_text or raw_html).encode("utf-8"))
+                source_type = QuotationLPO.SOURCE_PASTED_TEXT
+            else:
+                return Response({"detail": "Upload an LPO file or paste LPO text."}, status=status.HTTP_400_BAD_REQUEST)
+
+            source_context = {
+                "original_text": preview.get("original_text") or "",
+                "source_filename": preview.get("source_filename") or "",
+                "source_sha256": preview.get("source_sha256") or "",
+                "source_file_ref": preview.get("source_file_ref") or "",
+            }
+            warnings = list(preview.get("warnings") or [])
+            use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
+            if use_ai:
+                try:
+                    preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
+                except AIParseError as exc:
+                    warnings.append(str(exc))
+            for key, value in source_context.items():
+                if value and not preview.get(key):
+                    preview[key] = value
+
+            details = _extract_lpo_details(preview)
+            if not details["lpo_number"]:
+                warnings.append("LPO number was not detected. Enter it manually if the customer provided one.")
+            if not details["lpo_date"]:
+                warnings.append("LPO date was not detected. Enter it manually if needed.")
+
+            parsed_rows = preview.get("lines") or []
+            lpo_status = QuotationLPO.STATUS_PARSED if parsed_rows or details["lpo_number"] else QuotationLPO.STATUS_NEEDS_REVIEW
+            lpo = QuotationLPO.objects.create(
+                quotation=quotation,
+                source_type=source_type,
+                source_filename=preview.get("source_filename", ""),
+                source_sha256=preview.get("source_sha256", ""),
+                source_file_ref=preview.get("source_file_ref", ""),
+                source_file_size=source_file_size,
+                parse_method=preview.get("parse_method", ""),
+                lpo_number=details["lpo_number"],
+                lpo_date=details["lpo_date"],
+                status=lpo_status,
+                parsed_meta=details["parsed_meta"],
+                parsed_rows=parsed_rows,
+                warnings=warnings,
+                received_by=request.user if request.user.is_authenticated else None,
+            )
+            suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(quotation, preview)
+            audit_log(
+                request.user,
+                QuotationAuditLog.ACTION_LPO_UPLOADED,
+                lpo,
+                message=f"Recorded LPO for {quotation.quotation_number}.",
+                changes={
+                    "quotation": quotation.quotation_number,
+                    "lpo_number": lpo.lpo_number,
+                    "lpo_date": lpo.lpo_date.isoformat() if lpo.lpo_date else "",
+                    "source_filename": lpo.source_filename,
+                },
+            )
+        except (DjangoValidationError, ValueError) as exc:
+            return self.handle_workflow_error(exc)
+
+        serializer = QuotationLPOSerializer(lpo, context={"request": request})
+        return Response(
+            {
+                "lpo": serializer.data,
+                "outcome_suggestions": suggestions,
+                "unmatched_lpo_rows": unmatched,
+                "missing_quote_line_ids": missing_line_ids,
+                "message": "LPO recorded. Review the detected details, then download the Proforma Invoice.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=["get"])
+    def proforma_pdf(self, request, pk=None):
+        quotation = self.get_object()
+        if quotation.status not in {Quotation.STATUS_APPROVED, Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
+            return Response(
+                {"detail": "Approve or finalize this quotation before downloading a Proforma Invoice."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        lpo_id = request.query_params.get("lpo")
+        lpos = quotation.lpos.select_related("received_by").order_by("-received_at", "-id")
+        lpo = None
+        if lpo_id:
+            try:
+                lpo = lpos.get(pk=lpo_id)
+            except (QuotationLPO.DoesNotExist, ValueError):
+                return Response({"detail": "Selected LPO was not found for this quotation."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            lpo = lpos.first()
+        if not lpo:
+            return Response(
+                {"detail": "Record the customer's LPO before downloading a Proforma Invoice."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pdf_bytes = build_proforma_invoice_pdf(quotation, lpo=lpo)
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_PROFORMA_DOWNLOADED,
+            quotation,
+            message=f"Downloaded Proforma Invoice for {quotation.quotation_number}.",
+            changes={"lpo_id": lpo.id, "lpo_number": lpo.lpo_number},
+        )
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{_proforma_download_filename(quotation)}"'
+        return response
+
     @action(detail=True, methods=["post"])
     def bulk_update_lines(self, request, pk=None):
         quotation = self.get_object()
@@ -1127,6 +1358,40 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 ),
             }
         )
+
+
+class QuotationLPOViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = QuotationLPOSerializer
+    queryset = QuotationLPO.objects.select_related("quotation", "quotation__company", "received_by")
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        quotation_id = self.request.query_params.get("quotation")
+        if quotation_id:
+            queryset = queryset.filter(quotation_id=quotation_id)
+        return queryset.order_by("-received_at", "-id")
+
+    def perform_update(self, serializer):
+        lpo = serializer.save()
+        audit_log(
+            self.request.user,
+            QuotationAuditLog.ACTION_UPDATED,
+            lpo,
+            message=f"Updated LPO details for {lpo.quotation.quotation_number}.",
+            changes={"lpo_number": lpo.lpo_number, "lpo_date": lpo.lpo_date.isoformat() if lpo.lpo_date else ""},
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        lpo = self.get_object()
+        audit_log(
+            request.user,
+            QuotationAuditLog.ACTION_DELETED,
+            lpo,
+            message=f"Deleted LPO record for {lpo.quotation.quotation_number}.",
+            changes={"lpo_number": lpo.lpo_number, "source_filename": lpo.source_filename},
+        )
+        return super().destroy(request, *args, **kwargs)
 
 
 class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

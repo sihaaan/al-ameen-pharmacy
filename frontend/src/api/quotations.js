@@ -162,6 +162,13 @@ const quotationAPI = {
     bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_update_lines/`, data),
     bulkCreateProductsForLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_create_products_for_lines/`, data),
     productPrice: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_price/`, { params }),
+    lpos: (id) => axiosInstance.get(`/quotations/quotes/${id}/lpos/`),
+    uploadLpo: (id, data, isMultipart = false) => axiosInstance.post(
+      `/quotations/quotes/${id}/upload_lpo/`,
+      data,
+      isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined
+    ),
+    proformaPdf: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/proforma_pdf/`, { params, responseType: 'blob' }),
     outcome: (id) => axiosInstance.get(`/quotations/quotes/${id}/outcome/`),
     updateOutcome: (id, data) => axiosInstance.patch(`/quotations/quotes/${id}/outcome/`, data),
     parseOutcomePO: (id, data, isMultipart = false) => axiosInstance.post(
@@ -174,6 +181,11 @@ const quotationAPI = {
     cancel: (id) => axiosInstance.post(`/quotations/quotes/${id}/cancel/`),
     pdf: (id) => axiosInstance.get(`/quotations/quotes/${id}/pdf/`, { responseType: 'blob' }),
     excel: (id) => axiosInstance.get(`/quotations/quotes/${id}/excel/`, { responseType: 'blob' }),
+  },
+  lpos: {
+    list: (params = {}) => axiosInstance.get('/quotations/lpos/', { params }),
+    update: (id, data) => axiosInstance.patch(`/quotations/lpos/${id}/`, data),
+    delete: (id) => axiosInstance.delete(`/quotations/lpos/${id}/`),
   },
   lines: {
     create: (data) => axiosInstance.post('/quotations/quote-lines/', data),

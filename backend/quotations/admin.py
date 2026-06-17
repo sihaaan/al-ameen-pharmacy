@@ -15,6 +15,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationLPO,
     QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
@@ -295,6 +296,29 @@ class QuotationOutcomePOImportAdmin(admin.ModelAdmin):
         "unmatched_po_rows",
         "missing_quote_line_ids",
         "warnings",
+        "created_at",
+        "updated_at",
+    ]
+
+
+@admin.register(QuotationLPO)
+class QuotationLPOAdmin(admin.ModelAdmin):
+    list_display = ["quotation", "lpo_number", "lpo_date", "status", "source_filename", "received_by", "received_at"]
+    list_filter = ["status", "source_type", "lpo_date", "received_at"]
+    search_fields = ["quotation__quotation_number", "quotation__company__name", "lpo_number", "source_filename", "source_sha256"]
+    autocomplete_fields = ["quotation", "received_by"]
+    readonly_fields = [
+        "source_type",
+        "source_filename",
+        "source_sha256",
+        "source_file_ref",
+        "source_file_size",
+        "parse_method",
+        "parsed_meta",
+        "parsed_rows",
+        "warnings",
+        "received_by",
+        "received_at",
         "created_at",
         "updated_at",
     ]

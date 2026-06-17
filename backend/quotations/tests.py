@@ -41,6 +41,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationLPO,
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
@@ -79,6 +80,7 @@ class QuotationPermissionTests(APITestCase):
         "quotation-historical-import-line-list",
         "quotation-historical-import-ai-suggestion-list",
         "quotation-list",
+        "quotation-lpo-list",
         "quotation-line-list",
         "quotation-price-history-list",
         "quotation-audit-log-list",
@@ -294,6 +296,57 @@ class QuotationWorkflowTests(APITestCase):
             unit_price=Decimal("10.00"),
             match_status=QuotationLine.MATCH_CONFIRMED,
         )
+
+    def test_upload_lpo_records_reviewable_lpo_without_changing_outcome(self):
+        quotation = self.create_quote()
+        quotation.status = Quotation.STATUS_APPROVED
+        quotation.save(update_fields=["status", "updated_at"])
+        self.create_valid_line(quotation)
+
+        response = self.client.post(
+            reverse("quotation-upload-lpo", args=[quotation.id]),
+            {
+                "text": "Purchase Order No: LPO-77\nDate: 17/06/2026\nBandage Pack 2 box AED 10.00",
+                "use_ai": "false",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        lpo = QuotationLPO.objects.get(quotation=quotation)
+        self.assertEqual(lpo.lpo_number, "LPO-77")
+        self.assertEqual(lpo.lpo_date.isoformat(), "2026-06-17")
+        self.assertEqual(lpo.received_by, self.staff)
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.outcome_status, Quotation.OUTCOME_PENDING)
+        self.assertIn("outcome_suggestions", response.data)
+
+    def test_proforma_pdf_requires_lpo_and_uses_standard_quote_lines(self):
+        quotation = self.create_quote()
+        quotation.status = Quotation.STATUS_APPROVED
+        quotation.save(update_fields=["status", "updated_at"])
+        self.create_valid_line(quotation)
+
+        missing_response = self.client.get(reverse("quotation-proforma-pdf", args=[quotation.id]))
+        self.assertEqual(missing_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        QuotationLPO.objects.create(
+            quotation=quotation,
+            source_type=QuotationLPO.SOURCE_PASTED_TEXT,
+            lpo_number="LPO-77",
+            lpo_date=date(2026, 6, 17),
+            received_by=self.staff,
+        )
+        response = self.client.get(reverse("quotation-proforma-pdf", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        text = extract_pdf_text(response.content)
+        self.assertIn("PROFORMA", text)
+        self.assertIn("INVOICE", text)
+        self.assertIn("LPO-77", text)
+        self.assertIn("Bandage Pack", text)
+        self.assertIn("not a tax invoice", text)
 
     def test_cannot_finalize_invalid_quote(self):
         quotation = self.create_quote()

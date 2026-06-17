@@ -1240,6 +1240,64 @@ class QuotationOutcomePOImport(models.Model):
         return f"PO outcome import for {self.quotation}"
 
 
+class QuotationLPO(models.Model):
+    STATUS_RECEIVED = "received"
+    STATUS_PARSED = "parsed"
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_CONFIRMED = "confirmed"
+    STATUS_CHOICES = [
+        (STATUS_RECEIVED, "Received"),
+        (STATUS_PARSED, "Parsed"),
+        (STATUS_NEEDS_REVIEW, "Needs review"),
+        (STATUS_CONFIRMED, "Confirmed"),
+    ]
+
+    SOURCE_FILE = "file"
+    SOURCE_PASTED_TEXT = "pasted_text"
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_FILE, "File"),
+        (SOURCE_PASTED_TEXT, "Pasted text"),
+    ]
+
+    quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="lpos")
+    source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES, default=SOURCE_FILE)
+    source_filename = models.CharField(max_length=255, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    source_file_ref = models.CharField(max_length=500, blank=True)
+    source_file_size = models.PositiveIntegerField(default=0)
+    parse_method = models.CharField(max_length=100, blank=True)
+    lpo_number = models.CharField(max_length=120, blank=True, db_index=True)
+    lpo_date = models.DateField(null=True, blank=True, db_index=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_RECEIVED, db_index=True)
+    parsed_meta = models.JSONField(default=dict, blank=True)
+    parsed_rows = models.JSONField(default=list, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    notes = models.TextField(blank=True)
+    received_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="received_quotation_lpos",
+    )
+    received_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-received_at", "-id"]
+        indexes = [
+            models.Index(fields=["quotation", "received_at"]),
+            models.Index(fields=["quotation", "status"]),
+            models.Index(fields=["source_sha256"]),
+            models.Index(fields=["lpo_date"]),
+        ]
+
+    def __str__(self):
+        label = self.lpo_number or self.source_filename or f"LPO #{self.pk}"
+        return f"{label} for {self.quotation}"
+
+
 class CompanyPriceHistory(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="price_history")
     quote_item = models.ForeignKey(
@@ -1298,6 +1356,8 @@ class QuotationAuditLog(models.Model):
     ACTION_REVISED = "revised"
     ACTION_PDF_DOWNLOADED = "pdf_downloaded"
     ACTION_IMPORTED = "imported"
+    ACTION_LPO_UPLOADED = "lpo_uploaded"
+    ACTION_PROFORMA_DOWNLOADED = "proforma_downloaded"
     ACTION_OUTCOME_UPDATED = "outcome_updated"
     ACTION_FOLLOWUP_UPDATED = "followup_updated"
     ACTION_CHOICES = [
@@ -1309,6 +1369,8 @@ class QuotationAuditLog(models.Model):
         (ACTION_REVISED, "Revised"),
         (ACTION_PDF_DOWNLOADED, "PDF Downloaded"),
         (ACTION_IMPORTED, "Imported"),
+        (ACTION_LPO_UPLOADED, "LPO Uploaded"),
+        (ACTION_PROFORMA_DOWNLOADED, "Proforma Downloaded"),
         (ACTION_OUTCOME_UPDATED, "Outcome Updated"),
         (ACTION_FOLLOWUP_UPDATED, "Follow-up Updated"),
     ]
