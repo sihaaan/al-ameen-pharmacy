@@ -165,21 +165,90 @@
   gap: 18px;
 }
 
-.qm-proforma-start {
+.qm-form.qm-proforma-start {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) minmax(280px, 0.8fr);
-  gap: 14px;
-  align-items: end;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 16px;
+  align-items: stretch;
 }
 
-.qm-proforma-start > label,
-.qm-proforma-start > button {
+.qm-proforma-start-actions {
   grid-column: 1 / -1;
+}
+
+.qm-proforma-start-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.qm-proforma-start-card .qm-company-picker,
+.qm-proforma-start-card label {
+  min-width: 0;
+}
+
+.qm-proforma-start-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.qm-proforma-start-card textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.qm-card-eyebrow {
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.qm-proforma-start-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+
+.qm-proforma-start-actions > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.qm-proforma-start-actions strong {
+  color: #134e4a;
+}
+
+.qm-proforma-start-actions span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .qm-proforma-start .qm-company-picker-grid,
 .qm-proforma-start .qm-contact-control {
   min-width: 0;
+}
+
+.qm-proforma-start .qm-company-picker-grid {
+  grid-template-columns: minmax(180px, 0.9fr) minmax(220px, 1.1fr) auto;
 }
 
 .qm-proforma-list {
@@ -3397,6 +3466,7 @@
   .qm-party-grid,
   .qm-contact-control,
   .qm-inline-card,
+  .qm-form.qm-proforma-start,
   .qm-lpo-steps,
   .qm-lpo-detail-grid,
   .qm-review-import-shell,
@@ -3516,8 +3586,14 @@
   }
 
   .qm-company-suggestion,
-  .qm-review-card-heading {
+  .qm-review-card-heading,
+  .qm-proforma-start-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .qm-proforma-start-actions .qm-actions,
+  .qm-proforma-start-actions button {
+    width: 100%;
   }
 }

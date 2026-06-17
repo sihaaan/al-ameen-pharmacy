@@ -398,33 +398,47 @@ const ProformaInvoiceManager = () => {
               {selected && <span className={`qm-badge status-${selected.status}`}>{selected.status_display}</span>}
             </div>
             <form className="qm-form qm-proforma-start" onSubmit={createProforma}>
-              <CompanySelectWithCreate
-                companies={companies}
-                value={form.company}
-                required
-                onChange={(companyId) => {
-                  setForm({ ...form, company: companyId, contact: '' });
-                  loadContactsForCompany(companyId);
-                }}
-                onCreated={rememberCompany}
-              />
-              <div className="qm-contact-control">
+              <div className="qm-proforma-start-card">
+                <div className="qm-card-eyebrow">Customer</div>
+                <CompanySelectWithCreate
+                  companies={companies}
+                  value={form.company}
+                  required
+                  onChange={(companyId) => {
+                    setForm({ ...form, company: companyId, contact: '' });
+                    loadContactsForCompany(companyId);
+                  }}
+                  onCreated={rememberCompany}
+                />
+              </div>
+              <div className="qm-proforma-start-card">
+                <div className="qm-card-eyebrow">Contact & Notes</div>
                 <label>Contact
                   <select value={form.contact} disabled={!form.company} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
                     <option value="">No contact</option>
                     {contacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
                   </select>
                 </label>
-                <button type="button" className="qm-secondary small" disabled={!selected || saving} onClick={saveDetails}>
-                  {saving ? 'Saving...' : 'Save Details'}
-                </button>
+                <label>Internal notes
+                  <textarea rows="3" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional internal note" />
+                </label>
               </div>
-              <label>Internal notes
-                <textarea rows="3" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional internal note" />
-              </label>
-              <button type="submit" className="qm-primary" disabled={!form.company || saving}>
-                {saving ? 'Creating...' : 'Create New Proforma'}
-              </button>
+              <div className="qm-proforma-start-actions">
+                <div>
+                  <strong>{selected ? selected.proforma_number : 'New Proforma Invoice'}</strong>
+                  <span>{selected ? 'Save customer/contact changes or create another PI from the selected customer.' : 'Create the draft first, then upload or paste the LPO.'}</span>
+                </div>
+                <div className="qm-actions">
+                  {selected && (
+                    <button type="button" className="qm-secondary" disabled={saving} onClick={saveDetails}>
+                      {saving ? 'Saving...' : 'Save Details'}
+                    </button>
+                  )}
+                  <button type="submit" className="qm-primary" disabled={!form.company || saving}>
+                    {saving ? 'Creating...' : selected ? 'Create Another Proforma' : 'Create New Proforma'}
+                  </button>
+                </div>
+              </div>
             </form>
           </div>
 
