@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import './Auth.css';
 
 function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { login, error } = useAuth();
 
   const [formData, setFormData] = useState({
@@ -43,8 +44,10 @@ function Login() {
     setLoading(false);
 
     if (result.success) {
-      // Redirect to home page
-      navigate('/');
+      const params = new URLSearchParams(location.search);
+      const next = params.get('next');
+      const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+      navigate(safeNext);
     } else {
       setLocalError(result.error || 'Login failed');
     }

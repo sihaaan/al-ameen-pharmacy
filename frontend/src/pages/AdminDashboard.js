@@ -1,7 +1,7 @@
 // frontend/src/pages/AdminDashboard.js
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import axiosInstance from '../utils/axios';
 import ProductManagement from '../components/ProductManagement';
 import OrderManagement from '../components/OrderManagement';
@@ -12,6 +12,7 @@ import '../styles/Dashboard.css';
 const AdminDashboard = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [activeTab, setActiveTab] = useState('overview');
   const [stats, setStats] = useState({
     totalProducts: 0,
@@ -26,14 +27,15 @@ const AdminDashboard = () => {
   // Check if user is admin
   useEffect(() => {
     if (!user) {
-      navigate('/login');
+      const next = `${location.pathname}${location.search}`;
+      navigate(`/login?next=${encodeURIComponent(next)}`);
     } else if (!user.is_staff) {
       alert('You do not have permission to access this page');
       navigate('/');
     } else {
       fetchStats();
     }
-  }, [user, navigate]);
+  }, [user, navigate, location.pathname, location.search]);
 
   const fetchStats = async () => {
     setStatsLoading(true);

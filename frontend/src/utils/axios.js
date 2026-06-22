@@ -55,7 +55,8 @@ axiosInstance.interceptors.response.use(
         localStorage.removeItem('token');
         localStorage.removeItem('refreshToken');
         localStorage.removeItem('user');
-        window.location.href = '/login';
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.href = `/login?next=${encodeURIComponent(next)}`;
         return Promise.reject(refreshError);
       }
     }
