@@ -654,7 +654,10 @@ const ContractIntelligenceManager = () => {
                 <div className="qm-panel">
                   <div className="qm-panel-heading">
                     <div>
-                      <h3>Sources</h3>
+                      <h3>
+                        Sources
+                        <span className="qm-heading-count">{selectedSummary.sources || 0} emails found</span>
+                      </h3>
                       <p>Emails and attachments found for this run.</p>
                     </div>
                   </div>
