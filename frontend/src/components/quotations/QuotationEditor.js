@@ -847,6 +847,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     return `POST /quotations/quotes/${quote.id}/${endpointNames[label] || label.toLowerCase()}/`;
   };
 
+  const downloadPdfFile = async (quoteForFilename = quote) => {
+    const response = await quotationAPI.quotes.pdf(quote.id);
+    const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', quotationDownloadFilename(quoteForFilename, 'pdf'));
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   const runAction = async (label, action) => {
     if (saving || actionInFlight) return;
     if (label === 'Finalize' && finalizeIssues.length > 0) return;
@@ -858,6 +870,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const response = await action(quote.id);
       if (label === 'Create Revision' && response.data?.id) {
         window.alert(`Created revision ${response.data.quotation_number}`);
+      }
+      if (label === 'Finalize') {
+        setDownloadLoading(true);
+        try {
+          await downloadPdfFile(response.data || quote);
+        } catch (downloadError) {
+          const details = await describeQuotationError(downloadError, 'Download finalized quotation PDF', `GET /quotations/quotes/${quote.id}/pdf/`);
+          setErrorInfo(details);
+          console.error(formatQuotationError(details), downloadError);
+        } finally {
+          setDownloadLoading(false);
+        }
       }
       await load();
     } catch (error) {
@@ -875,15 +899,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setDownloadLoading(true);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.quotes.pdf(quote.id);
-      const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', quotationDownloadFilename(quote, 'pdf'));
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
+      await downloadPdfFile(quote);
     } catch (error) {
       const details = await describeQuotationError(error, 'Download quotation PDF', `GET /quotations/quotes/${quote.id}/pdf/`);
       setErrorInfo(details);
