@@ -73,6 +73,7 @@ const ContractIntelligenceManager = () => {
   const [busyAction, setBusyAction] = useState('');
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState('');
+  const [analysisProgress, setAnalysisProgress] = useState(null);
   const [itemFilter, setItemFilter] = useState('');
   const [sourceSort, setSourceSort] = useState('newest');
   const [deleteConfirmRun, setDeleteConfirmRun] = useState(null);
@@ -140,6 +141,9 @@ const ContractIntelligenceManager = () => {
   };
 
   const openRun = async (runId) => {
+    if (selectedRun?.id !== runId) {
+      setAnalysisProgress(null);
+    }
     setBusyAction(`open-${runId}`);
     setErrorInfo(null);
     try {
@@ -312,20 +316,44 @@ const ContractIntelligenceManager = () => {
     setBusyAction(action);
     setNotice('');
     setErrorInfo(null);
+    setAnalysisProgress(null);
+    let totals = {
+      batches: 0,
+      sources_analyzed: 0,
+      items_created: 0,
+      pending_sources: 0,
+      warnings: 0,
+      stopped: false,
+    };
     try {
-      const pendingSources = Math.max(Number(selectedSummary.sources_candidate || 0), Number(sources.filter((source) => source.status !== 'analyzed').length || 0));
-      const maxBatches = Math.min(Math.ceil((pendingSources || selectedBatchSize) / selectedBatchSize) || 1, 100);
-      const totals = {
-        batches: 0,
-        sources_analyzed: 0,
-        items_created: 0,
-        pending_sources: pendingSources,
-      };
+      const totalSources = Number(selectedSummary.sources || sources.length || 0);
+      const analyzedSources = Number(selectedSummary.sources_analyzed || sources.filter((source) => source.status === 'analyzed').length || 0);
+      const pendingSources = Math.max(
+        totalSources - analyzedSources,
+        Number(selectedSummary.sources_candidate || 0),
+        Number(sources.filter((source) => source.status !== 'analyzed').length || 0),
+        0
+      );
+      const chunkSize = useAI ? 1 : Math.min(Math.max(selectedBatchSize || 25, 1), 50);
+      const maxBatches = Math.min(Math.ceil((pendingSources || chunkSize) / chunkSize) || 1, Math.max(pendingSources || 1, 1), 5000);
+      totals.pending_sources = pendingSources;
       for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
-        setNotice(`${useAI ? 'AI analyzing' : 'Analyzing'} batch ${batchIndex + 1} of up to ${maxBatches}...`);
+        setAnalysisProgress({
+          mode: useAI ? 'AI' : 'Basic',
+          batch: batchIndex + 1,
+          maxBatches,
+          chunkSize,
+          completed: totals.sources_analyzed,
+          total: pendingSources,
+          pending: totals.pending_sources,
+          items: totals.items_created,
+          warnings: totals.warnings,
+          paused: false,
+        });
+        setNotice(`${useAI ? 'AI analyzing' : 'Analyzing'} ${useAI ? 'one source' : `${chunkSize} source(s)`} at a time. ${totals.sources_analyzed} of ${pendingSources} processed in this pass.`);
         const response = await quotationAPI.contractIntelligence.analyze(selectedRun.id, {
           use_ai: useAI,
-          source_limit: selectedBatchSize,
+          source_limit: chunkSize,
         });
         const result = response.data.result || {};
         const analyzedThisBatch = Number(result.sources_analyzed || 0);
@@ -333,13 +361,44 @@ const ContractIntelligenceManager = () => {
         totals.sources_analyzed += analyzedThisBatch;
         totals.items_created += Number(result.items_created || 0);
         totals.pending_sources = Number(result.pending_sources || 0);
+        totals.warnings += Number((result.warnings || []).length || 0);
+        setAnalysisProgress({
+          mode: useAI ? 'AI' : 'Basic',
+          batch: batchIndex + 1,
+          maxBatches,
+          chunkSize,
+          completed: totals.sources_analyzed,
+          total: pendingSources,
+          pending: totals.pending_sources,
+          items: totals.items_created,
+          warnings: totals.warnings,
+          paused: false,
+        });
         if (totals.pending_sources <= 0 || analyzedThisBatch <= 0) {
+          totals.stopped = analyzedThisBatch <= 0 && totals.pending_sources > 0;
           break;
         }
       }
-      setNotice(`Full analysis complete: ${totals.items_created} item row(s) extracted from ${totals.sources_analyzed} source(s) across ${totals.batches} batch(es). ${totals.pending_sources || 0} source(s) still waiting.`);
+      setAnalysisProgress((current) => current ? { ...current, paused: totals.stopped } : null);
+      const completionLabel = totals.stopped ? 'paused' : 'complete';
+      const resumeText = totals.pending_sources > 0 ? ' Run it again to resume from the remaining sources.' : '';
+      const warningText = totals.warnings ? ` ${totals.warnings} source warning(s) used deterministic fallback.` : '';
+      setNotice(`Full ${useAI ? 'AI' : 'basic'} analysis ${completionLabel}: ${totals.items_created} item row(s) extracted from ${totals.sources_analyzed} source(s) across ${totals.batches} chunk(s). ${totals.pending_sources || 0} source(s) still waiting.${warningText}${resumeText}`);
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
+      setAnalysisProgress((current) => current ? { ...current, paused: true } : {
+        mode: useAI ? 'AI' : 'Basic',
+        batch: totals.batches,
+        maxBatches: totals.batches,
+        chunkSize: useAI ? 1 : selectedBatchSize,
+        completed: totals.sources_analyzed,
+        total: totals.sources_analyzed + totals.pending_sources,
+        pending: totals.pending_sources,
+        items: totals.items_created,
+        warnings: totals.warnings,
+        paused: true,
+      });
+      setNotice(`${useAI ? 'AI' : 'Basic'} analysis paused after ${totals.sources_analyzed} source(s). Already analyzed sources are saved; run it again to resume after checking the error.`);
       await handleError(error, 'Run full contract email analysis', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze/`);
     } finally {
       setBusyAction('');
@@ -635,7 +694,7 @@ const ContractIntelligenceManager = () => {
                     </button>
                   )}
                   <button type="button" className="qm-secondary" onClick={() => analyzeAll(true)} disabled={!sources.length || busyAction === 'analyze-all-ai'}>
-                    {busyAction === 'analyze-all-ai' ? 'AI analyzing...' : 'Run Full AI Analysis'}
+                    {busyAction === 'analyze-all-ai' ? 'AI analyzing safe chunks...' : 'Run Full AI Analysis'}
                   </button>
                   <button type="button" className="qm-secondary" onClick={() => analyzeAll(false)} disabled={!sources.length || busyAction === 'analyze-all-basic'}>
                     {busyAction === 'analyze-all-basic' ? 'Analyzing...' : 'Run Full Basic Analysis'}
@@ -654,6 +713,28 @@ const ContractIntelligenceManager = () => {
                   </button>
                 </div>
               </section>
+
+              {analysisProgress && (
+                <section className={`qm-panel qm-contract-analysis-progress ${analysisProgress.paused ? 'paused' : ''}`}>
+                  <div>
+                    <strong>{analysisProgress.mode} analysis progress</strong>
+                    <p>
+                      {analysisProgress.completed} of {analysisProgress.total || analysisProgress.completed} source(s) processed in this pass.
+                      {' '}{analysisProgress.pending || 0} still waiting.
+                    </p>
+                  </div>
+                  <div className="qm-contract-progress-meter" aria-label="Contract analysis progress">
+                    <span style={{ width: `${analysisProgress.total ? Math.min(100, Math.round((analysisProgress.completed / analysisProgress.total) * 100)) : 0}%` }} />
+                  </div>
+                  <div className="qm-contract-progress-meta">
+                    <span>Chunk {analysisProgress.batch || 0} / {analysisProgress.maxBatches || 0}</span>
+                    <span>{analysisProgress.chunkSize || 1} source(s) per request</span>
+                    <span>{analysisProgress.items || 0} item row(s) found</span>
+                    {!!analysisProgress.warnings && <span>{analysisProgress.warnings} fallback warning(s)</span>}
+                    {analysisProgress.paused && <span>Paused safely. Run again to resume.</span>}
+                  </div>
+                </section>
+              )}
 
               <section className="qm-summary-banner qm-contract-summary">
                 <div className="qm-summary-stat">

@@ -3679,6 +3679,63 @@
   flex-wrap: wrap;
 }
 
+.qm-contract-analysis-progress {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1.2fr);
+  gap: 12px 18px;
+  align-items: center;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+
+.qm-contract-analysis-progress.paused {
+  border-color: #facc15;
+  background: #fffbeb;
+}
+
+.qm-contract-analysis-progress strong {
+  display: block;
+  color: #0f766e;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.qm-contract-analysis-progress p {
+  margin: 4px 0 0;
+  color: #475569;
+}
+
+.qm-contract-progress-meter {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ccfbf1;
+}
+
+.qm-contract-progress-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #0f766e;
+  transition: width 180ms ease;
+}
+
+.qm-contract-progress-meta {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.qm-contract-progress-meta span {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .qm-contract-summary {
   grid-template-columns: repeat(6, minmax(120px, 1fr));
 }
@@ -3896,9 +3953,14 @@
   .qm-company-suggestion,
   .qm-review-card-heading,
   .qm-contract-run-header,
+  .qm-contract-analysis-progress,
   .qm-proforma-start-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .qm-contract-analysis-progress {
+    display: flex;
   }
 
   .qm-contract-actions,
