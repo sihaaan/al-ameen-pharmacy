@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import CompanyManager from './CompanyManager';
 import QuoteItemManager from './QuoteItemManager';
 import InquiryManager from './InquiryManager';
@@ -11,6 +11,7 @@ import PriceHistoryPanel from './PriceHistoryPanel';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationSettings from './QuotationSettings';
 import HistoricalImportManager from './HistoricalImportManager';
+import ContractIntelligenceManager from './ContractIntelligenceManager';
 import './QuotationModule.css';
 
 const tabs = [
@@ -22,6 +23,7 @@ const tabs = [
   { id: 'proformas', label: 'Proforma Tax Invoices' },
   { id: 'history', label: 'Price History' },
   { id: 'historical-imports', label: 'Historical Imports' },
+  { id: 'contract-intelligence', label: 'Contract Intelligence' },
   { id: 'audit', label: 'Audit Logs' },
   { id: 'settings', label: 'Settings' },
 ];
@@ -31,6 +33,14 @@ const QuotationModule = () => {
   const [editingQuoteId, setEditingQuoteId] = useState(null);
   const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('quotation_tab');
+    if (tabs.some((candidate) => candidate.id === tab)) {
+      setActiveTab(tab);
+    }
+  }, []);
 
   const refresh = () => setRefreshKey((value) => value + 1);
 
@@ -97,6 +107,7 @@ const QuotationModule = () => {
         {activeTab === 'proformas' && <ProformaInvoiceManager />}
         {activeTab === 'history' && <PriceHistoryPanel />}
         {activeTab === 'historical-imports' && <HistoricalImportManager />}
+        {activeTab === 'contract-intelligence' && <ContractIntelligenceManager />}
         {activeTab === 'audit' && <AuditLogPanel />}
         {activeTab === 'settings' && <QuotationSettings />}
       </div>

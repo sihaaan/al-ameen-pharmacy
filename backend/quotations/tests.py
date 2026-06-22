@@ -11,6 +11,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
 from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 from pypdf import PdfReader, PdfWriter
 from PIL import Image as PILImage
@@ -32,6 +33,10 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    ContractIntelligenceItem,
+    ContractIntelligenceRun,
+    ContractIntelligenceSource,
+    GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
     HistoricalPriceImport,
@@ -73,6 +78,9 @@ class QuotationPermissionTests(APITestCase):
     list_route_names = [
         "quotation-company-list",
         "quotation-contact-list",
+        "quotation-contract-intelligence-run-list",
+        "quotation-contract-intelligence-source-list",
+        "quotation-contract-intelligence-item-list",
         "quotation-item-list",
         "quotation-inquiry-list",
         "quotation-inquiry-line-list",
@@ -1355,6 +1363,178 @@ class InquiryParserRuleTests(APITestCase):
     def test_ocr_provider_interface_is_explicitly_unavailable_by_default(self):
         with self.assertRaises(OCRProviderUnavailable):
             get_ocr_provider("")
+
+
+class ContractIntelligenceWorkflowTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(username="contract_staff", password="pass", is_staff=True)
+        self.customer = User.objects.create_user(username="contract_customer", password="pass")
+        self.company = Company.objects.create(name="ALEC Engineering")
+        self.product = Product.objects.create(name="Pulse Oximeter", price=Decimal("55.00"), pack_size="NUM", status="draft")
+        self.client.force_authenticate(self.staff)
+
+    def test_gmail_status_is_clear_when_oauth_is_not_configured(self):
+        with override_settings(GOOGLE_OAUTH_CLIENT_ID="", GOOGLE_OAUTH_CLIENT_SECRET=""):
+            response = self.client.get(reverse("quotation-gmail-connection"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["configured"])
+        self.assertIn("GOOGLE_OAUTH_CLIENT_ID", response.data["railway_env_vars"])
+        self.assertIsNone(response.data["connection"])
+
+    def test_contract_intelligence_run_can_be_created_for_company_research(self):
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-list"),
+            {
+                "company": self.company.id,
+                "target_company_name": "ALEC",
+                "date_from": "2018-01-01",
+                "date_to": "2026-06-22",
+                "max_messages": 25,
+                "include_attachments": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        run = ContractIntelligenceRun.objects.get(id=response.data["id"])
+        self.assertEqual(run.created_by, self.staff)
+        self.assertEqual(run.max_messages, 25)
+        self.assertEqual(run.company, self.company)
+
+    def test_discovery_without_gmail_connection_returns_clean_error(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+
+        response = self.client.post(reverse("quotation-contract-intelligence-run-discover", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Connect Gmail", response.data["detail"])
+
+    def test_contract_analysis_creates_review_items_from_saved_attachment_rows_without_ai(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC yearly clinic supplies",
+            sender="buyer@alec.example",
+            sent_at=timezone.now(),
+            attachments=[
+                {
+                    "filename": "alec-prices.xlsx",
+                    "status": "parsed",
+                    "lines": [
+                        {
+                            "requested_item_name": "Pulse Oximeter",
+                            "quantity": "2",
+                            "unit": "NUM",
+                            "unit_price": "55.00",
+                            "raw_line": "Pulse Oximeter | 2 | NUM | 55.00",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result"]["items_created"], 1)
+        item = ContractIntelligenceItem.objects.get(run=run)
+        self.assertEqual(item.source, source)
+        self.assertEqual(item.suggested_item_name, "Pulse Oximeter")
+        self.assertEqual(item.normalized_item_name, "pulse oximeter")
+        self.assertEqual(item.product, self.product)
+        self.assertEqual(item.status, ContractIntelligenceItem.STATUS_SUGGESTED)
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContractIntelligenceRun.STATUS_REVIEW)
+        self.assertEqual(run.summary["items"], 1)
+        self.assertEqual(run.summary["matched_products"], 1)
+
+    def test_contract_items_are_review_only_not_created_through_generic_endpoint(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+
+        create_response = self.client.post(
+            reverse("quotation-contract-intelligence-item-list"),
+            {"run": run.id, "original_item_name": "Injected Item"},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_staff_can_review_extracted_item_without_creating_durable_product_data(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        item = ContractIntelligenceItem.objects.create(
+            run=run,
+            original_item_name="Pulse Ox",
+            suggested_item_name="Pulse Oximeter",
+            quantity=Decimal("1.000"),
+            unit="NUM",
+            unit_price=Decimal("55.00"),
+        )
+
+        response = self.client.patch(
+            reverse("quotation-contract-intelligence-item-detail", args=[item.id]),
+            {"status": ContractIntelligenceItem.STATUS_APPROVED, "review_notes": "Useful for ALEC list."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item.refresh_from_db()
+        self.assertEqual(item.status, ContractIntelligenceItem.STATUS_APPROVED)
+        self.assertEqual(item.review_notes, "Useful for ALEC list.")
+        self.assertEqual(Product.objects.filter(name="Pulse Ox").count(), 0)
+
+    def test_contract_intelligence_export_returns_accountant_friendly_xlsx(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            product=self.product,
+            original_item_name="Pulse Ox",
+            suggested_item_name="Pulse Oximeter",
+            quantity=Decimal("2.000"),
+            unit="NUM",
+            unit_price=Decimal("55.00"),
+            confidence=0.9,
+        )
+
+        response = self.client.get(reverse("quotation-contract-intelligence-run-export", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        workbook = load_workbook(BytesIO(response.content))
+        self.assertIn("Contract Items", workbook.sheetnames)
+        self.assertIn("Summary", workbook.sheetnames)
+        contract_sheet = workbook["Contract Items"]
+        headers = [cell.value for cell in contract_sheet[5]]
+        self.assertIn("Item", headers)
+        self.assertIn("Product Match", headers)
+        self.assertEqual(contract_sheet["A6"].value, "Pulse Oximeter")
 
 
 class InquiryImportTests(APITestCase):

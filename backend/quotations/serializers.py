@@ -13,6 +13,10 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    ContractIntelligenceItem,
+    ContractIntelligenceRun,
+    ContractIntelligenceSource,
+    GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
     HistoricalPriceImport,
@@ -179,6 +183,177 @@ class CompanyListSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
+    is_connected = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GmailOAuthConnection
+        fields = [
+            "id",
+            "email",
+            "google_subject",
+            "status",
+            "is_connected",
+            "last_error",
+            "scopes",
+            "token_expiry",
+            "connected_at",
+            "disconnected_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_connected(self, obj):
+        return obj.status == GmailOAuthConnection.STATUS_CONNECTED
+
+
+class ContractIntelligenceItemSerializer(serializers.ModelSerializer):
+    source_subject = serializers.CharField(source="source.subject", read_only=True, allow_null=True)
+    source_sender = serializers.CharField(source="source.sender", read_only=True, allow_null=True)
+    source_sent_at = serializers.DateTimeField(source="source.sent_at", read_only=True, allow_null=True)
+    product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = ContractIntelligenceItem
+        fields = [
+            "id",
+            "run",
+            "source",
+            "source_subject",
+            "source_sender",
+            "source_sent_at",
+            "product",
+            "product_name",
+            "original_item_name",
+            "normalized_item_name",
+            "suggested_item_name",
+            "quantity",
+            "unit",
+            "unit_price",
+            "currency",
+            "requested_date",
+            "project",
+            "contact_text",
+            "source_text",
+            "source_filename",
+            "source_page",
+            "confidence",
+            "ai_reason",
+            "status",
+            "review_notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "run",
+            "source",
+            "source_subject",
+            "source_sender",
+            "source_sent_at",
+            "product_name",
+            "normalized_item_name",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class ContractIntelligenceSourceSerializer(serializers.ModelSerializer):
+    item_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ContractIntelligenceSource
+        fields = [
+            "id",
+            "run",
+            "gmail_message_id",
+            "gmail_thread_id",
+            "subject",
+            "sender",
+            "recipients",
+            "sent_at",
+            "snippet",
+            "source_sha256",
+            "attachments",
+            "classification",
+            "confidence",
+            "status",
+            "error",
+            "item_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
+    company_name = serializers.CharField(source="company.name", read_only=True, allow_null=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    source_count = serializers.SerializerMethodField()
+    item_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ContractIntelligenceRun
+        fields = [
+            "id",
+            "company",
+            "company_name",
+            "target_company_name",
+            "gmail_query",
+            "date_from",
+            "date_to",
+            "max_messages",
+            "include_attachments",
+            "status",
+            "ai_status",
+            "summary",
+            "warnings",
+            "created_by",
+            "created_by_username",
+            "source_count",
+            "item_count",
+            "started_at",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "company_name",
+            "status",
+            "ai_status",
+            "summary",
+            "warnings",
+            "created_by",
+            "created_by_username",
+            "source_count",
+            "item_count",
+            "started_at",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_source_count(self, obj):
+        return obj.sources.count() if obj.pk else 0
+
+    def get_item_count(self, obj):
+        return obj.items.count() if obj.pk else 0
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        company = attrs.get("company") or getattr(self.instance, "company", None)
+        target_name = attrs.get("target_company_name") or getattr(self.instance, "target_company_name", "")
+        if company and not target_name:
+            attrs["target_company_name"] = company.name
+        if not attrs.get("target_company_name") and not target_name:
+            raise serializers.ValidationError({"target_company_name": "Enter the customer/company to search for."})
+        max_messages = attrs.get("max_messages")
+        if max_messages is not None:
+            attrs["max_messages"] = min(max(int(max_messages), 1), 200)
+        return attrs
 
 
 class QuoteItemSerializer(serializers.ModelSerializer):

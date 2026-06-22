@@ -90,6 +90,22 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/aliases/${id}/`, data),
     delete: (id) => axiosInstance.delete(`/quotations/aliases/${id}/`),
   },
+  gmail: {
+    status: () => axiosInstance.get('/quotations/gmail/connection/'),
+    connectUrl: () => axiosInstance.post('/quotations/gmail/connection/'),
+    disconnect: () => axiosInstance.delete('/quotations/gmail/connection/'),
+  },
+  contractIntelligence: {
+    runs: (params = {}) => axiosInstance.get('/quotations/contract-intelligence-runs/', { params }),
+    createRun: (data) => axiosInstance.post('/quotations/contract-intelligence-runs/', data),
+    retrieveRun: (id) => axiosInstance.get(`/quotations/contract-intelligence-runs/${id}/`),
+    discover: (id) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/discover/`),
+    analyze: (id, data = {}) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/analyze/`, data),
+    sources: (id) => axiosInstance.get(`/quotations/contract-intelligence-runs/${id}/sources/`),
+    items: (id, params = {}) => axiosInstance.get(`/quotations/contract-intelligence-runs/${id}/items/`, { params }),
+    updateItem: (id, data) => axiosInstance.patch(`/quotations/contract-intelligence-items/${id}/`, data),
+    export: (id) => axiosInstance.get(`/quotations/contract-intelligence-runs/${id}/export/`, { responseType: 'blob' }),
+  },
   inquiries: {
     list: (params = {}) => axiosInstance.get('/quotations/inquiries/', { params }),
     create: (data) => axiosInstance.post('/quotations/inquiries/', data),

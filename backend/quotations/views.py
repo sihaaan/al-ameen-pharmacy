@@ -5,12 +5,14 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
-from django.http import HttpResponse
+from django.http import HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
+from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -34,6 +36,18 @@ from .ai_learning import (
     refresh_historical_import_batch_summary,
 )
 from .company_matching import find_similar_companies
+from .contract_intelligence import (
+    build_contract_intelligence_export,
+    build_gmail_auth_url,
+    discover_contract_sources,
+    disconnect_gmail,
+    exchange_gmail_code,
+    gmail_frontend_redirect_url,
+    gmail_oauth_configured,
+    parse_gmail_oauth_state,
+    refresh_contract_run_summary,
+    analyze_contract_run,
+)
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
 from .matching import apply_match_to_preview_line
@@ -41,6 +55,10 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    ContractIntelligenceItem,
+    ContractIntelligenceRun,
+    ContractIntelligenceSource,
+    GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
     HistoricalPriceImport,
@@ -67,6 +85,10 @@ from .serializers import (
     CompanyListSerializer,
     CompanyPriceHistorySerializer,
     CompanySerializer,
+    ContractIntelligenceItemSerializer,
+    ContractIntelligenceRunSerializer,
+    ContractIntelligenceSourceSerializer,
+    GmailOAuthConnectionSerializer,
     HistoricalPriceImportLineSerializer,
     HistoricalPriceImportSerializer,
     HistoricalImportAISuggestionSerializer,
@@ -404,6 +426,200 @@ class UserQuotationProfileView(APIView):
             message="Updated user quotation signature.",
         )
         return Response(UserQuotationProfileSerializer(profile, context={"request": request}).data)
+
+
+class GmailConnectionView(APIView):
+    permission_classes = [IsQuotationStaff]
+
+    def get(self, request):
+        try:
+            connection = request.user.quotation_gmail_connection
+        except GmailOAuthConnection.DoesNotExist:
+            connection = None
+        return Response(
+            {
+                "configured": gmail_oauth_configured(),
+                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                "connection": GmailOAuthConnectionSerializer(connection).data if connection else None,
+                "railway_env_vars": [
+                    "GOOGLE_OAUTH_CLIENT_ID",
+                    "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "GOOGLE_OAUTH_REDIRECT_URI",
+                ],
+            }
+        )
+
+    def post(self, request):
+        try:
+            return Response({"auth_url": build_gmail_auth_url(request.user, request)})
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request):
+        try:
+            connection = request.user.quotation_gmail_connection
+        except GmailOAuthConnection.DoesNotExist:
+            connection = None
+        if not connection:
+            return Response({"detail": "Gmail is not connected."}, status=status.HTTP_400_BAD_REQUEST)
+        disconnect_gmail(connection)
+        return Response({"detail": "Gmail disconnected."})
+
+
+class GmailOAuthCallbackView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        error = request.query_params.get("error")
+        if error:
+            return HttpResponseRedirect(gmail_frontend_redirect_url(f"error:{error}"))
+        user_id = parse_gmail_oauth_state(request.query_params.get("state"))
+        if not user_id:
+            return HttpResponseRedirect(gmail_frontend_redirect_url("invalid-state"))
+        code = request.query_params.get("code")
+        if not code:
+            return HttpResponseRedirect(gmail_frontend_redirect_url("missing-code"))
+        User = get_user_model()
+        try:
+            user = User.objects.get(pk=user_id, is_staff=True)
+            exchange_gmail_code(user, code, request)
+        except Exception as exc:
+            logger.exception("Gmail OAuth callback failed.")
+            return HttpResponseRedirect(gmail_frontend_redirect_url(f"error:{str(exc)[:80]}"))
+        return HttpResponseRedirect(gmail_frontend_redirect_url("connected"))
+
+
+class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = ContractIntelligenceRunSerializer
+    queryset = ContractIntelligenceRun.objects.select_related("company", "created_by").prefetch_related("sources", "items")
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        company_id = self.request.query_params.get("company")
+        status_param = self.request.query_params.get("status")
+        search = (self.request.query_params.get("search") or "").strip()
+        if company_id:
+            queryset = queryset.filter(company_id=company_id)
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        if search:
+            queryset = queryset.filter(
+                Q(target_company_name__icontains=search)
+                | Q(company__name__icontains=search)
+                | Q(gmail_query__icontains=search)
+            )
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        refresh_contract_run_summary(instance)
+        instance.save(update_fields=["summary", "updated_at"])
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"])
+    def sources(self, request, pk=None):
+        run = self.get_object()
+        queryset = run.sources.annotate(item_count=Count("items")).order_by("-sent_at", "-created_at")
+        return Response(ContractIntelligenceSourceSerializer(queryset, many=True).data)
+
+    @action(detail=True, methods=["get"])
+    def items(self, request, pk=None):
+        run = self.get_object()
+        queryset = run.items.select_related("source", "product").order_by("normalized_item_name", "-requested_date", "-id")
+        status_param = request.query_params.get("status")
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        return Response(ContractIntelligenceItemSerializer(queryset[:1000], many=True).data)
+
+    @action(detail=True, methods=["post"])
+    def discover(self, request, pk=None):
+        run = self.get_object()
+        try:
+            result = discover_contract_sources(run, request.user)
+        except RuntimeError as exc:
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Contract intelligence Gmail discovery failed.")
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": result})
+
+    @action(detail=True, methods=["post"])
+    def analyze(self, request, pk=None):
+        run = self.get_object()
+        use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no", "off"}
+        try:
+            result = analyze_contract_run(run, request.user, use_ai=use_ai)
+        except RuntimeError as exc:
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Contract intelligence analysis failed.")
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": result})
+
+    @action(detail=True, methods=["get"])
+    def export(self, request, pk=None):
+        run = self.get_object()
+        content = build_contract_intelligence_export(run)
+        filename = _safe_download_name_part(run.target_company_name or "CONTRACT") or "CONTRACT"
+        response = HttpResponse(
+            content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}_contract_intelligence.xlsx"'
+        return response
+
+
+class ContractIntelligenceSourceViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):
+    serializer_class = ContractIntelligenceSourceSerializer
+    queryset = ContractIntelligenceSource.objects.select_related("run").annotate(item_count=Count("items"))
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        run_id = self.request.query_params.get("run")
+        if run_id:
+            queryset = queryset.filter(run_id=run_id)
+        return queryset
+
+
+class ContractIntelligenceItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
+    serializer_class = ContractIntelligenceItemSerializer
+    queryset = ContractIntelligenceItem.objects.select_related("run", "source", "product")
+    http_method_names = ["get", "patch", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        run_id = self.request.query_params.get("run")
+        status_param = self.request.query_params.get("status")
+        search = (self.request.query_params.get("search") or "").strip()
+        if run_id:
+            queryset = queryset.filter(run_id=run_id)
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        if search:
+            queryset = queryset.filter(
+                Q(original_item_name__icontains=search)
+                | Q(suggested_item_name__icontains=search)
+                | Q(normalized_item_name__icontains=search)
+                | Q(source__subject__icontains=search)
+            )
+        return queryset
 
 
 class QuotationDashboardView(APIView):

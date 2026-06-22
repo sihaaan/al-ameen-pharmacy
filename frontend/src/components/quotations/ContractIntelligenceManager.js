@@ -1,0 +1,619 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import QuotationErrorNotice from './QuotationErrorNotice';
+
+const emptyRunForm = {
+  company: '',
+  target_company_name: 'ALEC',
+  gmail_query: '',
+  date_from: '',
+  date_to: '',
+  max_messages: 100,
+  include_attachments: true,
+};
+
+const statusLabel = {
+  draft: 'Draft',
+  discovering: 'Discovering',
+  ready: 'Ready',
+  analyzing: 'Analyzing',
+  review: 'Review',
+  failed: 'Failed',
+};
+
+const classificationLabel = {
+  inquiry: 'Inquiry',
+  quotation: 'Quotation',
+  lpo: 'LPO',
+  followup: 'Follow-up',
+  irrelevant: 'Irrelevant',
+  unknown: 'Unknown',
+};
+
+const itemStatusLabel = {
+  suggested: 'Suggested',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  needs_review: 'Needs review',
+};
+
+const formatDate = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString('en-AE');
+};
+
+const formatDateTime = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('en-AE');
+};
+
+const percent = (value) => `${Math.round(Number(value || 0) * 100)}%`;
+
+const ContractIntelligenceManager = () => {
+  const [gmail, setGmail] = useState(null);
+  const [companies, setCompanies] = useState([]);
+  const [runs, setRuns] = useState([]);
+  const [selectedRun, setSelectedRun] = useState(null);
+  const [sources, setSources] = useState([]);
+  const [items, setItems] = useState([]);
+  const [form, setForm] = useState(emptyRunForm);
+  const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState('');
+  const [errorInfo, setErrorInfo] = useState(null);
+  const [notice, setNotice] = useState('');
+  const [itemFilter, setItemFilter] = useState('');
+
+  const selectedSummary = selectedRun?.summary || {};
+
+  const visibleItems = useMemo(() => {
+    const term = itemFilter.trim().toLowerCase();
+    if (!term) return items;
+    return items.filter((item) => (
+      (item.suggested_item_name || '').toLowerCase().includes(term) ||
+      (item.original_item_name || '').toLowerCase().includes(term) ||
+      (item.product_name || '').toLowerCase().includes(term) ||
+      (item.source_subject || '').toLowerCase().includes(term)
+    ));
+  }, [items, itemFilter]);
+
+  const sourceStats = useMemo(() => {
+    const stats = { inquiry: 0, quotation: 0, lpo: 0, followup: 0, unknown: 0, irrelevant: 0 };
+    sources.forEach((source) => {
+      stats[source.classification || 'unknown'] = (stats[source.classification || 'unknown'] || 0) + 1;
+    });
+    return stats;
+  }, [sources]);
+
+  const handleError = async (error, action, endpoint) => {
+    const details = await describeQuotationError(error, action, endpoint);
+    setErrorInfo(details);
+    console.error(formatQuotationError(details), error);
+  };
+
+  const loadRuns = async () => {
+    const response = await quotationAPI.contractIntelligence.runs();
+    setRuns(response.data);
+    return response.data;
+  };
+
+  const loadGmail = async () => {
+    const response = await quotationAPI.gmail.status();
+    setGmail(response.data);
+    return response.data;
+  };
+
+  const loadInitial = async () => {
+    setLoading(true);
+    setErrorInfo(null);
+    try {
+      const [gmailRes, companiesRes, runsRes] = await Promise.all([
+        loadGmail(),
+        quotationAPI.companies.list({ active: 'true' }),
+        loadRuns(),
+      ]);
+      setGmail(gmailRes);
+      setCompanies(companiesRes.data);
+      if (!selectedRun && runsRes.length) {
+        await openRun(runsRes[0].id);
+      }
+    } catch (error) {
+      await handleError(error, 'Load contract intelligence', 'GET Gmail status, companies, and contract intelligence runs');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openRun = async (runId) => {
+    setBusyAction(`open-${runId}`);
+    setErrorInfo(null);
+    try {
+      const [runRes, sourceRes, itemRes] = await Promise.all([
+        quotationAPI.contractIntelligence.retrieveRun(runId),
+        quotationAPI.contractIntelligence.sources(runId),
+        quotationAPI.contractIntelligence.items(runId),
+      ]);
+      setSelectedRun(runRes.data);
+      setSources(sourceRes.data);
+      setItems(itemRes.data);
+    } catch (error) {
+      await handleError(error, 'Open contract intelligence run', `GET /quotations/contract-intelligence-runs/${runId}/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const refreshSelectedRun = async (runId = selectedRun?.id) => {
+    if (!runId) return;
+    await openRun(runId);
+    await loadRuns();
+  };
+
+  useEffect(() => {
+    loadInitial();
+    const params = new URLSearchParams(window.location.search);
+    const gmailStatus = params.get('gmail');
+    if (gmailStatus) {
+      setNotice(gmailStatus === 'connected' ? 'Gmail connected successfully.' : `Gmail connection status: ${gmailStatus}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const createRun = async (event) => {
+    event.preventDefault();
+    setBusyAction('create-run');
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contractIntelligence.createRun({
+        ...form,
+        company: form.company || null,
+      });
+      setNotice('Contract intelligence run created. Use Discover Gmail to collect matching emails.');
+      setForm(emptyRunForm);
+      await loadRuns();
+      await openRun(response.data.id);
+    } catch (error) {
+      await handleError(error, 'Create contract intelligence run', 'POST /quotations/contract-intelligence-runs/');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const connectGmail = async () => {
+    setBusyAction('gmail-connect');
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.gmail.connectUrl();
+      window.location.href = response.data.auth_url;
+    } catch (error) {
+      await handleError(error, 'Start Gmail connection', 'POST /quotations/gmail/connection/');
+      setBusyAction('');
+    }
+  };
+
+  const disconnectGmail = async () => {
+    setBusyAction('gmail-disconnect');
+    setErrorInfo(null);
+    try {
+      await quotationAPI.gmail.disconnect();
+      setNotice('Gmail disconnected.');
+      await loadGmail();
+    } catch (error) {
+      await handleError(error, 'Disconnect Gmail', 'DELETE /quotations/gmail/connection/');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const discover = async () => {
+    if (!selectedRun) return;
+    setBusyAction('discover');
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contractIntelligence.discover(selectedRun.id);
+      setNotice(`Discovery complete: ${response.data.result.created} new emails, ${response.data.result.reused} already tracked, ${response.data.result.failed} failed.`);
+      await refreshSelectedRun(selectedRun.id);
+    } catch (error) {
+      await handleError(error, 'Discover Gmail contract emails', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/discover/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const analyze = async (useAI = true) => {
+    if (!selectedRun) return;
+    setBusyAction(useAI ? 'analyze-ai' : 'analyze-basic');
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contractIntelligence.analyze(selectedRun.id, { use_ai: useAI });
+      setNotice(`Analysis complete: ${response.data.result.items_created} item rows extracted. ${response.data.result.sources_failed} source(s) failed.`);
+      await refreshSelectedRun(selectedRun.id);
+    } catch (error) {
+      await handleError(error, 'Analyze contract emails', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const exportRun = async () => {
+    if (!selectedRun) return;
+    setBusyAction('export');
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contractIntelligence.export(selectedRun.id);
+      const blob = new Blob([response.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${(selectedRun.target_company_name || 'contract').replace(/[^a-z0-9]+/gi, '_')}_contract_intelligence.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      await handleError(error, 'Export contract intelligence', `GET /quotations/contract-intelligence-runs/${selectedRun.id}/export/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const updateItem = async (itemId, changes) => {
+    setBusyAction(`item-${itemId}`);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contractIntelligence.updateItem(itemId, changes);
+      setItems((current) => current.map((item) => (item.id === itemId ? response.data : item)));
+    } catch (error) {
+      await handleError(error, 'Update contract intelligence item', `PATCH /quotations/contract-intelligence-items/${itemId}/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  if (loading) return <div className="qm-loading">Loading contract intelligence...</div>;
+
+  const gmailConnected = gmail?.connection?.is_connected;
+  const gmailConfigured = gmail?.configured;
+
+  return (
+    <div className="qm-section qm-contract-intel">
+      <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+      {notice && <div className="qm-helper">{notice}</div>}
+
+      <section className="qm-panel qm-contract-hero">
+        <div>
+          <span className="qm-step-kicker">Gmail Read-Only + AI</span>
+          <h3>ALEC Yearly Contract Intelligence</h3>
+          <p>
+            Search old pharmacy emails, extract inquiry/quotation/LPO product demand, and export the item intelligence Dad needs for yearly contract pricing.
+          </p>
+        </div>
+        <div className="qm-contract-gmail-card">
+          <span>Gmail</span>
+          <strong>{gmailConnected ? gmail.connection.email : gmailConfigured ? 'Ready to connect' : 'Not configured'}</strong>
+          <small>Scope: gmail.readonly. AI suggestions are review-only.</small>
+          <div className="qm-actions">
+            {gmailConnected ? (
+              <button type="button" className="qm-secondary small" onClick={disconnectGmail} disabled={busyAction === 'gmail-disconnect'}>
+                {busyAction === 'gmail-disconnect' ? 'Disconnecting...' : 'Disconnect'}
+              </button>
+            ) : (
+              <button type="button" className="qm-primary small" onClick={connectGmail} disabled={!gmailConfigured || busyAction === 'gmail-connect'}>
+                {busyAction === 'gmail-connect' ? 'Opening Google...' : 'Connect Gmail'}
+              </button>
+            )}
+          </div>
+          {!gmailConfigured && (
+            <p className="qm-field-warning">
+              Add GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI on the Railway backend.
+            </p>
+          )}
+        </div>
+      </section>
+
+      <div className="qm-contract-layout">
+        <aside className="qm-panel qm-contract-sidebar">
+          <div className="qm-panel-heading">
+            <div>
+              <h3>Research Runs</h3>
+              <p>Create a focused search session for ALEC or another customer.</p>
+            </div>
+          </div>
+
+          <form className="qm-form qm-contract-run-form" onSubmit={createRun}>
+            <label>
+              Customer
+              <select
+                value={form.company}
+                onChange={(event) => {
+                  const companyId = event.target.value;
+                  const selected = companies.find((company) => String(company.id) === String(companyId));
+                  setForm((current) => ({
+                    ...current,
+                    company: companyId,
+                    target_company_name: selected?.name || current.target_company_name,
+                  }));
+                }}
+              >
+                <option value="">No linked company</option>
+                {companies.map((company) => (
+                  <option key={company.id} value={company.id}>{company.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Search name
+              <input
+                value={form.target_company_name}
+                onChange={(event) => setForm((current) => ({ ...current, target_company_name: event.target.value }))}
+                placeholder="ALEC"
+                required
+              />
+            </label>
+            <label>
+              Gmail query override
+              <textarea
+                value={form.gmail_query}
+                onChange={(event) => setForm((current) => ({ ...current, gmail_query: event.target.value }))}
+                placeholder='Optional: from:alec "quotation" after:2018/01/01'
+              />
+            </label>
+            <div className="qm-grid-two">
+              <label>
+                From
+                <input
+                  type="date"
+                  value={form.date_from}
+                  onChange={(event) => setForm((current) => ({ ...current, date_from: event.target.value }))}
+                />
+              </label>
+              <label>
+                To
+                <input
+                  type="date"
+                  value={form.date_to}
+                  onChange={(event) => setForm((current) => ({ ...current, date_to: event.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="qm-grid-two">
+              <label>
+                Max emails
+                <input
+                  type="number"
+                  min="1"
+                  max="200"
+                  value={form.max_messages}
+                  onChange={(event) => setForm((current) => ({ ...current, max_messages: event.target.value }))}
+                />
+              </label>
+              <label className="qm-checkbox contract-checkbox">
+                <input
+                  type="checkbox"
+                  checked={form.include_attachments}
+                  onChange={(event) => setForm((current) => ({ ...current, include_attachments: event.target.checked }))}
+                />
+                Parse attachments
+              </label>
+            </div>
+            <button type="submit" className="qm-primary" disabled={busyAction === 'create-run'}>
+              {busyAction === 'create-run' ? 'Creating...' : 'Create Research Run'}
+            </button>
+          </form>
+
+          <div className="qm-contract-run-list">
+            {runs.length === 0 && <div className="qm-empty compact">No research runs yet.</div>}
+            {runs.map((run) => (
+              <button
+                type="button"
+                key={run.id}
+                className={`qm-contract-run-item ${selectedRun?.id === run.id ? 'active' : ''}`}
+                onClick={() => openRun(run.id)}
+              >
+                <strong>{run.target_company_name}</strong>
+                <span>{statusLabel[run.status] || run.status} - {run.item_count} rows</span>
+                <small>{formatDateTime(run.updated_at)}</small>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        <main className="qm-contract-workspace">
+          {!selectedRun ? (
+            <section className="qm-panel qm-empty-state">
+              <h3>Select or create a research run</h3>
+              <p>Connect Gmail, create an ALEC run, then discover and analyze matching emails.</p>
+            </section>
+          ) : (
+            <>
+              <section className="qm-panel qm-contract-run-header">
+                <div>
+                  <span className={`qm-badge status-${selectedRun.status}`}>{statusLabel[selectedRun.status] || selectedRun.status}</span>
+                  <h3>{selectedRun.target_company_name}</h3>
+                  <p>{selectedRun.gmail_query || 'Default smart Gmail query will be generated from customer and date range.'}</p>
+                </div>
+                <div className="qm-contract-actions">
+                  <button type="button" className="qm-primary" onClick={discover} disabled={!gmailConnected || busyAction === 'discover'}>
+                    {busyAction === 'discover' ? 'Discovering...' : 'Discover Gmail'}
+                  </button>
+                  <button type="button" className="qm-secondary" onClick={() => analyze(true)} disabled={!sources.length || busyAction === 'analyze-ai'}>
+                    {busyAction === 'analyze-ai' ? 'Analyzing...' : 'AI Analyze'}
+                  </button>
+                  <button type="button" className="qm-secondary" onClick={() => analyze(false)} disabled={!sources.length || busyAction === 'analyze-basic'}>
+                    Basic Analyze
+                  </button>
+                  <button type="button" className="qm-secondary" onClick={exportRun} disabled={!items.length || busyAction === 'export'}>
+                    Export Excel
+                  </button>
+                </div>
+              </section>
+
+              <section className="qm-summary-banner qm-contract-summary">
+                <div className="qm-summary-stat">
+                  <span>Sources</span>
+                  <strong>{selectedSummary.sources || 0}</strong>
+                </div>
+                <div className="qm-summary-stat">
+                  <span>Items</span>
+                  <strong>{selectedSummary.items || 0}</strong>
+                </div>
+                <div className="qm-summary-stat success">
+                  <span>Unique Items</span>
+                  <strong>{selectedSummary.unique_items || 0}</strong>
+                </div>
+                <div className="qm-summary-stat">
+                  <span>Matched Products</span>
+                  <strong>{selectedSummary.matched_products || 0}</strong>
+                </div>
+                <div className="qm-summary-stat">
+                  <span>Inquiries</span>
+                  <strong>{sourceStats.inquiry || 0}</strong>
+                </div>
+                <div className="qm-summary-stat">
+                  <span>LPOs</span>
+                  <strong>{sourceStats.lpo || 0}</strong>
+                </div>
+              </section>
+
+              {!!(selectedRun.warnings || []).length && (
+                <section className="qm-helper warning">
+                  {(selectedRun.warnings || []).slice(0, 3).map((warning, index) => (
+                    <div key={`${warning}-${index}`}>{warning}</div>
+                  ))}
+                </section>
+              )}
+
+              <section className="qm-grid-two qm-contract-panels">
+                <div className="qm-panel">
+                  <div className="qm-panel-heading">
+                    <div>
+                      <h3>Sources</h3>
+                      <p>Emails and attachments found for this run.</p>
+                    </div>
+                  </div>
+                  <div className="qm-contract-source-list">
+                    {sources.length === 0 && <div className="qm-empty compact">No Gmail sources discovered yet.</div>}
+                    {sources.slice(0, 50).map((source) => (
+                      <article key={source.id} className="qm-contract-source">
+                        <div>
+                          <strong>{source.subject || '(no subject)'}</strong>
+                          <span>{source.sender}</span>
+                          <small>{formatDateTime(source.sent_at)}</small>
+                        </div>
+                        <div className="qm-contract-source-meta">
+                          <span className={`qm-badge status-${source.classification}`}>{classificationLabel[source.classification] || source.classification}</span>
+                          <span>{percent(source.confidence)}</span>
+                          <span>{source.item_count || 0} items</span>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="qm-panel">
+                  <div className="qm-panel-heading">
+                    <div>
+                      <h3>Top Items</h3>
+                      <p>Grouped demand signals across emails and attachments.</p>
+                    </div>
+                  </div>
+                  <div className="qm-contract-top-items">
+                    {(selectedSummary.top_items || []).length === 0 && <div className="qm-empty compact">Analyze sources to see grouped items.</div>}
+                    {(selectedSummary.top_items || []).map((item) => (
+                      <div key={item.normalized} className="qm-contract-top-item">
+                        <strong>{item.item_name}</strong>
+                        <span>{item.count} mention(s) from {item.source_count} source(s)</span>
+                        <small>{item.latest_date || '-'} {item.last_price ? `- AED ${item.last_price}` : ''}</small>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              <section className="qm-panel">
+                <div className="qm-panel-heading">
+                  <div>
+                    <h3>Extracted Item Review</h3>
+                    <p>Review-only intelligence. Editing rows here does not create Products, aliases, quotations, or orders.</p>
+                  </div>
+                  <input
+                    className="qm-input compact"
+                    value={itemFilter}
+                    onChange={(event) => setItemFilter(event.target.value)}
+                    placeholder="Search items"
+                  />
+                </div>
+                <div className="qm-table-wrap">
+                  <table className="qm-table qm-contract-items-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Item</th>
+                        <th>Qty</th>
+                        <th>Unit</th>
+                        <th>Price</th>
+                        <th>Date</th>
+                        <th>Product Match</th>
+                        <th>Confidence</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleItems.map((item, index) => (
+                        <tr key={item.id}>
+                          <td>{index + 1}</td>
+                          <td>
+                            <input
+                              value={item.suggested_item_name || ''}
+                              onChange={(event) => setItems((current) => current.map((row) => (
+                                row.id === item.id ? { ...row, suggested_item_name: event.target.value } : row
+                              )))}
+                              onBlur={(event) => updateItem(item.id, { suggested_item_name: event.target.value })}
+                            />
+                            <small>{item.source_subject || item.source_filename || item.original_item_name}</small>
+                          </td>
+                          <td>{item.quantity || '-'}</td>
+                          <td>{item.unit || '-'}</td>
+                          <td>{item.unit_price ? `${item.currency || 'AED'} ${Number(item.unit_price).toFixed(2)}` : '-'}</td>
+                          <td>{item.requested_date ? formatDate(item.requested_date) : formatDate(item.source_sent_at)}</td>
+                          <td>{item.product_name || <span className="qm-muted-line">No catalog match</span>}</td>
+                          <td><span className="qm-confidence">{percent(item.confidence)}</span></td>
+                          <td>
+                            <select
+                              value={item.status}
+                              onChange={(event) => updateItem(item.id, { status: event.target.value })}
+                              disabled={busyAction === `item-${item.id}`}
+                            >
+                              {Object.entries(itemStatusLabel).map(([value, label]) => (
+                                <option key={value} value={value}>{label}</option>
+                              ))}
+                            </select>
+                          </td>
+                        </tr>
+                      ))}
+                      {!visibleItems.length && (
+                        <tr>
+                          <td colSpan="9" className="qm-empty">No extracted items yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+};
+
+export default ContractIntelligenceManager;

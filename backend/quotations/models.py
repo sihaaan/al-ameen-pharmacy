@@ -386,6 +386,218 @@ class AIParseLog(models.Model):
         return f"{self.provider}:{self.mode}:{status}:{self.created_at:%Y-%m-%d %H:%M}"
 
 
+class GmailOAuthConnection(models.Model):
+    STATUS_CONNECTED = "connected"
+    STATUS_ERROR = "error"
+    STATUS_DISCONNECTED = "disconnected"
+    STATUS_CHOICES = [
+        (STATUS_CONNECTED, "Connected"),
+        (STATUS_ERROR, "Error"),
+        (STATUS_DISCONNECTED, "Disconnected"),
+    ]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="quotation_gmail_connection",
+    )
+    email = models.EmailField(blank=True)
+    google_subject = models.CharField(max_length=255, blank=True)
+    access_token_encrypted = models.TextField(blank=True)
+    refresh_token_encrypted = models.TextField(blank=True)
+    token_expiry = models.DateTimeField(null=True, blank=True)
+    scopes = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_CONNECTED)
+    last_error = models.TextField(blank=True)
+    connected_at = models.DateTimeField(default=timezone.now)
+    disconnected_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["email"]),
+        ]
+
+    def __str__(self):
+        return self.email or f"Gmail connection for {self.user}"
+
+
+class ContractIntelligenceRun(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_DISCOVERING = "discovering"
+    STATUS_READY = "ready"
+    STATUS_ANALYZING = "analyzing"
+    STATUS_REVIEW = "review"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_DISCOVERING, "Discovering"),
+        (STATUS_READY, "Ready"),
+        (STATUS_ANALYZING, "Analyzing"),
+        (STATUS_REVIEW, "Review"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contract_intelligence_runs",
+    )
+    target_company_name = models.CharField(max_length=255)
+    gmail_query = models.TextField(blank=True)
+    date_from = models.DateField(null=True, blank=True)
+    date_to = models.DateField(null=True, blank=True)
+    max_messages = models.PositiveIntegerField(default=100)
+    include_attachments = models.BooleanField(default=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    ai_status = models.CharField(max_length=80, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_contract_intelligence_runs",
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "created_at"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["created_by", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.target_company_name} contract intelligence #{self.pk}"
+
+
+class ContractIntelligenceSource(models.Model):
+    CLASS_INQUIRY = "inquiry"
+    CLASS_QUOTATION = "quotation"
+    CLASS_LPO = "lpo"
+    CLASS_FOLLOWUP = "followup"
+    CLASS_IRRELEVANT = "irrelevant"
+    CLASS_UNKNOWN = "unknown"
+    CLASSIFICATION_CHOICES = [
+        (CLASS_INQUIRY, "Inquiry / RFQ"),
+        (CLASS_QUOTATION, "Quotation sent"),
+        (CLASS_LPO, "LPO / order"),
+        (CLASS_FOLLOWUP, "Follow-up"),
+        (CLASS_IRRELEVANT, "Irrelevant"),
+        (CLASS_UNKNOWN, "Unknown"),
+    ]
+
+    run = models.ForeignKey(ContractIntelligenceRun, on_delete=models.CASCADE, related_name="sources")
+    gmail_message_id = models.CharField(max_length=255, blank=True)
+    gmail_thread_id = models.CharField(max_length=255, blank=True)
+    subject = models.CharField(max_length=500, blank=True)
+    sender = models.CharField(max_length=500, blank=True)
+    recipients = models.TextField(blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    snippet = models.TextField(blank=True)
+    body_text = models.TextField(blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    attachments = models.JSONField(default=list, blank=True)
+    classification = models.CharField(max_length=30, choices=CLASSIFICATION_CHOICES, default=CLASS_UNKNOWN)
+    confidence = models.FloatField(default=0.0)
+    status = models.CharField(max_length=30, default="fetched")
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-sent_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["run", "classification"]),
+            models.Index(fields=["gmail_message_id"]),
+            models.Index(fields=["sent_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "gmail_message_id"],
+                condition=models.Q(gmail_message_id__gt=""),
+                name="uniq_contract_run_gmail_message",
+            ),
+        ]
+
+    def __str__(self):
+        return self.subject or f"Contract source #{self.pk}"
+
+
+class ContractIntelligenceItem(models.Model):
+    STATUS_SUGGESTED = "suggested"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_NEEDS_REVIEW = "needs_review"
+    STATUS_CHOICES = [
+        (STATUS_SUGGESTED, "Suggested"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_NEEDS_REVIEW, "Needs Review"),
+    ]
+
+    run = models.ForeignKey(ContractIntelligenceRun, on_delete=models.CASCADE, related_name="items")
+    source = models.ForeignKey(
+        ContractIntelligenceSource,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="items",
+    )
+    product = models.ForeignKey(
+        "api.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contract_intelligence_items",
+    )
+    original_item_name = models.CharField(max_length=500)
+    normalized_item_name = models.CharField(max_length=500, db_index=True)
+    suggested_item_name = models.CharField(max_length=500, blank=True)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    unit = models.CharField(max_length=80, blank=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default="AED")
+    requested_date = models.DateField(null=True, blank=True)
+    project = models.CharField(max_length=255, blank=True)
+    contact_text = models.CharField(max_length=255, blank=True)
+    source_text = models.TextField(blank=True)
+    source_filename = models.CharField(max_length=255, blank=True)
+    source_page = models.CharField(max_length=30, blank=True)
+    confidence = models.FloatField(default=0.0)
+    ai_reason = models.TextField(blank=True)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_SUGGESTED)
+    review_notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["normalized_item_name", "-requested_date", "-created_at"]
+        indexes = [
+            models.Index(fields=["run", "status"]),
+            models.Index(fields=["normalized_item_name"]),
+            models.Index(fields=["requested_date"]),
+            models.Index(fields=["product"]),
+        ]
+
+    def __str__(self):
+        return self.suggested_item_name or self.original_item_name
+
+    def save(self, *args, **kwargs):
+        self.normalized_item_name = normalize_label(self.suggested_item_name or self.original_item_name)
+        super().save(*args, **kwargs)
+
+
 class Inquiry(models.Model):
     SOURCE_MANUAL = "manual"
     SOURCE_IMPORTED = "imported"
