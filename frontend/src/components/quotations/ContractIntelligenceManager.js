@@ -356,11 +356,16 @@ const ContractIntelligenceManager = () => {
           source_limit: chunkSize,
         });
         const result = response.data.result || {};
+        const previousPending = totals.pending_sources;
         const analyzedThisBatch = Number(result.sources_analyzed || 0);
+        const itemsThisBatch = Number(result.items_created || 0);
+        const pendingAfterBatch = Number(result.pending_sources || 0);
+        const pendingMoved = previousPending > pendingAfterBatch ? previousPending - pendingAfterBatch : 0;
+        const processedThisBatch = Math.max(analyzedThisBatch, pendingMoved);
         totals.batches += 1;
-        totals.sources_analyzed += analyzedThisBatch;
-        totals.items_created += Number(result.items_created || 0);
-        totals.pending_sources = Number(result.pending_sources || 0);
+        totals.sources_analyzed += processedThisBatch;
+        totals.items_created += itemsThisBatch;
+        totals.pending_sources = pendingAfterBatch;
         totals.warnings += Number((result.warnings || []).length || 0);
         setAnalysisProgress({
           mode: useAI ? 'AI' : 'Basic',
@@ -374,8 +379,8 @@ const ContractIntelligenceManager = () => {
           warnings: totals.warnings,
           paused: false,
         });
-        if (totals.pending_sources <= 0 || analyzedThisBatch <= 0) {
-          totals.stopped = analyzedThisBatch <= 0 && totals.pending_sources > 0;
+        if (totals.pending_sources <= 0 || processedThisBatch <= 0) {
+          totals.stopped = processedThisBatch <= 0 && totals.pending_sources > 0;
           break;
         }
       }

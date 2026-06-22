@@ -662,6 +662,19 @@ def _quantity(value):
         return None
 
 
+def _confidence(value, default=0.0):
+    if value in (None, ""):
+        return default
+    try:
+        text = str(value).strip()
+        if text.endswith("%"):
+            return float(text[:-1].strip()) / 100
+        parsed = float(text)
+        return parsed / 100 if parsed > 1 else parsed
+    except (TypeError, ValueError):
+        return default
+
+
 def _source_date(source):
     return source.sent_at.date() if source.sent_at else None
 
@@ -1025,7 +1038,7 @@ def _create_contract_item(run, source, payload, *, requested_date=None):
         source_text=payload.get("source_text") or "",
         source_filename=(payload.get("source_filename") or "")[:255],
         source_page=str(payload.get("source_page") or "")[:30],
-        confidence=max(0.0, min(float(payload.get("confidence") or 0), 1.0)),
+        confidence=max(0.0, min(_confidence(payload.get("confidence")), 1.0)),
         ai_reason=payload.get("reason") or "",
         status=ContractIntelligenceItem.STATUS_SUGGESTED,
     )
@@ -1102,9 +1115,17 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
             source.confidence = max(0.0, min(confidence, 1.0))
             item_payloads = (payload or {}).get("items") if payload else None
             item_payloads = item_payloads or (_deterministic_items_from_attachments(source) + _deterministic_items_from_text(source))
+            item_errors = []
             for item_payload in item_payloads:
-                if _create_contract_item(run, source, item_payload, requested_date=_source_date(source)):
-                    created += 1
+                try:
+                    if _create_contract_item(run, source, item_payload, requested_date=_source_date(source)):
+                        created += 1
+                except Exception as item_exc:
+                    item_errors.append(str(item_exc)[:180])
+            if item_errors:
+                warnings.append(
+                    f"{source.subject or source.gmail_message_id}: skipped {len(item_errors)} malformed extracted row(s)."
+                )
             source.status = "analyzed"
             source.error = ""
             source.save(update_fields=["classification", "confidence", "status", "error", "updated_at"])

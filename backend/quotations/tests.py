@@ -1857,6 +1857,50 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(run.summary["items"], 1)
         self.assertEqual(run.summary["matched_products"], 1)
 
+    @patch("quotations.contract_intelligence._ai_items_for_source")
+    def test_contract_ai_analysis_tolerates_percent_confidence_without_pausing_source(self, mock_ai_items):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC quote request",
+            sender="buyer@alec.example",
+            body_text="10100004 AMMONIA INHALANT Brand:BRAND AS QUOTED",
+            status="candidate",
+        )
+        mock_ai_items.return_value = {
+            "classification": ContractIntelligenceSource.CLASS_INQUIRY,
+            "confidence": "93%",
+            "items": [
+                {
+                    "item_name": "10100004 AMMONIA INHALANT Brand:BRAND AS QUOTED",
+                    "suggested_item_name": "AMMONIA INHALANT",
+                    "quantity": "3",
+                    "unit": "EA",
+                    "unit_price": "10",
+                    "confidence": "93%",
+                }
+            ],
+        }
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": True, "source_limit": 1},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result"]["sources_analyzed"], 1)
+        self.assertEqual(response.data["result"]["pending_sources"], 0)
+        source.refresh_from_db()
+        self.assertEqual(source.status, "analyzed")
+        item = ContractIntelligenceItem.objects.get(run=run, source=source)
+        self.assertEqual(item.suggested_item_name, "AMMONIA INHALANT")
+        self.assertEqual(item.confidence, 0.93)
+
     def test_contract_items_are_review_only_not_created_through_generic_endpoint(self):
         run = ContractIntelligenceRun.objects.create(
             company=self.company,
