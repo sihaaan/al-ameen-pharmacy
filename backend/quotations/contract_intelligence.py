@@ -48,7 +48,6 @@ except ImportError:  # pragma: no cover - production installs this transitively;
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 MAX_ANALYSIS_CHARS = 18000
@@ -247,13 +246,12 @@ def exchange_gmail_code(user, code, request=None):
     access_token = token_payload.get("access_token", "")
     if not access_token:
         raise RuntimeError("Google OAuth did not return an access token.")
-    userinfo = _json_request(GOOGLE_USERINFO_URL, token=access_token)
+    gmail_profile = _json_request(f"{GMAIL_API_BASE}/profile", token=access_token)
     expires_in = int(token_payload.get("expires_in") or 3600)
     connection, _ = GmailOAuthConnection.objects.get_or_create(user=user)
     existing_refresh = decrypt_token(connection.refresh_token_encrypted)
     refresh_token = token_payload.get("refresh_token") or existing_refresh
-    connection.email = userinfo.get("email", "") or connection.email
-    connection.google_subject = userinfo.get("sub", "") or connection.google_subject
+    connection.email = gmail_profile.get("emailAddress", "") or connection.email
     connection.access_token_encrypted = encrypt_token(access_token)
     connection.refresh_token_encrypted = encrypt_token(refresh_token)
     connection.token_expiry = timezone.now() + timedelta(seconds=max(expires_in - 60, 60))

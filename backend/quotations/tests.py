@@ -25,7 +25,7 @@ from rest_framework.test import APITestCase
 
 from api.models import Product, ProductImage
 
-from .contract_intelligence import build_contract_gmail_query
+from .contract_intelligence import build_contract_gmail_query, exchange_gmail_code
 from .import_parsers import parse_text_preview
 from .import_rules import detect_header_row, parse_inquiry_line, parse_text_lines, split_quantity_unit
 from .models import (
@@ -1382,6 +1382,29 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertFalse(response.data["configured"])
         self.assertIn("GOOGLE_OAUTH_CLIENT_ID", response.data["railway_env_vars"])
         self.assertIsNone(response.data["connection"])
+
+    @patch("quotations.contract_intelligence._json_request")
+    @patch("quotations.contract_intelligence._form_request")
+    @override_settings(
+        GOOGLE_OAUTH_CLIENT_ID="client-id",
+        GOOGLE_OAUTH_CLIENT_SECRET="client-secret",
+        GOOGLE_OAUTH_REDIRECT_URI="https://api.example.com/api/quotations/gmail/oauth/callback/",
+    )
+    def test_gmail_oauth_exchange_uses_gmail_profile_for_email(self, mock_form, mock_json):
+        mock_form.return_value = {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/gmail.readonly",
+        }
+        mock_json.return_value = {"emailAddress": "pharmacydxb@gmail.com"}
+
+        connection = exchange_gmail_code(self.staff, "auth-code")
+
+        self.assertEqual(connection.email, "pharmacydxb@gmail.com")
+        self.assertEqual(connection.status, GmailOAuthConnection.STATUS_CONNECTED)
+        mock_json.assert_called_once()
+        self.assertIn("/gmail/v1/users/me/profile", mock_json.call_args.args[0])
 
     def test_contract_intelligence_run_can_be_created_for_company_research(self):
         response = self.client.post(

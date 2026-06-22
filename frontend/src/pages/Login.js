@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import './Auth.css';
@@ -6,14 +6,26 @@ import './Auth.css';
 function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, error } = useAuth();
+  const { login, error, user, loading: authLoading } = useAuth();
 
   const [formData, setFormData] = useState({
     username: '',
     password: '',
   });
-  const [loading, setLoading] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
   const [localError, setLocalError] = useState('');
+
+  const getSafeNext = useCallback(() => {
+    const params = new URLSearchParams(location.search);
+    const next = params.get('next');
+    return next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!authLoading && user) {
+      navigate(getSafeNext(), { replace: true });
+    }
+  }, [authLoading, user, navigate, getSafeNext]);
 
   // Handle input changes
   const handleChange = (e) => {
@@ -36,18 +48,15 @@ function Login() {
       return;
     }
 
-    setLoading(true);
+    setLoginLoading(true);
 
     // Call login function from AuthContext
     const result = await login(formData.username, formData.password);
 
-    setLoading(false);
+    setLoginLoading(false);
 
     if (result.success) {
-      const params = new URLSearchParams(location.search);
-      const next = params.get('next');
-      const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
-      navigate(safeNext);
+      navigate(getSafeNext());
     } else {
       setLocalError(result.error || 'Login failed');
     }
@@ -75,7 +84,7 @@ function Login() {
               value={formData.username}
               onChange={handleChange}
               placeholder="Enter your username"
-              disabled={loading}
+              disabled={loginLoading}
               autoFocus
             />
           </div>
@@ -89,16 +98,16 @@ function Login() {
               value={formData.password}
               onChange={handleChange}
               placeholder="Enter your password"
-              disabled={loading}
+              disabled={loginLoading}
             />
           </div>
 
           <button
             type="submit"
             className="auth-button"
-            disabled={loading}
+            disabled={loginLoading}
           >
-            {loading ? 'Logging in...' : 'Login'}
+            {loginLoading ? 'Logging in...' : 'Login'}
           </button>
         </form>
 

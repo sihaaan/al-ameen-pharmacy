@@ -10,7 +10,7 @@ import AccountingModule from '../components/accounting/AccountingModule';
 import '../styles/Dashboard.css';
 
 const AdminDashboard = () => {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [activeTab, setActiveTab] = useState('overview');
@@ -26,6 +26,9 @@ const AdminDashboard = () => {
 
   // Check if user is admin
   useEffect(() => {
+    if (loading) {
+      return;
+    }
     if (!user) {
       const next = `${location.pathname}${location.search}`;
       navigate(`/login?next=${encodeURIComponent(next)}`);
@@ -35,7 +38,7 @@ const AdminDashboard = () => {
     } else {
       fetchStats();
     }
-  }, [user, navigate, location.pathname, location.search]);
+  }, [user, loading, navigate, location.pathname, location.search]);
 
   const fetchStats = async () => {
     setStatsLoading(true);
@@ -65,6 +68,17 @@ const AdminDashboard = () => {
       setStatsLoading(false);
     }
   };
+
+  if (loading) {
+    return (
+      <div className="admin-dashboard">
+        <div className="admin-header">
+          <h1>Admin Dashboard</h1>
+          <p>Loading admin session...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="admin-dashboard">
