@@ -1464,6 +1464,10 @@ class ContractIntelligenceWorkflowTests(APITestCase):
                     "<https://www.alameenpharmacygroup.com/>",
                     "Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39",
                     "Please find the attached LPO, kindly proceed accordingly.",
+                    "> *Item Descr:*",
+                    "> *Manuf.*",
+                    "M +971 508126371 | T +971 4 429 0599",
+                    "Mahesh Babu - Procurement Specialist",
                     "DEEP HEAT SPRAY 10 BOTTLES",
                 ]
             ),
@@ -1478,6 +1482,52 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         items = list(ContractIntelligenceItem.objects.filter(run=run).values_list("suggested_item_name", flat=True))
         self.assertEqual(items, ["DEEP HEAT SPRAY"])
+
+    def test_contract_analysis_cleans_catalog_brand_comments_and_skips_rfq_noise(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC catalog attachment",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            attachments=[
+                {
+                    "filename": "alec-rfq.xlsx",
+                    "status": "parsed",
+                    "lines": [
+                        {"requested_item_name": "> *Item Descr:*"},
+                        {"requested_item_name": "> *Last date of submission*"},
+                        {"requested_item_name": "M +971 508126371 | T +971 4 429 0599"},
+                        {
+                            "requested_item_name": "10100004 AMMONIA INHALANT Brand:BRAND AS QUOTED Comments:AMMONIA INHALANT",
+                            "quantity": "3",
+                            "unit": "EA",
+                            "unit_price": "10",
+                        },
+                        {
+                            "requested_item_name": "10100006 GAUZE SWAB STERILE Brand:BRAND AS QUOTED Comments:GAUZE BANDAGE -1''",
+                            "quantity": "6",
+                            "unit": "EA",
+                            "unit_price": "6",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": False, "source_limit": 5},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = list(ContractIntelligenceItem.objects.filter(run=run).order_by("id").values_list("suggested_item_name", flat=True))
+        self.assertEqual(items, ["AMMONIA INHALANT", "GAUZE SWAB STERILE - GAUZE BANDAGE -1''"])
 
     @patch("quotations.contract_intelligence._ai_items_for_source")
     def test_contract_ai_analysis_uses_small_safe_batches(self, mock_ai_items):

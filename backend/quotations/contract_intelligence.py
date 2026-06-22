@@ -700,6 +700,19 @@ NOISE_PREFIXES = (
     "email",
     "e-mail",
     "website",
+    "project",
+    "manuf",
+    "manufacturer",
+    "model",
+    "remarks",
+    "remark",
+    "rfq",
+    "r.f.q",
+    "last date",
+    "procurement",
+    "chief executive",
+    "prepared by",
+    "approved by",
 )
 
 
@@ -713,25 +726,149 @@ NOISE_PHRASES = (
     "follow us",
     "p.o. box",
     "po box",
+    "last date of submission",
+    "procurement specialist",
+    "chief executive officer",
+    "payment terms",
+    "days credit",
+    "al ameen pharmacy group",
+    "authorized signature",
+    "company stamp",
 )
 
 
-def _is_contract_item_noise(value):
+NOISE_LABELS = {
+    "item",
+    "items",
+    "item descr",
+    "item description",
+    "description",
+    "qty",
+    "quantity",
+    "uom",
+    "unit",
+    "unit price",
+    "price",
+    "total",
+    "vat",
+    "brand",
+    "comments",
+    "remark",
+    "remarks",
+    "rfq",
+    "rfq ref",
+    "r f q",
+    "project",
+    "manuf",
+    "manufacturer",
+    "model",
+    "last date of submission",
+    "procurement specialist",
+    "contact",
+    "contact person",
+    "mobile",
+    "telephone",
+    "phone",
+    "email",
+    "date",
+    "subject",
+    "from",
+    "to",
+    "cc",
+}
+
+
+def _clean_contract_item_name(value):
+    text = html.unescape(str(value or ""))
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^[>\-*•\s]+", "", text).strip()
+    text = text.strip("|:;- ")
+    text = re.sub(r"^\d+\s*[.)|-]\s*", "", text).strip()
+    text = re.sub(r"^\d{5,}\s+", "", text).strip()
+    text = re.sub(r"^(?:item\s+descr(?:iption)?|description)\s*[:*-]\s*", "", text, flags=re.I).strip()
+
+    comment_text = ""
+    comment_match = re.search(r"\bcomments?\s*:\s*(.+)$", text, flags=re.I)
+    if comment_match:
+        comment_text = comment_match.group(1).strip()
+        text = text[: comment_match.start()].strip()
+
+    text = re.sub(
+        r"\bbrand\s*:\s*(?:brand\s+as\s+quot(?:ed|e)?|as\s+quot(?:ed|e)?|brand\s+quoted|not\s+specified|n/?a|-)?\b",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\bbrand\s*:\s*$", "", text, flags=re.I).strip()
+    text = re.sub(r"\s+", " ", text).strip(" |:;-")
+
+    comment_text = re.sub(
+        r"\bbrand\s*:\s*(?:brand\s+as\s+quot(?:ed|e)?|as\s+quot(?:ed|e)?|not\s+specified|n/?a|-)?\b",
+        "",
+        comment_text,
+        flags=re.I,
+    )
+    comment_text = re.sub(r"\s+", " ", comment_text).strip(" |:;-")
+    if comment_text and not _is_contract_item_noise_basic(comment_text):
+        base_norm = normalize_label(text)
+        comment_norm = normalize_label(comment_text)
+        if comment_norm and comment_norm != base_norm and comment_norm not in base_norm:
+            text = f"{text} - {comment_text}" if text else comment_text
+
+    return text[:500]
+
+
+def _is_contract_item_noise_basic(value):
     text = " ".join(str(value or "").split())
-    unwrapped_text = text.strip("<> ")
+    if not text:
+        return True
+    lowered = text.lower().strip()
     normalized = normalize_label(text)
     if not normalized or len(normalized) < 3:
         return True
-    lowered = text.lower().strip()
+    if normalized in NOISE_LABELS:
+        return True
     if lowered.startswith(NOISE_PREFIXES):
         return True
     if any(phrase in lowered for phrase in NOISE_PHRASES):
         return True
     if re.search(r"https?://|www\.|@[\w.-]+", lowered):
         return True
-    if re.fullmatch(r"[+()0-9\s.-]{7,}", unwrapped_text):
+    unwrapped_text = text.strip("<> ")
+    if re.fullmatch(r"(?:[mt]\s*)?[+()0-9\s./-]{7,}(?:\s*\|\s*(?:[mt]\s*)?[+()0-9\s./-]{7,})*", unwrapped_text, flags=re.I):
         return True
     if re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", lowered):
+        return True
+    if re.fullmatch(r"[a-z][a-z .'-]{2,40}", lowered) and any(
+        title in lowered for title in ["suleman", "mahesh", "mohammad", "muhammad", "rengan", "rensan"]
+    ):
+        return True
+    return False
+
+
+def _is_contract_item_noise(value):
+    text = _clean_contract_item_name(value)
+    unwrapped_text = text.strip("<> ")
+    normalized = normalize_label(text)
+    if not normalized or len(normalized) < 3:
+        return True
+    lowered = text.lower().strip()
+    if normalized in NOISE_LABELS:
+        return True
+    if lowered.startswith(NOISE_PREFIXES):
+        return True
+    if any(phrase in lowered for phrase in NOISE_PHRASES):
+        return True
+    if re.search(r"https?://|www\.|@[\w.-]+", lowered):
+        return True
+    if re.fullmatch(r"(?:[mt]\s*)?[+()0-9\s./-]{7,}(?:\s*\|\s*(?:[mt]\s*)?[+()0-9\s./-]{7,})*", unwrapped_text, flags=re.I):
+        return True
+    if re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", lowered):
+        return True
+    if re.fullmatch(r"[a-z][a-z .'-]{2,40}", lowered) and any(
+        title in lowered for title in ["suleman", "mahesh", "mohammad", "muhammad", "rengan", "rensan"]
+    ):
         return True
     # Long prose lines without any item-like quantity or price signal are almost
     # always email body/signature text, not product demand.
@@ -750,12 +887,13 @@ def _deterministic_items_from_text(source):
         if not parsed:
             continue
         name = parsed.get("requested_item_name") or parsed.get("raw_name") or ""
-        if _is_contract_item_noise(name):
+        clean_name = _clean_contract_item_name(name)
+        if _is_contract_item_noise(clean_name):
             continue
         items.append(
             {
-                "item_name": name,
-                "suggested_item_name": name,
+                "item_name": clean_name,
+                "suggested_item_name": clean_name,
                 "quantity": parsed.get("quantity"),
                 "unit": parsed.get("unit") or "",
                 "unit_price": parsed.get("unit_price"),
@@ -779,12 +917,13 @@ def _deterministic_items_from_attachments(source):
             continue
         for row in attachment.get("lines") or []:
             name = row.get("requested_item_name") or row.get("item_name") or row.get("raw_name") or ""
-            if _is_contract_item_noise(name):
+            clean_name = _clean_contract_item_name(name)
+            if _is_contract_item_noise(clean_name):
                 continue
             items.append(
                 {
-                    "item_name": name,
-                    "suggested_item_name": name,
+                    "item_name": clean_name,
+                    "suggested_item_name": clean_name,
                     "quantity": row.get("quantity"),
                     "unit": row.get("unit") or "",
                     "unit_price": row.get("unit_price"),
@@ -862,7 +1001,8 @@ def _ai_items_for_source(source, run):
 def _create_contract_item(run, source, payload, *, requested_date=None):
     if not isinstance(payload, dict):
         return None
-    name = (payload.get("suggested_item_name") or payload.get("item_name") or "").strip()
+    raw_name = (payload.get("suggested_item_name") or payload.get("item_name") or "").strip()
+    name = _clean_contract_item_name(raw_name)
     if _is_contract_item_noise(name):
         return None
     try:
@@ -873,7 +1013,7 @@ def _create_contract_item(run, source, payload, *, requested_date=None):
         run=run,
         source=source,
         product=product_match,
-        original_item_name=(payload.get("item_name") or name)[:500],
+        original_item_name=_clean_contract_item_name(payload.get("item_name") or raw_name or name)[:500],
         suggested_item_name=name[:500],
         quantity=_quantity(payload.get("quantity")),
         unit=(payload.get("unit") or "")[:80],
@@ -947,7 +1087,16 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
                 classification = payload.get("classification") or classification
                 confidence = float(payload.get("confidence") or confidence)
             except Exception as exc:
-                warnings.append(f"{source.subject or source.gmail_message_id}: AI unavailable or failed; deterministic extraction used. {str(exc)[:140]}")
+                error_text = str(exc)
+                if "timed out" in error_text.lower() or "timeout" in error_text.lower():
+                    error_text = (
+                        "AI request timed out; deterministic extraction used. "
+                        "Try fewer sources per AI batch or increase QUOTATION_AI_PARSE_TIMEOUT_SECONDS. "
+                        f"{error_text}"
+                    )
+                else:
+                    error_text = f"AI unavailable or failed; deterministic extraction used. {error_text}"
+                warnings.append(f"{source.subject or source.gmail_message_id}: {error_text[:220]}")
         try:
             source.classification = classification
             source.confidence = max(0.0, min(confidence, 1.0))
