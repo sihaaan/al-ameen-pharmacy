@@ -237,19 +237,36 @@ const ContractIntelligenceManager = () => {
       const knownSources = Number(selectedSummary.sources || 0);
       const remainingMessages = selectedMaxMessages ? Math.max(selectedMaxMessages - knownSources, selectedBatchSize) : selectedBatchSize * 50;
       const maxBatches = Math.min(Math.ceil(remainingMessages / selectedBatchSize) || 1, 100);
-      const response = await quotationAPI.contractIntelligence.discoverAll(selectedRun.id, {
-        batch_size: selectedBatchSize,
-        max_batches: maxBatches,
-        reset_cursor: resetCursor,
-      });
-      const result = response.data.result;
-      const exhaustedText = result.discovery_exhausted
+      const totals = {
+        batches: 0,
+        created: 0,
+        reused: 0,
+        failed: 0,
+        discovery_exhausted: false,
+      };
+      for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
+        setNotice(`Discovering Gmail batch ${batchIndex + 1} of up to ${maxBatches}...`);
+        const response = await quotationAPI.contractIntelligence.discover(selectedRun.id, {
+          batch_size: selectedBatchSize,
+          reset_cursor: resetCursor && batchIndex === 0,
+        });
+        const result = response.data.result || {};
+        totals.batches += 1;
+        totals.created += Number(result.created || 0);
+        totals.reused += Number(result.reused || 0);
+        totals.failed += Number(result.failed || 0);
+        totals.discovery_exhausted = Boolean(result.discovery_exhausted);
+        if (totals.discovery_exhausted || !result.next_page_token) {
+          break;
+        }
+      }
+      const exhaustedText = totals.discovery_exhausted
         ? ' Gmail has no more matching messages for this run.'
         : ' Discovery stopped at the safety cap; run it again to continue if needed.';
-      setNotice(`Full discovery complete: ${result.batches} batch(es), ${result.created} new candidate email(s), ${result.reused} already tracked, ${result.failed} failed.${exhaustedText}`);
+      setNotice(`Full discovery complete: ${totals.batches} batch(es), ${totals.created} new candidate email(s), ${totals.reused} already tracked, ${totals.failed} failed.${exhaustedText}`);
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
-      await handleError(error, 'Run full Gmail discovery', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/discover_all/`);
+      await handleError(error, 'Run full Gmail discovery', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/discover/`);
     } finally {
       setBusyAction('');
     }
@@ -283,16 +300,32 @@ const ContractIntelligenceManager = () => {
     try {
       const pendingSources = Math.max(Number(selectedSummary.sources_candidate || 0), Number(sources.filter((source) => source.status !== 'analyzed').length || 0));
       const maxBatches = Math.min(Math.ceil((pendingSources || selectedBatchSize) / selectedBatchSize) || 1, 100);
-      const response = await quotationAPI.contractIntelligence.analyzeAll(selectedRun.id, {
-        use_ai: useAI,
-        source_limit: selectedBatchSize,
-        max_batches: maxBatches,
-      });
-      const result = response.data.result;
-      setNotice(`Full analysis complete: ${result.items_created} item row(s) extracted from ${result.sources_analyzed} source(s) across ${result.batches} batch(es). ${result.pending_sources || 0} source(s) still waiting.`);
+      const totals = {
+        batches: 0,
+        sources_analyzed: 0,
+        items_created: 0,
+        pending_sources: pendingSources,
+      };
+      for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
+        setNotice(`${useAI ? 'AI analyzing' : 'Analyzing'} batch ${batchIndex + 1} of up to ${maxBatches}...`);
+        const response = await quotationAPI.contractIntelligence.analyze(selectedRun.id, {
+          use_ai: useAI,
+          source_limit: selectedBatchSize,
+        });
+        const result = response.data.result || {};
+        const analyzedThisBatch = Number(result.sources_analyzed || 0);
+        totals.batches += 1;
+        totals.sources_analyzed += analyzedThisBatch;
+        totals.items_created += Number(result.items_created || 0);
+        totals.pending_sources = Number(result.pending_sources || 0);
+        if (totals.pending_sources <= 0 || analyzedThisBatch <= 0) {
+          break;
+        }
+      }
+      setNotice(`Full analysis complete: ${totals.items_created} item row(s) extracted from ${totals.sources_analyzed} source(s) across ${totals.batches} batch(es). ${totals.pending_sources || 0} source(s) still waiting.`);
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
-      await handleError(error, 'Run full contract email analysis', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze_all/`);
+      await handleError(error, 'Run full contract email analysis', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze/`);
     } finally {
       setBusyAction('');
     }
