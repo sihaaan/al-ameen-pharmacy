@@ -236,6 +236,11 @@ QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION = int(os.environ.get("QUOTATION_AI_PARSE_
 QUOTATION_AI_PARSE_IMAGE_SCALE = float(os.environ.get("QUOTATION_AI_PARSE_IMAGE_SCALE", "1.4"))
 QUOTATION_AI_PARSE_TIMEOUT_SECONDS = int(os.environ.get("QUOTATION_AI_PARSE_TIMEOUT_SECONDS", "60"))
 
+# ---- Gmail read-only OAuth for quotation contract intelligence ----
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+
 # ---- accounting overdue statement imports ----
 ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT = int(os.environ.get("ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", "75"))
