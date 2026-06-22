@@ -1500,6 +1500,104 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         mock_search.assert_called_once()
         self.assertEqual(mock_search.call_args.kwargs["page_token"], "")
 
+    @patch("quotations.contract_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.contract_intelligence.gmail_search_messages")
+    def test_contract_full_discovery_runs_multiple_gmail_batches(self, mock_search, mock_metadata):
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            access_token_encrypted="token",
+            status=GmailOAuthConnection.STATUS_CONNECTED,
+        )
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            max_messages=10,
+            discovery_batch_size=2,
+            created_by=self.staff,
+        )
+        mock_search.side_effect = [
+            {
+                "messages": [{"id": "m1"}, {"id": "m2"}],
+                "next_page_token": "NEXT_PAGE",
+                "result_size_estimate": 3,
+            },
+            {
+                "messages": [{"id": "m3"}],
+                "next_page_token": "",
+                "result_size_estimate": 3,
+            },
+        ]
+        mock_metadata.side_effect = [
+            {
+                "gmail_message_id": "m1",
+                "gmail_thread_id": "t1",
+                "subject": "ALEC clinic supplies inquiry",
+                "sender": "buyer@alec.ae",
+                "recipients": "pharmacy@example.com",
+                "sent_at": timezone.now(),
+                "snippet": "Please quote clinic supplies",
+            },
+            {
+                "gmail_message_id": "m2",
+                "gmail_thread_id": "t2",
+                "subject": "ALEC yearly RFQ",
+                "sender": "procurement@alec.ae",
+                "recipients": "pharmacy@example.com",
+                "sent_at": timezone.now(),
+                "snippet": "RFQ list attached",
+            },
+            {
+                "gmail_message_id": "m3",
+                "gmail_thread_id": "t3",
+                "subject": "ALEC LPO",
+                "sender": "buyer@alec.ae",
+                "recipients": "pharmacy@example.com",
+                "sent_at": timezone.now(),
+                "snippet": "LPO attached",
+            },
+        ]
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-discover-all", args=[run.id]),
+            {"batch_size": 2, "max_batches": 5},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result"]["batches"], 2)
+        self.assertEqual(response.data["result"]["created"], 3)
+        self.assertEqual(ContractIntelligenceSource.objects.filter(run=run, status="candidate").count(), 3)
+        self.assertEqual(mock_search.call_count, 2)
+        self.assertEqual(mock_search.call_args_list[1].kwargs["page_token"], "NEXT_PAGE")
+
+    def test_contract_intelligence_run_can_be_deleted_for_clean_restart(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            gmail_message_id="m1",
+            subject="ALEC inquiry",
+            sender="buyer@alec.ae",
+        )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="Pulse Oximeter",
+            normalized_item_name="pulse oximeter",
+        )
+
+        response = self.client.delete(reverse("quotation-contract-intelligence-run-detail", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ContractIntelligenceRun.objects.filter(id=run.id).exists())
+        self.assertFalse(ContractIntelligenceSource.objects.filter(id=source.id).exists())
+        self.assertFalse(ContractIntelligenceItem.objects.filter(run_id=run.id).exists())
+
     @patch("quotations.contract_intelligence.gmail_fetch_message")
     def test_contract_analysis_fetches_candidate_source_content_before_extracting_items(self, mock_fetch):
         GmailOAuthConnection.objects.create(

@@ -492,7 +492,7 @@ class GmailOAuthCallbackView(APIView):
 class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = ContractIntelligenceRunSerializer
     queryset = ContractIntelligenceRun.objects.select_related("company", "created_by").prefetch_related("sources", "items")
-    http_method_names = ["get", "post", "patch", "head", "options"]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -582,6 +582,123 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
             run.save(update_fields=["status", "warnings", "updated_at"])
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": result})
+
+    @staticmethod
+    def _positive_int(value, default, minimum=1, maximum=100):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return min(max(parsed, minimum), maximum)
+
+    @action(detail=True, methods=["post"])
+    def discover_all(self, request, pk=None):
+        run = self.get_object()
+        batch_size = self._positive_int(
+            request.data.get("batch_size"),
+            run.discovery_batch_size or 25,
+            minimum=1,
+            maximum=100,
+        )
+        max_batches = self._positive_int(request.data.get("max_batches"), 50, minimum=1, maximum=100)
+        reset_cursor = bool(request.data.get("reset_cursor"))
+        totals = {
+            "batches": 0,
+            "created": 0,
+            "reused": 0,
+            "failed": 0,
+            "warnings": [],
+            "discovery_exhausted": False,
+            "result_size_estimate": None,
+        }
+
+        try:
+            for batch_index in range(max_batches):
+                result = discover_contract_sources(
+                    run,
+                    request.user,
+                    batch_size=batch_size,
+                    reset_cursor=reset_cursor and batch_index == 0,
+                )
+                totals["batches"] += 1
+                totals["created"] += int(result.get("created") or 0)
+                totals["reused"] += int(result.get("reused") or 0)
+                totals["failed"] += int(result.get("failed") or 0)
+                totals["warnings"].extend(result.get("warnings") or [])
+                totals["discovery_exhausted"] = bool(result.get("discovery_exhausted"))
+                totals["result_size_estimate"] = result.get("result_size_estimate")
+                run.refresh_from_db()
+                if result.get("discovery_exhausted") or run.discovery_exhausted:
+                    break
+                if not result.get("next_page_token"):
+                    break
+        except RuntimeError as exc:
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc), "result": totals}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Contract intelligence full Gmail discovery failed.")
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc), "result": totals}, status=status.HTTP_400_BAD_REQUEST)
+
+        refresh_contract_run_summary(run)
+        run.save(update_fields=["summary", "updated_at"])
+        return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": totals})
+
+    @action(detail=True, methods=["post"])
+    def analyze_all(self, request, pk=None):
+        run = self.get_object()
+        use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no", "off"}
+        source_limit = self._positive_int(
+            request.data.get("source_limit"),
+            run.discovery_batch_size or 25,
+            minimum=1,
+            maximum=100,
+        )
+        max_batches = self._positive_int(request.data.get("max_batches"), 50, minimum=1, maximum=100)
+        totals = {
+            "batches": 0,
+            "sources_analyzed": 0,
+            "items_created": 0,
+            "warnings": [],
+            "pending_sources": None,
+        }
+
+        try:
+            for _ in range(max_batches):
+                result = analyze_contract_run(
+                    run,
+                    request.user,
+                    use_ai=use_ai,
+                    source_limit=source_limit,
+                )
+                sources_analyzed = int(result.get("sources_analyzed") or 0)
+                totals["batches"] += 1
+                totals["sources_analyzed"] += sources_analyzed
+                totals["items_created"] += int(result.get("items_created") or 0)
+                totals["warnings"].extend(result.get("warnings") or [])
+                totals["pending_sources"] = int(result.get("pending_sources") or 0)
+                run.refresh_from_db()
+                if totals["pending_sources"] <= 0 or sources_analyzed <= 0:
+                    break
+        except RuntimeError as exc:
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc), "result": totals}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Contract intelligence full analysis failed.")
+            run.status = ContractIntelligenceRun.STATUS_FAILED
+            run.warnings = [str(exc)]
+            run.save(update_fields=["status", "warnings", "updated_at"])
+            return Response({"detail": str(exc), "result": totals}, status=status.HTTP_400_BAD_REQUEST)
+
+        refresh_contract_run_summary(run)
+        run.save(update_fields=["summary", "updated_at"])
+        return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": totals})
 
     @action(detail=True, methods=["get"])
     def export(self, request, pk=None):

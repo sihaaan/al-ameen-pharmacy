@@ -68,8 +68,11 @@ const ContractIntelligenceManager = () => {
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState('');
   const [itemFilter, setItemFilter] = useState('');
+  const [deleteConfirmRun, setDeleteConfirmRun] = useState(null);
 
   const selectedSummary = selectedRun?.summary || {};
+  const selectedBatchSize = Number(selectedRun?.discovery_batch_size || 25);
+  const selectedMaxMessages = Number(selectedRun?.max_messages || 0);
 
   const visibleItems = useMemo(() => {
     const term = itemFilter.trim().toLowerCase();
@@ -225,6 +228,33 @@ const ContractIntelligenceManager = () => {
     }
   };
 
+  const discoverAll = async ({ resetCursor = false } = {}) => {
+    if (!selectedRun) return;
+    setBusyAction('discover-all');
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      const knownSources = Number(selectedSummary.sources || 0);
+      const remainingMessages = selectedMaxMessages ? Math.max(selectedMaxMessages - knownSources, selectedBatchSize) : selectedBatchSize * 50;
+      const maxBatches = Math.min(Math.ceil(remainingMessages / selectedBatchSize) || 1, 100);
+      const response = await quotationAPI.contractIntelligence.discoverAll(selectedRun.id, {
+        batch_size: selectedBatchSize,
+        max_batches: maxBatches,
+        reset_cursor: resetCursor,
+      });
+      const result = response.data.result;
+      const exhaustedText = result.discovery_exhausted
+        ? ' Gmail has no more matching messages for this run.'
+        : ' Discovery stopped at the safety cap; run it again to continue if needed.';
+      setNotice(`Full discovery complete: ${result.batches} batch(es), ${result.created} new candidate email(s), ${result.reused} already tracked, ${result.failed} failed.${exhaustedText}`);
+      await refreshSelectedRun(selectedRun.id);
+    } catch (error) {
+      await handleError(error, 'Run full Gmail discovery', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/discover_all/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
   const analyze = async (useAI = true) => {
     if (!selectedRun) return;
     setBusyAction(useAI ? 'analyze-ai' : 'analyze-basic');
@@ -239,6 +269,54 @@ const ContractIntelligenceManager = () => {
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
       await handleError(error, 'Analyze contract emails', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const analyzeAll = async (useAI = true) => {
+    if (!selectedRun) return;
+    const action = useAI ? 'analyze-all-ai' : 'analyze-all-basic';
+    setBusyAction(action);
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      const pendingSources = Math.max(Number(selectedSummary.sources_candidate || 0), Number(sources.filter((source) => source.status !== 'analyzed').length || 0));
+      const maxBatches = Math.min(Math.ceil((pendingSources || selectedBatchSize) / selectedBatchSize) || 1, 100);
+      const response = await quotationAPI.contractIntelligence.analyzeAll(selectedRun.id, {
+        use_ai: useAI,
+        source_limit: selectedBatchSize,
+        max_batches: maxBatches,
+      });
+      const result = response.data.result;
+      setNotice(`Full analysis complete: ${result.items_created} item row(s) extracted from ${result.sources_analyzed} source(s) across ${result.batches} batch(es). ${result.pending_sources || 0} source(s) still waiting.`);
+      await refreshSelectedRun(selectedRun.id);
+    } catch (error) {
+      await handleError(error, 'Run full contract email analysis', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze_all/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const deleteRun = async () => {
+    if (!deleteConfirmRun) return;
+    setBusyAction('delete-run');
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      await quotationAPI.contractIntelligence.deleteRun(deleteConfirmRun.id);
+      setDeleteConfirmRun(null);
+      setSelectedRun(null);
+      setSources([]);
+      setItems([]);
+      const nextRuns = await loadRuns();
+      if (nextRuns.length) {
+        await openRun(nextRuns[0].id);
+      } else {
+        setNotice('Research run deleted. Start a fresh run when you are ready.');
+      }
+    } catch (error) {
+      await handleError(error, 'Delete contract intelligence run', `DELETE /quotations/contract-intelligence-runs/${deleteConfirmRun.id}/`);
     } finally {
       setBusyAction('');
     }
@@ -471,22 +549,31 @@ const ContractIntelligenceManager = () => {
                   </div>
                 </div>
                 <div className="qm-contract-actions">
-                  <button type="button" className="qm-primary" onClick={discover} disabled={!gmailConnected || busyAction === 'discover'}>
-                    {busyAction === 'discover' ? 'Discovering...' : selectedSummary.sources ? 'Discover Next Batch' : 'Discover First Batch'}
+                  <button type="button" className="qm-primary" onClick={() => discoverAll()} disabled={!gmailConnected || busyAction === 'discover-all' || selectedRun.discovery_exhausted}>
+                    {busyAction === 'discover-all' ? 'Discovering all...' : selectedRun.discovery_exhausted ? 'Discovery Complete' : 'Run Full Discovery'}
+                  </button>
+                  <button type="button" className="qm-secondary" onClick={discover} disabled={!gmailConnected || busyAction === 'discover' || selectedRun.discovery_exhausted}>
+                    {busyAction === 'discover' ? 'Discovering...' : selectedSummary.sources ? 'Discover One Batch' : 'Discover First Batch'}
                   </button>
                   {!!selectedSummary.sources && !selectedRun.discovery_exhausted && (
-                    <button type="button" className="qm-secondary" onClick={() => discover({ resetCursor: true })} disabled={!gmailConnected || busyAction === 'discover'}>
-                      Restart Search Cursor
+                    <button type="button" className="qm-secondary" onClick={() => discoverAll({ resetCursor: true })} disabled={!gmailConnected || busyAction === 'discover-all'}>
+                      Restart Full Discovery
                     </button>
                   )}
-                  <button type="button" className="qm-secondary" onClick={() => analyze(true)} disabled={!sources.length || busyAction === 'analyze-ai'}>
-                    {busyAction === 'analyze-ai' ? 'Analyzing...' : 'AI Analyze Next Batch'}
+                  <button type="button" className="qm-secondary" onClick={() => analyzeAll(true)} disabled={!sources.length || busyAction === 'analyze-all-ai'}>
+                    {busyAction === 'analyze-all-ai' ? 'AI analyzing...' : 'Run Full AI Analysis'}
                   </button>
-                  <button type="button" className="qm-secondary" onClick={() => analyze(false)} disabled={!sources.length || busyAction === 'analyze-basic'}>
-                    Basic Analyze Next Batch
+                  <button type="button" className="qm-secondary" onClick={() => analyzeAll(false)} disabled={!sources.length || busyAction === 'analyze-all-basic'}>
+                    {busyAction === 'analyze-all-basic' ? 'Analyzing...' : 'Run Full Basic Analysis'}
+                  </button>
+                  <button type="button" className="qm-secondary" onClick={() => analyze(true)} disabled={!sources.length || busyAction === 'analyze-ai'}>
+                    AI Analyze One Batch
                   </button>
                   <button type="button" className="qm-secondary" onClick={exportRun} disabled={!items.length || busyAction === 'export'}>
                     Export Excel
+                  </button>
+                  <button type="button" className="qm-secondary danger" onClick={() => setDeleteConfirmRun(selectedRun)} disabled={busyAction === 'delete-run'}>
+                    Delete Run
                   </button>
                 </div>
               </section>
@@ -652,6 +739,28 @@ const ContractIntelligenceManager = () => {
           )}
         </main>
       </div>
+      {deleteConfirmRun && (
+        <div className="qm-modal-backdrop" role="presentation">
+          <div className="qm-modal qm-contract-delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-contract-run-title">
+            <h3 id="delete-contract-run-title">Delete this research run?</h3>
+            <p>
+              This removes the run, discovered Gmail sources, and extracted review items for
+              <strong> {deleteConfirmRun.target_company_name}</strong>. Gmail messages are not deleted.
+            </p>
+            <div className="qm-helper warning">
+              Use this when a run was started with the wrong settings and you want a clean slate.
+            </div>
+            <div className="qm-actions">
+              <button type="button" className="qm-secondary" onClick={() => setDeleteConfirmRun(null)} disabled={busyAction === 'delete-run'}>
+                Cancel
+              </button>
+              <button type="button" className="qm-secondary danger" onClick={deleteRun} disabled={busyAction === 'delete-run'}>
+                {busyAction === 'delete-run' ? 'Deleting...' : 'Delete Research Run'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
