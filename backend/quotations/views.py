@@ -540,7 +540,12 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
     def discover(self, request, pk=None):
         run = self.get_object()
         try:
-            result = discover_contract_sources(run, request.user)
+            result = discover_contract_sources(
+                run,
+                request.user,
+                batch_size=request.data.get("batch_size"),
+                reset_cursor=bool(request.data.get("reset_cursor")),
+            )
         except RuntimeError as exc:
             run.status = ContractIntelligenceRun.STATUS_FAILED
             run.warnings = [str(exc)]
@@ -559,7 +564,12 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
         run = self.get_object()
         use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no", "off"}
         try:
-            result = analyze_contract_run(run, request.user, use_ai=use_ai)
+            result = analyze_contract_run(
+                run,
+                request.user,
+                use_ai=use_ai,
+                source_limit=request.data.get("source_limit"),
+            )
         except RuntimeError as exc:
             run.status = ContractIntelligenceRun.STATUS_FAILED
             run.warnings = [str(exc)]

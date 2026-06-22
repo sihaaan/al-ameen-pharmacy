@@ -6,9 +6,11 @@ const emptyRunForm = {
   company: '',
   target_company_name: 'ALEC',
   gmail_query: '',
+  sender_domain_hint: 'alec.ae',
   date_from: '',
   date_to: '',
-  max_messages: 100,
+  max_messages: 500,
+  discovery_batch_size: 25,
   include_attachments: true,
 };
 
@@ -79,14 +81,6 @@ const ContractIntelligenceManager = () => {
       (item.source_subject || '').toLowerCase().includes(term)
     ));
   }, [items, itemFilter]);
-
-  const sourceStats = useMemo(() => {
-    const stats = { inquiry: 0, quotation: 0, lpo: 0, followup: 0, unknown: 0, irrelevant: 0 };
-    sources.forEach((source) => {
-      stats[source.classification || 'unknown'] = (stats[source.classification || 'unknown'] || 0) + 1;
-    });
-    return stats;
-  }, [sources]);
 
   const handleError = async (error, action, endpoint) => {
     const details = await describeQuotationError(error, action, endpoint);
@@ -209,14 +203,20 @@ const ContractIntelligenceManager = () => {
     }
   };
 
-  const discover = async () => {
+  const discover = async ({ resetCursor = false } = {}) => {
     if (!selectedRun) return;
     setBusyAction('discover');
     setNotice('');
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.contractIntelligence.discover(selectedRun.id);
-      setNotice(`Discovery complete: ${response.data.result.created} new emails, ${response.data.result.reused} already tracked, ${response.data.result.failed} failed.`);
+      const response = await quotationAPI.contractIntelligence.discover(selectedRun.id, {
+        batch_size: selectedRun.discovery_batch_size || 25,
+        reset_cursor: resetCursor,
+      });
+      const exhaustedText = response.data.result.discovery_exhausted
+        ? ' Gmail has no more matching messages for this run.'
+        : ' More matching messages may be available; discover the next batch when ready.';
+      setNotice(`Discovery batch complete: ${response.data.result.created} new candidate email(s), ${response.data.result.reused} already tracked, ${response.data.result.failed} failed.${exhaustedText}`);
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
       await handleError(error, 'Discover Gmail contract emails', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/discover/`);
@@ -231,8 +231,11 @@ const ContractIntelligenceManager = () => {
     setNotice('');
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.contractIntelligence.analyze(selectedRun.id, { use_ai: useAI });
-      setNotice(`Analysis complete: ${response.data.result.items_created} item rows extracted. ${response.data.result.sources_failed} source(s) failed.`);
+      const response = await quotationAPI.contractIntelligence.analyze(selectedRun.id, {
+        use_ai: useAI,
+        source_limit: selectedRun.discovery_batch_size || 25,
+      });
+      setNotice(`Analysis batch complete: ${response.data.result.items_created} item row(s) extracted from ${response.data.result.sources_analyzed} source(s). ${response.data.result.pending_sources} source(s) still waiting.`);
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
       await handleError(error, 'Analyze contract emails', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze/`);
@@ -359,6 +362,15 @@ const ContractIntelligenceManager = () => {
               />
             </label>
             <label>
+              Domain hint
+              <input
+                value={form.sender_domain_hint}
+                onChange={(event) => setForm((current) => ({ ...current, sender_domain_hint: event.target.value }))}
+                placeholder="alec.ae"
+              />
+              <small>Optional. Speeds up ALEC searches but does not exclude forwarded or non-domain emails.</small>
+            </label>
+            <label>
               Gmail query override
               <textarea
                 value={form.gmail_query}
@@ -386,15 +398,27 @@ const ContractIntelligenceManager = () => {
             </div>
             <div className="qm-grid-two">
               <label>
-                Max emails
+                Max emails in run
                 <input
                   type="number"
                   min="1"
-                  max="200"
+                  max="5000"
                   value={form.max_messages}
                   onChange={(event) => setForm((current) => ({ ...current, max_messages: event.target.value }))}
                 />
               </label>
+              <label>
+                Batch size
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={form.discovery_batch_size}
+                  onChange={(event) => setForm((current) => ({ ...current, discovery_batch_size: event.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="qm-grid-two">
               <label className="qm-checkbox contract-checkbox">
                 <input
                   type="checkbox"
@@ -438,17 +462,28 @@ const ContractIntelligenceManager = () => {
                 <div>
                   <span className={`qm-badge status-${selectedRun.status}`}>{statusLabel[selectedRun.status] || selectedRun.status}</span>
                   <h3>{selectedRun.target_company_name}</h3>
-                  <p>{selectedRun.gmail_query || 'Default smart Gmail query will be generated from customer and date range.'}</p>
+                  <p>{selectedRun.gmail_query || 'Default smart Gmail query will use the customer name, optional domain hint, inquiry/quotation/LPO terms, and date range.'}</p>
+                  <div className="qm-contract-progress-line">
+                    <span>Batch size: {selectedRun.discovery_batch_size || 25}</span>
+                    <span>Message cap: {selectedRun.max_messages || 0}</span>
+                    <span>{selectedRun.discovery_exhausted ? 'Discovery complete' : 'Discovery can continue'}</span>
+                    {selectedRun.sender_domain_hint && <span>Domain hint: {selectedRun.sender_domain_hint}</span>}
+                  </div>
                 </div>
                 <div className="qm-contract-actions">
                   <button type="button" className="qm-primary" onClick={discover} disabled={!gmailConnected || busyAction === 'discover'}>
-                    {busyAction === 'discover' ? 'Discovering...' : 'Discover Gmail'}
+                    {busyAction === 'discover' ? 'Discovering...' : selectedSummary.sources ? 'Discover Next Batch' : 'Discover First Batch'}
                   </button>
+                  {!!selectedSummary.sources && !selectedRun.discovery_exhausted && (
+                    <button type="button" className="qm-secondary" onClick={() => discover({ resetCursor: true })} disabled={!gmailConnected || busyAction === 'discover'}>
+                      Restart Search Cursor
+                    </button>
+                  )}
                   <button type="button" className="qm-secondary" onClick={() => analyze(true)} disabled={!sources.length || busyAction === 'analyze-ai'}>
-                    {busyAction === 'analyze-ai' ? 'Analyzing...' : 'AI Analyze'}
+                    {busyAction === 'analyze-ai' ? 'Analyzing...' : 'AI Analyze Next Batch'}
                   </button>
                   <button type="button" className="qm-secondary" onClick={() => analyze(false)} disabled={!sources.length || busyAction === 'analyze-basic'}>
-                    Basic Analyze
+                    Basic Analyze Next Batch
                   </button>
                   <button type="button" className="qm-secondary" onClick={exportRun} disabled={!items.length || busyAction === 'export'}>
                     Export Excel
@@ -462,8 +497,12 @@ const ContractIntelligenceManager = () => {
                   <strong>{selectedSummary.sources || 0}</strong>
                 </div>
                 <div className="qm-summary-stat">
-                  <span>Items</span>
-                  <strong>{selectedSummary.items || 0}</strong>
+                  <span>Candidates</span>
+                  <strong>{selectedSummary.sources_candidate || 0}</strong>
+                </div>
+                <div className="qm-summary-stat">
+                  <span>Analyzed</span>
+                  <strong>{selectedSummary.sources_analyzed || 0}</strong>
                 </div>
                 <div className="qm-summary-stat success">
                   <span>Unique Items</span>
@@ -474,12 +513,12 @@ const ContractIntelligenceManager = () => {
                   <strong>{selectedSummary.matched_products || 0}</strong>
                 </div>
                 <div className="qm-summary-stat">
-                  <span>Inquiries</span>
-                  <strong>{sourceStats.inquiry || 0}</strong>
+                  <span>Items</span>
+                  <strong>{selectedSummary.items || 0}</strong>
                 </div>
                 <div className="qm-summary-stat">
-                  <span>LPOs</span>
-                  <strong>{sourceStats.lpo || 0}</strong>
+                  <span>Gmail Estimate</span>
+                  <strong>{selectedSummary.discovery_result_estimate || '-'}</strong>
                 </div>
               </section>
 
@@ -509,6 +548,7 @@ const ContractIntelligenceManager = () => {
                           <small>{formatDateTime(source.sent_at)}</small>
                         </div>
                         <div className="qm-contract-source-meta">
+                          <span className={`qm-badge status-${source.status}`}>{source.status || 'tracked'}</span>
                           <span className={`qm-badge status-${source.classification}`}>{classificationLabel[source.classification] || source.classification}</span>
                           <span>{percent(source.confidence)}</span>
                           <span>{source.item_count || 0} items</span>

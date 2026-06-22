@@ -54,6 +54,9 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 MAX_ANALYSIS_CHARS = 18000
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 SUPPORTED_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".xlsb"}
+DEFAULT_DISCOVERY_BATCH_SIZE = 25
+MAX_DISCOVERY_BATCH_SIZE = 100
+MAX_CONTRACT_MESSAGES = 5000
 
 
 CONTRACT_AI_JSON_SCHEMA = {
@@ -307,8 +310,14 @@ def build_contract_gmail_query(run):
         return raw_query
     company_terms = [run.target_company_name or "", getattr(run.company, "name", "")]
     company_term = next((term for term in company_terms if term), "ALEC")
+    domain_hint = (getattr(run, "sender_domain_hint", "") or "").strip().lstrip("@")
+    company_search_parts = [f'"{company_term}"']
+    if domain_hint:
+        # Domain hints speed up large mailbox scans, but company text remains in
+        # the query so forwarded or non-domain messages are still discoverable.
+        company_search_parts.extend([f"from:{domain_hint}", f"to:{domain_hint}", f'"{domain_hint}"'])
     parts = [
-        f'("{company_term}" OR from:{company_term} OR to:{company_term})',
+        "(" + " OR ".join(company_search_parts) + ")",
         "(inquiry OR enquiry OR RFQ OR quotation OR quote OR LPO OR purchase order)",
     ]
     if run.date_from:
@@ -318,25 +327,22 @@ def build_contract_gmail_query(run):
     return " ".join(parts)
 
 
-def gmail_search_messages(connection, query, max_messages=100):
+def gmail_search_messages(connection, query, max_messages=100, page_token=""):
     token = get_valid_access_token(connection)
-    max_messages = min(max(int(max_messages or 100), 1), int(getattr(settings, "QUOTATION_GMAIL_MAX_MESSAGES", 200)))
-    found = []
-    next_page = ""
-    while len(found) < max_messages:
-        params = {
-            "q": query,
-            "maxResults": min(100, max_messages - len(found)),
-        }
-        if next_page:
-            params["pageToken"] = next_page
-        url = f"{GMAIL_API_BASE}/messages?{urllib.parse.urlencode(params)}"
-        payload = _json_request(url, token=token)
-        found.extend(payload.get("messages") or [])
-        next_page = payload.get("nextPageToken") or ""
-        if not next_page:
-            break
-    return found[:max_messages]
+    max_messages = min(max(int(max_messages or DEFAULT_DISCOVERY_BATCH_SIZE), 1), MAX_DISCOVERY_BATCH_SIZE)
+    params = {
+        "q": query,
+        "maxResults": max_messages,
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    url = f"{GMAIL_API_BASE}/messages?{urllib.parse.urlencode(params)}"
+    payload = _json_request(url, token=token)
+    return {
+        "messages": payload.get("messages") or [],
+        "next_page_token": payload.get("nextPageToken") or "",
+        "result_size_estimate": payload.get("resultSizeEstimate"),
+    }
 
 
 def _decode_gmail_data(data):
@@ -451,7 +457,66 @@ def gmail_fetch_message(connection, message_id, *, include_attachments=True):
     }
 
 
-def discover_contract_sources(run, user):
+def gmail_fetch_message_metadata(connection, message_id):
+    token = get_valid_access_token(connection)
+    params = [
+        ("format", "metadata"),
+        ("metadataHeaders", "Subject"),
+        ("metadataHeaders", "From"),
+        ("metadataHeaders", "To"),
+        ("metadataHeaders", "Cc"),
+    ]
+    payload = _json_request(
+        f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(message_id)}?{urllib.parse.urlencode(params)}",
+        token=token,
+    )
+    headers = payload.get("payload", {}).get("headers") or []
+    return {
+        "gmail_message_id": payload.get("id", message_id),
+        "gmail_thread_id": payload.get("threadId", ""),
+        "subject": _header(headers, "Subject"),
+        "sender": _header(headers, "From"),
+        "recipients": ", ".join(filter(None, [_header(headers, "To"), _header(headers, "Cc")])),
+        "sent_at": _message_datetime(payload),
+        "snippet": payload.get("snippet", ""),
+    }
+
+
+def hydrate_contract_source(source, connection, *, include_attachments=True):
+    if source.body_text or any((attachment or {}).get("status") == "parsed" for attachment in source.attachments or []):
+        return source
+    payload = gmail_fetch_message(connection, source.gmail_message_id, include_attachments=include_attachments)
+    source.subject = payload.get("subject", "")[:500] or source.subject
+    source.sender = payload.get("sender", "")[:500] or source.sender
+    source.recipients = payload.get("recipients", "") or source.recipients
+    source.sent_at = payload.get("sent_at") or source.sent_at
+    source.snippet = payload.get("snippet", "") or source.snippet
+    source.body_text = payload.get("body_text", "")
+    source.attachments = payload.get("attachments") or []
+    source.source_sha256 = hashlib.sha256(
+        "\n".join([source.subject or "", source.sender or "", source.body_text or ""]).encode("utf-8")
+    ).hexdigest()
+    source.status = "fetched"
+    source.error = ""
+    source.save(
+        update_fields=[
+            "subject",
+            "sender",
+            "recipients",
+            "sent_at",
+            "snippet",
+            "body_text",
+            "attachments",
+            "source_sha256",
+            "status",
+            "error",
+            "updated_at",
+        ]
+    )
+    return source
+
+
+def discover_contract_sources(run, user, *, batch_size=None, reset_cursor=False):
     try:
         connection = user.quotation_gmail_connection
     except GmailOAuthConnection.DoesNotExist:
@@ -462,9 +527,37 @@ def discover_contract_sources(run, user):
     run.status = ContractIntelligenceRun.STATUS_DISCOVERING
     run.started_at = timezone.now()
     run.warnings = []
-    run.save(update_fields=["status", "started_at", "warnings", "updated_at"])
+    if reset_cursor:
+        run.discovery_page_token = ""
+        run.discovery_exhausted = False
+    run.save(update_fields=["status", "started_at", "warnings", "discovery_page_token", "discovery_exhausted", "updated_at"])
     query = build_contract_gmail_query(run)
-    messages = gmail_search_messages(connection, query, run.max_messages)
+    existing_count = ContractIntelligenceSource.objects.filter(run=run).exclude(gmail_message_id="").count()
+    remaining = max(min(int(run.max_messages or 0), MAX_CONTRACT_MESSAGES) - existing_count, 0)
+    if remaining <= 0:
+        run.status = ContractIntelligenceRun.STATUS_READY
+        run.discovery_exhausted = True
+        run.completed_at = timezone.now()
+        refresh_contract_run_summary(run)
+        run.save(update_fields=["status", "discovery_exhausted", "completed_at", "summary", "updated_at"])
+        return {
+            "query": query,
+            "created": 0,
+            "reused": 0,
+            "failed": 0,
+            "warnings": ["Run message limit reached. Increase max emails or create a narrower run if more discovery is needed."],
+            "next_page_token": "",
+            "discovery_exhausted": True,
+            "result_size_estimate": run.discovery_result_estimate,
+        }
+
+    effective_batch_size = min(
+        max(int(batch_size or run.discovery_batch_size or DEFAULT_DISCOVERY_BATCH_SIZE), 1),
+        MAX_DISCOVERY_BATCH_SIZE,
+        remaining,
+    )
+    search_result = gmail_search_messages(connection, query, effective_batch_size, page_token=run.discovery_page_token)
+    messages = search_result["messages"]
     created = 0
     reused = 0
     failed = 0
@@ -477,9 +570,9 @@ def discover_contract_sources(run, user):
             reused += 1
             continue
         try:
-            payload = gmail_fetch_message(connection, message_id, include_attachments=run.include_attachments)
+            payload = gmail_fetch_message_metadata(connection, message_id)
             source_hash = hashlib.sha256(
-                "\n".join([payload.get("subject", ""), payload.get("sender", ""), payload.get("body_text", "")]).encode("utf-8")
+                "\n".join([payload.get("subject", ""), payload.get("sender", ""), payload.get("snippet", "")]).encode("utf-8")
             ).hexdigest()
             ContractIntelligenceSource.objects.create(
                 run=run,
@@ -490,29 +583,59 @@ def discover_contract_sources(run, user):
                 recipients=payload.get("recipients", ""),
                 sent_at=payload.get("sent_at"),
                 snippet=payload.get("snippet", ""),
-                body_text=payload.get("body_text", ""),
+                body_text="",
                 source_sha256=source_hash,
-                attachments=payload.get("attachments") or [],
-                status="fetched",
+                attachments=[],
+                status="candidate",
             )
             created += 1
         except Exception as exc:
             failed += 1
             warnings.append(f"{message_id}: {str(exc)[:180]}")
+    run.discovery_page_token = search_result.get("next_page_token") or ""
+    run.discovery_exhausted = not bool(run.discovery_page_token) or (existing_count + created + reused) >= int(run.max_messages or 0)
+    run.discovery_result_estimate = search_result.get("result_size_estimate") or run.discovery_result_estimate
     run.status = ContractIntelligenceRun.STATUS_READY if failed < len(messages or []) else ContractIntelligenceRun.STATUS_FAILED
     run.completed_at = timezone.now()
     run.warnings = warnings
     refresh_contract_run_summary(run)
-    run.save(update_fields=["status", "completed_at", "warnings", "summary", "updated_at"])
+    run.save(
+        update_fields=[
+            "status",
+            "completed_at",
+            "warnings",
+            "summary",
+            "discovery_page_token",
+            "discovery_exhausted",
+            "discovery_result_estimate",
+            "updated_at",
+        ]
+    )
     audit_log(
         user,
         QuotationAuditLog.ACTION_IMPORTED,
         run,
         company=run.company,
         message="Discovered contract intelligence emails from Gmail.",
-        changes={"query": query, "created": created, "reused": reused, "failed": failed},
+        changes={
+            "query": query,
+            "batch_size": effective_batch_size,
+            "created": created,
+            "reused": reused,
+            "failed": failed,
+            "discovery_exhausted": run.discovery_exhausted,
+        },
     )
-    return {"query": query, "created": created, "reused": reused, "failed": failed, "warnings": warnings}
+    return {
+        "query": query,
+        "created": created,
+        "reused": reused,
+        "failed": failed,
+        "warnings": warnings,
+        "next_page_token": run.discovery_page_token,
+        "discovery_exhausted": run.discovery_exhausted,
+        "result_size_estimate": run.discovery_result_estimate,
+    }
 
 
 def _decimal(value):
@@ -694,19 +817,47 @@ def _create_contract_item(run, source, payload, *, requested_date=None):
     )
 
 
-def analyze_contract_run(run, user, *, use_ai=True):
+def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     run.status = ContractIntelligenceRun.STATUS_ANALYZING
     run.ai_status = "running"
     run.started_at = timezone.now()
     run.save(update_fields=["status", "ai_status", "started_at", "updated_at"])
-    ContractIntelligenceItem.objects.filter(run=run).delete()
     created = 0
     failed = 0
     warnings = []
-    sources = run.sources.all()
+    effective_limit = min(
+        max(int(source_limit or getattr(settings, "QUOTATION_CONTRACT_ANALYZE_BATCH_SIZE", 25)), 1),
+        100,
+    )
+    sources = list(
+        ContractIntelligenceSource.objects.filter(run=run)
+        .exclude(status="analyzed")
+        .order_by("-sent_at", "-created_at")[:effective_limit]
+    )
+    try:
+        connection = user.quotation_gmail_connection
+    except GmailOAuthConnection.DoesNotExist:
+        connection = None
     for source in sources:
         source.status = "analyzing"
         source.save(update_fields=["status", "updated_at"])
+        if not source.body_text and source.gmail_message_id:
+            if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+                failed += 1
+                source.status = "failed"
+                source.error = "Connect Gmail read-only to fetch message content before analysis."
+                source.save(update_fields=["status", "error", "updated_at"])
+                continue
+            try:
+                source = hydrate_contract_source(source, connection, include_attachments=run.include_attachments)
+            except Exception as exc:
+                failed += 1
+                source.status = "failed"
+                source.error = f"Could not fetch Gmail source content: {str(exc)[:420]}"
+                source.save(update_fields=["status", "error", "updated_at"])
+                warnings.append(f"{source.subject or source.gmail_message_id}: {source.error[:140]}")
+                continue
+        ContractIntelligenceItem.objects.filter(run=run, source=source).delete()
         classification, confidence = _classify_source_deterministically(source)
         payload = None
         if use_ai:
@@ -732,7 +883,14 @@ def analyze_contract_run(run, user, *, use_ai=True):
             source.status = "failed"
             source.error = str(exc)[:500]
             source.save(update_fields=["status", "error", "updated_at"])
-    run.status = ContractIntelligenceRun.STATUS_REVIEW if created else ContractIntelligenceRun.STATUS_FAILED
+    total_items = ContractIntelligenceItem.objects.filter(run=run).count()
+    pending_sources = ContractIntelligenceSource.objects.filter(run=run).exclude(status="analyzed").count()
+    if total_items:
+        run.status = ContractIntelligenceRun.STATUS_REVIEW
+    elif pending_sources and sources:
+        run.status = ContractIntelligenceRun.STATUS_READY
+    else:
+        run.status = ContractIntelligenceRun.STATUS_FAILED
     run.ai_status = "completed_with_warnings" if warnings else "completed"
     run.completed_at = timezone.now()
     run.warnings = warnings
@@ -744,9 +902,21 @@ def analyze_contract_run(run, user, *, use_ai=True):
         run,
         company=run.company,
         message="Analyzed contract intelligence source emails.",
-        changes={"items_created": created, "sources_failed": failed, "warnings": warnings[:10]},
+        changes={
+            "items_created": created,
+            "sources_failed": failed,
+            "sources_analyzed_this_batch": len(sources) - failed,
+            "pending_sources": pending_sources,
+            "warnings": warnings[:10],
+        },
     )
-    return {"items_created": created, "sources_failed": failed, "warnings": warnings}
+    return {
+        "items_created": created,
+        "sources_failed": failed,
+        "sources_analyzed": len(sources) - failed,
+        "pending_sources": pending_sources,
+        "warnings": warnings,
+    }
 
 
 def refresh_contract_run_summary(run):
@@ -782,8 +952,14 @@ def refresh_contract_run_summary(run):
     top_items.sort(key=lambda row: (-row["count"], row["item_name"]))
     run.summary = {
         "sources": sources.count(),
+        "sources_candidate": sources.filter(status="candidate").count(),
+        "sources_fetched": sources.filter(status="fetched").count(),
         "sources_analyzed": sources.filter(status="analyzed").count(),
         "sources_failed": sources.filter(status="failed").count(),
+        "discovery_exhausted": run.discovery_exhausted,
+        "discovery_result_estimate": run.discovery_result_estimate,
+        "discovery_batch_size": run.discovery_batch_size,
+        "domain_hint": run.sender_domain_hint,
         "inquiries": sources.filter(classification=ContractIntelligenceSource.CLASS_INQUIRY).count(),
         "quotations": sources.filter(classification=ContractIntelligenceSource.CLASS_QUOTATION).count(),
         "lpos": sources.filter(classification=ContractIntelligenceSource.CLASS_LPO).count(),

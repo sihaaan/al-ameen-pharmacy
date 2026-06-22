@@ -302,9 +302,14 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
             "company_name",
             "target_company_name",
             "gmail_query",
+            "sender_domain_hint",
             "date_from",
             "date_to",
             "max_messages",
+            "discovery_batch_size",
+            "discovery_page_token",
+            "discovery_exhausted",
+            "discovery_result_estimate",
             "include_attachments",
             "status",
             "ai_status",
@@ -326,6 +331,9 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
             "ai_status",
             "summary",
             "warnings",
+            "discovery_page_token",
+            "discovery_exhausted",
+            "discovery_result_estimate",
             "created_by",
             "created_by_username",
             "source_count",
@@ -352,7 +360,10 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"target_company_name": "Enter the customer/company to search for."})
         max_messages = attrs.get("max_messages")
         if max_messages is not None:
-            attrs["max_messages"] = min(max(int(max_messages), 1), 200)
+            attrs["max_messages"] = min(max(int(max_messages), 1), 5000)
+        batch_size = attrs.get("discovery_batch_size")
+        if batch_size is not None:
+            attrs["discovery_batch_size"] = min(max(int(batch_size), 1), 100)
         return attrs
 
 
