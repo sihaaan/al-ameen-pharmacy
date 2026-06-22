@@ -1443,8 +1443,69 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertIn('"ALEC"', query)
         self.assertIn("from:alec.ae", query)
         self.assertIn("to:alec.ae", query)
+        self.assertIn("cc:alec.ae", query)
         self.assertIn('"alec.ae"', query)
-        self.assertIn("inquiry", query)
+        self.assertNotIn("inquiry OR enquiry", query)
+
+    def test_contract_analysis_skips_email_signature_noise(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC order follow-up",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            body_text="\n".join(
+                [
+                    "<+971505456388>",
+                    "<https://www.alameenpharmacygroup.com/>",
+                    "Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39",
+                    "Please find the attached LPO, kindly proceed accordingly.",
+                    "DEEP HEAT SPRAY 10 BOTTLES",
+                ]
+            ),
+        )
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": False, "source_limit": 5},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = list(ContractIntelligenceItem.objects.filter(run=run).values_list("suggested_item_name", flat=True))
+        self.assertEqual(items, ["DEEP HEAT SPRAY"])
+
+    @patch("quotations.contract_intelligence._ai_items_for_source")
+    def test_contract_ai_analysis_uses_small_safe_batches(self, mock_ai_items):
+        mock_ai_items.return_value = {"classification": ContractIntelligenceSource.CLASS_UNKNOWN, "confidence": 0.8, "items": []}
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+        for index in range(7):
+            ContractIntelligenceSource.objects.create(
+                run=run,
+                subject=f"ALEC source {index}",
+                sender="buyer@alec.ae",
+                sent_at=timezone.now(),
+                body_text=f"Pulse Oximeter {index + 1} NUM 55",
+            )
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": True, "source_limit": 25},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result"]["sources_analyzed"], 5)
+        self.assertEqual(response.data["result"]["pending_sources"], 2)
+        self.assertEqual(mock_ai_items.call_count, 5)
 
     @patch("quotations.contract_intelligence.gmail_fetch_message_metadata")
     @patch("quotations.contract_intelligence.gmail_search_messages")

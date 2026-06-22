@@ -588,7 +588,7 @@ const ContractIntelligenceManager = () => {
                   <button type="button" className="qm-secondary" onClick={discover} disabled={!gmailConnected || busyAction === 'discover' || selectedRun.discovery_exhausted}>
                     {busyAction === 'discover' ? 'Discovering...' : selectedSummary.sources ? 'Discover One Batch' : 'Discover First Batch'}
                   </button>
-                  {!!selectedSummary.sources && !selectedRun.discovery_exhausted && (
+                  {!!selectedSummary.sources && (
                     <button type="button" className="qm-secondary" onClick={() => discoverAll({ resetCursor: true })} disabled={!gmailConnected || busyAction === 'discover-all'}>
                       Restart Full Discovery
                     </button>

@@ -56,6 +56,7 @@ SUPPORTED_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".xlsb"}
 DEFAULT_DISCOVERY_BATCH_SIZE = 25
 MAX_DISCOVERY_BATCH_SIZE = 100
 MAX_CONTRACT_MESSAGES = 5000
+DEFAULT_AI_ANALYSIS_BATCH_SIZE = 5
 
 
 CONTRACT_AI_JSON_SCHEMA = {
@@ -309,15 +310,22 @@ def build_contract_gmail_query(run):
     company_terms = [run.target_company_name or "", getattr(run.company, "name", "")]
     company_term = next((term for term in company_terms if term), "ALEC")
     domain_hint = (getattr(run, "sender_domain_hint", "") or "").strip().lstrip("@")
-    company_search_parts = [f'"{company_term}"']
     if domain_hint:
-        # Domain hints speed up large mailbox scans, but company text remains in
-        # the query so forwarded or non-domain messages are still discoverable.
-        company_search_parts.extend([f"from:{domain_hint}", f"to:{domain_hint}", f'"{domain_hint}"'])
-    parts = [
-        "(" + " OR ".join(company_search_parts) + ")",
-        "(inquiry OR enquiry OR RFQ OR quotation OR quote OR LPO OR purchase order)",
-    ]
+        # For contract intelligence, domain hints should widen discovery rather
+        # than over-filter it. AI/basic analysis will classify relevance later.
+        company_search_parts = [
+            f"from:{domain_hint}",
+            f"to:{domain_hint}",
+            f"cc:{domain_hint}",
+            f'"{domain_hint}"',
+            f'"{company_term}"',
+        ]
+        parts = ["(" + " OR ".join(company_search_parts) + ")"]
+    else:
+        parts = [
+            f'"{company_term}"',
+            "(inquiry OR enquiry OR RFQ OR quotation OR quote OR LPO OR purchase order)",
+        ]
     if run.date_from:
         parts.append(f"after:{run.date_from.strftime('%Y/%m/%d')}")
     if run.date_to:
@@ -671,15 +679,78 @@ def _classify_source_deterministically(source):
     return ContractIntelligenceSource.CLASS_UNKNOWN, 0.40
 
 
+NOISE_PREFIXES = (
+    "address",
+    "dear ",
+    "thanks",
+    "thank you",
+    "regards",
+    "best regards",
+    "kind regards",
+    "please find",
+    "kindly find",
+    "attached",
+    "subject",
+    "from ",
+    "to ",
+    "cc ",
+    "tel",
+    "phone",
+    "mobile",
+    "email",
+    "e-mail",
+    "website",
+)
+
+
+NOISE_PHRASES = (
+    "quotation is attached",
+    "revised quotation is attached",
+    "please find the attached",
+    "kindly find the attached",
+    "confidential",
+    "terms and conditions",
+    "follow us",
+    "p.o. box",
+    "po box",
+)
+
+
+def _is_contract_item_noise(value):
+    text = " ".join(str(value or "").split())
+    unwrapped_text = text.strip("<> ")
+    normalized = normalize_label(text)
+    if not normalized or len(normalized) < 3:
+        return True
+    lowered = text.lower().strip()
+    if lowered.startswith(NOISE_PREFIXES):
+        return True
+    if any(phrase in lowered for phrase in NOISE_PHRASES):
+        return True
+    if re.search(r"https?://|www\.|@[\w.-]+", lowered):
+        return True
+    if re.fullmatch(r"[+()0-9\s.-]{7,}", unwrapped_text):
+        return True
+    if re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", lowered):
+        return True
+    # Long prose lines without any item-like quantity or price signal are almost
+    # always email body/signature text, not product demand.
+    if len(text.split()) >= 10 and not re.search(r"\b\d+(?:\.\d+)?\b", text):
+        return True
+    return False
+
+
 def _deterministic_items_from_text(source):
     items = []
     lines = [line.strip() for line in re.split(r"[\r\n]+", source.body_text or "") if line.strip()]
     for line in lines[:300]:
+        if _is_contract_item_noise(line):
+            continue
         parsed = parse_inquiry_line(line, base_confidence=0.45)
         if not parsed:
             continue
         name = parsed.get("requested_item_name") or parsed.get("raw_name") or ""
-        if len(normalize_label(name)) < 3:
+        if _is_contract_item_noise(name):
             continue
         items.append(
             {
@@ -708,7 +779,7 @@ def _deterministic_items_from_attachments(source):
             continue
         for row in attachment.get("lines") or []:
             name = row.get("requested_item_name") or row.get("item_name") or row.get("raw_name") or ""
-            if len(normalize_label(name)) < 3:
+            if _is_contract_item_noise(name):
                 continue
             items.append(
                 {
@@ -789,10 +860,15 @@ def _ai_items_for_source(source, run):
 
 
 def _create_contract_item(run, source, payload, *, requested_date=None):
-    name = (payload.get("suggested_item_name") or payload.get("item_name") or "").strip()
-    if not name or len(normalize_label(name)) < 3:
+    if not isinstance(payload, dict):
         return None
-    product_match = suggest_product_for_text(name, run.company).product if run.company_id else suggest_product_for_text(name, None).product
+    name = (payload.get("suggested_item_name") or payload.get("item_name") or "").strip()
+    if _is_contract_item_noise(name):
+        return None
+    try:
+        product_match = suggest_product_for_text(name, run.company).product if run.company_id else suggest_product_for_text(name, None).product
+    except Exception:
+        product_match = None
     return ContractIntelligenceItem.objects.create(
         run=run,
         source=source,
@@ -823,10 +899,17 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     created = 0
     failed = 0
     warnings = []
-    effective_limit = min(
+    requested_limit = min(
         max(int(source_limit or getattr(settings, "QUOTATION_CONTRACT_ANALYZE_BATCH_SIZE", 25)), 1),
         100,
     )
+    if use_ai:
+        effective_limit = min(
+            requested_limit,
+            max(int(getattr(settings, "QUOTATION_CONTRACT_AI_ANALYZE_BATCH_SIZE", DEFAULT_AI_ANALYSIS_BATCH_SIZE)), 1),
+        )
+    else:
+        effective_limit = requested_limit
     sources = list(
         ContractIntelligenceSource.objects.filter(run=run)
         .exclude(status="analyzed")
