@@ -39,6 +39,12 @@ const itemStatusLabel = {
   needs_review: 'Needs review',
 };
 
+const discoveryStopLabel = {
+  can_continue: 'Discovery can continue',
+  message_cap_reached: 'Message cap reached',
+  gmail_exhausted: 'Gmail has no more matching messages',
+};
+
 const formatDate = (value) => {
   if (!value) return '-';
   const date = new Date(value);
@@ -340,6 +346,28 @@ const ContractIntelligenceManager = () => {
     }
   };
 
+  const cleanExtractedRows = async () => {
+    if (!selectedRun) return;
+    const runId = selectedRun.id;
+    setBusyAction('clean-items');
+    setNotice('');
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.contractIntelligence.cleanItems(runId);
+      const result = response.data.result || {};
+      setNotice(
+        `Cleaned extracted rows: ${result.updated || 0} item name(s) improved, `
+        + `${result.noise_rejected || 0} metadata/noise row(s) hidden, `
+        + `${result.skipped_approved || 0} approved row(s) left untouched.`
+      );
+      await refreshSelectedRun(runId);
+    } catch (error) {
+      await handleError(error, 'Clean contract intelligence rows', `POST /quotations/contract-intelligence-runs/${runId}/clean_items/`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
   const deleteRun = async () => {
     if (!deleteConfirmRun) return;
     setBusyAction('delete-run');
@@ -582,11 +610,15 @@ const ContractIntelligenceManager = () => {
                 <div>
                   <span className={`qm-badge status-${selectedRun.status}`}>{statusLabel[selectedRun.status] || selectedRun.status}</span>
                   <h3>{selectedRun.target_company_name}</h3>
-                  <p>{selectedRun.gmail_query || 'Default smart Gmail query will use the customer name, optional domain hint, inquiry/quotation/LPO terms, and date range.'}</p>
+                  <p>{selectedRun.gmail_query ? 'Custom Gmail query override is active.' : 'Smart Gmail query uses the customer name, optional domain hint, inquiry/quotation/LPO terms, and date range.'}</p>
+                  <div className="qm-contract-query-box">
+                    <strong>Effective Gmail query</strong>
+                    <code>{selectedRun.effective_gmail_query || selectedRun.gmail_query || 'No Gmail query available yet.'}</code>
+                  </div>
                   <div className="qm-contract-progress-line">
                     <span>Batch size: {selectedRun.discovery_batch_size || 25}</span>
                     <span>Message cap: {selectedRun.max_messages || 0}</span>
-                    <span>{selectedRun.discovery_exhausted ? 'Discovery complete' : 'Discovery can continue'}</span>
+                    <span>{discoveryStopLabel[selectedRun.discovery_stop_reason] || (selectedRun.discovery_exhausted ? 'Discovery complete' : 'Discovery can continue')}</span>
                     {selectedRun.sender_domain_hint && <span>Domain hint: {selectedRun.sender_domain_hint}</span>}
                   </div>
                 </div>
@@ -610,6 +642,9 @@ const ContractIntelligenceManager = () => {
                   </button>
                   <button type="button" className="qm-secondary" onClick={() => analyze(true)} disabled={!sources.length || busyAction === 'analyze-ai'}>
                     AI Analyze One Batch
+                  </button>
+                  <button type="button" className="qm-secondary" onClick={cleanExtractedRows} disabled={!items.length || busyAction === 'clean-items'}>
+                    {busyAction === 'clean-items' ? 'Cleaning...' : 'Clean Extracted Rows'}
                   </button>
                   <button type="button" className="qm-secondary" onClick={exportRun} disabled={!items.length || busyAction === 'export'}>
                     Export Excel

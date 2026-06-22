@@ -39,6 +39,7 @@ from .company_matching import find_similar_companies
 from .contract_intelligence import (
     build_contract_intelligence_export,
     build_gmail_auth_url,
+    clean_contract_run_items,
     discover_contract_sources,
     disconnect_gmail,
     exchange_gmail_code,
@@ -699,6 +700,17 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
         refresh_contract_run_summary(run)
         run.save(update_fields=["summary", "updated_at"])
         return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": totals})
+
+    @action(detail=True, methods=["post"])
+    def clean_items(self, request, pk=None):
+        run = self.get_object()
+        try:
+            result = clean_contract_run_items(run)
+        except Exception as exc:
+            logger.exception("Contract intelligence item cleanup failed.")
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        run.refresh_from_db()
+        return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": result})
 
     @action(detail=True, methods=["get"])
     def export(self, request, pk=None):

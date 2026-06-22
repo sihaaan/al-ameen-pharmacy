@@ -3628,6 +3628,34 @@
   overflow-wrap: anywhere;
 }
 
+.qm-contract-query-box {
+  max-width: 780px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.qm-contract-query-box strong {
+  display: block;
+  margin-bottom: 5px;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.qm-contract-query-box code {
+  display: block;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .qm-contract-progress-line {
   display: flex;
   flex-wrap: wrap;

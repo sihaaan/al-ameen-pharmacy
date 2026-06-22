@@ -1149,6 +1149,57 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     }
 
 
+def clean_contract_run_items(run):
+    """Clean existing extracted rows without creating durable catalog data."""
+    total = 0
+    updated = 0
+    noise_rejected = 0
+    already_clean = 0
+    skipped_approved = 0
+    for item in ContractIntelligenceItem.objects.filter(run=run).select_related("source", "product"):
+        total += 1
+        if item.status == ContractIntelligenceItem.STATUS_APPROVED:
+            skipped_approved += 1
+            continue
+
+        current_name = item.suggested_item_name or item.original_item_name
+        cleaned_name = _clean_contract_item_name(current_name)
+        is_noise = _is_contract_item_noise(cleaned_name or current_name)
+        update_fields = []
+
+        if is_noise:
+            if item.status != ContractIntelligenceItem.STATUS_REJECTED:
+                item.status = ContractIntelligenceItem.STATUS_REJECTED
+                update_fields.append("status")
+                noise_rejected += 1
+            else:
+                already_clean += 1
+            note = "Marked as metadata/noise by contract intelligence cleanup."
+            if note not in (item.ai_reason or ""):
+                item.ai_reason = f"{item.ai_reason}\n{note}".strip() if item.ai_reason else note
+                update_fields.append("ai_reason")
+        elif cleaned_name and cleaned_name != item.suggested_item_name:
+            item.suggested_item_name = cleaned_name[:500]
+            item.normalized_item_name = normalize_label(cleaned_name)
+            update_fields.extend(["suggested_item_name", "normalized_item_name"])
+            updated += 1
+        else:
+            already_clean += 1
+
+        if update_fields:
+            item.save(update_fields=sorted(set(update_fields + ["updated_at"])))
+
+    refresh_contract_run_summary(run)
+    run.save(update_fields=["summary", "updated_at"])
+    return {
+        "total": total,
+        "updated": updated,
+        "noise_rejected": noise_rejected,
+        "already_clean": already_clean,
+        "skipped_approved": skipped_approved,
+    }
+
+
 def refresh_contract_run_summary(run):
     sources = ContractIntelligenceSource.objects.filter(run=run)
     items = ContractIntelligenceItem.objects.filter(run=run)

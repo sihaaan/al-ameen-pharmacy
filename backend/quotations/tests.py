@@ -1529,6 +1529,50 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         items = list(ContractIntelligenceItem.objects.filter(run=run).order_by("id").values_list("suggested_item_name", flat=True))
         self.assertEqual(items, ["AMMONIA INHALANT", "GAUZE SWAB STERILE - GAUZE BANDAGE -1''"])
 
+    def test_contract_cleanup_action_cleans_existing_review_rows(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            max_messages=1000,
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC catalog",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        noisy = ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39",
+            suggested_item_name="Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39",
+            normalized_item_name="address frij murar deira dubai uae po box 39",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+        messy = ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="10100004 AMMONIA INHALANT Brand:BRAND AS QUOTED Comments:AMMONIA INHALANT",
+            suggested_item_name="10100004 AMMONIA INHALANT Brand:BRAND AS QUOTED Comments:AMMONIA INHALANT",
+            normalized_item_name="10100004 ammonia inhalant brand brand as quoted comments ammonia inhalant",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+
+        response = self.client.post(reverse("quotation-contract-intelligence-run-clean-items", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        noisy.refresh_from_db()
+        messy.refresh_from_db()
+        self.assertEqual(noisy.status, ContractIntelligenceItem.STATUS_REJECTED)
+        self.assertEqual(messy.suggested_item_name, "AMMONIA INHALANT")
+        self.assertEqual(response.data["result"]["noise_rejected"], 1)
+        self.assertEqual(response.data["result"]["updated"], 1)
+        self.assertIn("effective_gmail_query", response.data["run"])
+        self.assertEqual(response.data["run"]["discovery_stop_reason"], "can_continue")
+
     @patch("quotations.contract_intelligence._ai_items_for_source")
     def test_contract_ai_analysis_uses_small_safe_batches(self, mock_ai_items):
         mock_ai_items.return_value = {"classification": ContractIntelligenceSource.CLASS_UNKNOWN, "confidence": 0.8, "items": []}

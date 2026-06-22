@@ -293,6 +293,8 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     source_count = serializers.SerializerMethodField()
     item_count = serializers.SerializerMethodField()
+    effective_gmail_query = serializers.SerializerMethodField()
+    discovery_stop_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = ContractIntelligenceRun
@@ -302,6 +304,7 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
             "company_name",
             "target_company_name",
             "gmail_query",
+            "effective_gmail_query",
             "sender_domain_hint",
             "date_from",
             "date_to",
@@ -309,6 +312,7 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
             "discovery_batch_size",
             "discovery_page_token",
             "discovery_exhausted",
+            "discovery_stop_reason",
             "discovery_result_estimate",
             "include_attachments",
             "status",
@@ -327,12 +331,14 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "company_name",
+            "effective_gmail_query",
             "status",
             "ai_status",
             "summary",
             "warnings",
             "discovery_page_token",
             "discovery_exhausted",
+            "discovery_stop_reason",
             "discovery_result_estimate",
             "created_by",
             "created_by_username",
@@ -349,6 +355,19 @@ class ContractIntelligenceRunSerializer(serializers.ModelSerializer):
 
     def get_item_count(self, obj):
         return obj.items.count() if obj.pk else 0
+
+    def get_effective_gmail_query(self, obj):
+        from .contract_intelligence import build_contract_gmail_query
+
+        return build_contract_gmail_query(obj)
+
+    def get_discovery_stop_reason(self, obj):
+        if not obj.discovery_exhausted:
+            return "can_continue"
+        tracked = obj.sources.exclude(gmail_message_id="").count() if obj.pk else 0
+        if obj.max_messages and tracked >= int(obj.max_messages):
+            return "message_cap_reached"
+        return "gmail_exhausted"
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
