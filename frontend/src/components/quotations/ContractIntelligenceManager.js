@@ -9,7 +9,7 @@ const emptyRunForm = {
   sender_domain_hint: 'alec.ae',
   date_from: '',
   date_to: '',
-  max_messages: 500,
+  max_messages: 5000,
   discovery_batch_size: 25,
   include_attachments: true,
 };
@@ -68,6 +68,7 @@ const ContractIntelligenceManager = () => {
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState('');
   const [itemFilter, setItemFilter] = useState('');
+  const [sourceSort, setSourceSort] = useState('newest');
   const [deleteConfirmRun, setDeleteConfirmRun] = useState(null);
 
   const selectedSummary = selectedRun?.summary || {};
@@ -84,6 +85,14 @@ const ContractIntelligenceManager = () => {
       (item.source_subject || '').toLowerCase().includes(term)
     ));
   }, [items, itemFilter]);
+
+  const visibleSources = useMemo(() => (
+    [...sources].sort((left, right) => {
+      const leftTime = new Date(left.sent_at || left.created_at || 0).getTime() || 0;
+      const rightTime = new Date(right.sent_at || right.created_at || 0).getTime() || 0;
+      return sourceSort === 'oldest' ? leftTime - rightTime : rightTime - leftTime;
+    })
+  ), [sources, sourceSort]);
 
   const handleError = async (error, action, endpoint) => {
     const details = await describeQuotationError(error, action, endpoint);
@@ -658,12 +667,21 @@ const ContractIntelligenceManager = () => {
                         Sources
                         <span className="qm-heading-count">{selectedSummary.sources || 0} emails found</span>
                       </h3>
-                      <p>Emails and attachments found for this run.</p>
+                      <p>Emails and attachments found for this run. Showing all discovered sources.</p>
                     </div>
+                    <select
+                      className="qm-input compact"
+                      value={sourceSort}
+                      onChange={(event) => setSourceSort(event.target.value)}
+                      aria-label="Sort discovered sources"
+                    >
+                      <option value="newest">Newest first</option>
+                      <option value="oldest">Oldest first</option>
+                    </select>
                   </div>
                   <div className="qm-contract-source-list">
                     {sources.length === 0 && <div className="qm-empty compact">No Gmail sources discovered yet.</div>}
-                    {sources.slice(0, 50).map((source) => (
+                    {visibleSources.map((source) => (
                       <article key={source.id} className="qm-contract-source">
                         <div>
                           <strong>{source.subject || '(no subject)'}</strong>
