@@ -730,6 +730,8 @@ NOISE_PREFIXES = (
 
 
 NOISE_PHRASES = (
+    "alec logo",
+    "al ameen invoice",
     "quotation is attached",
     "revised quotation is attached",
     "please find the attached",
@@ -737,13 +739,24 @@ NOISE_PHRASES = (
     "confidential",
     "terms and conditions",
     "follow us",
+    "frij murar",
     "p.o. box",
     "po box",
+    "against lpo",
+    "need soa",
+    "overdue payment",
+    "invoice #",
     "last date of submission",
     "procurement specialist",
     "chief executive officer",
     "payment terms",
     "days credit",
+    "external email",
+    "vector file rgb",
+    "human rights",
+    "sustainability",
+    "esg report",
+    "publishes",
     "al ameen pharmacy group",
     "authorized signature",
     "company stamp",
@@ -770,6 +783,7 @@ NOISE_LABELS = {
     "remarks",
     "rfq",
     "rfq ref",
+    "rfq reference",
     "r f q",
     "project",
     "manuf",
@@ -789,6 +803,25 @@ NOISE_LABELS = {
     "to",
     "cc",
 }
+
+
+def _has_low_text_signal(text):
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return True
+    alpha_count = sum(char.isalpha() for char in compact)
+    alnum_count = sum(char.isalnum() for char in compact)
+    if alpha_count < 3:
+        return True
+    if re.fullmatch(r"[\W\d_]+", compact):
+        return True
+    leading = compact[:1]
+    if leading in {"!", "$", "&", "#", "{", "[", "]", "|", "\\"} and not re.match(r"^\d{5,}[A-Za-z ]{3,}", compact):
+        return True
+    symbol_count = len(compact) - alnum_count
+    if len(compact) <= 14 and symbol_count >= alpha_count:
+        return True
+    return False
 
 
 def _clean_contract_item_name(value):
@@ -842,6 +875,10 @@ def _is_contract_item_noise_basic(value):
         return True
     if normalized in NOISE_LABELS:
         return True
+    if _has_low_text_signal(text):
+        return True
+    if re.search(r"\bcid\s*:", lowered) or re.search(r"\[[^\]]*(?:cid|logo|external email)[^\]]*\]", lowered):
+        return True
     if lowered.startswith(NOISE_PREFIXES):
         return True
     if any(phrase in lowered for phrase in NOISE_PHRASES):
@@ -857,6 +894,10 @@ def _is_contract_item_noise_basic(value):
         title in lowered for title in ["suleman", "mahesh", "mohammad", "muhammad", "rengan", "rensan"]
     ):
         return True
+    if re.search(r"\+?\d[\d\s()./-]{5,}", lowered) and any(
+        title in lowered for title in ["suleman", "mahesh", "mohammad", "muhammad", "rengan", "rensan"]
+    ):
+        return True
     return False
 
 
@@ -869,6 +910,10 @@ def _is_contract_item_noise(value):
     lowered = text.lower().strip()
     if normalized in NOISE_LABELS:
         return True
+    if _has_low_text_signal(text):
+        return True
+    if re.search(r"\bcid\s*:", lowered) or re.search(r"\[[^\]]*(?:cid|logo|external email)[^\]]*\]", lowered):
+        return True
     if lowered.startswith(NOISE_PREFIXES):
         return True
     if any(phrase in lowered for phrase in NOISE_PHRASES):
@@ -880,6 +925,10 @@ def _is_contract_item_noise(value):
     if re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", lowered):
         return True
     if re.fullmatch(r"[a-z][a-z .'-]{2,40}", lowered) and any(
+        title in lowered for title in ["suleman", "mahesh", "mohammad", "muhammad", "rengan", "rensan"]
+    ):
+        return True
+    if re.search(r"\+?\d[\d\s()./-]{5,}", lowered) and any(
         title in lowered for title in ["suleman", "mahesh", "mohammad", "muhammad", "rengan", "rensan"]
     ):
         return True

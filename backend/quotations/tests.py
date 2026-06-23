@@ -1502,6 +1502,12 @@ class ContractIntelligenceWorkflowTests(APITestCase):
                         {"requested_item_name": "> *Item Descr:*"},
                         {"requested_item_name": "> *Last date of submission*"},
                         {"requested_item_name": "M +971 508126371 | T +971 4 429 0599"},
+                        {"requested_item_name": "[ALEC logo - vector file RGB]"},
+                        {"requested_item_name": "[cid:ii_18ff68062474ccf311]"},
+                        {"requested_item_name": "$INO Fercdulnr*"},
+                        {"requested_item_name": "Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39"},
+                        {"requested_item_name": "Mahammad Suleman 0505456388"},
+                        {"requested_item_name": "ALEC Holdings Publishes 2024 Sustainability & ESG Report"},
                         {
                             "requested_item_name": "10100004 AMMONIA INHALANT Brand:BRAND AS QUOTED Comments:AMMONIA INHALANT",
                             "quantity": "3",
@@ -1560,15 +1566,35 @@ class ContractIntelligenceWorkflowTests(APITestCase):
             normalized_item_name="10100004 ammonia inhalant brand brand as quoted comments ammonia inhalant",
             status=ContractIntelligenceItem.STATUS_SUGGESTED,
         )
+        logo = ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="[ALEC logo - vector file RGB]",
+            suggested_item_name="[ALEC logo - vector file RGB]",
+            normalized_item_name="alec logo vector file rgb",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+        phone = ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="Mahammad Suleman 0505456388",
+            suggested_item_name="Mahammad Suleman 0505456388",
+            normalized_item_name="mahammad suleman 0505456388",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
 
         response = self.client.post(reverse("quotation-contract-intelligence-run-clean-items", args=[run.id]))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         noisy.refresh_from_db()
         messy.refresh_from_db()
+        logo.refresh_from_db()
+        phone.refresh_from_db()
         self.assertEqual(noisy.status, ContractIntelligenceItem.STATUS_REJECTED)
+        self.assertEqual(logo.status, ContractIntelligenceItem.STATUS_REJECTED)
+        self.assertEqual(phone.status, ContractIntelligenceItem.STATUS_REJECTED)
         self.assertEqual(messy.suggested_item_name, "AMMONIA INHALANT")
-        self.assertEqual(response.data["result"]["noise_rejected"], 1)
+        self.assertEqual(response.data["result"]["noise_rejected"], 3)
         self.assertEqual(response.data["result"]["updated"], 1)
         self.assertIn("effective_gmail_query", response.data["run"])
         self.assertEqual(response.data["run"]["discovery_stop_reason"], "can_continue")
