@@ -1430,6 +1430,94 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(run.sender_domain_hint, "alec.ae")
         self.assertEqual(run.company, self.company)
 
+    @patch("quotations.views.refresh_contract_run_summary", side_effect=ValueError("stale summary row"))
+    def test_contract_intelligence_run_detail_does_not_500_when_summary_refresh_fails(self, _mock_refresh):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            created_by=self.staff,
+        )
+
+        response = self.client.get(reverse("quotation-contract-intelligence-run-detail", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], run.id)
+        run.refresh_from_db()
+        self.assertTrue(any("Summary refresh failed" in warning for warning in run.warnings))
+
+    def test_contract_analysis_with_no_pending_sources_returns_clean_noop(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            status=ContractIntelligenceRun.STATUS_REVIEW,
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC analyzed source",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="Pulse Oximeter",
+            suggested_item_name="Pulse Oximeter",
+            normalized_item_name="pulse oximeter",
+        )
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": False, "source_limit": 1},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["result"]["no_pending_sources"])
+        self.assertEqual(response.data["result"]["sources_analyzed"], 0)
+        self.assertEqual(response.data["result"]["items_created"], 0)
+        run.refresh_from_db()
+        self.assertEqual(run.status, ContractIntelligenceRun.STATUS_REVIEW)
+        self.assertEqual(run.ai_status, "no_pending_sources")
+
+    def test_contract_analysis_reanalyze_resets_existing_items_and_sources(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            status=ContractIntelligenceRun.STATUS_REVIEW,
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC inquiry",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            body_text="Deep Heat Spray 10 BOTTLES 18",
+            status="analyzed",
+        )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="Old stale item",
+            suggested_item_name="Old stale item",
+            normalized_item_name="old stale item",
+        )
+
+        response = self.client.post(
+            reverse("quotation-contract-intelligence-run-analyze", args=[run.id]),
+            {"use_ai": False, "source_limit": 1, "reanalyze": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result"]["sources_analyzed"], 1)
+        self.assertFalse(ContractIntelligenceItem.objects.filter(run=run, original_item_name="Old stale item").exists())
+        items = list(ContractIntelligenceItem.objects.filter(run=run).values_list("suggested_item_name", flat=True))
+        self.assertEqual(items, ["Deep Heat Spray 10 BOTTLES 18"])
+        source.refresh_from_db()
+        self.assertEqual(source.status, "analyzed")
+
     def test_contract_gmail_query_uses_domain_hint_without_hard_filter(self):
         run = ContractIntelligenceRun.objects.create(
             company=self.company,
@@ -1499,8 +1587,12 @@ class ContractIntelligenceWorkflowTests(APITestCase):
                     "filename": "alec-rfq.xlsx",
                     "status": "parsed",
                     "lines": [
+                        {"requested_item_name": "!! I"},
+                        {"requested_item_name": "!&t@ SYa"},
+                        {"requested_item_name": "$INo Prticulrnr"},
                         {"requested_item_name": "> *Item Descr:*"},
                         {"requested_item_name": "> *Last date of submission*"},
+                        {"requested_item_name": "Al Ameen Pharmacy LLC - 01/07/2022"},
                         {"requested_item_name": "M +971 508126371 | T +971 4 429 0599"},
                         {"requested_item_name": "[ALEC logo - vector file RGB]"},
                         {"requested_item_name": "[cid:ii_18ff68062474ccf311]"},
@@ -1596,6 +1688,12 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(messy.suggested_item_name, "AMMONIA INHALANT")
         self.assertEqual(response.data["result"]["noise_rejected"], 3)
         self.assertEqual(response.data["result"]["updated"], 1)
+        summary = response.data["run"]["summary"]
+        self.assertEqual(summary["items"], 1)
+        self.assertEqual(summary["raw_items"], 4)
+        self.assertEqual(summary["rejected_noise_items"], 3)
+        self.assertEqual(summary["unique_items"], 1)
+        self.assertEqual([row["item_name"] for row in summary["top_items"]], ["AMMONIA INHALANT"])
         self.assertIn("effective_gmail_query", response.data["run"])
         self.assertEqual(response.data["run"]["discovery_stop_reason"], "can_continue")
 

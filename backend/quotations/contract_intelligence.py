@@ -758,6 +758,7 @@ NOISE_PHRASES = (
     "esg report",
     "publishes",
     "al ameen pharmacy group",
+    "al ameen pharmacy llc",
     "authorized signature",
     "company stamp",
 )
@@ -802,6 +803,11 @@ NOISE_LABELS = {
     "from",
     "to",
     "cc",
+    "s no",
+    "sl no",
+    "sno",
+    "particular",
+    "particulars",
 }
 
 
@@ -883,6 +889,8 @@ def _is_contract_item_noise_basic(value):
         return True
     if any(phrase in lowered for phrase in NOISE_PHRASES):
         return True
+    if re.search(r"\b(?:s\s*\.?\s*no|sl\s*\.?\s*no|partic(?:ulars?|ulr|lr)|prtc?l)\b", lowered):
+        return True
     if re.search(r"https?://|www\.|@[\w.-]+", lowered):
         return True
     unwrapped_text = text.strip("<> ")
@@ -917,6 +925,8 @@ def _is_contract_item_noise(value):
     if lowered.startswith(NOISE_PREFIXES):
         return True
     if any(phrase in lowered for phrase in NOISE_PHRASES):
+        return True
+    if re.search(r"\b(?:s\s*\.?\s*no|sl\s*\.?\s*no|partic(?:ulars?|ulr|lr)|prtc?l)\b", lowered):
         return True
     if re.search(r"https?://|www\.|@[\w.-]+", lowered):
         return True
@@ -1094,10 +1104,6 @@ def _create_contract_item(run, source, payload, *, requested_date=None):
 
 
 def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
-    run.status = ContractIntelligenceRun.STATUS_ANALYZING
-    run.ai_status = "running"
-    run.started_at = timezone.now()
-    run.save(update_fields=["status", "ai_status", "started_at", "updated_at"])
     created = 0
     failed = 0
     warnings = []
@@ -1112,11 +1118,43 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
         )
     else:
         effective_limit = requested_limit
-    sources = list(
-        ContractIntelligenceSource.objects.filter(run=run)
-        .exclude(status="analyzed")
-        .order_by("-sent_at", "-created_at")[:effective_limit]
-    )
+    source_queryset = ContractIntelligenceSource.objects.filter(run=run)
+    pending_queryset = source_queryset.exclude(status="analyzed")
+    sources = list(pending_queryset.order_by("-sent_at", "-created_at")[:effective_limit])
+    if not sources:
+        total_items = ContractIntelligenceItem.objects.filter(run=run).count()
+        pending_sources = pending_queryset.count()
+        if total_items:
+            cleanup_result = clean_contract_run_items(run)
+            active_items = ContractIntelligenceItem.objects.filter(run=run).exclude(
+                status=ContractIntelligenceItem.STATUS_REJECTED
+            ).count()
+            run.status = ContractIntelligenceRun.STATUS_REVIEW if active_items else ContractIntelligenceRun.STATUS_READY
+        else:
+            cleanup_result = None
+        if not total_items and source_queryset.exists():
+            run.status = ContractIntelligenceRun.STATUS_READY
+        elif not total_items:
+            run.status = ContractIntelligenceRun.STATUS_DRAFT
+        run.ai_status = "no_pending_sources"
+        run.completed_at = timezone.now()
+        run.warnings = []
+        refresh_contract_run_summary(run)
+        run.save(update_fields=["status", "ai_status", "completed_at", "warnings", "summary", "updated_at"])
+        return {
+            "items_created": 0,
+            "sources_failed": 0,
+            "sources_analyzed": 0,
+            "pending_sources": pending_sources,
+            "warnings": [],
+            "no_pending_sources": True,
+            "cleanup": cleanup_result,
+        }
+
+    run.status = ContractIntelligenceRun.STATUS_ANALYZING
+    run.ai_status = "running"
+    run.started_at = timezone.now()
+    run.save(update_fields=["status", "ai_status", "started_at", "updated_at"])
     try:
         connection = user.quotation_gmail_connection
     except GmailOAuthConnection.DoesNotExist:
@@ -1183,7 +1221,8 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
             source.status = "failed"
             source.error = str(exc)[:500]
             source.save(update_fields=["status", "error", "updated_at"])
-    total_items = ContractIntelligenceItem.objects.filter(run=run).count()
+    cleanup_result = clean_contract_run_items(run)
+    total_items = ContractIntelligenceItem.objects.filter(run=run).exclude(status=ContractIntelligenceItem.STATUS_REJECTED).count()
     pending_sources = ContractIntelligenceSource.objects.filter(run=run).exclude(status="analyzed").count()
     if total_items:
         run.status = ContractIntelligenceRun.STATUS_REVIEW
@@ -1208,6 +1247,7 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
             "sources_analyzed_this_batch": len(sources) - failed,
             "pending_sources": pending_sources,
             "warnings": warnings[:10],
+            "cleanup": cleanup_result,
         },
     )
     return {
@@ -1216,6 +1256,7 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
         "sources_analyzed": len(sources) - failed,
         "pending_sources": pending_sources,
         "warnings": warnings,
+        "cleanup": cleanup_result,
     }
 
 
@@ -1273,12 +1314,17 @@ def clean_contract_run_items(run):
 def refresh_contract_run_summary(run):
     sources = ContractIntelligenceSource.objects.filter(run=run)
     items = ContractIntelligenceItem.objects.filter(run=run)
+    active_items = items.exclude(status=ContractIntelligenceItem.STATUS_REJECTED)
+    rejected_noise_count = items.filter(status=ContractIntelligenceItem.STATUS_REJECTED).count()
     grouped = defaultdict(lambda: {"count": 0, "latest_date": "", "last_price": "", "units": set(), "source_count": 0})
     source_ids_by_item = defaultdict(set)
-    for item in items:
-        key = normalize_label(item.suggested_item_name or item.original_item_name)
+    for item in active_items:
+        item_name = (item.suggested_item_name or item.original_item_name or "").strip()
+        key = normalize_label(item_name)
+        if not key:
+            continue
         row = grouped[key]
-        row["item_name"] = item.suggested_item_name or item.original_item_name
+        row["item_name"] = item_name
         row["count"] += 1
         if item.unit:
             row["units"].add(item.unit)
@@ -1314,10 +1360,12 @@ def refresh_contract_run_summary(run):
         "inquiries": sources.filter(classification=ContractIntelligenceSource.CLASS_INQUIRY).count(),
         "quotations": sources.filter(classification=ContractIntelligenceSource.CLASS_QUOTATION).count(),
         "lpos": sources.filter(classification=ContractIntelligenceSource.CLASS_LPO).count(),
-        "items": items.count(),
+        "items": active_items.count(),
+        "raw_items": items.count(),
+        "rejected_noise_items": rejected_noise_count,
         "unique_items": len(grouped),
-        "matched_products": items.exclude(product__isnull=True).count(),
-        "needs_review": items.filter(status=ContractIntelligenceItem.STATUS_NEEDS_REVIEW).count(),
+        "matched_products": active_items.exclude(product__isnull=True).count(),
+        "needs_review": active_items.filter(status=ContractIntelligenceItem.STATUS_NEEDS_REVIEW).count(),
         "top_items": top_items[:25],
     }
     return run.summary
@@ -1352,7 +1400,11 @@ def build_contract_intelligence_export(run):
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="0F766E")
         cell.alignment = Alignment(horizontal="center")
-    for item in run.items.select_related("source", "product").order_by("normalized_item_name", "-requested_date", "-id"):
+    for item in (
+        run.items.exclude(status=ContractIntelligenceItem.STATUS_REJECTED)
+        .select_related("source", "product")
+        .order_by("normalized_item_name", "-requested_date", "-id")
+    ):
         ws.append(
             [
                 item.suggested_item_name or item.original_item_name,

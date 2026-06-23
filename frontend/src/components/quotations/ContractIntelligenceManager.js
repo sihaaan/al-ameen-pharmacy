@@ -81,17 +81,19 @@ const ContractIntelligenceManager = () => {
   const selectedSummary = selectedRun?.summary || {};
   const selectedBatchSize = Number(selectedRun?.discovery_batch_size || 25);
   const selectedMaxMessages = Number(selectedRun?.max_messages || 0);
+  const activeItems = useMemo(() => items.filter((item) => item.status !== 'rejected'), [items]);
+  const hiddenNoiseItemCount = Math.max(0, items.length - activeItems.length);
 
   const visibleItems = useMemo(() => {
     const term = itemFilter.trim().toLowerCase();
-    if (!term) return items;
-    return items.filter((item) => (
+    if (!term) return activeItems;
+    return activeItems.filter((item) => (
       (item.suggested_item_name || '').toLowerCase().includes(term) ||
       (item.original_item_name || '').toLowerCase().includes(term) ||
       (item.product_name || '').toLowerCase().includes(term) ||
       (item.source_subject || '').toLowerCase().includes(term)
     ));
-  }, [items, itemFilter]);
+  }, [activeItems, itemFilter]);
 
   const visibleSources = useMemo(() => (
     [...sources].sort((left, right) => {
@@ -301,7 +303,18 @@ const ContractIntelligenceManager = () => {
         use_ai: useAI,
         source_limit: selectedRun.discovery_batch_size || 25,
       });
-      setNotice(`Analysis batch complete: ${response.data.result.items_created} item row(s) extracted from ${response.data.result.sources_analyzed} source(s). ${response.data.result.pending_sources} source(s) still waiting.`);
+      const result = response.data.result || {};
+      if (result.no_pending_sources) {
+        const cleanupText = result.cleanup?.noise_rejected
+          ? ` ${result.cleanup.noise_rejected} metadata/signature/noise row(s) were hidden from review.`
+          : '';
+        setNotice(`No pending Gmail sources need analysis. Use Run Full AI Re-analysis if you want to rebuild extracted items from the saved sources.${cleanupText}`);
+      } else {
+        const cleanupText = result.cleanup?.noise_rejected
+          ? ` ${result.cleanup.noise_rejected} metadata/signature/noise row(s) were hidden from review.`
+          : '';
+        setNotice(`Analysis batch complete: ${result.items_created} item row(s) extracted from ${result.sources_analyzed} source(s). ${result.pending_sources} source(s) still waiting.${cleanupText}`);
+      }
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
       await handleError(error, 'Analyze contract emails', `POST /quotations/contract-intelligence-runs/${selectedRun.id}/analyze/`);
@@ -323,6 +336,7 @@ const ContractIntelligenceManager = () => {
       items_created: 0,
       pending_sources: 0,
       warnings: 0,
+      noise_rejected: 0,
       stopped: false,
     };
     try {
@@ -334,9 +348,29 @@ const ContractIntelligenceManager = () => {
         Number(sources.filter((source) => source.status !== 'analyzed').length || 0),
         0
       );
+      if (totalSources <= 0) {
+        setNotice('No Gmail sources are available for analysis yet. Run discovery first.');
+        setAnalysisProgress(null);
+        await refreshSelectedRun(selectedRun.id);
+        return;
+      }
+      const isReanalysis = pendingSources <= 0;
+      const totalToProcess = isReanalysis ? totalSources : pendingSources;
+      if (useAI && isReanalysis) {
+        const confirmed = window.confirm(
+          `This run already has ${totalSources} analyzed Gmail source(s).\n\n` +
+          `Running full AI analysis again will delete the current extracted rows and send those saved sources back to OpenAI, which can incur API cost.\n\n` +
+          `Continue with a paid full AI re-analysis?`
+        );
+        if (!confirmed) {
+          setNotice('AI re-analysis cancelled. Existing extracted items were kept unchanged.');
+          setAnalysisProgress(null);
+          return;
+        }
+      }
       const chunkSize = useAI ? 1 : Math.min(Math.max(selectedBatchSize || 25, 1), 50);
-      const maxBatches = Math.min(Math.ceil((pendingSources || chunkSize) / chunkSize) || 1, Math.max(pendingSources || 1, 1), 5000);
-      totals.pending_sources = pendingSources;
+      const maxBatches = Math.min(Math.ceil(totalToProcess / chunkSize) || 1, Math.max(totalToProcess, 1), 5000);
+      totals.pending_sources = totalToProcess;
       for (let batchIndex = 0; batchIndex < maxBatches; batchIndex += 1) {
         setAnalysisProgress({
           mode: useAI ? 'AI' : 'Basic',
@@ -344,18 +378,23 @@ const ContractIntelligenceManager = () => {
           maxBatches,
           chunkSize,
           completed: totals.sources_analyzed,
-          total: pendingSources,
+          total: totalToProcess,
           pending: totals.pending_sources,
           items: totals.items_created,
           warnings: totals.warnings,
           paused: false,
         });
-        setNotice(`${useAI ? 'AI analyzing' : 'Analyzing'} ${useAI ? 'one source' : `${chunkSize} source(s)`} at a time. ${totals.sources_analyzed} of ${pendingSources} processed in this pass.`);
+        setNotice(`${isReanalysis ? 'Re-analyzing saved sources. ' : ''}${useAI ? 'AI analyzing' : 'Analyzing'} ${useAI ? 'one source' : `${chunkSize} source(s)`} at a time. ${totals.sources_analyzed} of ${totalToProcess} processed in this pass.`);
         const response = await quotationAPI.contractIntelligence.analyze(selectedRun.id, {
           use_ai: useAI,
           source_limit: chunkSize,
+          reanalyze: isReanalysis && batchIndex === 0,
         });
         const result = response.data.result || {};
+        if (result.no_pending_sources) {
+          totals.pending_sources = 0;
+          break;
+        }
         const previousPending = totals.pending_sources;
         const analyzedThisBatch = Number(result.sources_analyzed || 0);
         const itemsThisBatch = Number(result.items_created || 0);
@@ -367,13 +406,14 @@ const ContractIntelligenceManager = () => {
         totals.items_created += itemsThisBatch;
         totals.pending_sources = pendingAfterBatch;
         totals.warnings += Number((result.warnings || []).length || 0);
+        totals.noise_rejected += Number(result.cleanup?.noise_rejected || 0);
         setAnalysisProgress({
           mode: useAI ? 'AI' : 'Basic',
           batch: batchIndex + 1,
           maxBatches,
           chunkSize,
           completed: totals.sources_analyzed,
-          total: pendingSources,
+          total: totalToProcess,
           pending: totals.pending_sources,
           items: totals.items_created,
           warnings: totals.warnings,
@@ -388,7 +428,8 @@ const ContractIntelligenceManager = () => {
       const completionLabel = totals.stopped ? 'paused' : 'complete';
       const resumeText = totals.pending_sources > 0 ? ' Run it again to resume from the remaining sources.' : '';
       const warningText = totals.warnings ? ` ${totals.warnings} source warning(s) used deterministic fallback.` : '';
-      setNotice(`Full ${useAI ? 'AI' : 'basic'} analysis ${completionLabel}: ${totals.items_created} item row(s) extracted from ${totals.sources_analyzed} source(s) across ${totals.batches} chunk(s). ${totals.pending_sources || 0} source(s) still waiting.${warningText}${resumeText}`);
+      const cleanupText = totals.noise_rejected ? ` ${totals.noise_rejected} metadata/signature/noise row(s) were hidden from review.` : '';
+      setNotice(`Full ${useAI ? 'AI' : 'basic'} analysis ${completionLabel}: ${totals.items_created} item row(s) extracted from ${totals.sources_analyzed} source(s) across ${totals.batches} chunk(s). ${totals.pending_sources || 0} source(s) still waiting.${warningText}${cleanupText}${resumeText}`);
       await refreshSelectedRun(selectedRun.id);
     } catch (error) {
       setAnalysisProgress((current) => current ? { ...current, paused: true } : {
@@ -845,6 +886,11 @@ const ContractIntelligenceManager = () => {
                   <div>
                     <h3>Extracted Item Review</h3>
                     <p>Review-only intelligence. Editing rows here does not create Products, aliases, quotations, or orders.</p>
+                    {!!hiddenNoiseItemCount && (
+                      <p className="qm-muted-line">
+                        {hiddenNoiseItemCount} metadata/signature/noise row(s) are hidden from this review and excluded from Excel export.
+                      </p>
+                    )}
                   </div>
                   <input
                     className="qm-input compact"

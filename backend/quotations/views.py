@@ -515,10 +515,23 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
+    def _refresh_summary_safely(self, run):
+        try:
+            refresh_contract_run_summary(run)
+            run.save(update_fields=["summary", "updated_at"])
+        except Exception as exc:
+            logger.exception("Contract intelligence summary refresh failed for run %s.", run.pk)
+            existing_warnings = run.warnings if isinstance(run.warnings, list) else []
+            warning = "Summary refresh failed. Run data is still available."
+            if str(exc):
+                warning = f"{warning} {str(exc)[:160]}"
+            if warning not in existing_warnings:
+                run.warnings = [*existing_warnings[-9:], warning]
+                run.save(update_fields=["warnings", "updated_at"])
+
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
-        refresh_contract_run_summary(instance)
-        instance.save(update_fields=["summary", "updated_at"])
+        self._refresh_summary_safely(instance)
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
 
@@ -564,7 +577,17 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
     def analyze(self, request, pk=None):
         run = self.get_object()
         use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no", "off"}
+        reanalyze = str(request.data.get("reanalyze", "false")).lower() in {"1", "true", "yes", "on"}
         try:
+            if reanalyze:
+                ContractIntelligenceItem.objects.filter(run=run).delete()
+                ContractIntelligenceSource.objects.filter(run=run).update(status="candidate", error="")
+                run.status = ContractIntelligenceRun.STATUS_READY
+                run.ai_status = "queued"
+                run.warnings = []
+                run.completed_at = None
+                self._refresh_summary_safely(run)
+                run.save(update_fields=["status", "ai_status", "warnings", "completed_at", "updated_at"])
             result = analyze_contract_run(
                 run,
                 request.user,
