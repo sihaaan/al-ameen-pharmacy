@@ -53,6 +53,7 @@ from .models import (
     UserQuotationProfile,
     ProductAlias,
     QuoteItem,
+    normalize_label,
 )
 from .pdf_config import get_quotation_pdf_config
 from .matching import apply_match_to_preview_line, suggest_product_for_text
@@ -1807,6 +1808,108 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(cleanable.suggested_item_name, "GAUZE SWAB STERILE - GAUZE BANDAGE -1''")
         self.assertEqual(second_response.data["run"]["summary"]["items"], 1)
         self.assertEqual(second_response.data["run"]["summary"]["raw_items"], 2)
+
+    def test_contract_cleanup_normalizes_numbered_item_rows_and_rejects_noise(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            max_messages=1000,
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC extracted catalog",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        rows = [
+            "1 10504 PG 10100052 NITRIL EXAMINATION GLOVES MED BLUE 5.000 BX",
+            "1 BLOOD PRESSURE MONITOR DIGITAL gernany each 1 390 390 390",
+            "% ALCOHOL 70 % ALCOHOL 16",
+            "WareHouse",
+            "Place",
+            "boxes.",
+            "Bandages and Dressings Emergency Products First",
+        ]
+        created = [
+            ContractIntelligenceItem.objects.create(
+                run=run,
+                source=source,
+                original_item_name=row,
+                suggested_item_name=row,
+                normalized_item_name=normalize_label(row),
+                confidence=0.93 if index < 3 else 0.45,
+                status=ContractIntelligenceItem.STATUS_SUGGESTED,
+            )
+            for index, row in enumerate(rows)
+        ]
+
+        response = self.client.post(reverse("quotation-contract-intelligence-run-clean-items", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for item in created:
+            item.refresh_from_db()
+        self.assertEqual(created[0].suggested_item_name, "NITRIL EXAMINATION GLOVES MED BLUE")
+        self.assertEqual(created[1].suggested_item_name, "BLOOD PRESSURE MONITOR DIGITAL gernany")
+        self.assertEqual(created[2].suggested_item_name, "ALCOHOL 70%")
+        self.assertEqual(
+            [item.status for item in created[3:]],
+            [ContractIntelligenceItem.STATUS_REJECTED] * 4,
+        )
+        self.assertEqual(response.data["result"]["noise_rejected"], 4)
+        self.assertEqual(response.data["result"]["updated"], 3)
+        self.assertEqual(response.data["run"]["summary"]["items"], 3)
+        self.assertEqual(response.data["run"]["summary"]["rejected_noise_items"], 4)
+
+    def test_contract_items_endpoint_hides_rejected_noise_by_default(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC catalog",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="AMMONIA INHALANT",
+            suggested_item_name="AMMONIA INHALANT",
+            normalized_item_name="ammonia inhalant",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="WareHouse",
+            suggested_item_name="WareHouse",
+            normalized_item_name="warehouse",
+            status=ContractIntelligenceItem.STATUS_REJECTED,
+        )
+
+        default_response = self.client.get(reverse("quotation-contract-intelligence-run-items", args=[run.id]))
+        rejected_response = self.client.get(
+            reverse("quotation-contract-intelligence-run-items", args=[run.id]),
+            {"status": ContractIntelligenceItem.STATUS_REJECTED},
+        )
+        full_response = self.client.get(
+            reverse("quotation-contract-intelligence-run-items", args=[run.id]),
+            {"include_rejected": "true"},
+        )
+
+        self.assertEqual(default_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(rejected_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(full_response.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["suggested_item_name"] for row in default_response.data], ["AMMONIA INHALANT"])
+        self.assertEqual([row["suggested_item_name"] for row in rejected_response.data], ["WareHouse"])
+        self.assertEqual(len(full_response.data), 2)
 
     @patch("quotations.contract_intelligence._ai_items_for_source")
     def test_contract_ai_analysis_uses_small_safe_batches(self, mock_ai_items):

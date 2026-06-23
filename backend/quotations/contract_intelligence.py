@@ -781,6 +781,8 @@ NOISE_PHRASES = (
     "fax",
     "iban",
     "trn",
+    "emergency products first",
+    "bandages and dressings emergency products",
 )
 
 
@@ -806,6 +808,12 @@ NOISE_LABELS = {
     "rfq ref",
     "rfq reference",
     "r f q",
+    "warehouse",
+    "ware house",
+    "place",
+    "t sya",
+    "ino fercdulnr",
+    "ino prticulrnr",
     "project",
     "manuf",
     "manufacturer",
@@ -854,6 +862,48 @@ NOISE_LABELS = {
     "rolls",
     "bt",
 }
+
+CONTRACT_UNIT_TERMS = (
+    "10s/pack",
+    "ampoules",
+    "bottles",
+    "boxes",
+    "packs",
+    "rolls",
+    "strips",
+    "tubes",
+    "vials",
+    "ampoule",
+    "bottle",
+    "case",
+    "each",
+    "pack",
+    "roll",
+    "strip",
+    "tube",
+    "vial",
+    "bags",
+    "bxs",
+    "nos",
+    "pcs",
+    "pkt",
+    "set",
+    "tub",
+    "bag",
+    "bot",
+    "box",
+    "btl",
+    "bts",
+    "bx",
+    "ea",
+    "no",
+    "pk",
+    "pc",
+    "bt",
+)
+CONTRACT_UNIT_PATTERN = "|".join(
+    re.escape(unit) for unit in sorted(set(CONTRACT_UNIT_TERMS), key=len, reverse=True)
+)
 
 
 PRODUCT_SIGNAL_TERMS = {
@@ -946,6 +996,8 @@ def _has_low_text_signal(text):
         return True
     if re.fullmatch(r"[\W\d_]+", compact):
         return True
+    if re.fullmatch(r"[A-Za-z]@[A-Za-z]{2,5}", compact):
+        return True
     leading = compact[:1]
     if leading in {"!", "$", "&", "#", "{", "[", "]", "|", "\\"} and not re.match(r"^\d{5,}[A-Za-z ]{3,}", compact):
         return True
@@ -959,9 +1011,25 @@ def _clean_contract_item_name(value):
     text = html.unescape(str(value or ""))
     text = text.replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^[%#!$&|\\/•\s]+", "", text).strip()
     text = re.sub(r"^[>\-*•\s]+", "", text).strip()
     text = text.replace("*", "").strip()
-    text = text.strip("|:;- ")
+    text = text.strip("|:;-. ")
+    text = re.sub(r"\b(\d{1,3})\s*%\b", r"\1%", text)
+    text = re.sub(
+        r"\b([A-Za-z][A-Za-z ]{2,}?)\s+(\d{1,3})\s*%\s+\1\s+\d+(?:[.,]\d+)?\b",
+        lambda match: f"{match.group(1).strip()} {match.group(2)}%",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(
+        rf"^\d{{1,4}}\s+(?=(?:\d{{4,}}\s+)?(?:pg|page|p)\b|\d{{5,}}\s+[A-Za-z]|[A-Za-z][A-Za-z0-9 /().,%+-]{{3,}}\b(?:{CONTRACT_UNIT_PATTERN})\b\s+\d)",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(r"^\d{4,8}\s+(?:pg|page|p)\s+", "", text, flags=re.I).strip()
+    text = re.sub(r"^\d{4,8}\s+(?=\d{5,}\s+[A-Za-z])", "", text).strip()
     text = re.sub(r"^\d+\s*[.)|-]\s*", "", text).strip()
     text = re.sub(r"^\d{5,}(?=\s*[A-Za-z])\s*", "", text).strip()
     text = re.sub(r"^(?:item\s+descr(?:iption)?|description)\s*[:*-]\s*", "", text, flags=re.I).strip()
@@ -980,6 +1048,21 @@ def _clean_contract_item_name(value):
     )
     text = re.sub(r"\bbrand\s*:\s*$", "", text, flags=re.I).strip()
     text = re.sub(r"\s+", " ", text).strip(" |:;-")
+    text = re.sub(
+        rf"\s+\d+(?:[.,]\d+)?\s+(?:{CONTRACT_UNIT_PATTERN})\.?\s*$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(
+        rf"\s+(?:{CONTRACT_UNIT_PATTERN})\.?\s+\d+(?:[.,]\d+)?(?:\s+\d+(?:[.,]\d+)?)+\s*$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(r"\s+\d+(?:[.,]\d+)?(?:\s+\d+(?:[.,]\d+)?){2,}\s*$", "", text).strip()
+    text = re.sub(r"\b(\d{1,3})\s*%\b", r"\1%", text)
+    text = text.strip(" |:;-.")
 
     comment_text = re.sub(
         r"\bbrand\s*:\s*(?:brand\s+as\s+quot(?:ed|e)?|as\s+quot(?:ed|e)?|not\s+specified|n/?a|-)?\b",

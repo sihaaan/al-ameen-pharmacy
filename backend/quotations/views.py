@@ -497,6 +497,8 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if getattr(self, "action", None) != "list":
+            return queryset
         company_id = self.request.query_params.get("company")
         status_param = self.request.query_params.get("status")
         search = (self.request.query_params.get("search") or "").strip()
@@ -546,8 +548,11 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
         run = self.get_object()
         queryset = run.items.select_related("source", "product").order_by("normalized_item_name", "-requested_date", "-id")
         status_param = request.query_params.get("status")
+        include_rejected = str(request.query_params.get("include_rejected", "")).lower() in {"1", "true", "yes", "on"}
         if status_param:
             queryset = queryset.filter(status=status_param)
+        elif not include_rejected:
+            queryset = queryset.exclude(status=ContractIntelligenceItem.STATUS_REJECTED)
         return Response(ContractIntelligenceItemSerializer(queryset[:1000], many=True).data)
 
     @action(detail=True, methods=["post"])
