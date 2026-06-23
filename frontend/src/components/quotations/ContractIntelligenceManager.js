@@ -455,16 +455,49 @@ const ContractIntelligenceManager = () => {
   const cleanExtractedRows = async () => {
     if (!selectedRun) return;
     const runId = selectedRun.id;
+    const batchSize = 500;
+    const totals = {
+      processed: 0,
+      updated: 0,
+      noise_rejected: 0,
+      already_clean: 0,
+      skipped_approved: 0,
+    };
+    let cursor = 0;
+    let totalItems = items.length || selectedRun.summary?.items || 0;
+    let latestRun = selectedRun;
     setBusyAction('clean-items');
     setNotice('');
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.contractIntelligence.cleanItems(runId);
-      const result = response.data.result || {};
+      for (let pass = 0; pass < 500; pass += 1) {
+        const response = await quotationAPI.contractIntelligence.cleanItems(runId, {
+          cursor,
+          batch_size: batchSize,
+        });
+        const result = response.data.result || {};
+        const updatedRun = response.data.run || latestRun;
+        latestRun = updatedRun;
+        totalItems = result.total_items || totalItems;
+        totals.processed += Number(result.processed || result.total || 0);
+        totals.updated += Number(result.updated || 0);
+        totals.noise_rejected += Number(result.noise_rejected || 0);
+        totals.already_clean += Number(result.already_clean || 0);
+        totals.skipped_approved += Number(result.skipped_approved || 0);
+        const remaining = Number(result.remaining || 0);
+        const checked = totalItems ? Math.max(0, totalItems - remaining) : totals.processed;
+        setSelectedRun(updatedRun);
+        setRuns((currentRuns) => currentRuns.map((run) => (run.id === updatedRun.id ? updatedRun : run)));
+        setNotice(`Cleaning extracted rows: ${checked} of ${totalItems || checked} checked...`);
+        if (result.done || !result.cursor) {
+          break;
+        }
+        cursor = result.cursor;
+      }
       setNotice(
-        `Cleaned extracted rows: ${result.updated || 0} item name(s) improved, `
-        + `${result.noise_rejected || 0} metadata/noise row(s) hidden, `
-        + `${result.skipped_approved || 0} approved row(s) left untouched.`
+        `Cleaned extracted rows: ${totals.updated} item name(s) improved, `
+        + `${totals.noise_rejected} metadata/noise row(s) hidden, `
+        + `${totals.skipped_approved} approved row(s) left untouched.`
       );
       await refreshSelectedRun(runId);
     } catch (error) {

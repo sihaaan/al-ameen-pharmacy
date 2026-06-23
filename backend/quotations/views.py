@@ -492,7 +492,7 @@ class GmailOAuthCallbackView(APIView):
 
 class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = ContractIntelligenceRunSerializer
-    queryset = ContractIntelligenceRun.objects.select_related("company", "created_by").prefetch_related("sources", "items")
+    queryset = ContractIntelligenceRun.objects.select_related("company", "created_by")
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
@@ -730,12 +730,34 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
     @action(detail=True, methods=["post"])
     def clean_items(self, request, pk=None):
         run = self.get_object()
+        batch_size = self._positive_int(request.data.get("batch_size"), 500, minimum=1, maximum=2000)
         try:
-            result = clean_contract_run_items(run)
+            cursor = int(request.data.get("cursor") or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+        try:
+            result = clean_contract_run_items(run, limit=batch_size, cursor=cursor, save_summary=False)
         except Exception as exc:
             logger.exception("Contract intelligence item cleanup failed.")
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        items = ContractIntelligenceItem.objects.filter(run=run)
+        total_items = items.count()
+        result_cursor = result.get("cursor")
+        remaining = items.filter(id__gt=result_cursor).count() if result_cursor else 0
+        done = not result_cursor or remaining == 0
+        if done:
+            refresh_contract_run_summary(run)
+            run.save(update_fields=["summary", "updated_at"])
         run.refresh_from_db()
+        result.update(
+            {
+                "processed": result.get("total", 0),
+                "total_items": total_items,
+                "remaining": remaining,
+                "done": done,
+                "batch_size": batch_size,
+            }
+        )
         return Response({"run": ContractIntelligenceRunSerializer(run).data, "result": result})
 
     @action(detail=True, methods=["get"])

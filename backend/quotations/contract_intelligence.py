@@ -1441,20 +1441,24 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     }
 
 
-def clean_contract_run_items(run, *, source_ids=None, limit=None, save_summary=True):
+def clean_contract_run_items(run, *, source_ids=None, limit=None, cursor=None, save_summary=True):
     """Clean existing extracted rows without creating durable catalog data."""
     total = 0
     updated = 0
     noise_rejected = 0
     already_clean = 0
     skipped_approved = 0
-    queryset = ContractIntelligenceItem.objects.filter(run=run).select_related("source", "product")
+    last_item_id = None
+    queryset = ContractIntelligenceItem.objects.filter(run=run).select_related("source", "product").order_by("id")
     if source_ids is not None:
         queryset = queryset.filter(source_id__in=list(source_ids))
+    if cursor:
+        queryset = queryset.filter(id__gt=int(cursor))
     if limit:
-        queryset = queryset.order_by("id")[: int(limit)]
+        queryset = queryset[: int(limit)]
     for item in queryset:
         total += 1
+        last_item_id = item.id
         if item.status == ContractIntelligenceItem.STATUS_APPROVED:
             skipped_approved += 1
             continue
@@ -1495,6 +1499,7 @@ def clean_contract_run_items(run, *, source_ids=None, limit=None, save_summary=T
         "noise_rejected": noise_rejected,
         "already_clean": already_clean,
         "skipped_approved": skipped_approved,
+        "cursor": last_item_id,
     }
 
 

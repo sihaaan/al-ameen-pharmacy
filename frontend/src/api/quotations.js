@@ -103,7 +103,7 @@ const quotationAPI = {
     discoverAll: (id, data = {}) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/discover_all/`, data),
     analyze: (id, data = {}) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/analyze/`, data),
     analyzeAll: (id, data = {}) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/analyze_all/`, data),
-    cleanItems: (id) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/clean_items/`),
+    cleanItems: (id, data = {}) => axiosInstance.post(`/quotations/contract-intelligence-runs/${id}/clean_items/`, data),
     deleteRun: (id) => axiosInstance.delete(`/quotations/contract-intelligence-runs/${id}/`),
     sources: (id) => axiosInstance.get(`/quotations/contract-intelligence-runs/${id}/sources/`),
     items: (id, params = {}) => axiosInstance.get(`/quotations/contract-intelligence-runs/${id}/items/`, { params }),

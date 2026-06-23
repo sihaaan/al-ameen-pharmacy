@@ -1751,6 +1751,63 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertIn("effective_gmail_query", response.data["run"])
         self.assertEqual(response.data["run"]["discovery_stop_reason"], "can_continue")
 
+    def test_contract_cleanup_action_can_resume_in_batches(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            max_messages=1000,
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC catalog",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        noisy = ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39",
+            suggested_item_name="Address: Frij Murar, Deira, Dubai, UAE P.O. Box 39",
+            normalized_item_name="address frij murar deira dubai uae po box 39",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+        cleanable = ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source,
+            original_item_name="10100006 GAUZE SWAB STERILE Brand:BRAND AS QUOTED Comments:GAUZE BANDAGE -1''",
+            suggested_item_name="10100006 GAUZE SWAB STERILE Brand:BRAND AS QUOTED Comments:GAUZE BANDAGE -1''",
+            normalized_item_name="10100006 gauze swab sterile brand brand as quoted comments gauze bandage 1",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+
+        first_response = self.client.post(
+            reverse("quotation-contract-intelligence-run-clean-items", args=[run.id]),
+            {"batch_size": 1},
+            format="json",
+        )
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(first_response.data["result"]["done"])
+        self.assertEqual(first_response.data["result"]["processed"], 1)
+        noisy.refresh_from_db()
+        cleanable.refresh_from_db()
+        self.assertEqual(noisy.status, ContractIntelligenceItem.STATUS_REJECTED)
+        self.assertEqual(cleanable.suggested_item_name, cleanable.original_item_name)
+
+        second_response = self.client.post(
+            reverse("quotation-contract-intelligence-run-clean-items", args=[run.id]),
+            {"batch_size": 1, "cursor": first_response.data["result"]["cursor"]},
+            format="json",
+        )
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(second_response.data["result"]["done"])
+        cleanable.refresh_from_db()
+        self.assertEqual(cleanable.suggested_item_name, "GAUZE SWAB STERILE - GAUZE BANDAGE -1''")
+        self.assertEqual(second_response.data["run"]["summary"]["items"], 1)
+        self.assertEqual(second_response.data["run"]["summary"]["raw_items"], 2)
+
     @patch("quotations.contract_intelligence._ai_items_for_source")
     def test_contract_ai_analysis_uses_small_safe_batches(self, mock_ai_items):
         mock_ai_items.return_value = {"classification": ContractIntelligenceSource.CLASS_UNKNOWN, "confidence": 0.8, "items": []}
