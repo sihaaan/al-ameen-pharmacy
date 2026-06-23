@@ -726,6 +726,11 @@ NOISE_PREFIXES = (
     "chief executive",
     "prepared by",
     "approved by",
+    "re:",
+    "fw:",
+    "fwd:",
+    "m ",
+    "t ",
 )
 
 
@@ -761,6 +766,21 @@ NOISE_PHRASES = (
     "al ameen pharmacy llc",
     "authorized signature",
     "company stamp",
+    "al ameen inv",
+    "attached herewith",
+    "kindly proceed",
+    "please proceed",
+    "as requested",
+    "for all your requirement",
+    "date of submission",
+    "mail disclaimer",
+    "do not print",
+    "save paper",
+    "uae p.o",
+    "united arab emirates p.o",
+    "fax",
+    "iban",
+    "trn",
 )
 
 
@@ -808,6 +828,111 @@ NOISE_LABELS = {
     "sno",
     "particular",
     "particulars",
+    "al ameen pharmacy group",
+    "al ameen pharmacy llc",
+    "ceo",
+    "chief executive officer",
+    "each",
+    "ea",
+    "box",
+    "boxes",
+    "bot",
+    "bottle",
+    "bottles",
+    "nos",
+    "no",
+    "num",
+    "pcs",
+    "pkt",
+    "pk",
+    "pack",
+    "set",
+    "tub",
+    "tube",
+    "tubes",
+    "roll",
+    "rolls",
+    "bt",
+}
+
+
+PRODUCT_SIGNAL_TERMS = {
+    "adhesive",
+    "alcohol",
+    "ammonia",
+    "antiseptic",
+    "bandage",
+    "betadine",
+    "blood",
+    "bottle",
+    "box",
+    "capsule",
+    "chair",
+    "cotton",
+    "cream",
+    "cylinder",
+    "deep heat",
+    "defibrillator",
+    "detector",
+    "digital",
+    "dressing",
+    "eye",
+    "face",
+    "first aid",
+    "gauze",
+    "gel",
+    "glove",
+    "glucometer",
+    "inhalant",
+    "mask",
+    "medical",
+    "needle",
+    "ointment",
+    "oxygen",
+    "pad",
+    "plaster",
+    "pulse",
+    "sanitizer",
+    "scissor",
+    "solution",
+    "spray",
+    "sterile",
+    "stretcher",
+    "swab",
+    "syringe",
+    "tablet",
+    "tape",
+    "thermometer",
+    "tongue",
+    "wipes",
+}
+
+
+BUSINESS_METADATA_TERMS = {
+    "address",
+    "al ameen",
+    "alec",
+    "attached",
+    "chief",
+    "credit",
+    "dear",
+    "department",
+    "email",
+    "engineer",
+    "invoice",
+    "lpo",
+    "payment",
+    "phone",
+    "procurement",
+    "project",
+    "quotation",
+    "regards",
+    "request",
+    "soa",
+    "submission",
+    "suleman",
+    "thanks",
+    "website",
 }
 
 
@@ -835,9 +960,10 @@ def _clean_contract_item_name(value):
     text = text.replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"^[>\-*•\s]+", "", text).strip()
+    text = text.replace("*", "").strip()
     text = text.strip("|:;- ")
     text = re.sub(r"^\d+\s*[.)|-]\s*", "", text).strip()
-    text = re.sub(r"^\d{5,}\s+", "", text).strip()
+    text = re.sub(r"^\d{5,}(?=\s*[A-Za-z])\s*", "", text).strip()
     text = re.sub(r"^(?:item\s+descr(?:iption)?|description)\s*[:*-]\s*", "", text, flags=re.I).strip()
 
     comment_text = ""
@@ -869,6 +995,59 @@ def _clean_contract_item_name(value):
             text = f"{text} - {comment_text}" if text else comment_text
 
     return text[:500]
+
+
+def _has_contract_product_signal(value):
+    normalized = normalize_label(value)
+    if not normalized:
+        return False
+    return any(term in normalized for term in PRODUCT_SIGNAL_TERMS)
+
+
+def _looks_like_business_metadata(value):
+    normalized = normalize_label(value)
+    if not normalized:
+        return True
+    if normalized in NOISE_LABELS:
+        return True
+    if any(term in normalized for term in BUSINESS_METADATA_TERMS):
+        return True
+    if re.search(r"\bp\s*\.?\s*o\s*\.?\s*box\b", str(value or ""), flags=re.I):
+        return True
+    return False
+
+
+def _payload_has_contract_value(payload):
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        payload.get(key) not in (None, "", [], {})
+        for key in ("quantity", "unit_price", "product_id", "product", "matched_product")
+    )
+
+
+def _is_contract_payload_record_noise(payload, cleaned_name):
+    if _is_contract_item_noise(cleaned_name):
+        return True
+    has_row_value = _payload_has_contract_value(payload)
+    confidence = _confidence(payload.get("confidence") if isinstance(payload, dict) else None)
+    if _looks_like_business_metadata(cleaned_name) and not has_row_value:
+        return True
+    if confidence <= 0.56 and not has_row_value and not _has_contract_product_signal(cleaned_name):
+        return True
+    return False
+
+
+def _is_contract_item_record_noise(item, cleaned_name):
+    if _is_contract_item_noise(cleaned_name):
+        return True
+    has_row_value = bool(item.product_id) or item.quantity is not None or item.unit_price is not None
+    confidence = float(item.confidence or 0)
+    if _looks_like_business_metadata(cleaned_name) and not has_row_value:
+        return True
+    if confidence <= 0.56 and not has_row_value and not _has_contract_product_signal(cleaned_name):
+        return True
+    return False
 
 
 def _is_contract_item_noise_basic(value):
@@ -1075,7 +1254,7 @@ def _create_contract_item(run, source, payload, *, requested_date=None):
         return None
     raw_name = (payload.get("suggested_item_name") or payload.get("item_name") or "").strip()
     name = _clean_contract_item_name(raw_name)
-    if _is_contract_item_noise(name):
+    if _is_contract_payload_record_noise(payload, name):
         return None
     try:
         product_match = suggest_product_for_text(name, run.company).product if run.company_id else suggest_product_for_text(name, None).product
@@ -1282,7 +1461,7 @@ def clean_contract_run_items(run, *, source_ids=None, limit=None, save_summary=T
 
         current_name = item.suggested_item_name or item.original_item_name
         cleaned_name = _clean_contract_item_name(current_name)
-        is_noise = _is_contract_item_noise(cleaned_name or current_name)
+        is_noise = _is_contract_item_record_noise(item, cleaned_name or current_name)
         update_fields = []
 
         if is_noise:
