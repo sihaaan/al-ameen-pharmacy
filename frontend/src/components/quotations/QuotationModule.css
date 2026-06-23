@@ -1328,7 +1328,7 @@
 }
 
 .line-table {
-  min-width: 1480px;
+  min-width: 1380px;
   table-layout: fixed;
 }
 
@@ -1390,8 +1390,13 @@
 
 .line-table th:nth-child(11),
 .line-table td:nth-child(11) {
-  width: 300px;
-  min-width: 300px;
+  width: 230px;
+  min-width: 230px;
+}
+
+.line-table .qm-unit-input {
+  min-width: 82px;
+  max-width: 102px;
 }
 
 .qm-vat-cell {

@@ -24,6 +24,44 @@ const paymentTermOptions = [
   { value: 'as_per_agreement', label: 'As per agreement' },
 ];
 
+const unitSuggestions = [
+  'each',
+  'pcs',
+  'nos',
+  'no',
+  'set',
+  'box',
+  'boxes',
+  'pack',
+  'pkt',
+  'carton',
+  'bottle',
+  'tube',
+  'roll',
+  'pair',
+  'bag',
+  'vial',
+  'ampoule',
+  'strip',
+  'sachet',
+  'jar',
+  'can',
+  'tin',
+  'case',
+];
+
+const sanitizeUnitText = (value) => String(value || '')
+  .replace(/[0-9]/g, '')
+  .replace(/\s+/g, ' ')
+  .trimStart()
+  .slice(0, 50);
+
+const preventUnitNumberKey = (event) => {
+  if (/^[0-9]$/.test(event.key)) {
+    event.preventDefault();
+  }
+};
+
 const contactOptionLabel = (contact) => {
   const details = [contact.role, contact.department].filter(Boolean).join(', ');
   return details ? `${contact.name} - ${details}` : contact.name;
@@ -371,7 +409,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     return {
       product: productId,
       item_name_snapshot: item ? item.name : draft.item_name_snapshot,
-      unit: draft.unit || item?.unit || '',
+      unit: draft.unit || sanitizeUnitText(item?.unit || ''),
       match_status: productId ? 'confirmed' : 'unresolved',
       product_image: '',
       product_image_url: item?.primary_image_url || '',
@@ -438,9 +476,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     if (priceShouldAutofill(currentDraft)) {
       pricePatch.unit_price = suggestion.unit_price;
     }
-    if (!currentDraft.unit && suggestion.unit) {
-      pricePatch.unit = suggestion.unit;
-    }
     if (Object.keys(pricePatch).length) {
       updateLineDraft(line.id, pricePatch);
       setPriceHintForLine(line.id, suggestion, pricePatch.unit_price ? 'autofilled' : 'history_found');
@@ -459,7 +494,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setLineForm((current) => ({
       ...current,
       unit_price: priceShouldAutofill(current) ? suggestion.unit_price : current.unit_price,
-      unit: current.unit || suggestion.unit || '',
     }));
   };
 
@@ -654,24 +688,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     }
   };
 
-  const rememberAlias = async (lineId) => {
-    if (saving || actionInFlight) return;
-    setSaving(true);
-    setLineFeedback(null);
-    setErrorInfo(null);
-    try {
-      await quotationAPI.lines.rememberAlias(lineId);
-      setLineFeedback({ type: 'success', message: 'Company-specific alias remembered for this product.' });
-      await load();
-    } catch (error) {
-      const details = await describeQuotationError(error, 'Remember product alias', `POST /quotations/quote-lines/${lineId}/remember_alias/`);
-      setErrorInfo(details);
-      console.error(formatQuotationError(details), error);
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const toggleLineSelection = (lineId) => {
     setSelectedLineIds((current) => (
       current.includes(lineId)
@@ -837,8 +853,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const actionEndpoint = (label) => {
     const endpointNames = {
-      'Submit Review': 'submit_review',
-      Approve: 'approve',
       Finalize: 'finalize',
       'Mark Sent': 'mark_sent',
       'Create Revision': 'revise',
@@ -1056,8 +1070,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           )}
         </div>
         <div className="qm-action-row">
-          {quote.status === 'draft' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Submit Review', quotationAPI.quotes.submitReview)}>{actionInFlight === 'Submit Review' ? 'Submitting...' : 'Submit Review'}</button>}
-          {['draft', 'pending_review'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Approve', quotationAPI.quotes.approve)}>{actionInFlight === 'Approve' ? 'Approving...' : 'Approve'}</button>}
           {['draft', 'pending_review', 'approved'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={() => runAction('Finalize', quotationAPI.quotes.finalize)}>{actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}</button>}
           {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
@@ -1292,7 +1304,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={clearSelection}>Clear selection</button>
             <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ vat_rate: '0' })}>VAT 0%</button>
             <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ vat_rate: '5' })}>VAT 5%</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ match_status: 'ignored' })}>Skip selected</button>
             <button type="button" className="qm-secondary small" disabled={!selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
             <label className="qm-checkbox compact">
               <input type="checkbox" checked={showFullProductCatalog} onChange={(event) => setShowFullProductCatalog(event.target.checked)} />
@@ -1305,6 +1316,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         )}
 
         <div className="qm-table-wrap">
+          <datalist id="quotation-unit-suggestions">
+            {unitSuggestions.map((unit) => <option key={unit} value={unit} />)}
+          </datalist>
           <table className="qm-table line-table">
             <thead>
               <tr>
@@ -1344,7 +1358,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                     </td>
                     <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
                     <td><input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
-                    <td><input disabled={!isEditable} value={draft.unit || ''} onChange={(event) => updateLineDraft(line.id, { unit: event.target.value })} /></td>
+                    <td>
+                      <input
+                        className="qm-unit-input"
+                        disabled={!isEditable}
+                        list="quotation-unit-suggestions"
+                        inputMode="text"
+                        placeholder="each"
+                        value={draft.unit || ''}
+                        onKeyDown={preventUnitNumberKey}
+                        onChange={(event) => updateLineDraft(line.id, { unit: sanitizeUnitText(event.target.value) })}
+                      />
+                    </td>
                     <td className="qm-price-cell">
                       <input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
                       {priceHint && <span className={`qm-price-hint ${priceHint.mode}`}>{priceHintText(priceHint)}</span>}
@@ -1360,9 +1385,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                     <td className="qm-row-actions">
                       <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty} onClick={() => saveLine(line.id)}>Save</button>
-                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight} onClick={() => updateLineDraft(line.id, { match_status: draft.match_status === 'ignored' ? (draft.product ? 'confirmed' : 'unresolved') : 'ignored' })}>{draft.match_status === 'ignored' ? 'Unskip' : 'Skip'}</button>
-                      <button type="button" className="qm-secondary small" onClick={() => setHistoryItem(draft.product || '')}>History</button>
-                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !draft.product} onClick={() => rememberAlias(line.id)}>Remember Alias</button>
                       <div className="qm-line-image-tools">
                         <label className={`qm-line-image-toggle ${draft.include_product_image ? 'enabled' : ''}`}>
                           <input
@@ -1405,7 +1427,14 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             </select>
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
-            <input placeholder="Unit" value={lineForm.unit} onChange={(event) => setLineForm({ ...lineForm, unit: event.target.value })} />
+            <input
+              placeholder="Unit"
+              list="quotation-unit-suggestions"
+              inputMode="text"
+              value={lineForm.unit}
+              onKeyDown={preventUnitNumberKey}
+              onChange={(event) => setLineForm({ ...lineForm, unit: sanitizeUnitText(event.target.value) })}
+            />
             <input type="number" min="0" step="0.01" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, unit_price: event.target.value })} />
             <select value={lineForm.vat_rate} onChange={(event) => setLineForm({ ...lineForm, vat_rate: event.target.value })}>
               <option value="0">VAT 0%</option>
