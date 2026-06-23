@@ -1828,6 +1828,10 @@ class ContractIntelligenceWorkflowTests(APITestCase):
             "1 10504 PG 10100052 NITRIL EXAMINATION GLOVES MED BLUE 5.000 BX",
             "1 BLOOD PRESSURE MONITOR DIGITAL gernany each 1 390 390 390",
             "% ALCOHOL 70 % ALCOHOL 16",
+            "3 Nasal Canula adult",
+            "24 Sterile Eye Pads",
+            "28 Antiseptic Wipes",
+            "3M Micropore adhesive tape 2.5cm (12pcs/box)",
             "WareHouse",
             "Place",
             "boxes.",
@@ -1854,13 +1858,17 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(created[0].suggested_item_name, "NITRIL EXAMINATION GLOVES MED BLUE")
         self.assertEqual(created[1].suggested_item_name, "BLOOD PRESSURE MONITOR DIGITAL gernany")
         self.assertEqual(created[2].suggested_item_name, "ALCOHOL 70%")
+        self.assertEqual(created[3].suggested_item_name, "Nasal Canula adult")
+        self.assertEqual(created[4].suggested_item_name, "Sterile Eye Pads")
+        self.assertEqual(created[5].suggested_item_name, "Antiseptic Wipes")
+        self.assertEqual(created[6].suggested_item_name, "3M Micropore adhesive tape 2.5cm")
         self.assertEqual(
-            [item.status for item in created[3:]],
+            [item.status for item in created[7:]],
             [ContractIntelligenceItem.STATUS_REJECTED] * 4,
         )
         self.assertEqual(response.data["result"]["noise_rejected"], 4)
-        self.assertEqual(response.data["result"]["updated"], 3)
-        self.assertEqual(response.data["run"]["summary"]["items"], 3)
+        self.assertEqual(response.data["result"]["updated"], 7)
+        self.assertEqual(response.data["run"]["summary"]["items"], 7)
         self.assertEqual(response.data["run"]["summary"]["rejected_noise_items"], 4)
 
     def test_contract_items_endpoint_hides_rejected_noise_by_default(self):

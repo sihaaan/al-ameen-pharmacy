@@ -916,6 +916,8 @@ PRODUCT_SIGNAL_TERMS = {
     "blood",
     "bottle",
     "box",
+    "cannula",
+    "canula",
     "capsule",
     "chair",
     "cotton",
@@ -955,6 +957,25 @@ PRODUCT_SIGNAL_TERMS = {
     "thermometer",
     "tongue",
     "wipes",
+}
+
+ROW_NUMBER_EXEMPT_FIRST_WORDS = {
+    "amp",
+    "ampoule",
+    "ampoules",
+    "cm",
+    "g",
+    "gm",
+    "inch",
+    "inches",
+    "m",
+    "mcg",
+    "mg",
+    "ml",
+    "mm",
+    "oz",
+    "ply",
+    "way",
 }
 
 
@@ -1032,6 +1053,17 @@ def _clean_contract_item_name(value):
     text = re.sub(r"^\d{4,8}\s+(?=\d{5,}\s+[A-Za-z])", "", text).strip()
     text = re.sub(r"^\d+\s*[.)|-]\s*", "", text).strip()
     text = re.sub(r"^\d{5,}(?=\s*[A-Za-z])\s*", "", text).strip()
+    serial_match = re.match(r"^(\d{1,3})\s+([A-Za-z][A-Za-z0-9 /().,%+'\"-]{3,})$", text)
+    if serial_match:
+        remainder = serial_match.group(2).strip()
+        first_word = normalize_label(remainder.split()[0] if remainder.split() else "")
+        alpha_words = re.findall(r"[A-Za-z]{2,}", remainder)
+        if (
+            first_word not in ROW_NUMBER_EXEMPT_FIRST_WORDS
+            and not re.match(r"^(?:\d+(?:[.,]\d+)?\s*)?(?:%|mg|mcg|g|gm|ml|cm|mm|inch|inches|m)\b", remainder, flags=re.I)
+            and (len(alpha_words) >= 2 or _has_contract_product_signal(remainder))
+        ):
+            text = remainder
     text = re.sub(r"^(?:item\s+descr(?:iption)?|description)\s*[:*-]\s*", "", text, flags=re.I).strip()
 
     comment_text = ""
@@ -1048,6 +1080,18 @@ def _clean_contract_item_name(value):
     )
     text = re.sub(r"\bbrand\s*:\s*$", "", text, flags=re.I).strip()
     text = re.sub(r"\s+", " ", text).strip(" |:;-")
+    text = re.sub(
+        rf"\s*\(\s*\d+(?:[.,]\d+)?\s*(?:pcs?|pieces?|sachets?|tabs?|tablets?|caps?|capsules?|vials?|ampoules?|rolls?|packs?|pkts?|boxes?|box)\s*(?:/|per)\s*(?:{CONTRACT_UNIT_PATTERN}|pack|packet|strip|carton|ctn|box|pkt|roll|tube|bottle)s?\.?\s*\)\s*$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(
+        rf"\s+\d+(?:[.,]\d+)?\s*(?:pcs?|pieces?|sachets?|tabs?|tablets?|caps?|capsules?|vials?|ampoules?|rolls?|packs?|pkts?|boxes?)\s*(?:/|per)\s*(?:{CONTRACT_UNIT_PATTERN}|pack|packet|strip|carton|ctn|box|pkt|roll|tube|bottle)s?\.?\s*$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
     text = re.sub(
         rf"\s+\d+(?:[.,]\d+)?\s+(?:{CONTRACT_UNIT_PATTERN})\.?\s*$",
         "",
