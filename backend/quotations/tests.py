@@ -1445,7 +1445,8 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         run.refresh_from_db()
         self.assertTrue(any("Summary refresh failed" in warning for warning in run.warnings))
 
-    def test_contract_analysis_with_no_pending_sources_returns_clean_noop(self):
+    @patch("quotations.contract_intelligence.clean_contract_run_items")
+    def test_contract_analysis_with_no_pending_sources_returns_clean_noop(self, mock_clean_items):
         run = ContractIntelligenceRun.objects.create(
             company=self.company,
             target_company_name="ALEC",
@@ -1477,6 +1478,7 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertTrue(response.data["result"]["no_pending_sources"])
         self.assertEqual(response.data["result"]["sources_analyzed"], 0)
         self.assertEqual(response.data["result"]["items_created"], 0)
+        self.assertFalse(mock_clean_items.called)
         run.refresh_from_db()
         self.assertEqual(run.status, ContractIntelligenceRun.STATUS_REVIEW)
         self.assertEqual(run.ai_status, "no_pending_sources")
@@ -1722,6 +1724,7 @@ class ContractIntelligenceWorkflowTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["result"]["sources_analyzed"], 5)
+        self.assertEqual(response.data["result"]["sources_processed"], 5)
         self.assertEqual(response.data["result"]["pending_sources"], 2)
         self.assertEqual(mock_ai_items.call_count, 5)
 

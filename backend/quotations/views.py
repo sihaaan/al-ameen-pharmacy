@@ -686,6 +686,7 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
         totals = {
             "batches": 0,
             "sources_analyzed": 0,
+            "sources_processed": 0,
             "items_created": 0,
             "warnings": [],
             "pending_sources": None,
@@ -700,13 +701,15 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
                     source_limit=source_limit,
                 )
                 sources_analyzed = int(result.get("sources_analyzed") or 0)
+                sources_processed = int(result.get("sources_processed") or sources_analyzed)
                 totals["batches"] += 1
                 totals["sources_analyzed"] += sources_analyzed
+                totals["sources_processed"] += sources_processed
                 totals["items_created"] += int(result.get("items_created") or 0)
                 totals["warnings"].extend(result.get("warnings") or [])
                 totals["pending_sources"] = int(result.get("pending_sources") or 0)
                 run.refresh_from_db()
-                if totals["pending_sources"] <= 0 or sources_analyzed <= 0:
+                if totals["pending_sources"] <= 0 or sources_processed <= 0:
                     break
         except RuntimeError as exc:
             run.status = ContractIntelligenceRun.STATUS_FAILED

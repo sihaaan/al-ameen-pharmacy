@@ -1119,17 +1119,17 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     else:
         effective_limit = requested_limit
     source_queryset = ContractIntelligenceSource.objects.filter(run=run)
-    pending_queryset = source_queryset.exclude(status="analyzed")
+    pending_queryset = source_queryset.exclude(status__in=["analyzed", "failed"])
     sources = list(pending_queryset.order_by("-sent_at", "-created_at")[:effective_limit])
     if not sources:
         total_items = ContractIntelligenceItem.objects.filter(run=run).count()
         pending_sources = pending_queryset.count()
         if total_items:
-            cleanup_result = clean_contract_run_items(run)
             active_items = ContractIntelligenceItem.objects.filter(run=run).exclude(
                 status=ContractIntelligenceItem.STATUS_REJECTED
             ).count()
             run.status = ContractIntelligenceRun.STATUS_REVIEW if active_items else ContractIntelligenceRun.STATUS_READY
+            cleanup_result = {"skipped": True, "reason": "No pending sources. Existing extracted rows were kept unchanged."}
         else:
             cleanup_result = None
         if not total_items and source_queryset.exists():
@@ -1143,8 +1143,9 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
         run.save(update_fields=["status", "ai_status", "completed_at", "warnings", "summary", "updated_at"])
         return {
             "items_created": 0,
-            "sources_failed": 0,
+            "sources_failed": source_queryset.filter(status="failed").count(),
             "sources_analyzed": 0,
+            "sources_processed": 0,
             "pending_sources": pending_sources,
             "warnings": [],
             "no_pending_sources": True,
@@ -1221,9 +1222,9 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
             source.status = "failed"
             source.error = str(exc)[:500]
             source.save(update_fields=["status", "error", "updated_at"])
-    cleanup_result = clean_contract_run_items(run)
+    cleanup_result = clean_contract_run_items(run, source_ids=[source.id for source in sources])
     total_items = ContractIntelligenceItem.objects.filter(run=run).exclude(status=ContractIntelligenceItem.STATUS_REJECTED).count()
-    pending_sources = ContractIntelligenceSource.objects.filter(run=run).exclude(status="analyzed").count()
+    pending_sources = ContractIntelligenceSource.objects.filter(run=run).exclude(status__in=["analyzed", "failed"]).count()
     if total_items:
         run.status = ContractIntelligenceRun.STATUS_REVIEW
     elif pending_sources and sources:
@@ -1254,20 +1255,26 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
         "items_created": created,
         "sources_failed": failed,
         "sources_analyzed": len(sources) - failed,
+        "sources_processed": len(sources),
         "pending_sources": pending_sources,
         "warnings": warnings,
         "cleanup": cleanup_result,
     }
 
 
-def clean_contract_run_items(run):
+def clean_contract_run_items(run, *, source_ids=None, limit=None, save_summary=True):
     """Clean existing extracted rows without creating durable catalog data."""
     total = 0
     updated = 0
     noise_rejected = 0
     already_clean = 0
     skipped_approved = 0
-    for item in ContractIntelligenceItem.objects.filter(run=run).select_related("source", "product"):
+    queryset = ContractIntelligenceItem.objects.filter(run=run).select_related("source", "product")
+    if source_ids is not None:
+        queryset = queryset.filter(source_id__in=list(source_ids))
+    if limit:
+        queryset = queryset.order_by("id")[: int(limit)]
+    for item in queryset:
         total += 1
         if item.status == ContractIntelligenceItem.STATUS_APPROVED:
             skipped_approved += 1
@@ -1300,8 +1307,9 @@ def clean_contract_run_items(run):
         if update_fields:
             item.save(update_fields=sorted(set(update_fields + ["updated_at"])))
 
-    refresh_contract_run_summary(run)
-    run.save(update_fields=["summary", "updated_at"])
+    if save_summary:
+        refresh_contract_run_summary(run)
+        run.save(update_fields=["summary", "updated_at"])
     return {
         "total": total,
         "updated": updated,

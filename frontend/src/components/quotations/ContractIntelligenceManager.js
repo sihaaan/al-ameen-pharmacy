@@ -397,10 +397,11 @@ const ContractIntelligenceManager = () => {
         }
         const previousPending = totals.pending_sources;
         const analyzedThisBatch = Number(result.sources_analyzed || 0);
+        const processedByBackend = Number(result.sources_processed || 0);
         const itemsThisBatch = Number(result.items_created || 0);
         const pendingAfterBatch = Number(result.pending_sources || 0);
         const pendingMoved = previousPending > pendingAfterBatch ? previousPending - pendingAfterBatch : 0;
-        const processedThisBatch = Math.max(analyzedThisBatch, pendingMoved);
+        const processedThisBatch = Math.max(analyzedThisBatch, processedByBackend, pendingMoved);
         totals.batches += 1;
         totals.sources_analyzed += processedThisBatch;
         totals.items_created += itemsThisBatch;
