@@ -152,7 +152,7 @@ const ContractIntelligenceManager = () => {
       const [runRes, sourceRes, itemRes] = await Promise.all([
         quotationAPI.contractIntelligence.retrieveRun(runId),
         quotationAPI.contractIntelligence.sources(runId),
-        quotationAPI.contractIntelligence.items(runId),
+        quotationAPI.contractIntelligence.items(runId, { dedupe: '1' }),
       ]);
       setSelectedRun(runRes.data);
       setSources(sourceRes.data);
@@ -560,7 +560,16 @@ const ContractIntelligenceManager = () => {
     setErrorInfo(null);
     try {
       const response = await quotationAPI.contractIntelligence.updateItem(itemId, changes);
-      setItems((current) => current.map((item) => (item.id === itemId ? response.data : item)));
+      setItems((current) => current.map((item) => (
+        item.id === itemId
+          ? {
+              ...response.data,
+              unique_key: item.unique_key,
+              mention_count: item.mention_count,
+              source_count: item.source_count,
+            }
+          : item
+      )));
     } catch (error) {
       await handleError(error, 'Update contract intelligence item', `PATCH /quotations/contract-intelligence-items/${itemId}/`);
     } finally {
@@ -919,7 +928,7 @@ const ContractIntelligenceManager = () => {
                 <div className="qm-panel-heading">
                   <div>
                     <h3>Extracted Item Review</h3>
-                    <p>Review-only intelligence. Editing rows here does not create Products, aliases, quotations, or orders.</p>
+                    <p>Review-only intelligence. Duplicate mentions are collapsed into one item row; editing here does not create Products, aliases, quotations, or orders.</p>
                     {!!hiddenNoiseItemCount && (
                       <p className="qm-muted-line">
                         {hiddenNoiseItemCount} metadata/signature/noise row(s) are hidden from this review and excluded from Excel export.
@@ -961,6 +970,12 @@ const ContractIntelligenceManager = () => {
                               onBlur={(event) => updateItem(item.id, { suggested_item_name: event.target.value })}
                             />
                             <small>{item.source_subject || item.source_filename || item.original_item_name}</small>
+                            {((item.mention_count || 0) > 1 || (item.source_count || 0) > 1) && (
+                              <div className="qm-contract-item-meta">
+                                {(item.mention_count || 0) > 1 && <span>{item.mention_count} mentions</span>}
+                                {(item.source_count || 0) > 1 && <span>{item.source_count} sources</span>}
+                              </div>
+                            )}
                           </td>
                           <td>{item.quantity || '-'}</td>
                           <td>{item.unit || '-'}</td>

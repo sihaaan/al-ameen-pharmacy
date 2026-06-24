@@ -841,6 +841,7 @@ NOISE_LABELS = {
     "ceo",
     "chief executive officer",
     "each",
+    "eac",
     "ea",
     "box",
     "boxes",
@@ -877,6 +878,7 @@ CONTRACT_UNIT_TERMS = (
     "bottle",
     "case",
     "each",
+    "eac",
     "pack",
     "roll",
     "strip",
@@ -904,6 +906,34 @@ CONTRACT_UNIT_TERMS = (
 CONTRACT_UNIT_PATTERN = "|".join(
     re.escape(unit) for unit in sorted(set(CONTRACT_UNIT_TERMS), key=len, reverse=True)
 )
+
+GLUED_UNIT_TERMS = (
+    "each",
+    "eac",
+    "ea",
+    "nos",
+    "num",
+    "pcs",
+    "pc",
+    "pkt",
+    "pk",
+    "box",
+    "boxes",
+    "bot",
+    "bottle",
+    "bottles",
+    "tub",
+    "tube",
+    "tubes",
+    "roll",
+    "rolls",
+    "pack",
+    "packs",
+    "set",
+    "bt",
+    "bx",
+)
+GLUED_UNIT_PATTERN = "|".join(re.escape(unit) for unit in sorted(set(GLUED_UNIT_TERMS), key=len, reverse=True))
 
 
 PRODUCT_SIGNAL_TERMS = {
@@ -1032,6 +1062,7 @@ def _clean_contract_item_name(value):
     text = html.unescape(str(value or ""))
     text = text.replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s*[–—]\s*", " - ", text).strip()
     text = re.sub(r"^[%#!$&|\\/•\s]+", "", text).strip()
     text = re.sub(r"^[>\-*•\s]+", "", text).strip()
     text = text.replace("*", "").strip()
@@ -1040,6 +1071,24 @@ def _clean_contract_item_name(value):
     text = re.sub(
         r"\b([A-Za-z][A-Za-z ]{2,}?)\s+(\d{1,3})\s*%\s+\1\s+\d+(?:[.,]\d+)?\b",
         lambda match: f"{match.group(1).strip()} {match.group(2)}%",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(r"\s*\(\s*image\s+required\s*\)\s*", " ", text, flags=re.I).strip()
+    # Contract attachment tables often glue row numbers or unit cells to item
+    # names after extraction. Strip row/list numbers while preserving real
+    # product prefixes such as 3M, N95, 70%, or dimensions.
+    glued_row_match = re.match(r"^(\d{1,3})([A-Za-z][A-Za-z0-9 /().,%+'\"-]{3,})$", text)
+    if glued_row_match:
+        row_number, remainder = glued_row_match.groups()
+        remainder = remainder.strip()
+        starts_with_protected_brand = row_number == "3" and remainder.upper().startswith("M")
+        starts_with_measure = re.match(r"^(?:m|mg|mcg|g|gm|ml|cm|mm|inch|inches|ply)\b", remainder, flags=re.I)
+        if not starts_with_protected_brand and not starts_with_measure:
+            text = remainder
+    text = re.sub(
+        r"^(?:\d{1,3}\s+)?(?:\d{4,8}\s+)*(?:pg|page|p)\s+(?:\d{4,}\s+)*",
+        "",
         text,
         flags=re.I,
     ).strip()
@@ -1103,6 +1152,24 @@ def _clean_contract_item_name(value):
         "",
         text,
         flags=re.I,
+    ).strip()
+    text = re.sub(
+        r"\s+(?:each|eac|ea|nos|num|pcs|pc|pkt|pk|bt|bx|bot|tub)\.?\s*$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(
+        rf"^(.{{4,}}[A-Z]{{2}})(?:{GLUED_UNIT_PATTERN})\.?\d{{4,}}$",
+        r"\1",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(
+        rf"^(.{{4,}}[A-Z]{{2}})(?:{GLUED_UNIT_PATTERN})\.?$",
+        r"\1",
+        text,
+        flags=0,
     ).strip()
     text = re.sub(r"\s+\d+(?:[.,]\d+)?(?:\s+\d+(?:[.,]\d+)?){2,}\s*$", "", text).strip()
     text = re.sub(r"\b(\d{1,3})\s*%\b", r"\1%", text)
@@ -1323,7 +1390,10 @@ def _ai_contract_instructions(run):
         "You extract contract intelligence for a pharmacy yearly supply opportunity. "
         "Classify the source email as inquiry, quotation, lpo, followup, irrelevant, or unknown. "
         "Extract only real requested/quoted/orderable product lines. Ignore signatures, totals, headers, greetings, legal text, and metadata. "
-        "Normalize item names conservatively without inventing products. Preserve brand/spec/pack details when present. "
+        "Normalize item names conservatively without inventing products. Strip row/list numbers, catalog codes, and glued unit/quantity noise, "
+        "but preserve numbers that are part of the product identity such as 3M, N95, 70%, sizes, dimensions, dosage, and pack descriptions. "
+        "Normalize repeated variants to the same clean item name where they clearly describe the same product. "
+        "Do not include Brand:BRAND AS QUOTED, Comments:, signatures, phone numbers, addresses, or footer text unless it identifies a real product variant. "
         "Return quantities, units, unit prices, project/contact/source details when available. "
         "This is review-only. Do not suggest creating records silently."
     )

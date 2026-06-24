@@ -76,6 +76,7 @@ from .models import (
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
+    normalize_label,
 )
 from .excel import build_quotation_excel
 from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_pdf, build_quotation_pdf
@@ -549,11 +550,41 @@ class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet
         queryset = run.items.select_related("source", "product").order_by("normalized_item_name", "-requested_date", "-id")
         status_param = request.query_params.get("status")
         include_rejected = str(request.query_params.get("include_rejected", "")).lower() in {"1", "true", "yes", "on"}
+        dedupe = str(request.query_params.get("dedupe", "")).lower() in {"1", "true", "yes", "on"}
         if status_param:
             queryset = queryset.filter(status=status_param)
         elif not include_rejected:
             queryset = queryset.exclude(status=ContractIntelligenceItem.STATUS_REJECTED)
-        return Response(ContractIntelligenceItemSerializer(queryset[:1000], many=True).data)
+        if not dedupe:
+            return Response(ContractIntelligenceItemSerializer(queryset[:1000], many=True).data)
+
+        grouped = {}
+        for item in queryset:
+            key = item.normalized_item_name or normalize_label(item.suggested_item_name or item.original_item_name)
+            if not key:
+                key = f"item-{item.pk}"
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "representative": item,
+                    "mention_count": 0,
+                    "source_ids": set(),
+                },
+            )
+            bucket["mention_count"] += 1
+            if item.source_id:
+                bucket["source_ids"].add(item.source_id)
+
+        representatives = [bucket["representative"] for bucket in grouped.values()]
+        data = ContractIntelligenceItemSerializer(representatives[:1000], many=True).data
+        for row in data:
+            key = row.get("normalized_item_name") or normalize_label(row.get("suggested_item_name") or row.get("original_item_name") or "")
+            bucket = grouped.get(key)
+            if bucket:
+                row["unique_key"] = key
+                row["mention_count"] = bucket["mention_count"]
+                row["source_count"] = len(bucket["source_ids"])
+        return Response(data)
 
     @action(detail=True, methods=["post"])
     def discover(self, request, pk=None):

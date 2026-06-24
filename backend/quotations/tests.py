@@ -1871,6 +1871,66 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(response.data["run"]["summary"]["items"], 7)
         self.assertEqual(response.data["run"]["summary"]["rejected_noise_items"], 4)
 
+    def test_contract_cleanup_strips_glued_numbers_units_and_groups_repeats(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            max_messages=1000,
+            created_by=self.staff,
+        )
+        source = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="ALEC oxygen cylinder inquiry",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        rows = [
+            "1 Medical Oxygen Cylinder – Size – E required",
+            "1 Medical Oxygen Cylinder – Size – E required",
+            "1 Medical Oxygen Cylinder – Size – E required",
+            "12OXYGEN CYLINDER PORTABLE WITH REGULATOReach",
+            "14WASH BOTTLES FOR WOUND WASHeach23570070",
+            "1STRETCHER FOLDABLE",
+            "2STRETCHER COMBINATION/CHAIR (image required)eac",
+            "3M Micropore adhesive tape 2.5cm (12pcs/box)",
+            "N95 MASK",
+        ]
+        created = [
+            ContractIntelligenceItem.objects.create(
+                run=run,
+                source=source,
+                original_item_name=row,
+                suggested_item_name=row,
+                normalized_item_name=normalize_label(row),
+                confidence=0.55,
+                status=ContractIntelligenceItem.STATUS_SUGGESTED,
+            )
+            for row in rows
+        ]
+
+        response = self.client.post(reverse("quotation-contract-intelligence-run-clean-items", args=[run.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for item in created:
+            item.refresh_from_db()
+        self.assertEqual(created[0].suggested_item_name, "Medical Oxygen Cylinder - Size - E required")
+        self.assertEqual(created[1].suggested_item_name, "Medical Oxygen Cylinder - Size - E required")
+        self.assertEqual(created[2].suggested_item_name, "Medical Oxygen Cylinder - Size - E required")
+        self.assertEqual(created[3].suggested_item_name, "OXYGEN CYLINDER PORTABLE WITH REGULATOR")
+        self.assertEqual(created[4].suggested_item_name, "WASH BOTTLES FOR WOUND WASH")
+        self.assertEqual(created[5].suggested_item_name, "STRETCHER FOLDABLE")
+        self.assertEqual(created[6].suggested_item_name, "STRETCHER COMBINATION/CHAIR")
+        self.assertEqual(created[7].suggested_item_name, "3M Micropore adhesive tape 2.5cm")
+        self.assertEqual(created[8].suggested_item_name, "N95 MASK")
+        self.assertEqual(response.data["result"]["updated"], 8)
+        self.assertEqual(response.data["run"]["summary"]["items"], 9)
+        top_items = response.data["run"]["summary"]["top_items"]
+        oxygen = next(item for item in top_items if item["item_name"] == "Medical Oxygen Cylinder - Size - E required")
+        self.assertEqual(oxygen["count"], 3)
+        self.assertEqual(response.data["run"]["summary"]["unique_items"], 7)
+
     def test_contract_items_endpoint_hides_rejected_noise_by_default(self):
         run = ContractIntelligenceRun.objects.create(
             company=self.company,
@@ -1918,6 +1978,62 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual([row["suggested_item_name"] for row in default_response.data], ["AMMONIA INHALANT"])
         self.assertEqual([row["suggested_item_name"] for row in rejected_response.data], ["WareHouse"])
         self.assertEqual(len(full_response.data), 2)
+
+    def test_contract_items_endpoint_can_return_unique_item_review_rows(self):
+        run = ContractIntelligenceRun.objects.create(
+            company=self.company,
+            target_company_name="ALEC",
+            sender_domain_hint="alec.ae",
+            created_by=self.staff,
+        )
+        source_a = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="Enquiry - Medical Oxygen Cylinder",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        source_b = ContractIntelligenceSource.objects.create(
+            run=run,
+            subject="FW: Enquiry - Medical Oxygen Cylinder",
+            sender="buyer@alec.ae",
+            sent_at=timezone.now(),
+            status="analyzed",
+        )
+        for source in [source_a, source_b]:
+            ContractIntelligenceItem.objects.create(
+                run=run,
+                source=source,
+                original_item_name="1 Medical Oxygen Cylinder - Size - E required",
+                suggested_item_name="Medical Oxygen Cylinder - Size - E required",
+                normalized_item_name="medical oxygen cylinder size e required",
+                quantity=Decimal("1.000"),
+                unit="Nos",
+                requested_date=timezone.now().date(),
+                status=ContractIntelligenceItem.STATUS_SUGGESTED,
+            )
+        ContractIntelligenceItem.objects.create(
+            run=run,
+            source=source_b,
+            original_item_name="N95 MASK",
+            suggested_item_name="N95 MASK",
+            normalized_item_name="n95 mask",
+            status=ContractIntelligenceItem.STATUS_SUGGESTED,
+        )
+
+        raw_response = self.client.get(reverse("quotation-contract-intelligence-run-items", args=[run.id]))
+        deduped_response = self.client.get(
+            reverse("quotation-contract-intelligence-run-items", args=[run.id]),
+            {"dedupe": "1"},
+        )
+
+        self.assertEqual(raw_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(deduped_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(raw_response.data), 3)
+        self.assertEqual(len(deduped_response.data), 2)
+        oxygen = next(row for row in deduped_response.data if row["suggested_item_name"] == "Medical Oxygen Cylinder - Size - E required")
+        self.assertEqual(oxygen["mention_count"], 2)
+        self.assertEqual(oxygen["source_count"], 2)
 
     @patch("quotations.contract_intelligence._ai_items_for_source")
     def test_contract_ai_analysis_uses_small_safe_batches(self, mock_ai_items):
