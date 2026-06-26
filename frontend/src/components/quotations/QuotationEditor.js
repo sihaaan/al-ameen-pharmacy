@@ -194,7 +194,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [items, setItems] = useState([]);
   const [companyItems, setCompanyItems] = useState([]);
-  const [showFullProductCatalog, setShowFullProductCatalog] = useState(false);
+  const showFullProductCatalog = false;
   const [lineForm, setLineForm] = useState(emptyLine);
   const [lineDrafts, setLineDrafts] = useState({});
   const [savedLineDrafts, setSavedLineDrafts] = useState({});
@@ -698,13 +698,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const selectVisibleUnmatched = () => {
     setSelectedLineIds(filteredLines.filter((line) => derivedLineStatus(line).id === 'unmatched').map((line) => line.id));
-  };
-
-  const clearSelection = () => setSelectedLineIds([]);
-
-  const bulkPatchSelected = (patch) => {
-    if (!selectedLineIds.length) return;
-    selectedLineIds.forEach((lineId) => updateLineDraft(lineId, patch));
   };
 
   const openCreateProductModal = (lineIds) => {
@@ -1301,14 +1294,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               <option value="all">All lines</option>
             </select>
             <button type="button" className="qm-secondary small" onClick={selectVisibleUnmatched}>Select visible unmatched</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={clearSelection}>Clear selection</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ vat_rate: '0' })}>VAT 0%</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedLineIds.length} onClick={() => bulkPatchSelected({ vat_rate: '5' })}>VAT 5%</button>
             <button type="button" className="qm-secondary small" disabled={!selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
-            <label className="qm-checkbox compact">
-              <input type="checkbox" checked={showFullProductCatalog} onChange={(event) => setShowFullProductCatalog(event.target.checked)} />
-              Show full catalog
-            </label>
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLines} onClick={saveAllLines}>
               {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
             </button>

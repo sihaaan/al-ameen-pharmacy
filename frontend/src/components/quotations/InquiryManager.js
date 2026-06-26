@@ -354,11 +354,12 @@ const InquiryManager = ({ onOpenQuote }) => {
         ...newImportLine(),
         ...line,
         raw_line: line.raw_line || line.raw_source_line || '',
+        parse_status: 'parsed',
         parse_confidence: Number(line.parse_confidence || 0),
       })),
     });
     setAiCandidate(null);
-    setImportNotice({ type: 'success', message: 'AI cleaned rows applied. Review and edit before saving the inquiry.' });
+    setImportNotice({ type: 'success', message: 'AI cleaned rows applied and marked parsed. You can still edit rows before saving the inquiry.' });
   };
 
   const keepOriginalRows = () => {
@@ -850,7 +851,6 @@ const InquiryManager = ({ onOpenQuote }) => {
                 {selectedImportRows.length === importPreview.lines.length ? 'Deselect All' : 'Select All'}
               </button>
               <button type="button" className="qm-secondary small danger" disabled={!selectedImportRows.length} onClick={removeSelectedImportRows}>Delete Selected</button>
-              <button type="button" className="qm-secondary small" disabled={!selectedImportRows.length} onClick={() => setSelectedImportRows([])}>Clear</button>
             </div>
             {(importPreview.warnings || []).length > 0 && (
               <div className="qm-notice">
