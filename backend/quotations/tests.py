@@ -27,7 +27,14 @@ from api.models import Product, ProductImage
 
 from .contract_intelligence import build_contract_gmail_query, exchange_gmail_code
 from .import_parsers import parse_text_preview
-from .import_rules import detect_header_row, parse_inquiry_line, parse_text_lines, split_quantity_unit
+from .import_rules import (
+    clean_item_name,
+    detect_header_row,
+    parse_inquiry_line,
+    parse_text_lines,
+    preserve_specific_item_details,
+    split_quantity_unit,
+)
 from .models import (
     AIParseCache,
     AIParseLog,
@@ -1289,7 +1296,7 @@ class InquiryParserRuleTests(APITestCase):
     def test_serial_prefix_is_not_part_of_item_name(self):
         parsed = parse_inquiry_line("01 - TRIANGULAR BANDAGES 5 Nos")
 
-        self.assertEqual(parsed["raw_name"], "TRIANGULAR BANDAGES")
+        self.assertEqual(parsed["raw_name"], "Triangular Bandages")
         self.assertEqual(parsed["quantity"], "5")
         self.assertEqual(parsed["unit"].lower(), "nos")
         self.assertEqual(parsed["serial_no"], "01")
@@ -1299,7 +1306,7 @@ class InquiryParserRuleTests(APITestCase):
 
         self.assertEqual(skipped, 1)
         self.assertEqual(len(lines), 1)
-        self.assertEqual(lines[0]["raw_name"], "GAUZE PIECES")
+        self.assertEqual(lines[0]["raw_name"], "Gauze Pieces")
 
     def test_gmail_cell_per_line_table_parses_item_rows(self):
         pasted = "\n".join(
@@ -1335,11 +1342,11 @@ class InquiryParserRuleTests(APITestCase):
         lines, skipped = parse_text_lines(pasted)
 
         self.assertEqual([line["raw_name"] for line in lines[:5]], [
-            "PULSE OXMETER",
-            "GLUCOMETER",
-            "SURGICAL SCISSOR",
-            "BP MACHINE",
-            "STERILE MOUND DRESSING",
+            "Pulse Oximeter",
+            "Glucometer",
+            "Surgical Scissor",
+            "BP Machine",
+            "Sterile Mound Dressing",
         ])
         self.assertEqual(lines[0]["quantity"], "2")
         self.assertEqual(lines[0]["unit"], "NUM")
@@ -1357,10 +1364,35 @@ class InquiryParserRuleTests(APITestCase):
         preview = parse_text_preview("PULSE OXMETER\nGLUCOMETER", raw_html=html)
 
         self.assertEqual(preview["parse_method"], "deterministic_clipboard_html_table_v1")
-        self.assertEqual(preview["lines"][0]["raw_name"], "PULSE OXMETER")
+        self.assertEqual(preview["lines"][0]["raw_name"], "Pulse Oximeter")
         self.assertEqual(preview["lines"][0]["quantity"], "2")
         self.assertEqual(preview["lines"][0]["unit"], "NUM")
-        self.assertEqual(preview["lines"][1]["raw_name"], "GLUCOMETER")
+        self.assertEqual(preview["lines"][1]["raw_name"], "Glucometer")
+
+    def test_item_name_standardization_preserves_pharmacy_specs(self):
+        cases = [
+            ('adhesive tape 1/2" x 10 yds', 'Adhesive Tape 1/2" x 10 yds'),
+            ('ADHESIVE TAPE 1" X 10 YDS', 'Adhesive Tape 1" x 10 yds'),
+            ('GAUZE BANDAGE - 2"', 'Gauze Bandage - 2"'),
+            ('GAUZE PADS - 3" X 3"', 'Gauze Pads - 3" x 3"'),
+            ("ammonia inhalant - pack of 5", "Ammonia Inhalant - Pack of 5"),
+            ("3m micropore adhesive tape 2.5cm (12pcs/box)", "3M Micropore Adhesive Tape 2.5cm (12pcs/box)"),
+        ]
+
+        for raw_name, expected in cases:
+            with self.subTest(raw_name=raw_name):
+                self.assertEqual(clean_item_name(raw_name), expected)
+
+    def test_ai_cleanup_preserves_specific_details_from_original_hint(self):
+        cases = [
+            ("Adhesive Tape", 'Adhesive Tape 1/2" x 10 yds', 'Adhesive Tape 1/2" x 10 yds'),
+            ("Gauze Bandage", 'Gauze Bandage - 3"', 'Gauze Bandage - 3"'),
+            ("Ammonia Inhalant", "Ammonia Inhalant - pack of 5", "Ammonia Inhalant - Pack of 5"),
+        ]
+
+        for cleaned_name, original_name, expected in cases:
+            with self.subTest(original_name=original_name):
+                self.assertEqual(preserve_specific_item_details(cleaned_name, original_name), expected)
 
     def test_ocr_provider_interface_is_explicitly_unavailable_by_default(self):
         with self.assertRaises(OCRProviderUnavailable):
@@ -1517,7 +1549,7 @@ class ContractIntelligenceWorkflowTests(APITestCase):
         self.assertEqual(response.data["result"]["sources_analyzed"], 1)
         self.assertFalse(ContractIntelligenceItem.objects.filter(run=run, original_item_name="Old stale item").exists())
         items = list(ContractIntelligenceItem.objects.filter(run=run).values_list("suggested_item_name", flat=True))
-        self.assertEqual(items, ["Deep Heat Spray 10 BOTTLES 18"])
+        self.assertEqual(items, ["Deep Heat Spray 10 Bottles 18"])
         source.refresh_from_db()
         self.assertEqual(source.status, "analyzed")
 
@@ -1572,7 +1604,7 @@ class ContractIntelligenceWorkflowTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         items = list(ContractIntelligenceItem.objects.filter(run=run).values_list("suggested_item_name", flat=True))
-        self.assertEqual(items, ["DEEP HEAT SPRAY"])
+        self.assertEqual(items, ["Deep Heat Spray"])
 
     def test_contract_analysis_cleans_catalog_brand_comments_and_skips_rfq_noise(self):
         run = ContractIntelligenceRun.objects.create(
@@ -2691,10 +2723,10 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(response.data["meta"]["selected_sheets"][0]["header_row"], 2)
 
         expected = [
-            ("ANTI SEPTIC SOLUTION", "1", "bottle", "1"),
-            ("GAUZE PIECES", "1", "BOX", "2"),
-            ("TRIANGULAR BANDAGES", "5", "Nos", "3"),
-            ("SPLINTS", "2", "packs", "4"),
+            ("Anti Septic Solution", "1", "bottle", "1"),
+            ("Gauze Pieces", "1", "BOX", "2"),
+            ("Triangular Bandages", "5", "Nos", "3"),
+            ("Splints", "2", "packs", "4"),
         ]
         for line, (name, quantity, unit, serial) in zip(response.data["lines"], expected):
             with self.subTest(name=name):
@@ -2715,7 +2747,7 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         selected = [sheet["sheet_name"] for sheet in response.data["meta"]["selected_sheets"]]
         self.assertEqual(selected, ["Items"])
-        self.assertEqual(response.data["lines"][0]["raw_name"], "GLOVES MEDIUM")
+        self.assertEqual(response.data["lines"][0]["raw_name"], "Gloves Medium")
 
     def test_pdf_parse_happy_path(self):
         response = self.client.post(
@@ -2753,13 +2785,13 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(first_line["parse_status"], InquiryLine.PARSE_PARSED)
 
         band_aid = response.data["lines"][1]
-        self.assertEqual(band_aid["raw_name"], "Band Aid waterproof - Brand : Broplast (1x100)")
+        self.assertEqual(band_aid["raw_name"], "Band Aid Waterproof - Brand : Broplast (1 x 100)")
         self.assertEqual(band_aid["quantity"], "5")
         self.assertEqual(band_aid["unit"], "Boxes")
         self.assertEqual(band_aid["unit_price"], "8")
         self.assertEqual(band_aid["line_total"], "40")
 
-        continuation = next(line for line in response.data["lines"] if line["raw_name"].startswith("Face mask Earloop"))
+        continuation = next(line for line in response.data["lines"] if line["raw_name"].startswith("Face Mask Earloop"))
         self.assertEqual(continuation["quantity"], "5")
         self.assertEqual(continuation["unit_price"], "6")
 
@@ -2782,14 +2814,14 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data["lines"]), 2)
         electrorush = response.data["lines"][0]
-        self.assertEqual(electrorush["raw_name"], "Electrorush 21gm sache for 1 Ltr solution")
+        self.assertEqual(electrorush["raw_name"], "Electrorush 21gm Sache for 1 Ltr Solution")
         self.assertEqual(electrorush["quantity"], "50")
         self.assertEqual(electrorush["unit"], "carton")
         self.assertEqual(electrorush["unit_price"], "375")
         self.assertIn("1 box 10 sachets", electrorush["notes"])
 
         zest = response.data["lines"][1]
-        self.assertEqual(zest["raw_name"], "Zest Ors 21 gm sachet per for 1 Ltr solution")
+        self.assertEqual(zest["raw_name"], "Zest ORS 21 gm sachet per for 1 Ltr Solution")
         self.assertIsNone(zest["quantity"])
         self.assertEqual(zest["unit"], "box")
         self.assertEqual(zest["unit_price"], "18")
@@ -4686,7 +4718,7 @@ class AIImportParsingTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["result_source"], "ai_text_cleanup")
-        self.assertEqual(response.data["lines"][0]["raw_name"], "Electrorush 21gm sache for 1 Ltr solution")
+        self.assertEqual(response.data["lines"][0]["raw_name"], "Electrorush 21gm Sache for 1 Ltr Solution")
         self.assertEqual(response.data["lines"][0]["quantity"], "50")
         self.assertEqual(response.data["lines"][0]["unit_price"], "375")
         self.assertEqual(response.data["lines"][1]["parse_status"], InquiryLine.PARSE_NEEDS_REVIEW)

@@ -356,12 +356,160 @@ def strip_serial_prefix(value):
     return rest.strip(" -:|"), match.group("serial"), True
 
 
+ITEM_UPPERCASE_TOKENS = {
+    "AED",
+    "BP",
+    "CPR",
+    "ECG",
+    "FFP2",
+    "FFP3",
+    "ICU",
+    "IV",
+    "KN95",
+    "LPO",
+    "N95",
+    "ORS",
+    "PDC",
+    "PO",
+    "PPE",
+    "PVC",
+    "RFQ",
+    "TRN",
+    "UAE",
+    "VAT",
+}
+ITEM_LOWERCASE_TOKENS = {"a", "an", "and", "as", "for", "in", "of", "or", "per", "the", "to", "with", "x"}
+ITEM_TOKEN_REPLACEMENTS = {
+    "oxmeter": "Oximeter",
+}
+ITEM_STANDALONE_UNIT_TOKENS = {
+    "box",
+    "boxes",
+    "cap",
+    "caps",
+    "cm",
+    "ea",
+    "each",
+    "g",
+    "gm",
+    "kg",
+    "l",
+    "m",
+    "mg",
+    "ml",
+    "mm",
+    "nos",
+    "pc",
+    "pcs",
+    "pkt",
+    "pkts",
+    "sachet",
+    "sachets",
+    "tab",
+    "tabs",
+    "yd",
+    "yds",
+}
+ITEM_UNIT_SUFFIX_RE = re.compile(
+    r"^\d+(?:[./]\d+)?(?:cm|mm|m|mg|ml|l|gm|g|kg|yds?|pcs?|pc|sachets?|tabs?|caps?|/box|/pkt|%)?$",
+    re.IGNORECASE,
+)
+ITEM_SPEC_RE = re.compile(
+    r"("
+    r"\bpack\s+of\s+\d+\b"
+    r"|\b\d+(?:[./]\d+)?\s*(?:\"|inch(?:es)?|cm|mm|m|mg|ml|l|gm|g|kg|yds?|pcs?|pc|sachets?|tabs?|caps?)\b"
+    r"|\b\d+(?:[./]\d+)?\s*x\s*\d+(?:[./]\d+)?\b"
+    r"|\b\d+(?:[./]\d+)?\s*\"\s*x\s*\d+(?:[./]\d+)?\s*\""
+    r")",
+    re.IGNORECASE,
+)
+TRAILING_ORDER_TAIL_RE = re.compile(
+    rf"\s+\d+(?:[.,]\d+)?\s*(?:{UNIT_PATTERN})\s*(?:AED\s*)?\d*(?:[.,]\d+)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _compact_item_label(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _standardize_token(token, *, first=False):
+    if not token:
+        return token
+    match = re.match(r"^([^A-Za-z0-9]*)(.*?)([^A-Za-z0-9%\"]*)$", token)
+    if not match:
+        return token
+    prefix, core, suffix = match.groups()
+    if not core:
+        return token
+    core_upper = core.upper()
+    core_lower = core.lower()
+    if core_lower in ITEM_TOKEN_REPLACEMENTS:
+        formatted = ITEM_TOKEN_REPLACEMENTS[core_lower]
+    elif core_lower == "3m":
+        formatted = "3M"
+    elif core_upper in ITEM_UPPERCASE_TOKENS:
+        formatted = core_upper
+    elif core_lower in ITEM_STANDALONE_UNIT_TOKENS:
+        formatted = core_lower
+    elif ITEM_UNIT_SUFFIX_RE.match(core):
+        formatted = core_lower
+    elif any(char.isdigit() for char in core):
+        formatted = core_upper if re.fullmatch(r"[a-zA-Z]*\d+[a-zA-Z0-9-]*", core) else core
+    elif core_lower in ITEM_LOWERCASE_TOKENS and not first:
+        formatted = core_lower
+    else:
+        formatted = core_lower[:1].upper() + core_lower[1:]
+    return f"{prefix}{formatted}{suffix}"
+
+
+def standardize_item_display_name(value):
+    text = normalize_import_line(value)
+    text = text.replace("|", " ")
+    text = text.replace("â€“", "-").replace("â€”", "-")
+    text = text.replace("“", '"').replace("”", '"').replace("''", '"')
+    text = re.sub(r"^\s*[-*â€¢]\s*", "", text)
+    text = re.sub(r"(?<=\d)\s*[xX]\s*(?=\d)", " x ", text)
+    text = re.sub(r"\s*-\s*", " - ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -:\t|")
+    if not text:
+        return ""
+    words = text.split(" ")
+    return " ".join(_standardize_token(word, first=index == 0) for index, word in enumerate(words)).strip()
+
+
+def _trim_order_tail_from_item_hint(value):
+    text = normalize_import_line(value)
+    for _ in range(2):
+        trimmed = TRAILING_ORDER_TAIL_RE.sub("", text).strip()
+        if trimmed == text:
+            break
+        text = trimmed
+    return text
+
+
+def preserve_specific_item_details(cleaned_name, original_name):
+    cleaned = standardize_item_display_name(cleaned_name)
+    original = standardize_item_display_name(_trim_order_tail_from_item_hint(original_name))
+    if not cleaned:
+        return original[:255]
+    if not original:
+        return cleaned[:255]
+    cleaned_compact = _compact_item_label(cleaned)
+    original_compact = _compact_item_label(original)
+    has_original_spec = ITEM_SPEC_RE.search(original) or re.search(r'(?:^|\s|-\s*)\d+(?:[./]\d+)?\s*"', original)
+    if (
+        has_original_spec
+        and not ITEM_SPEC_RE.search(cleaned)
+        and original_compact.startswith(cleaned_compact)
+    ):
+        return original[:255]
+    return cleaned[:255]
+
+
 def clean_item_name(value):
     value, _, _ = strip_serial_prefix(value)
-    value = value.replace("|", " ")
-    value = re.sub(r"^\s*[-*•]\s*", "", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip(" -:\t|")[:255]
+    return standardize_item_display_name(value)[:255]
 
 
 def _data_row_score(row, columns):

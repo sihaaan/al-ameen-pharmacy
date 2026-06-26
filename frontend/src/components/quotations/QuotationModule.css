@@ -813,6 +813,30 @@
   box-shadow: 0 8px 22px rgba(15, 118, 110, 0.08);
 }
 
+.qm-save-row.sticky-line-actions {
+  top: 96px;
+  z-index: 30;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 12px;
+  background: rgba(255, 255, 255, 0.98);
+  border-color: #99f6e4;
+  box-shadow: 0 12px 30px rgba(15, 118, 110, 0.12);
+}
+
+.qm-save-row.sticky-line-actions .qm-input.compact {
+  width: 168px;
+  min-width: 150px;
+}
+
+.qm-sticky-action-divider {
+  width: 1px;
+  height: 32px;
+  margin: 0 2px;
+  background: #d1fae5;
+}
+
 .qm-link-button {
   border: 0;
   background: transparent;

@@ -1312,6 +1312,17 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLines} onClick={saveAllLines}>
               {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
             </button>
+            <span className="qm-sticky-action-divider" aria-hidden="true" />
+            {['draft', 'pending_review', 'approved'].includes(quote.status) && (
+              <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={() => runAction('Finalize', quotationAPI.quotes.finalize)}>
+                {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
+              </button>
+            )}
+            {!['revised', 'cancelled'].includes(quote.status) && (
+              <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>
+                {actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}
+              </button>
+            )}
           </div>
         )}
 

@@ -11,7 +11,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
-from .import_rules import summarize_lines
+from .import_rules import preserve_specific_item_details, standardize_item_display_name, summarize_lines
 from .models import AIParseCache, AIParseLog, HistoricalPriceImport, Inquiry, QuotationSettings
 from .private_storage import read_private_ref
 
@@ -510,6 +510,15 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
         if parse_status not in VALID_PARSE_STATUSES:
             parse_status = "needs_review"
         item_name = _clean_text(row.get("item_name"))
+        original_item_hint = _clean_text(
+            row.get("original_item_name")
+            or row.get("source_item_name")
+            or row.get("raw_name")
+            or row.get("raw_source_text")
+            or row.get("raw_line")
+            or item_name
+        )
+        item_name = preserve_specific_item_details(item_name, original_item_hint)
         raw_line = _clean_text(row.get("raw_source_text") or row.get("raw_line") or item_name)
         if parse_status == "ignored":
             ignored_count += 1
@@ -538,7 +547,7 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
             rows.append(
                 {
                     **common,
-                    "item_name": item_name[:255],
+                    "item_name": standardize_item_display_name(item_name)[:255],
                     "status": "needs_review",
                     "source_page": _safe_int(row.get("page_number"), default=None),
                 }
@@ -547,7 +556,7 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
             rows.append(
                 {
                     **common,
-                    "raw_name": item_name[:255],
+                    "raw_name": standardize_item_display_name(item_name)[:255],
                     "matched_product": "",
                     "match_reason": "",
                     "match_status": "unresolved",
@@ -717,7 +726,7 @@ def _ai_instructions(*, output_style, mode):
     return (
         "You clean messy pharmacy inquiry, LPO, and finalized quotation extraction into JSON rows for human review. "
         "Do not match products, do not create items, do not invent prices or quantities, and do not commit anything. "
-        "Only extract what is visible or clearly present. Put order quantities, units, unit prices, totals, and pack details in their own fields, never inside item_name. "
+        "Only extract what is visible or clearly present. Preserve product-identifying sizes, dimensions, strengths, variants, and pack counts in item_name, for example Adhesive Tape 1/2\" x 10 yds, Gauze Bandage - 2\", Gauze Pads - 3\" x 3\", or Ammonia Inhalant - pack of 5. Put order quantities, units, unit prices, and totals in their own fields. "
         "Skip obvious document metadata such as dates, seller/buyer addresses, tender numbers, quotation headings, table headers, totals, footers, contact/signature text, and email addresses by setting parse_status='ignored'. "
         "If quantity is unclear, leave quantity blank and set parse_status='needs_review'. "
         "If price is clear, extract unit_price. Preserve item-like uncertain rows as needs_review. "
