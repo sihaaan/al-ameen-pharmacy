@@ -327,6 +327,10 @@ def _row_payload(row, score):
     }
 
 
+def _is_blank(value):
+    return value is None or str(value).strip() == ""
+
+
 def apply_price_reference_to_preview(preview, reference_rows):
     updated_lines = []
     matched_count = 0
@@ -343,10 +347,11 @@ def apply_price_reference_to_preview(preview, reference_rows):
             if score > best_score or (score == best_score and best and row.sequence > best.sequence):
                 best = row
                 best_score = score
-        if best and best_score >= 0.82:
-            line["unit_price"] = str(best.unit_price)
-            line["vat_rate"] = str(best.vat_rate)
-            line["price_reference_match"] = _row_payload(best, best_score)
+        matched_reference = best if best and best_score >= 0.82 else None
+        if matched_reference:
+            line["unit_price"] = str(matched_reference.unit_price)
+            line["vat_rate"] = str(matched_reference.vat_rate)
+            line["price_reference_match"] = _row_payload(matched_reference, best_score)
             line["price_reference_status"] = "matched"
             line["parse_status"] = line.get("parse_status") or "parsed"
             matched_count += 1
@@ -358,7 +363,10 @@ def apply_price_reference_to_preview(preview, reference_rows):
             line["price_reference_status"] = "unmatched"
             unmatched_count += 1
         line["quantity"] = original_line.get("quantity", "")
-        line["unit"] = original_line.get("unit", "")
+        if matched_reference and _is_blank(original_line.get("unit")) and matched_reference.unit:
+            line["unit"] = matched_reference.unit
+        else:
+            line["unit"] = original_line.get("unit", "")
         updated_lines.append(line)
     return {
         **preview,

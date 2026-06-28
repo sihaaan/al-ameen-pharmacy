@@ -319,12 +319,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   };
 
   const lineTotalForDraft = (draft = {}) => {
+    if (draft.match_status === 'ignored') return 0;
     const quantity = Number(draft.quantity || 0);
     const unitPrice = Number(draft.unit_price || 0);
     const vatRate = Number(draft.vat_rate || 0);
     const subtotal = quantity * unitPrice;
     return Number.isFinite(subtotal) ? subtotal * (1 + (Number.isFinite(vatRate) ? vatRate : 0) / 100) : 0;
   };
+  const liveLineDraftFor = (line) => ({ ...line, ...(lineDrafts[line.id] || {}) });
+  const liveQuoteTotal = activeLines.reduce((sum, line) => sum + lineTotalForDraft(liveLineDraftFor(line)), 0);
 
   const derivedLineStatus = (line) => {
     const draft = lineDrafts[line.id] || {};
@@ -1285,6 +1288,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         {isEditable && (
           <div className="qm-save-row sticky-line-actions">
             <span className={hasUnsavedLines ? 'qm-unsaved' : 'qm-saved'}>{hasUnsavedLines ? `${changedLineIds.length} unsaved line change(s)` : 'All line changes saved'}</span>
+            <span className="qm-sticky-total">
+              Total <strong>{quote.currency} {liveQuoteTotal.toFixed(2)}</strong>
+            </span>
             <select className="qm-input compact" value={lineFilter} onChange={(event) => setLineFilter(event.target.value)}>
               <option value="active">Active lines</option>
               <option value="unmatched">Unmatched</option>

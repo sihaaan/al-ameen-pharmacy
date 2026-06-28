@@ -837,6 +837,25 @@
   background: #d1fae5;
 }
 
+.qm-sticky-total {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid #ccfbf1;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.qm-sticky-total strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+
 .qm-link-button {
   border: 0;
   background: transparent;

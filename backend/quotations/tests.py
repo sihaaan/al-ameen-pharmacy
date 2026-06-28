@@ -822,7 +822,7 @@ class QuotationWorkflowTests(APITestCase):
         sheet = workbook.active
         sheet.append(["Sl No", "Items", "unit", "qty", "uprice", "TOTAL", "Vat", "g total"])
         sheet.append([1, "Adol Infant suspension", "box", 99, 12, 36, 0, 36])
-        sheet.append([2, "Fenestil Gel", "pcs", 3, 12.5, 37.5, 0, 37.5])
+        sheet.append([2, "Fenestil Gel", "tube", 7, 12.5, 37.5, 5, 39.38])
         buffer = BytesIO()
         workbook.save(buffer)
         upload = SimpleUploadedFile(
@@ -834,6 +834,7 @@ class QuotationWorkflowTests(APITestCase):
             "source_type": "excel",
             "lines": [
                 {"raw_name": "Adol Infant suspension", "quantity": "3", "unit": "pcs", "parse_status": "parsed"},
+                {"raw_name": "Fenestil Gel", "quantity": "2", "unit": "", "parse_status": "parsed"},
                 {"raw_name": "Unknown Clinic Item", "quantity": "1", "unit": "pcs", "parse_status": "needs_review"},
             ],
         }
@@ -845,13 +846,17 @@ class QuotationWorkflowTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["price_reference_summary"]["matched_count"], 1)
+        self.assertEqual(response.data["price_reference_summary"]["matched_count"], 2)
         self.assertEqual(response.data["lines"][0]["quantity"], "3")
         self.assertEqual(response.data["lines"][0]["unit"], "pcs")
         self.assertEqual(response.data["lines"][0]["unit_price"], "12.00")
         self.assertEqual(response.data["lines"][0]["vat_rate"], "0.00")
         self.assertEqual(response.data["lines"][0]["price_reference_status"], "matched")
-        self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
+        self.assertEqual(response.data["lines"][1]["quantity"], "2")
+        self.assertEqual(response.data["lines"][1]["unit"], "tube")
+        self.assertEqual(response.data["lines"][1]["unit_price"], "12.50")
+        self.assertEqual(response.data["lines"][1]["vat_rate"], "5.00")
+        self.assertEqual(response.data["lines"][2]["price_reference_status"], "unmatched")
 
     def test_price_reference_pasted_text_fills_prices_and_preserves_quantity(self):
         preview = {
@@ -878,8 +883,10 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["price_reference_summary"]["matched_count"], 1)
         self.assertEqual(response.data["lines"][0]["quantity"], "2")
-        self.assertEqual(response.data["lines"][0]["unit"], "")
+        self.assertEqual(response.data["lines"][0]["unit"], "NUM")
         self.assertEqual(response.data["lines"][0]["unit_price"], "55.00")
+        self.assertEqual(response.data["lines"][1]["quantity"], "5")
+        self.assertEqual(response.data["lines"][1]["unit"], "PCS")
         self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
 
     def test_imported_inquiry_prices_carry_into_created_quote_lines(self):

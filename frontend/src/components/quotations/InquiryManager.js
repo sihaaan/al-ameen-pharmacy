@@ -65,6 +65,11 @@ const preserveParsedField = (currentLine, responseLine, field) => (
     : responseLine[field] ?? ''
 );
 
+const useReferenceWhenBlank = (currentLine, responseLine, field) => {
+  const currentValue = preserveParsedField(currentLine, responseLine, field);
+  return String(currentValue || '').trim() ? currentValue : responseLine[field] ?? '';
+};
+
 const mergePriceReferenceLines = (currentLines, responseLines) => {
   const currentByKey = new Map(
     (currentLines || []).map((line, index) => [importLineKey(line, index), line])
@@ -75,7 +80,7 @@ const mergePriceReferenceLines = (currentLines, responseLines) => {
     return {
       ...line,
       quantity: preserveParsedField(currentLine, line, 'quantity'),
-      unit: preserveParsedField(currentLine, line, 'unit'),
+      unit: useReferenceWhenBlank(currentLine, line, 'unit'),
     };
   });
 };
