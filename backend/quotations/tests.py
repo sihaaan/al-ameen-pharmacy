@@ -821,7 +821,7 @@ class QuotationWorkflowTests(APITestCase):
         workbook = Workbook()
         sheet = workbook.active
         sheet.append(["Sl No", "Items", "unit", "qty", "uprice", "TOTAL", "Vat", "g total"])
-        sheet.append([1, "Adol Infant suspension", "pcs", 3, 12, 36, 0, 36])
+        sheet.append([1, "Adol Infant suspension", "box", 99, 12, 36, 0, 36])
         sheet.append([2, "Fenestil Gel", "pcs", 3, 12.5, 37.5, 0, 37.5])
         buffer = BytesIO()
         workbook.save(buffer)
@@ -846,6 +846,8 @@ class QuotationWorkflowTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["price_reference_summary"]["matched_count"], 1)
+        self.assertEqual(response.data["lines"][0]["quantity"], "3")
+        self.assertEqual(response.data["lines"][0]["unit"], "pcs")
         self.assertEqual(response.data["lines"][0]["unit_price"], "12.00")
         self.assertEqual(response.data["lines"][0]["vat_rate"], "0.00")
         self.assertEqual(response.data["lines"][0]["price_reference_status"], "matched")

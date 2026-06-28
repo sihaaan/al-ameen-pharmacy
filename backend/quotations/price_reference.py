@@ -333,6 +333,7 @@ def apply_price_reference_to_preview(preview, reference_rows):
     review_count = 0
     unmatched_count = 0
     for line in preview.get("lines", []) or []:
+        original_line = dict(line)
         line = dict(line)
         raw_name = line.get("raw_name") or line.get("item_name") or ""
         best = None
@@ -356,6 +357,8 @@ def apply_price_reference_to_preview(preview, reference_rows):
         else:
             line["price_reference_status"] = "unmatched"
             unmatched_count += 1
+        line["quantity"] = original_line.get("quantity", "")
+        line["unit"] = original_line.get("unit", "")
         updated_lines.append(line)
     return {
         **preview,

@@ -50,6 +50,36 @@ const contactOptionLabel = (contact) => {
   return details ? `${contact.name} - ${details}` : contact.name;
 };
 
+const importLineKey = (line, index) => [
+  line.id || '',
+  line.sheet_name || '',
+  line.row_number || '',
+  line.raw_line || line.raw_source_line || '',
+  line.raw_name || line.item_name || '',
+  index,
+].join('::');
+
+const preserveParsedField = (currentLine, responseLine, field) => (
+  Object.prototype.hasOwnProperty.call(currentLine, field)
+    ? currentLine[field] ?? ''
+    : responseLine[field] ?? ''
+);
+
+const mergePriceReferenceLines = (currentLines, responseLines) => {
+  const currentByKey = new Map(
+    (currentLines || []).map((line, index) => [importLineKey(line, index), line])
+  );
+
+  return (responseLines || []).map((line, index) => {
+    const currentLine = currentByKey.get(importLineKey(line, index)) || currentLines[index] || {};
+    return {
+      ...line,
+      quantity: preserveParsedField(currentLine, line, 'quantity'),
+      unit: preserveParsedField(currentLine, line, 'unit'),
+    };
+  });
+};
+
 const emptyContactForm = {
   name: '',
   email: '',
@@ -445,16 +475,7 @@ const InquiryManager = ({ onOpenQuote }) => {
       setPreview({
         ...response.data,
         result_source: response.data.result_source || importPreview.result_source || 'deterministic_parse',
-        lines: responseLines.map((line, index) => {
-          const currentLine = currentLines[index] || {};
-          const hasCurrentQuantity = Object.prototype.hasOwnProperty.call(currentLine, 'quantity');
-          const hasCurrentUnit = Object.prototype.hasOwnProperty.call(currentLine, 'unit');
-          return {
-            ...line,
-            quantity: hasCurrentQuantity ? currentLine.quantity : line.quantity ?? '',
-            unit: hasCurrentUnit ? currentLine.unit : line.unit ?? '',
-          };
-        }),
+        lines: mergePriceReferenceLines(currentLines, responseLines),
       });
       const summary = response.data.price_reference_summary || {};
       setImportNotice({
