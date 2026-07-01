@@ -82,6 +82,7 @@ from .excel import build_quotation_excel
 from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_pdf, build_quotation_pdf
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
+from .quote_po_intelligence import find_quote_po_evidence, parse_quote_po_evidence
 from .serializers import (
     CompanyContactSerializer,
     CompanyListSerializer,
@@ -101,6 +102,7 @@ from .serializers import (
     QuotationAuditLogSerializer,
     QuotationLineSerializer,
     QuotationLPOSerializer,
+    QuotationPOEvidenceSerializer,
     QuotationListSerializer,
     QuotationOutcomePOImportSerializer,
     ProformaInvoiceLineSerializer,
@@ -1646,10 +1648,12 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             .get(pk=quotation.pk)
         )
         serializer = self.get_serializer(quotation)
+        evidence = quotation.po_evidence.order_by("-confidence", "-sent_at", "-created_at")[:12]
         return Response(
             {
                 "quotation": serializer.data,
                 "summary": outcome_summary_for_quotation(quotation),
+                "po_evidence": QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request}).data,
                 "line_outcome_statuses": [
                     {"value": value, "label": label} for value, label in QuotationLine.OUTCOME_STATUS_CHOICES
                 ],
@@ -1721,6 +1725,75 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return self.handle_workflow_error(exc)
         serializer = QuotationOutcomePOImportSerializer(po_import, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"], parser_classes=[JSONParser])
+    def po_evidence(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            ensure_outcome_reviewable(quotation)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        evidence = quotation.po_evidence.order_by("-confidence", "-sent_at", "-created_at")
+        serializer = QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request})
+        return Response({"results": serializer.data, "count": len(serializer.data)})
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def find_po_evidence(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            result = find_quote_po_evidence(
+                quotation,
+                request.user,
+                limit=request.data.get("limit", 25),
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            logger.exception("Quotation PO evidence search failed for quote %s", quotation.pk)
+            return Response(
+                {"detail": f"Gmail PO evidence search failed. {str(exc)[:250]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = QuotationPOEvidenceSerializer(result["evidence"], many=True, context={"request": request})
+        return Response({"count": result["count"], "queries": result["queries"], "results": serializer.data})
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def parse_po_evidence(self, request, pk=None):
+        quotation = self.get_object()
+        evidence_id = request.data.get("evidence_id")
+        try:
+            evidence = quotation.po_evidence.get(pk=evidence_id)
+            po_import = parse_quote_po_evidence(
+                evidence,
+                request.user,
+                use_ai=str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"},
+            )
+        except quotation.po_evidence.model.DoesNotExist:
+            return Response({"detail": "Select a valid Gmail evidence candidate."}, status=status.HTTP_400_BAD_REQUEST)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            logger.exception("Quotation PO evidence parsing failed for quote %s", quotation.pk)
+            return Response(
+                {"detail": f"Gmail PO evidence parsing failed. {str(exc)[:250]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = QuotationOutcomePOImportSerializer(po_import, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def mark_po_evidence_not_relevant(self, request, pk=None):
+        quotation = self.get_object()
+        evidence_id = request.data.get("evidence_id")
+        try:
+            evidence = quotation.po_evidence.get(pk=evidence_id)
+        except quotation.po_evidence.model.DoesNotExist:
+            return Response({"detail": "Select a valid Gmail evidence candidate."}, status=status.HTTP_400_BAD_REQUEST)
+        evidence.status = evidence.STATUS_NOT_RELEVANT
+        evidence.error = ""
+        evidence.save(update_fields=["status", "error", "updated_at"])
+        serializer = QuotationPOEvidenceSerializer(evidence, context={"request": request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=["get"])
     def lpos(self, request, pk=None):

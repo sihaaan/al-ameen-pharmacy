@@ -196,6 +196,10 @@ const quotationAPI = {
       data,
       isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined
     ),
+    poEvidence: (id) => axiosInstance.get(`/quotations/quotes/${id}/po_evidence/`),
+    findPOEvidence: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/find_po_evidence/`, data),
+    parsePOEvidence: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/parse_po_evidence/`, data),
+    markPOEvidenceNotRelevant: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/mark_po_evidence_not_relevant/`, data),
     markSent: (id) => axiosInstance.post(`/quotations/quotes/${id}/mark_sent/`),
     revise: (id) => axiosInstance.post(`/quotations/quotes/${id}/revise/`),
     cancel: (id) => axiosInstance.post(`/quotations/quotes/${id}/cancel/`),

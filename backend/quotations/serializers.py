@@ -29,6 +29,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationLPO,
+    QuotationPOEvidence,
     QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
@@ -1731,14 +1732,56 @@ class QuotationListSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    attachment_count = serializers.SerializerMethodField()
+    parsed_attachment_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuotationPOEvidence
+        fields = [
+            "id",
+            "quotation",
+            "gmail_message_id",
+            "gmail_thread_id",
+            "sender",
+            "recipients",
+            "subject",
+            "sent_at",
+            "snippet",
+            "attachments",
+            "attachment_count",
+            "parsed_attachment_count",
+            "source_sha256",
+            "matching_reason",
+            "confidence",
+            "status",
+            "error",
+            "created_by",
+            "created_by_username",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_attachment_count(self, obj):
+        return len(obj.attachments or [])
+
+    def get_parsed_attachment_count(self, obj):
+        return sum(1 for attachment in obj.attachments or [] if (attachment or {}).get("status") == "parsed")
+
+
 class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    gmail_evidence_subject = serializers.CharField(source="gmail_evidence.subject", read_only=True, allow_null=True)
 
     class Meta:
         model = QuotationOutcomePOImport
         fields = [
             "id",
             "quotation",
+            "gmail_evidence",
+            "gmail_evidence_subject",
             "source_type",
             "source_filename",
             "source_sha256",

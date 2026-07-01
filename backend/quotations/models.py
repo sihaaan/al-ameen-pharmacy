@@ -1408,12 +1408,71 @@ class QuotationLine(models.Model):
         super().save(*args, **kwargs)
 
 
+class QuotationPOEvidence(models.Model):
+    STATUS_CANDIDATE = "candidate"
+    STATUS_PARSED = "parsed"
+    STATUS_NOT_RELEVANT = "not_relevant"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_CANDIDATE, "Candidate"),
+        (STATUS_PARSED, "Parsed"),
+        (STATUS_NOT_RELEVANT, "Not relevant"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="po_evidence")
+    gmail_message_id = models.CharField(max_length=255, blank=True, db_index=True)
+    gmail_thread_id = models.CharField(max_length=255, blank=True, db_index=True)
+    sender = models.CharField(max_length=500, blank=True)
+    recipients = models.TextField(blank=True)
+    subject = models.CharField(max_length=500, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    snippet = models.TextField(blank=True)
+    extracted_text = models.TextField(blank=True)
+    attachments = models.JSONField(default=list, blank=True)
+    source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)
+    matching_reason = models.TextField(blank=True)
+    confidence = models.PositiveSmallIntegerField(default=0)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_CANDIDATE)
+    error = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_quote_po_evidence",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-confidence", "-sent_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["quotation", "status"]),
+            models.Index(fields=["quotation", "confidence"]),
+            models.Index(fields=["sent_at"]),
+            models.Index(fields=["source_sha256"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["quotation", "gmail_message_id"],
+                condition=~models.Q(gmail_message_id=""),
+                name="unique_quote_po_evidence_message",
+            )
+        ]
+
+    def __str__(self):
+        return self.subject or f"PO evidence for {self.quotation}"
+
+
 class QuotationOutcomePOImport(models.Model):
     SOURCE_PASTED_TEXT = "pasted_text"
     SOURCE_FILE = "file"
+    SOURCE_GMAIL = "gmail"
     SOURCE_TYPE_CHOICES = [
         (SOURCE_PASTED_TEXT, "Pasted text"),
         (SOURCE_FILE, "File"),
+        (SOURCE_GMAIL, "Gmail evidence"),
     ]
 
     STATUS_PARSED = "parsed"
@@ -1424,6 +1483,13 @@ class QuotationOutcomePOImport(models.Model):
     ]
 
     quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="outcome_po_imports")
+    gmail_evidence = models.ForeignKey(
+        QuotationPOEvidence,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="po_imports",
+    )
     source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES)
     source_filename = models.CharField(max_length=255, blank=True)
     source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)

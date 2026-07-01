@@ -56,6 +56,8 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationLPO,
+    QuotationOutcomePOImport,
+    QuotationPOEvidence,
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
@@ -628,6 +630,111 @@ class QuotationWorkflowTests(APITestCase):
         line.refresh_from_db()
         self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_PENDING)
         self.assertTrue(response.data["unmatched_po_rows"])
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_find_po_evidence_dedupes_gmail_candidates(self, mock_search, mock_metadata):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        quotation.status = Quotation.STATUS_SENT
+        quotation.sent_at = timezone.now()
+        quotation.save(update_fields=["status", "sent_at", "updated_at"])
+        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        mock_search.return_value = {"messages": [{"id": "gmail-1"}, {"id": "gmail-1"}]}
+        mock_metadata.return_value = {
+            "gmail_message_id": "gmail-1",
+            "gmail_thread_id": "thread-1",
+            "sender": "buyer@workflow.example",
+            "recipients": "pharmacy@example.com",
+            "subject": f"LPO for {quotation.quotation_number}",
+            "sent_at": timezone.now(),
+            "snippet": "Please find attached purchase order.",
+            "attachments": [{"filename": "po.pdf", "size": 1234}],
+        }
+
+        first = self.client.post(reverse("quotation-find-po-evidence", args=[quotation.id]), {"limit": 5}, format="json")
+        second = self.client.post(reverse("quotation-find-po-evidence", args=[quotation.id]), {"limit": 5}, format="json")
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(QuotationPOEvidence.objects.filter(quotation=quotation).count(), 1)
+        self.assertEqual(first.data["count"], 1)
+        evidence = QuotationPOEvidence.objects.get(quotation=quotation)
+        self.assertEqual(evidence.gmail_message_id, "gmail-1")
+        self.assertIn("quote number", evidence.matching_reason)
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message")
+    def test_parse_po_evidence_creates_review_import_without_saving_outcome(self, mock_fetch):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        quotation.status = Quotation.STATUS_SENT
+        quotation.sent_at = timezone.now()
+        quotation.save(update_fields=["status", "sent_at", "updated_at"])
+        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        evidence = QuotationPOEvidence.objects.create(
+            quotation=quotation,
+            gmail_message_id="gmail-parse-1",
+            gmail_thread_id="thread-parse-1",
+            sender="buyer@workflow.example",
+            subject="LPO accepted items",
+            confidence=90,
+            created_by=self.staff,
+        )
+        mock_fetch.return_value = {
+            "gmail_message_id": "gmail-parse-1",
+            "gmail_thread_id": "thread-parse-1",
+            "sender": "buyer@workflow.example",
+            "recipients": "pharmacy@example.com",
+            "subject": "LPO accepted items",
+            "sent_at": timezone.now(),
+            "snippet": "Bandage Pack accepted",
+            "body_text": "Bandage Pack 2 box 10\nExtra PO Item 1 box 5",
+            "attachments": [],
+        }
+
+        response = self.client.post(
+            reverse("quotation-parse-po-evidence", args=[quotation.id]),
+            {"evidence_id": evidence.id, "use_ai": "false"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["source_type"], QuotationOutcomePOImport.SOURCE_GMAIL)
+        self.assertEqual(response.data["gmail_evidence"], evidence.id)
+        self.assertGreaterEqual(len(response.data["suggestions"]), 1)
+        self.assertEqual(response.data["suggestions"][0]["quotation_line_id"], line.id)
+        line.refresh_from_db()
+        evidence.refresh_from_db()
+        self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_PENDING)
+        self.assertEqual(evidence.status, QuotationPOEvidence.STATUS_PARSED)
+        self.assertTrue(QuotationOutcomePOImport.objects.filter(gmail_evidence=evidence).exists())
+
+    def test_mark_po_evidence_not_relevant_is_review_only(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        evidence = QuotationPOEvidence.objects.create(
+            quotation=quotation,
+            gmail_message_id="gmail-ignore-1",
+            subject="Unrelated message",
+            status=QuotationPOEvidence.STATUS_CANDIDATE,
+            confidence=25,
+            created_by=self.staff,
+        )
+
+        response = self.client.post(
+            reverse("quotation-mark-po-evidence-not-relevant", args=[quotation.id]),
+            {"evidence_id": evidence.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        evidence.refresh_from_db()
+        quotation.refresh_from_db()
+        self.assertEqual(evidence.status, QuotationPOEvidence.STATUS_NOT_RELEVANT)
+        self.assertEqual(quotation.outcome_status, Quotation.OUTCOME_PENDING)
 
     def test_analysis_dashboard_and_followups_expose_outcome_metrics(self):
         quotation = self.create_quote()

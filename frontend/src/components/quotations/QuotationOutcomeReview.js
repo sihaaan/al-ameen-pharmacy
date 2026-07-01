@@ -72,6 +72,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [poFile, setPoFile] = useState(null);
   const [poUseAi, setPoUseAi] = useState(true);
   const [poResult, setPoResult] = useState(null);
+  const [poEvidence, setPoEvidence] = useState([]);
+  const [evidenceUseAi, setEvidenceUseAi] = useState(true);
   const [manualOutcome, setManualOutcome] = useState({ outcome_status: '', outcome_notes: '' });
   const [followupDraft, setFollowupDraft] = useState({
     last_contacted_now: false,
@@ -83,12 +85,16 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [poLoading, setPoLoading] = useState(false);
+  const [findingEvidence, setFindingEvidence] = useState(false);
+  const [parsingEvidenceId, setParsingEvidenceId] = useState(null);
+  const [markingEvidenceId, setMarkingEvidenceId] = useState(null);
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
   const setLoaded = useCallback((data) => {
     setQuote(data.quotation);
     setSummary(data.summary);
+    setPoEvidence(data.po_evidence || []);
     const drafts = Object.fromEntries((data.quotation.lines || []).map((line) => [line.id, draftFromLine(line)]));
     setLineDrafts(drafts);
     setManualOutcome({
@@ -205,6 +211,73 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
+  const loadPOEvidence = async () => {
+    try {
+      const response = await quotationAPI.quotes.poEvidence(quoteId);
+      setPoEvidence(response.data.results || []);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load Gmail PO evidence', `GET /quotations/quotes/${quoteId}/po_evidence/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    }
+  };
+
+  const findPOEvidence = async () => {
+    setFindingEvidence(true);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.findPOEvidence(quoteId, { limit: 25 });
+      setPoEvidence(response.data.results || []);
+      setNotice({
+        type: 'success',
+        message: `Found ${response.data.count || 0} Gmail evidence candidate(s). Nothing was saved to the outcome yet.`,
+      });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Find Gmail PO evidence', `POST /quotations/quotes/${quoteId}/find_po_evidence/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setFindingEvidence(false);
+    }
+  };
+
+  const parseEvidence = async (evidenceId) => {
+    setParsingEvidenceId(evidenceId);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.parsePOEvidence(quoteId, { evidence_id: evidenceId, use_ai: evidenceUseAi ? '1' : '0' });
+      setPoResult(response.data);
+      setSelectedSuggestions((response.data.suggestions || []).map((suggestion) => suggestion.quotation_line_id).filter(Boolean));
+      await loadPOEvidence();
+      setNotice({ type: 'success', message: 'Gmail evidence parsed into review-only PO suggestions.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Parse Gmail PO evidence', `POST /quotations/quotes/${quoteId}/parse_po_evidence/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setParsingEvidenceId(null);
+    }
+  };
+
+  const markEvidenceNotRelevant = async (evidenceId) => {
+    setMarkingEvidenceId(evidenceId);
+    setNotice(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.markPOEvidenceNotRelevant(quoteId, { evidence_id: evidenceId });
+      setPoEvidence((current) => current.map((item) => (item.id === evidenceId ? response.data : item)));
+      setNotice({ type: 'success', message: 'Gmail evidence marked not relevant.' });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Mark Gmail evidence not relevant', `POST /quotations/quotes/${quoteId}/mark_po_evidence_not_relevant/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setMarkingEvidenceId(null);
+    }
+  };
+
   const applySelectedSuggestions = () => {
     const suggestions = (poResult?.suggestions || []).filter((suggestion) => selectedSuggestions.includes(suggestion.quotation_line_id));
     if (!suggestions.length) return;
@@ -255,6 +328,69 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         <div className="qm-stat"><span>{percent(summary.value_win_rate)}</span><p>Value win rate</p></div>
         <div className="qm-stat"><span>{percent(summary.line_win_rate)}</span><p>Line win rate</p></div>
         <div className="qm-stat"><span>{summary.pending_lines}</span><p>Pending lines</p></div>
+      </div>
+
+      <div className="qm-panel qm-evidence-panel">
+        <div className="qm-panel-heading">
+          <div>
+            <span className="qm-step-kicker">Gmail evidence</span>
+            <h3>Find PO/LPO replies for this quotation</h3>
+            <p>Searches Gmail only for this quote, customer, and post-quote PO/LPO signals. Evidence is parsed into suggestions only.</p>
+          </div>
+          <div className="qm-evidence-controls">
+            <label className="qm-checkbox">
+              <input type="checkbox" checked={evidenceUseAi} onChange={(event) => setEvidenceUseAi(event.target.checked)} />
+              AI cleanup
+            </label>
+            <button type="button" className="qm-primary" disabled={findingEvidence} onClick={findPOEvidence}>
+              {findingEvidence ? 'Searching Gmail...' : 'Find Gmail Evidence'}
+            </button>
+          </div>
+        </div>
+        {poEvidence.length ? (
+          <div className="qm-evidence-grid">
+            {poEvidence.map((evidence) => {
+              const evidenceStatus = evidence.status || 'candidate';
+              return (
+              <article key={evidence.id} className={`qm-evidence-card status-${evidenceStatus}`}>
+                <div className="qm-evidence-card-main">
+                  <div>
+                    <h4>{evidence.subject || 'Untitled email'}</h4>
+                    <p>{evidence.sender || 'Unknown sender'}</p>
+                    <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} · {evidence.attachment_count} attachment(s)</small>
+                  </div>
+                  <div className="qm-evidence-badges">
+                    <span className="qm-badge">{Math.round(Number(evidence.confidence || 0))}%</span>
+                    <span className={`qm-badge status-${evidenceStatus}`}>{evidenceStatus.replace('_', ' ')}</span>
+                  </div>
+                </div>
+                <div className="qm-evidence-reason">{evidence.matching_reason || evidence.snippet || 'Matched by targeted Gmail search.'}</div>
+                {evidence.error && <div className="qm-notice warning">{evidence.error}</div>}
+                <div className="qm-evidence-actions">
+                  <button
+                    type="button"
+                    className="qm-secondary small"
+                    disabled={parsingEvidenceId === evidence.id || evidenceStatus === 'not_relevant'}
+                    onClick={() => parseEvidence(evidence.id)}
+                  >
+                    {parsingEvidenceId === evidence.id ? 'Parsing...' : 'Parse & Suggest'}
+                  </button>
+                  <button
+                    type="button"
+                    className="qm-secondary small"
+                    disabled={markingEvidenceId === evidence.id || evidenceStatus === 'not_relevant'}
+                    onClick={() => markEvidenceNotRelevant(evidence.id)}
+                  >
+                    {markingEvidenceId === evidence.id ? 'Saving...' : 'Not relevant'}
+                  </button>
+                </div>
+              </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="qm-empty subtle">No Gmail evidence candidates yet. Click Find Gmail Evidence to search for related PO/LPO replies.</div>
+        )}
       </div>
 
       <div className="qm-grid-two">

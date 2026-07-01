@@ -18,6 +18,7 @@ from .models import (
     QuotationAuditLog,
     QuotationLine,
     QuotationLPO,
+    QuotationPOEvidence,
     QuotationOutcomePOImport,
     QuotationSettings,
     UserQuotationProfile,
@@ -287,8 +288,8 @@ class QuotationLineAdmin(admin.ModelAdmin):
 class QuotationOutcomePOImportAdmin(admin.ModelAdmin):
     list_display = ["quotation", "source_type", "source_filename", "status", "created_by", "created_at"]
     list_filter = ["source_type", "status", "created_at"]
-    search_fields = ["quotation__quotation_number", "source_filename", "source_sha256"]
-    autocomplete_fields = ["quotation", "created_by"]
+    search_fields = ["quotation__quotation_number", "source_filename", "source_sha256", "gmail_evidence__subject"]
+    autocomplete_fields = ["quotation", "gmail_evidence", "created_by"]
     readonly_fields = [
         "source_sha256",
         "source_file_ref",
@@ -298,6 +299,27 @@ class QuotationOutcomePOImportAdmin(admin.ModelAdmin):
         "unmatched_po_rows",
         "missing_quote_line_ids",
         "warnings",
+        "created_at",
+        "updated_at",
+    ]
+
+
+@admin.register(QuotationPOEvidence)
+class QuotationPOEvidenceAdmin(admin.ModelAdmin):
+    list_display = ["quotation", "subject", "sender", "sent_at", "confidence", "status", "updated_at"]
+    list_filter = ["status", "sent_at", "updated_at"]
+    search_fields = ["quotation__quotation_number", "subject", "sender", "gmail_message_id", "gmail_thread_id"]
+    autocomplete_fields = ["quotation", "created_by"]
+    readonly_fields = [
+        "gmail_message_id",
+        "gmail_thread_id",
+        "recipients",
+        "snippet",
+        "extracted_text",
+        "attachments",
+        "source_sha256",
+        "matching_reason",
+        "error",
         "created_at",
         "updated_at",
     ]
