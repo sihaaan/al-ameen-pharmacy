@@ -18,6 +18,50 @@
   margin-top: 12px;
 }
 
+.qm-po-scan-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  background: #f0fdfa;
+}
+
+.qm-po-scan-card p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.qm-po-scan-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.qm-po-scan-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-po-scan-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .qm-header h2,
 .qm-editor-header h3,
 .qm-panel h3 {
@@ -4027,13 +4071,23 @@
   }
 
   .qm-action-row,
-  .qm-controls {
+  .qm-controls,
+  .qm-po-scan-card {
     width: 100%;
   }
 
+  .qm-po-scan-card {
+    grid-template-columns: 1fr;
+  }
+
   .qm-action-row button,
-  .qm-controls .qm-input {
+  .qm-controls .qm-input,
+  .qm-po-scan-actions button {
     flex: 1;
+  }
+
+  .qm-po-scan-actions {
+    justify-content: stretch;
   }
 
   .qm-line-form > * {

@@ -198,6 +198,7 @@ const quotationAPI = {
     ),
     poEvidence: (id) => axiosInstance.get(`/quotations/quotes/${id}/po_evidence/`),
     findPOEvidence: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/find_po_evidence/`, data),
+    scanPOEvidence: (data = {}) => axiosInstance.post('/quotations/quotes/scan_po_evidence/', data),
     parsePOEvidence: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/parse_po_evidence/`, data),
     markPOEvidenceNotRelevant: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/mark_po_evidence_not_relevant/`, data),
     markSent: (id) => axiosInstance.post(`/quotations/quotes/${id}/mark_sent/`),

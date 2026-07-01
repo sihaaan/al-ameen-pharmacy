@@ -82,7 +82,7 @@ from .excel import build_quotation_excel
 from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_pdf, build_quotation_pdf
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
-from .quote_po_intelligence import find_quote_po_evidence, parse_quote_po_evidence
+from .quote_po_intelligence import find_quote_po_evidence, parse_quote_po_evidence, scan_quote_po_evidence_batch
 from .serializers import (
     CompanyContactSerializer,
     CompanyListSerializer,
@@ -1430,6 +1430,20 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+        if self.action == "list":
+            queryset = queryset.annotate(
+                po_evidence_count=Count("po_evidence", distinct=True),
+                po_evidence_candidate_count=Count(
+                    "po_evidence",
+                    filter=Q(po_evidence__status__in=["candidate", "parsed"]),
+                    distinct=True,
+                ),
+                po_evidence_parsed_count=Count(
+                    "po_evidence",
+                    filter=Q(po_evidence__status="parsed"),
+                    distinct=True,
+                ),
+            )
         if self.action != "list":
             queryset = queryset.prefetch_related(
                 "lines",
@@ -1633,6 +1647,12 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 quotation = update_quotation_outcome(quotation, request.data or {}, request.user)
             except DjangoValidationError as exc:
                 return self.handle_workflow_error(exc)
+            except Exception as exc:
+                logger.exception("Quotation outcome save failed for quote %s", quotation.pk)
+                return Response(
+                    {"detail": f"Save quotation outcome failed. {str(exc)[:250]}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             quotation.refresh_from_db()
         quotation = (
             Quotation.objects.select_related(
@@ -1756,6 +1776,25 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         serializer = QuotationPOEvidenceSerializer(result["evidence"], many=True, context={"request": request})
         return Response({"count": result["count"], "queries": result["queries"], "results": serializer.data})
+
+    @action(detail=False, methods=["post"], parser_classes=[JSONParser])
+    def scan_po_evidence(self, request):
+        try:
+            result = scan_quote_po_evidence_batch(
+                request.user,
+                quote_limit=request.data.get("quote_limit", 5),
+                message_limit=request.data.get("message_limit", 10),
+                rescan=str(request.data.get("rescan", "false")).lower() in {"1", "true", "yes"},
+            )
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        except Exception as exc:
+            logger.exception("Batch quotation PO evidence scan failed")
+            return Response(
+                {"detail": f"Batch PO/LPO scan failed. {str(exc)[:250]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(result)
 
     @action(detail=True, methods=["post"], parser_classes=[JSONParser])
     def parse_po_evidence(self, request, pk=None):

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
@@ -36,6 +36,17 @@ const emptyContactForm = {
   is_primary: false,
 };
 
+const poEvidenceLabel = (quote) => {
+  const candidates = Number(quote.po_evidence_candidate_count || 0);
+  const parsed = Number(quote.po_evidence_parsed_count || 0);
+  if (parsed > 0) return `${parsed} parsed`;
+  if (candidates > 0) return `${candidates} candidate${candidates === 1 ? '' : 's'}`;
+  if (quote.po_evidence_last_scanned_at) {
+    return quote.po_evidence_last_scan_error ? 'Scan issue' : 'Checked';
+  }
+  return 'Not checked';
+};
+
 const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -50,6 +61,16 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorInfo, setErrorInfo] = useState(null);
+  const [poScan, setPoScan] = useState({
+    running: false,
+    processed: 0,
+    found: 0,
+    remaining: null,
+    errors: [],
+    lastQuotes: [],
+    done: false,
+  });
+  const stopPoScanRef = useRef(false);
 
   const load = async () => {
     setLoading(true);
@@ -128,6 +149,66 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
     }
   };
 
+  const runPOEvidenceScan = async () => {
+    if (poScan.running) return;
+    stopPoScanRef.current = false;
+    setErrorInfo(null);
+    setPoScan({
+      running: true,
+      processed: 0,
+      found: 0,
+      remaining: null,
+      errors: [],
+      lastQuotes: [],
+      done: false,
+    });
+
+    const totals = {
+      processed: 0,
+      found: 0,
+      errors: [],
+      lastQuotes: [],
+      remaining: null,
+      done: false,
+    };
+
+    try {
+      for (let pass = 0; pass < 200; pass += 1) {
+        if (stopPoScanRef.current) break;
+        const response = await quotationAPI.quotes.scanPOEvidence({ quote_limit: 5, message_limit: 10 });
+        const data = response.data || {};
+        totals.processed += Number(data.processed || 0);
+        totals.found += Number(data.candidates_found || 0);
+        totals.remaining = Number(data.remaining || 0);
+        totals.done = Boolean(data.done);
+        totals.errors = [...totals.errors, ...(data.errors || [])].slice(-8);
+        totals.lastQuotes = data.quotes || [];
+        setPoScan({
+          running: !totals.done,
+          processed: totals.processed,
+          found: totals.found,
+          remaining: totals.remaining,
+          errors: totals.errors,
+          lastQuotes: totals.lastQuotes,
+          done: totals.done,
+        });
+        if (totals.done || Number(data.processed || 0) === 0) break;
+      }
+      await load();
+      setPoScan((current) => ({ ...current, running: false, done: current.remaining === 0 }));
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Scan quotations for PO/LPO evidence', 'POST /quotations/quotes/scan_po_evidence/');
+      setErrorInfo(details);
+      setPoScan((current) => ({ ...current, running: false }));
+      console.error(formatQuotationError(details), error);
+    }
+  };
+
+  const stopPOEvidenceScan = () => {
+    stopPoScanRef.current = true;
+    setPoScan((current) => ({ ...current, running: false }));
+  };
+
   const rememberCompany = (company) => {
     setCompanies((current) => {
       const withoutDuplicate = current.filter((candidate) => candidate.id !== company.id);
@@ -181,6 +262,34 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
             </select>
           </div>
         </div>
+        <div className="qm-po-scan-card">
+          <div>
+            <strong>PO/LPO evidence scan</strong>
+            <p>Automatically checks finalized and sent quotations against Gmail, then flags likely PO/LPO replies for outcome review.</p>
+            {(poScan.processed > 0 || poScan.remaining !== null) && (
+              <div className="qm-po-scan-meta">
+                <span>{poScan.processed} quotation(s) checked</span>
+                <span>{poScan.found} candidate email(s) found</span>
+                <span>{poScan.remaining ?? 0} remaining</span>
+              </div>
+            )}
+            {poScan.errors.length > 0 && (
+              <div className="qm-inline-warning">
+                {poScan.errors.length} scan issue(s). Latest: {poScan.errors[poScan.errors.length - 1].quotation_number}: {poScan.errors[poScan.errors.length - 1].detail}
+              </div>
+            )}
+          </div>
+          <div className="qm-po-scan-actions">
+            <button type="button" className="qm-primary" disabled={poScan.running} onClick={runPOEvidenceScan}>
+              {poScan.running ? 'Scanning...' : poScan.done ? 'Scan Missing Quotes' : 'Scan Sent Quotes'}
+            </button>
+            {poScan.running && (
+              <button type="button" className="qm-secondary" onClick={stopPOEvidenceScan}>
+                Stop after this quote
+              </button>
+            )}
+          </div>
+        </div>
         <div className="qm-table-wrap">
           <table className="qm-table">
             <thead>
@@ -190,6 +299,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
                 <th>Prepared By</th>
                 <th>Status</th>
                 <th>Outcome</th>
+                <th>PO/LPO</th>
                 <th>Version</th>
                 <th>Total</th>
                 <th>Updated</th>
@@ -204,6 +314,11 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
                   <td>{quote.created_by_username || '-'}</td>
                   <td><span className={`qm-badge status-${quote.status}`}>{statusLabels[quote.status] || quote.status}</span></td>
                   <td><span className={`qm-badge status-${quote.outcome_status || 'pending'}`}>{outcomeLabels[quote.outcome_status] || quote.outcome_status || 'Pending'}</span></td>
+                  <td>
+                    <span className={`qm-badge ${quote.po_evidence_candidate_count ? 'status-sent' : 'status-pending'}`}>
+                      {poEvidenceLabel(quote)}
+                    </span>
+                  </td>
                   <td>{quote.version}</td>
                   <td>{quote.currency} {parseFloat(quote.total || 0).toFixed(2)}</td>
                   <td>{new Date(quote.updated_at).toLocaleDateString('en-AE')}</td>
