@@ -1647,6 +1647,12 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 quotation = update_quotation_outcome(quotation, request.data or {}, request.user)
             except DjangoValidationError as exc:
                 return self.handle_workflow_error(exc)
+            except Exception as exc:
+                logger.exception("Quotation outcome save failed for quote %s", quotation.pk)
+                return Response(
+                    {"detail": f"Save quotation outcome failed. {str(exc)[:250]}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             quotation.refresh_from_db()
         quotation = (
             Quotation.objects.select_related(

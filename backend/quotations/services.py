@@ -1,5 +1,5 @@
 from datetime import datetime, time, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -89,6 +89,10 @@ def _money(value):
     return Decimal(value or 0).quantize(Decimal("0.01"))
 
 
+def _line_label(line):
+    return line.item_name_snapshot or getattr(line.product, "name", "") or f"line {line.id}"
+
+
 def _line_outcome_snapshot(line):
     return {
         "id": line.id,
@@ -132,63 +136,68 @@ def latest_product_cost(product):
 
 
 def recalculate_line_outcome(line, *, save=True):
-    quoted_total = _money(line.line_total)
-    accepted_total = Decimal("0.00")
-    accepted_qty = line.accepted_quantity
-    accepted_unit_price = line.accepted_unit_price
+    try:
+        quoted_total = _money(line.line_total)
+        accepted_total = Decimal("0.00")
+        accepted_qty = line.accepted_quantity
+        accepted_unit_price = line.accepted_unit_price
 
-    if line.outcome_status == QuotationLine.OUTCOME_ACCEPTED:
-        accepted_qty = accepted_qty if accepted_qty is not None else line.quantity
-        accepted_unit_price = accepted_unit_price if accepted_unit_price is not None else line.unit_price
-    elif line.outcome_status == QuotationLine.OUTCOME_QUANTITY_CHANGED:
-        accepted_qty = accepted_qty if accepted_qty is not None else Decimal("0.000")
-        accepted_unit_price = accepted_unit_price if accepted_unit_price is not None else line.unit_price
-    elif line.outcome_status in {
-        QuotationLine.OUTCOME_REJECTED,
-        QuotationLine.OUTCOME_UNAVAILABLE_MISSING,
-        QuotationLine.OUTCOME_SUBSTITUTED,
-        QuotationLine.OUTCOME_PENDING,
-    }:
-        accepted_qty = None if line.outcome_status == QuotationLine.OUTCOME_PENDING else Decimal("0.000")
-        accepted_unit_price = None if line.outcome_status == QuotationLine.OUTCOME_PENDING else Decimal("0.00")
+        if line.outcome_status == QuotationLine.OUTCOME_ACCEPTED:
+            accepted_qty = accepted_qty if accepted_qty is not None else line.quantity
+            accepted_unit_price = accepted_unit_price if accepted_unit_price is not None else line.unit_price
+        elif line.outcome_status == QuotationLine.OUTCOME_QUANTITY_CHANGED:
+            accepted_qty = accepted_qty if accepted_qty is not None else Decimal("0.000")
+            accepted_unit_price = accepted_unit_price if accepted_unit_price is not None else line.unit_price
+        elif line.outcome_status in {
+            QuotationLine.OUTCOME_REJECTED,
+            QuotationLine.OUTCOME_UNAVAILABLE_MISSING,
+            QuotationLine.OUTCOME_SUBSTITUTED,
+            QuotationLine.OUTCOME_PENDING,
+        }:
+            accepted_qty = None if line.outcome_status == QuotationLine.OUTCOME_PENDING else Decimal("0.000")
+            accepted_unit_price = None if line.outcome_status == QuotationLine.OUTCOME_PENDING else Decimal("0.00")
 
-    if accepted_qty is not None and accepted_unit_price is not None:
-        accepted_subtotal = Decimal(accepted_qty) * Decimal(accepted_unit_price)
-        accepted_vat = accepted_subtotal * (Decimal(line.vat_rate or 0) / Decimal("100"))
-        accepted_total = _money(accepted_subtotal + accepted_vat)
-    else:
-        accepted_subtotal = Decimal("0.00")
-
-    if (
-        line.outcome_status == QuotationLine.OUTCOME_ACCEPTED
-        and accepted_qty is not None
-        and line.quantity is not None
-        and accepted_qty < line.quantity
-    ):
-        line.outcome_status = QuotationLine.OUTCOME_QUANTITY_CHANGED
-        if not line.outcome_reason:
-            line.outcome_reason = QuotationLine.REASON_QUANTITY_CHANGED
-
-    line.accepted_quantity = accepted_qty
-    line.accepted_unit_price = accepted_unit_price
-    line.accepted_total = accepted_total
-    line.lost_value = max(quoted_total - accepted_total, Decimal("0.00")).quantize(Decimal("0.01"))
-
-    cost = latest_product_cost(line.product)
-    if cost is not None and line.unit_price is not None:
-        line.quoted_gross_profit = _money((Decimal(line.unit_price) - Decimal(cost)) * Decimal(line.quantity or 0))
         if accepted_qty is not None and accepted_unit_price is not None:
-            line.accepted_gross_profit = _money((Decimal(accepted_unit_price) - Decimal(cost)) * Decimal(accepted_qty))
+            accepted_subtotal = Decimal(accepted_qty) * Decimal(accepted_unit_price)
+            accepted_vat = accepted_subtotal * (Decimal(line.vat_rate or 0) / Decimal("100"))
+            accepted_total = _money(accepted_subtotal + accepted_vat)
         else:
-            line.accepted_gross_profit = Decimal("0.00")
-        line.lost_gross_profit = max(
-            Decimal(line.quoted_gross_profit or 0) - Decimal(line.accepted_gross_profit or 0),
-            Decimal("0.00"),
-        ).quantize(Decimal("0.01"))
-    else:
-        line.quoted_gross_profit = None
-        line.accepted_gross_profit = None
-        line.lost_gross_profit = None
+            accepted_subtotal = Decimal("0.00")
+
+        if (
+            line.outcome_status == QuotationLine.OUTCOME_ACCEPTED
+            and accepted_qty is not None
+            and line.quantity is not None
+            and accepted_qty < line.quantity
+        ):
+            line.outcome_status = QuotationLine.OUTCOME_QUANTITY_CHANGED
+            if not line.outcome_reason:
+                line.outcome_reason = QuotationLine.REASON_QUANTITY_CHANGED
+
+        line.accepted_quantity = accepted_qty
+        line.accepted_unit_price = accepted_unit_price
+        line.accepted_total = accepted_total
+        line.lost_value = max(quoted_total - accepted_total, Decimal("0.00")).quantize(Decimal("0.01"))
+
+        cost = latest_product_cost(line.product)
+        if cost is not None and line.unit_price is not None:
+            line.quoted_gross_profit = _money((Decimal(line.unit_price) - Decimal(cost)) * Decimal(line.quantity or 0))
+            if accepted_qty is not None and accepted_unit_price is not None:
+                line.accepted_gross_profit = _money((Decimal(accepted_unit_price) - Decimal(cost)) * Decimal(accepted_qty))
+            else:
+                line.accepted_gross_profit = Decimal("0.00")
+            line.lost_gross_profit = max(
+                Decimal(line.quoted_gross_profit or 0) - Decimal(line.accepted_gross_profit or 0),
+                Decimal("0.00"),
+            ).quantize(Decimal("0.01"))
+        else:
+            line.quoted_gross_profit = None
+            line.accepted_gross_profit = None
+            line.lost_gross_profit = None
+    except (InvalidOperation, ArithmeticError, TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"{_line_label(line)} has invalid quantity, unit price, VAT, or total. Fix the quotation line before saving outcomes."
+        ) from exc
 
     if save:
         line.save(

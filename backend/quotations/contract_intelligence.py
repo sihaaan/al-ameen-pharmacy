@@ -274,6 +274,25 @@ def disconnect_gmail(connection):
     return connection
 
 
+def mark_gmail_connection_error(connection, message):
+    connection.access_token_encrypted = ""
+    connection.refresh_token_encrypted = ""
+    connection.token_expiry = None
+    connection.status = GmailOAuthConnection.STATUS_ERROR
+    connection.last_error = (message or "Gmail needs to be reconnected.")[:1000]
+    connection.save(
+        update_fields=[
+            "access_token_encrypted",
+            "refresh_token_encrypted",
+            "token_expiry",
+            "status",
+            "last_error",
+            "updated_at",
+        ]
+    )
+    return connection
+
+
 def get_valid_access_token(connection):
     if connection.status != GmailOAuthConnection.STATUS_CONNECTED:
         raise RuntimeError("Gmail is not connected.")
@@ -283,15 +302,25 @@ def get_valid_access_token(connection):
     refresh_token = decrypt_token(connection.refresh_token_encrypted)
     if not refresh_token:
         raise RuntimeError("Gmail refresh token is missing. Reconnect Gmail.")
-    payload = _form_request(
-        GOOGLE_TOKEN_URL,
-        {
-            "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
-            "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        },
-    )
+    try:
+        payload = _form_request(
+            GOOGLE_TOKEN_URL,
+            {
+                "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+    except RuntimeError as exc:
+        detail = str(exc)
+        if "invalid_grant" in detail:
+            mark_gmail_connection_error(
+                connection,
+                "Google rejected the saved Gmail login. Reconnect Gmail and try again.",
+            )
+            raise RuntimeError("Gmail connection expired or was revoked. Reconnect Gmail and try again.") from exc
+        raise
     access_token = payload.get("access_token", "")
     if not access_token:
         raise RuntimeError("Could not refresh Gmail access token.")
