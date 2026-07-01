@@ -1696,6 +1696,9 @@ class QuotationListSerializer(serializers.ModelSerializer):
     payment_terms_display = serializers.CharField(source="get_payment_terms_display", read_only=True)
     outcome_status_display = serializers.CharField(source="get_outcome_status_display", read_only=True)
     follow_up_status_display = serializers.CharField(source="get_follow_up_status_display", read_only=True)
+    po_evidence_count = serializers.SerializerMethodField()
+    po_evidence_candidate_count = serializers.SerializerMethodField()
+    po_evidence_parsed_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Quotation
@@ -1721,6 +1724,12 @@ class QuotationListSerializer(serializers.ModelSerializer):
             "next_follow_up_date",
             "follow_up_status",
             "follow_up_status_display",
+            "po_evidence_count",
+            "po_evidence_candidate_count",
+            "po_evidence_parsed_count",
+            "po_evidence_last_scanned_at",
+            "po_evidence_last_scan_count",
+            "po_evidence_last_scan_error",
             "subtotal",
             "vat_total",
             "total",
@@ -1730,6 +1739,21 @@ class QuotationListSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_po_evidence_count(self, obj):
+        return getattr(obj, "po_evidence_count", None) if getattr(obj, "po_evidence_count", None) is not None else obj.po_evidence.count()
+
+    def get_po_evidence_candidate_count(self, obj):
+        annotated = getattr(obj, "po_evidence_candidate_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.po_evidence.filter(status__in=[QuotationPOEvidence.STATUS_CANDIDATE, QuotationPOEvidence.STATUS_PARSED]).count()
+
+    def get_po_evidence_parsed_count(self, obj):
+        annotated = getattr(obj, "po_evidence_parsed_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.po_evidence.filter(status=QuotationPOEvidence.STATUS_PARSED).count()
 
 
 class QuotationPOEvidenceSerializer(serializers.ModelSerializer):

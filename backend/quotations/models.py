@@ -1189,6 +1189,9 @@ class Quotation(models.Model):
         choices=FOLLOWUP_CONTACT_METHOD_CHOICES,
         blank=True,
     )
+    po_evidence_last_scanned_at = models.DateTimeField(null=True, blank=True)
+    po_evidence_last_scan_count = models.PositiveIntegerField(default=0)
+    po_evidence_last_scan_error = models.TextField(blank=True)
     is_historical_import = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
