@@ -48,6 +48,8 @@ AI_PARSE_JSON_SCHEMA = {
                     "quantity": {"type": "string"},
                     "unit": {"type": "string"},
                     "unit_price": {"type": "string"},
+                    "vat_rate": {"type": "string"},
+                    "vat_amount": {"type": "string"},
                     "line_total": {"type": "string"},
                     "pack_info": {"type": "string"},
                     "notes": {"type": "string"},
@@ -62,6 +64,8 @@ AI_PARSE_JSON_SCHEMA = {
                     "quantity",
                     "unit",
                     "unit_price",
+                    "vat_rate",
+                    "vat_amount",
                     "line_total",
                     "pack_info",
                     "notes",
@@ -535,6 +539,8 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
             "quantity": _clean_quantity(row.get("quantity")),
             "unit": _clean_text(row.get("unit"))[:50],
             "unit_price": _clean_money(row.get("unit_price")),
+            "vat_rate": _clean_money(row.get("vat_rate")),
+            "vat_amount": _clean_money(row.get("vat_amount")),
             "line_total": _clean_money(row.get("line_total")),
             "notes": _join_notes(row.get("pack_info"), row.get("notes"), row.get("reason")),
             "raw_line": raw_line,
@@ -621,6 +627,8 @@ def _build_preview_text_context(preview):
                         "quantity": line.get("quantity"),
                         "unit": line.get("unit"),
                         "unit_price": line.get("unit_price"),
+                        "vat_rate": line.get("vat_rate"),
+                        "vat_amount": line.get("vat_amount"),
                         "line_total": line.get("line_total"),
                         "raw_source_text": line.get("raw_line") or line.get("raw_source_line"),
                         "parse_status": line.get("parse_status"),
@@ -727,6 +735,8 @@ def _ai_instructions(*, output_style, mode):
         "You clean messy pharmacy inquiry, LPO, and finalized quotation extraction into JSON rows for human review. "
         "Do not match products, do not create items, do not invent prices or quantities, and do not commit anything. "
         "Only extract what is visible or clearly present. Preserve product-identifying sizes, dimensions, strengths, variants, and pack counts in item_name, for example Adhesive Tape 1/2\" x 10 yds, Gauze Bandage - 2\", Gauze Pads - 3\" x 3\", or Ammonia Inhalant - pack of 5. Put order quantities, units, unit prices, and totals in their own fields. "
+        "Preserve VAT percentage/rate in vat_rate and VAT money amount in vat_amount when visible. Do not convert a visible VAT rate such as 5% into a VAT amount. "
+        "For structured Excel rows, keep every real item row unless it is clearly a header, footer, subtotal, metadata, or duplicate noise row. "
         "Skip obvious document metadata such as dates, seller/buyer addresses, tender numbers, quotation headings, table headers, totals, footers, contact/signature text, and email addresses by setting parse_status='ignored'. "
         "If quantity is unclear, leave quantity blank and set parse_status='needs_review'. "
         "If price is clear, extract unit_price. Preserve item-like uncertain rows as needs_review. "

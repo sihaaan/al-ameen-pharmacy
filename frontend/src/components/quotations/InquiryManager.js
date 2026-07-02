@@ -18,6 +18,8 @@ const newImportLine = () => ({
   unit: '',
   unit_price: '',
   vat_rate: '0',
+  vat_amount: '',
+  line_total: '',
   raw_line: '',
   parse_status: 'needs_review',
   parse_confidence: 0,
@@ -376,6 +378,21 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const applyAiCandidate = () => {
     if (!aiCandidate) return;
+    const originalLineCount = importPreview?.lines?.length || 0;
+    const candidateLineCount = aiCandidate.lines?.length || 0;
+    const parseMethod = String(importPreview?.parse_method || '');
+    if (
+      originalLineCount > 0
+      && candidateLineCount > 0
+      && parseMethod.includes('openpyxl_structured')
+      && candidateLineCount < originalLineCount
+    ) {
+      setImportNotice({
+        type: 'warning',
+        message: `AI returned ${candidateLineCount} rows, but the deterministic Excel parser found ${originalLineCount}. Kept the original rows so no items are lost.`,
+      });
+      return;
+    }
     setSavedImportedInquiry(null);
     setExpandedRawRows({});
     setSelectedImportRows([]);

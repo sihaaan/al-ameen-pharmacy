@@ -2751,6 +2751,21 @@ class InquiryImportTests(APITestCase):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+    def make_vat_total_excel_upload(self, name="converted_medical_items.xlsx"):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Converted Data"
+        sheet.append(["S.No", "Item Description", "Qty", "Unit", "Unit Price", "VAT %", "VAT Amount", "Line Total"])
+        sheet.append([1, "Wheel Chair - Supreme", 1, "EA", 320, 5, 16, 336])
+        sheet.append([2, "First Aid Box", 2, "BOX", 120, 0, 0, 240])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return SimpleUploadedFile(
+            name,
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     def make_first_aid_excel_upload(self, name="FIRST AID MATERIAL LOG.xlsx"):
         workbook = Workbook()
         sheet = workbook.active
@@ -2964,6 +2979,25 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(response.data["lines"][0]["raw_name"], "Panadol 500mg")
         self.assertIn("summary", response.data)
         self.assertIn("sheet_metadata", response.data["meta"])
+
+    def test_excel_parse_recognizes_vat_rate_amount_and_line_total(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_vat_total_excel_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["parse_method"], "openpyxl_structured_v2")
+        self.assertEqual(len(response.data["lines"]), 2)
+
+        first = response.data["lines"][0]
+        self.assertEqual(first["raw_name"], "Wheel Chair - Supreme")
+        self.assertEqual(first["vat_rate"], "5")
+        self.assertEqual(first["vat_amount"], "16")
+        self.assertEqual(first["line_total"], "336")
+        self.assertIn("VAT %: 5", first["notes"])
+        self.assertIn("VAT Amount: 16", first["notes"])
 
     def test_first_aid_material_log_excel_pattern(self):
         response = self.client.post(

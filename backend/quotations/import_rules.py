@@ -111,14 +111,26 @@ HEADER_ALIASES = {
         "subtotal",
         "value",
     },
-    "vat_amount": {
+    "vat_rate": {
+        "tax %",
+        "tax percent",
+        "tax percentage",
+        "tax rate",
         "vat",
+        "vat %",
+        "vat percent",
+        "vat percentage",
+        "vat rate",
+    },
+    "vat_amount": {
         "vat amount",
+        "vat value",
     },
     "line_total": {
         "g total",
         "grand total",
         "gross total",
+        "line total",
         "net total",
         "total",
     },
@@ -131,7 +143,8 @@ HEADER_ROLE_LABELS = {
     "unit": "Unit",
     "unit_price": "Unit Price",
     "amount": "Amount",
-    "vat_amount": "VAT",
+    "vat_rate": "VAT %",
+    "vat_amount": "VAT Amount",
     "line_total": "Total",
 }
 
@@ -291,7 +304,7 @@ def _row_roles(row):
 def is_header_like_row(row):
     roles, _ = _row_roles(row)
     return "requested_item_name" in roles and bool(
-        {"quantity", "unit", "serial_no", "unit_price", "amount", "vat_amount", "line_total"} & set(roles)
+        {"quantity", "unit", "serial_no", "unit_price", "amount", "vat_rate", "vat_amount", "line_total"} & set(roles)
     )
 
 
@@ -550,7 +563,7 @@ def detect_header_row(rows, *, start_row_number=1, max_scan_rows=20):
         roles, labels = _row_roles(row)
         if "requested_item_name" not in roles:
             continue
-        if not bool({"quantity", "unit", "serial_no", "unit_price", "amount", "vat_amount", "line_total"} & set(roles)):
+        if not bool({"quantity", "unit", "serial_no", "unit_price", "amount", "vat_rate", "vat_amount", "line_total"} & set(roles)):
             continue
 
         base_score = 0
@@ -565,6 +578,8 @@ def detect_header_row(rows, *, start_row_number=1, max_scan_rows=20):
         if "unit_price" in roles:
             base_score += 2
         if "amount" in roles:
+            base_score += 1
+        if "vat_rate" in roles:
             base_score += 1
         if "vat_amount" in roles:
             base_score += 1
@@ -647,7 +662,7 @@ def _money_note(label, value):
     return f"{label}: {preview}" if preview is not None else ""
 
 
-def _price_notes(*, unit_price=None, amount=None, vat_amount=None, line_total=None, price_unit="", pack_info=""):
+def _price_notes(*, unit_price=None, amount=None, vat_rate=None, vat_amount=None, line_total=None, price_unit="", pack_info=""):
     notes = []
     if unit_price is not None:
         price_text = _money_note("Unit price", unit_price)
@@ -655,7 +670,7 @@ def _price_notes(*, unit_price=None, amount=None, vat_amount=None, line_total=No
             price_text = f"{price_text} per {price_unit}"
         if price_text:
             notes.append(price_text)
-    for label, value in [("Amount", amount), ("VAT", vat_amount), ("Total", line_total)]:
+    for label, value in [("Amount", amount), ("VAT %", vat_rate), ("VAT Amount", vat_amount), ("Total", line_total)]:
         note = _money_note(label, value)
         if note:
             notes.append(note)
@@ -695,6 +710,7 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
     unit = normalize_unit(unit)
     unit_price = parse_decimal(_cell_by_role(row, columns, "unit_price"))
     amount = parse_decimal(_cell_by_role(row, columns, "amount"))
+    vat_rate = parse_decimal(_cell_by_role(row, columns, "vat_rate"))
     vat_amount = parse_decimal(_cell_by_role(row, columns, "vat_amount"))
     line_total = parse_decimal(_cell_by_role(row, columns, "line_total"))
 
@@ -723,11 +739,12 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         raw_name=item_name,
         quantity=quantity,
         unit=unit,
-        notes=_price_notes(unit_price=unit_price, amount=amount, vat_amount=vat_amount, line_total=line_total),
+        notes=_price_notes(unit_price=unit_price, amount=amount, vat_rate=vat_rate, vat_amount=vat_amount, line_total=line_total),
         parse_status=confidence_status(confidence),
         parse_confidence=confidence,
         unit_price=decimal_to_preview(unit_price),
         amount=decimal_to_preview(amount),
+        vat_rate=decimal_to_preview(vat_rate),
         vat_amount=decimal_to_preview(vat_amount),
         line_total=decimal_to_preview(line_total),
         source_sheet=source_sheet,
@@ -1018,7 +1035,7 @@ def _reconstruct_cell_per_line_table(raw_text):
 
     rows = [header_cells]
     role_count = len(header_cells)
-    has_price = "unit_price" in roles or "amount" in roles or "line_total" in roles
+    has_price = "unit_price" in roles or "amount" in roles or "vat_rate" in roles or "vat_amount" in roles or "line_total" in roles
     while index < len(cells):
         if "serial_no" in roles:
             if index + 3 >= len(cells) or not _looks_like_serial_cell(cells[index]):
