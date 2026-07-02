@@ -4,6 +4,11 @@ import QuotationErrorNotice from './QuotationErrorNotice';
 
 const money = (value, currency = 'AED') => `${currency} ${Number(value || 0).toFixed(2)}`;
 
+const unitMoney = (value, currency = 'AED') => `${currency} ${Number(value || 0).toLocaleString(undefined, {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 3,
+})}`;
+
 const percent = (value) => `${Number(value || 0).toFixed(1)}%`;
 
 const lineStatusLabels = {
@@ -482,7 +487,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                     <td>{suggestion.po_row?.item_name || '-'}</td>
                     <td>{suggestion.quotation_line_label}</td>
                     <td>{suggestion.suggested_accepted_quantity || '-'}</td>
-                    <td>{suggestion.suggested_accepted_unit_price || '-'}</td>
+                    <td>{suggestion.suggested_accepted_unit_price ? unitMoney(suggestion.suggested_accepted_unit_price, quote.currency) : '-'}</td>
                     <td>{Math.round(Number(suggestion.confidence || 0))}%</td>
                     <td>{suggestion.reason}</td>
                   </tr>
@@ -531,14 +536,14 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                     <td><input type="checkbox" checked={selectedLines.includes(line.id)} onChange={() => setSelectedLines((current) => current.includes(line.id) ? current.filter((id) => id !== line.id) : [...current, line.id])} /></td>
                     <td>{index + 1}</td>
                     <td><strong>{line.item_name_snapshot}</strong><br /><small>{line.product_name || 'No Product'} - {line.quantity} {line.unit}</small></td>
-                    <td>{money(line.line_total, quote.currency)}<br /><small>{line.quantity} x {money(line.unit_price, quote.currency)}</small></td>
+                    <td>{money(line.line_total, quote.currency)}<br /><small>{line.quantity} x {unitMoney(line.unit_price, quote.currency)}</small></td>
                     <td>
                       <select value={draft.outcome_status} onChange={(event) => updateLineDraft(line.id, { outcome_status: event.target.value })}>
                         {Object.entries(lineStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                       </select>
                     </td>
                     <td><input type="number" min="0" step="0.001" value={draft.accepted_quantity} onChange={(event) => updateLineDraft(line.id, { accepted_quantity: event.target.value })} /></td>
-                    <td><input type="number" min="0" step="0.01" value={draft.accepted_unit_price} onChange={(event) => updateLineDraft(line.id, { accepted_unit_price: event.target.value })} /></td>
+                    <td><input type="number" min="0" step="0.001" value={draft.accepted_unit_price} onChange={(event) => updateLineDraft(line.id, { accepted_unit_price: event.target.value })} /></td>
                     <td>
                       <select value={draft.outcome_reason} onChange={(event) => updateLineDraft(line.id, { outcome_reason: event.target.value })}>
                         <option value="">No reason</option>

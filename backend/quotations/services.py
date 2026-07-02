@@ -89,6 +89,20 @@ def _money(value):
     return Decimal(value or 0).quantize(Decimal("0.01"))
 
 
+def _unit_price_text(value):
+    if value in ("", None):
+        return ""
+    try:
+        text = f"{Decimal(str(value)).quantize(Decimal('0.001')):.3f}"
+    except (InvalidOperation, ValueError):
+        return ""
+    whole, _, fraction = text.partition(".")
+    fraction = fraction.rstrip("0")
+    if len(fraction) < 2:
+        fraction = fraction.ljust(2, "0")
+    return f"{whole}.{fraction}"
+
+
 def _line_label(line):
     return line.item_name_snapshot or getattr(line.product, "name", "") or f"line {line.id}"
 
@@ -500,7 +514,7 @@ def build_po_outcome_suggestions(quotation, preview):
                     "po_row": row,
                     "po_item_name": item_name,
                     "po_quantity": str(quantity) if quantity is not None else "",
-                    "po_unit_price": str(unit_price) if unit_price is not None else "",
+                    "po_unit_price": _unit_price_text(unit_price),
                     "quotation_line": best.id,
                     "quotation_line_id": best.id,
                     "quotation_item_name": best.item_name_snapshot,
@@ -511,7 +525,7 @@ def build_po_outcome_suggestions(quotation, preview):
                         else QuotationLine.OUTCOME_ACCEPTED
                     ),
                     "suggested_accepted_quantity": str(suggested_quantity) if suggested_quantity is not None else "",
-                    "suggested_accepted_unit_price": str(suggested_unit_price) if suggested_unit_price is not None else "",
+                    "suggested_accepted_unit_price": _unit_price_text(suggested_unit_price),
                     "confidence": min(best_score, 99),
                     "match_strength": "high" if best_score >= 85 else "medium",
                     "reason": "Matched PO item to the closest quotation line for staff review.",

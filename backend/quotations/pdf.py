@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from datetime import timedelta
 from io import BytesIO
@@ -49,8 +50,24 @@ def _optional_text(value):
     return value
 
 
-def _money(currency, value):
-    return f"{currency} {value or 0:.2f}"
+def _money(currency, value, *, places=2, min_places=None):
+    min_places = places if min_places is None else min_places
+    try:
+        amount = Decimal(str(value if value is not None else "0"))
+    except (InvalidOperation, ValueError):
+        amount = Decimal("0")
+    text = f"{amount:.{places}f}"
+    if places > min_places and "." in text:
+        whole, fraction = text.split(".", 1)
+        fraction = fraction.rstrip("0")
+        if len(fraction) < min_places:
+            fraction = fraction.ljust(min_places, "0")
+        text = f"{whole}.{fraction}"
+    return f"{currency} {text}"
+
+
+def _unit_money(currency, value):
+    return _money(currency, value, places=3, min_places=2)
 
 
 def _number(value):
@@ -504,7 +521,7 @@ def build_quotation_pdf(quotation):
                 item_cell,
                 Paragraph(_number(line.quantity), styles["TableCellRight"]),
                 Paragraph(_text(line.unit), styles["TableCell"]),
-                Paragraph(_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
+                Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
             ]
@@ -732,7 +749,7 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
                 item_cell,
                 Paragraph(_number(line.quantity), styles["TableCellRight"]),
                 Paragraph(_text(line.unit), styles["TableCell"]),
-                Paragraph(_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
+                Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
             ]
@@ -937,7 +954,7 @@ def build_standalone_proforma_invoice_pdf(proforma):
                 Paragraph(item_text, styles["TableCell"]),
                 Paragraph(_number(line.quantity), styles["TableCellRight"]),
                 Paragraph(_text(line.unit), styles["TableCell"]),
-                Paragraph(_money(proforma.currency, line.unit_price), styles["TableCellMoney"]),
+                Paragraph(_unit_money(proforma.currency, line.unit_price), styles["TableCellMoney"]),
                 Paragraph(_money(proforma.currency, line.vat_amount), styles["TableCellMoney"]),
                 Paragraph(_money(proforma.currency, line.line_total), styles["TableCellMoney"]),
             ]

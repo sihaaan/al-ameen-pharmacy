@@ -72,6 +72,29 @@ def validate_branding_image_upload(image, label):
     return image
 
 
+def format_unit_price_value(value):
+    if value in ("", None):
+        return ""
+    text = str(Decimal(str(value)).quantize(Decimal("0.001")))
+    whole, dot, fractional = text.partition(".")
+    if not dot:
+        return f"{whole}.00"
+    fractional = fractional.rstrip("0")
+    if len(fractional) < 2:
+        fractional = fractional.ljust(2, "0")
+    return f"{whole}.{fractional}"
+
+
+class UnitPriceDecimalField(serializers.DecimalField):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("max_digits", 12)
+        kwargs.setdefault("decimal_places", 3)
+        super().__init__(*args, **kwargs)
+
+    def to_representation(self, value):
+        return format_unit_price_value(super().to_representation(value))
+
+
 class CompanyContactSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
 
@@ -215,6 +238,7 @@ class ContractIntelligenceItemSerializer(serializers.ModelSerializer):
     source_sender = serializers.CharField(source="source.sender", read_only=True, allow_null=True)
     source_sent_at = serializers.DateTimeField(source="source.sent_at", read_only=True, allow_null=True)
     product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
+    unit_price = UnitPriceDecimalField(required=False, allow_null=True)
 
     class Meta:
         model = ContractIntelligenceItem
@@ -709,6 +733,7 @@ class UserQuotationProfileSerializer(serializers.ModelSerializer):
 class InquiryLineSerializer(serializers.ModelSerializer):
     matched_quote_item_name = serializers.CharField(source="matched_quote_item.name", read_only=True, allow_null=True)
     matched_product_name = serializers.CharField(source="matched_product.name", read_only=True, allow_null=True)
+    unit_price = UnitPriceDecimalField(required=False, allow_null=True)
 
     class Meta:
         model = InquiryLine
@@ -848,7 +873,7 @@ class ImportedInquiryLineSerializer(serializers.Serializer):
     raw_line = serializers.CharField(required=False, allow_blank=True)
     quantity = serializers.DecimalField(max_digits=12, decimal_places=3, required=False, allow_null=True)
     unit = serializers.CharField(max_length=50, required=False, allow_blank=True)
-    unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    unit_price = UnitPriceDecimalField(required=False, allow_null=True)
     vat_rate = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, default=Decimal("0.00"))
     notes = serializers.CharField(required=False, allow_blank=True)
     matched_quote_item = serializers.PrimaryKeyRelatedField(
@@ -914,6 +939,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
 class HistoricalPriceImportLineSerializer(serializers.ModelSerializer):
     quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
     product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
+    unit_price = UnitPriceDecimalField(required=False, allow_null=True)
 
     class Meta:
         model = HistoricalPriceImportLine
@@ -1212,7 +1238,7 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
     line_item_name = serializers.CharField(source="line.item_name", read_only=True, allow_null=True)
     line_quantity = serializers.DecimalField(source="line.quantity", max_digits=12, decimal_places=3, read_only=True, allow_null=True)
     line_unit = serializers.CharField(source="line.unit", read_only=True, allow_null=True)
-    line_unit_price = serializers.DecimalField(source="line.unit_price", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
+    line_unit_price = UnitPriceDecimalField(source="line.unit_price", read_only=True, allow_null=True)
     line_amount = serializers.DecimalField(source="line.amount", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
     line_vat_amount = serializers.DecimalField(source="line.vat_amount", max_digits=12, decimal_places=2, read_only=True, allow_null=True)
     line_vat_rate = serializers.DecimalField(source="line.vat_rate", max_digits=5, decimal_places=2, read_only=True, allow_null=True)
@@ -1328,7 +1354,7 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
         if not product:
             return {
                 "available": False,
-                "imported_unit_price": str(imported_price) if imported_price is not None else "",
+                "imported_unit_price": format_unit_price_value(imported_price),
                 "message": "Select a target Product to see previous price context.",
             }
         summary = {
@@ -1336,7 +1362,7 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
             "product_id": product.id,
             "product_name": product.name,
             "product_base_price": str(product.price) if product.price is not None else "",
-            "imported_unit_price": str(imported_price) if imported_price is not None else "",
+            "imported_unit_price": format_unit_price_value(imported_price),
             "last_company_price": "",
             "last_company_price_date": "",
             "price_difference": "",
@@ -1356,7 +1382,7 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
         if not last_price:
             summary["message"] = "No previous company-specific price history for this Product."
             return summary
-        summary["last_company_price"] = str(last_price.unit_price)
+        summary["last_company_price"] = format_unit_price_value(last_price.unit_price)
         summary["last_company_price_date"] = last_price.quoted_at.date().isoformat()
         if imported_price is not None:
             difference = Decimal(imported_price) - Decimal(last_price.unit_price)
@@ -1435,6 +1461,8 @@ class QuotationLineSerializer(serializers.ModelSerializer):
     has_product_image = serializers.SerializerMethodField()
     outcome_status_display = serializers.CharField(source="get_outcome_status_display", read_only=True)
     outcome_reason_display = serializers.CharField(source="get_outcome_reason_display", read_only=True)
+    unit_price = UnitPriceDecimalField(required=False, allow_null=True)
+    accepted_unit_price = UnitPriceDecimalField(read_only=True, allow_null=True)
 
     class Meta:
         model = QuotationLine
@@ -1826,6 +1854,7 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
 
 class ProformaInvoiceLineSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
+    unit_price = UnitPriceDecimalField(required=False, allow_null=True)
 
     class Meta:
         model = ProformaInvoiceLine
@@ -2023,6 +2052,7 @@ class CompanyPriceHistorySerializer(serializers.ModelSerializer):
     quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True)
     quotation_is_historical_import = serializers.BooleanField(source="quotation.is_historical_import", read_only=True)
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    unit_price = UnitPriceDecimalField(read_only=True, allow_null=True)
 
     class Meta:
         model = CompanyPriceHistory

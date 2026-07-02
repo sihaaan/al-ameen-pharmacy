@@ -584,7 +584,7 @@ const ProformaInvoiceManager = () => {
                             </td>
                             <td><input type="number" step="0.001" value={line.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
                             <td><input value={line.unit || ''} onChange={(event) => updateLineDraft(line.id, { unit: event.target.value })} /></td>
-                            <td><input type="number" step="0.01" value={line.unit_price || ''} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
+                            <td><input type="number" step="0.001" value={line.unit_price || ''} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
                             <td>
                               <select value={line.vat_rate || '0.00'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
                                 <option value="0.00">0%</option>

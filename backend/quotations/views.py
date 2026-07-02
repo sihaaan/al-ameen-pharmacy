@@ -113,6 +113,7 @@ from .serializers import (
     ProductAliasSerializer,
     QuoteItemListSerializer,
     QuoteItemSerializer,
+    format_unit_price_value,
     serializer_error_from_django_validation,
 )
 from .services import (
@@ -329,7 +330,7 @@ def _proforma_line_from_preview(row, index):
     )
     total = _preview_decimal(row.get("line_total") or row.get("total") or row.get("amount"))
     if unit_price is None and total is not None and quantity:
-        unit_price = (total / quantity).quantize(Decimal("0.01"))
+        unit_price = (total / quantity).quantize(Decimal("0.001"))
     vat_rate = _preview_decimal(row.get("vat_rate") or row.get("vat") or row.get("tax"), Decimal("0.00"))
     if vat_rate is None:
         vat_rate = Decimal("0.00")
@@ -1613,7 +1614,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 {
                     "product": product.id,
                     "product_name": product.name,
-                    "unit_price": str(history.unit_price),
+                    "unit_price": format_unit_price_value(history.unit_price),
                     "unit": history.unit or "",
                     "currency": history.currency,
                     "source": "company_price_history",

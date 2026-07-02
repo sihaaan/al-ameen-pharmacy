@@ -69,6 +69,20 @@ def _money(value):
         return None
 
 
+def _unit_price_text(value):
+    if value in ("", None):
+        return ""
+    try:
+        text = f"{Decimal(str(value)).quantize(Decimal('0.001')):.3f}"
+    except (InvalidOperation, ValueError):
+        return ""
+    whole, _, fraction = text.partition(".")
+    fraction = fraction.rstrip("0")
+    if len(fraction) < 2:
+        fraction = fraction.ljust(2, "0")
+    return f"{whole}.{fraction}"
+
+
 def _quantity(value):
     text = _clean_cell(value).replace(",", "")
     if not text:
@@ -316,7 +330,7 @@ def _row_payload(row, score):
         "item_name": row.item_name,
         "unit": row.unit,
         "quantity": row.quantity,
-        "unit_price": str(row.unit_price),
+        "unit_price": _unit_price_text(row.unit_price),
         "vat_rate": str(row.vat_rate),
         "vat_amount": str(row.vat_amount) if row.vat_amount is not None else "",
         "total": str(row.total) if row.total is not None else "",
@@ -349,7 +363,7 @@ def apply_price_reference_to_preview(preview, reference_rows):
                 best_score = score
         matched_reference = best if best and best_score >= 0.82 else None
         if matched_reference:
-            line["unit_price"] = str(matched_reference.unit_price)
+            line["unit_price"] = _unit_price_text(matched_reference.unit_price)
             line["vat_rate"] = str(matched_reference.vat_rate)
             line["price_reference_match"] = _row_payload(matched_reference, best_score)
             line["price_reference_status"] = "matched"

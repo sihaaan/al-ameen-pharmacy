@@ -3,6 +3,11 @@ import quotationAPI, { describeQuotationError, formatQuotationError } from '../.
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
+const formatUnitMoney = (value, currency = 'AED') => `${currency || 'AED'} ${Number(value || 0).toLocaleString(undefined, {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 3,
+})}`;
+
 const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
   const [history, setHistory] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -84,7 +89,7 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
                 <tr key={row.id}>
                   <td>{row.company_name}</td>
                   <td>{row.product_name || row.quote_item_name}</td>
-                  <td>{row.currency} {parseFloat(row.unit_price).toFixed(2)}</td>
+                  <td>{formatUnitMoney(row.unit_price, row.currency)}</td>
                   <td>{parseFloat(row.quantity).toString()} {row.unit}</td>
                   <td>{row.quotation_number}</td>
                   <td>{new Date(row.quoted_at).toLocaleDateString('en-AE')}</td>

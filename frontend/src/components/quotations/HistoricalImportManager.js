@@ -1547,7 +1547,7 @@ const HistoricalImportManager = () => {
               <input value={lineDraft.unit || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { unit: event.target.value })} />
             </label>
             <label><span className="qm-label-text">Unit price</span>
-              <input type="number" step="0.01" value={lineDraft.unit_price || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { unit_price: event.target.value })} />
+              <input type="number" step="0.001" value={lineDraft.unit_price || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { unit_price: event.target.value })} />
             </label>
             <label><span className="qm-label-text">VAT</span>
               <input type="number" step="0.01" value={lineDraft.vat_amount || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { vat_amount: event.target.value })} />

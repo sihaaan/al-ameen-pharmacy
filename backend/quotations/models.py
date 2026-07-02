@@ -571,7 +571,7 @@ class ContractIntelligenceItem(models.Model):
     suggested_item_name = models.CharField(max_length=500, blank=True)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     unit = models.CharField(max_length=80, blank=True)
-    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     currency = models.CharField(max_length=3, default="AED")
     requested_date = models.DateField(null=True, blank=True)
     project = models.CharField(max_length=255, blank=True)
@@ -700,7 +700,7 @@ class InquiryLine(models.Model):
     normalized_name = models.CharField(max_length=255, db_index=True, editable=False)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     unit = models.CharField(max_length=50, blank=True)
-    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
     notes = models.TextField(blank=True)
     matched_quote_item = models.ForeignKey(
@@ -867,7 +867,7 @@ class HistoricalPriceImportLine(models.Model):
     normalized_item_name = models.CharField(max_length=255, db_index=True, editable=False)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     unit = models.CharField(max_length=50, blank=True)
-    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     vat_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
@@ -1345,7 +1345,7 @@ class QuotationLine(models.Model):
     unit = models.CharField(max_length=50, blank=True)
     unit_price = models.DecimalField(
         max_digits=12,
-        decimal_places=2,
+        decimal_places=3,
         null=True,
         blank=True,
         validators=[MinValueValidator(Decimal("0.01"))],
@@ -1368,7 +1368,7 @@ class QuotationLine(models.Model):
         db_index=True,
     )
     accepted_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
-    accepted_unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    accepted_unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     accepted_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     lost_value = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     outcome_reason = models.CharField(max_length=40, choices=OUTCOME_REASON_CHOICES, blank=True)
@@ -1730,7 +1730,7 @@ class ProformaInvoiceLine(models.Model):
     unit = models.CharField(max_length=50, blank=True)
     unit_price = models.DecimalField(
         max_digits=12,
-        decimal_places=2,
+        decimal_places=3,
         null=True,
         blank=True,
         validators=[MinValueValidator(Decimal("0.00"))],
@@ -1792,7 +1792,7 @@ class CompanyPriceHistory(models.Model):
         on_delete=models.PROTECT,
         related_name="price_history_entry",
     )
-    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=3)
     currency = models.CharField(max_length=3, default="AED")
     quantity = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("1.000"))
     unit = models.CharField(max_length=50, blank=True)

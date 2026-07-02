@@ -966,7 +966,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                         <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
                         <td className="qm-import-price-cell">
-                          <input type="number" min="0" step="0.01" value={line.unit_price || ''} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
+                          <input type="number" min="0" step="0.001" value={line.unit_price || ''} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
                           {line.price_reference_match && (
                             <small className={`qm-price-match ${line.price_reference_status || ''}`}>
                               {line.price_reference_match.match_label} match: {line.price_reference_match.item_name} ({Math.round(Number(line.price_reference_match.confidence || 0) * 100)}%)

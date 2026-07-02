@@ -1374,7 +1374,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                       />
                     </td>
                     <td className="qm-price-cell">
-                      <input disabled={!isEditable} type="number" min="0" step="0.01" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
+                      <input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
                       {priceHint && <span className={`qm-price-hint ${priceHint.mode}`}>{priceHintText(priceHint)}</span>}
                     </td>
                     <td className="qm-vat-cell">
@@ -1438,7 +1438,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               onKeyDown={preventUnitNumberKey}
               onChange={(event) => setLineForm({ ...lineForm, unit: sanitizeUnitText(event.target.value) })}
             />
-            <input type="number" min="0" step="0.01" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, unit_price: event.target.value })} />
+            <input type="number" min="0" step="0.001" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, unit_price: event.target.value })} />
             <select value={lineForm.vat_rate} onChange={(event) => setLineForm({ ...lineForm, vat_rate: event.target.value })}>
               <option value="0">VAT 0%</option>
               <option value="5">VAT 5%</option>

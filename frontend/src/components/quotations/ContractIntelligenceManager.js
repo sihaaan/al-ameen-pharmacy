@@ -52,6 +52,11 @@ const formatDate = (value) => {
   return date.toLocaleDateString('en-AE');
 };
 
+const formatUnitMoney = (value, currency = 'AED') => `${currency || 'AED'} ${Number(value || 0).toLocaleString(undefined, {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 3,
+})}`;
+
 const formatDateTime = (value) => {
   if (!value) return '-';
   const date = new Date(value);
@@ -979,7 +984,7 @@ const ContractIntelligenceManager = () => {
                           </td>
                           <td>{item.quantity || '-'}</td>
                           <td>{item.unit || '-'}</td>
-                          <td>{item.unit_price ? `${item.currency || 'AED'} ${Number(item.unit_price).toFixed(2)}` : '-'}</td>
+                          <td>{item.unit_price ? formatUnitMoney(item.unit_price, item.currency) : '-'}</td>
                           <td>{item.requested_date ? formatDate(item.requested_date) : formatDate(item.source_sent_at)}</td>
                           <td>{item.product_name || <span className="qm-muted-line">No catalog match</span>}</td>
                           <td><span className="qm-confidence">{percent(item.confidence)}</span></td>

@@ -102,6 +102,7 @@ def build_quotation_excel(quotation):
         cell.border = header_border
 
     money_format = "#,##0.00"
+    unit_price_format = "#,##0.00#"
     lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).order_by("sort_order", "id")
     for index, line in enumerate(lines, start=1):
         row = table_start + index
@@ -126,7 +127,9 @@ def build_quotation_excel(quotation):
                 cell.number_format = "#,##0.000"
             elif column == 6:
                 cell.number_format = "0.00"
-            elif column in {5, 7, 8}:
+            elif column == 5:
+                cell.number_format = unit_price_format
+            elif column in {7, 8}:
                 cell.number_format = money_format
 
     last_line_row = table_start + max(lines.count(), 1)

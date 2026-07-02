@@ -682,6 +682,20 @@ def _decimal(value):
         return None
 
 
+def _unit_price_text(value):
+    if value in (None, ""):
+        return ""
+    try:
+        text = f"{Decimal(str(value)).quantize(Decimal('0.001')):.3f}"
+    except (InvalidOperation, ValueError):
+        return ""
+    whole, _, fraction = text.partition(".")
+    fraction = fraction.rstrip("0")
+    if len(fraction) < 2:
+        fraction = fraction.ljust(2, "0")
+    return f"{whole}.{fraction}"
+
+
 def _quantity(value):
     if value in (None, ""):
         return None
@@ -1750,7 +1764,7 @@ def refresh_contract_run_summary(run):
             source_ids_by_item[key].add(item.source_id)
         if item.requested_date and (not row["latest_date"] or item.requested_date.isoformat() > row["latest_date"]):
             row["latest_date"] = item.requested_date.isoformat()
-            row["last_price"] = str(item.unit_price) if item.unit_price is not None else ""
+            row["last_price"] = _unit_price_text(item.unit_price)
     top_items = []
     for key, row in grouped.items():
         top_items.append(
