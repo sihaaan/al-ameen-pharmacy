@@ -1,5 +1,5 @@
 from decimal import Decimal
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 import json
 import tempfile
@@ -867,6 +867,36 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(second.data["processed"], 1)
         self.assertEqual(second.data["remaining"], 0)
         self.assertEqual(QuotationPOEvidence.objects.count(), 2)
+
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_batch_po_evidence_rescan_advances_with_cutoff(self, mock_search):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        cutoff = timezone.now() - timedelta(minutes=5)
+        quotation.status = Quotation.STATUS_SENT
+        quotation.sent_at = cutoff - timedelta(days=1)
+        quotation.po_evidence_last_scanned_at = cutoff - timedelta(days=1)
+        quotation.save(update_fields=["status", "sent_at", "po_evidence_last_scanned_at", "updated_at"])
+        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        mock_search.return_value = {"messages": []}
+
+        first = self.client.post(
+            reverse("quotation-scan-po-evidence"),
+            {"quote_limit": 5, "message_limit": 5, "rescan": True, "rescan_before": cutoff.isoformat()},
+            format="json",
+        )
+        second = self.client.post(
+            reverse("quotation-scan-po-evidence"),
+            {"quote_limit": 5, "message_limit": 5, "rescan": True, "rescan_before": cutoff.isoformat()},
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data["processed"], 1)
+        self.assertTrue(first.data["rescan"])
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.data["processed"], 0)
 
     @patch("quotations.quote_po_intelligence.gmail_fetch_message")
     def test_parse_po_evidence_creates_review_import_without_saving_outcome(self, mock_fetch):

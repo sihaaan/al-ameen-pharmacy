@@ -1786,6 +1786,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 quote_limit=request.data.get("quote_limit", 5),
                 message_limit=request.data.get("message_limit", 10),
                 rescan=str(request.data.get("rescan", "false")).lower() in {"1", "true", "yes"},
+                rescan_before=request.data.get("rescan_before"),
             )
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)

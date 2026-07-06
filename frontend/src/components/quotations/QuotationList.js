@@ -149,8 +149,9 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
     }
   };
 
-  const runPOEvidenceScan = async () => {
+  const runPOEvidenceScan = async ({ rescan = false } = {}) => {
     if (poScan.running) return;
+    const rescanBefore = rescan ? new Date().toISOString() : null;
     stopPoScanRef.current = false;
     setErrorInfo(null);
     setPoScan({
@@ -161,6 +162,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
       errors: [],
       lastQuotes: [],
       done: false,
+      mode: rescan ? 'rescan' : 'missing',
     });
 
     const totals = {
@@ -175,7 +177,12 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
     try {
       for (let pass = 0; pass < 200; pass += 1) {
         if (stopPoScanRef.current) break;
-        const response = await quotationAPI.quotes.scanPOEvidence({ quote_limit: 5, message_limit: 10 });
+        const response = await quotationAPI.quotes.scanPOEvidence({
+          quote_limit: 20,
+          message_limit: 10,
+          rescan,
+          ...(rescanBefore ? { rescan_before: rescanBefore } : {}),
+        });
         const data = response.data || {};
         totals.processed += Number(data.processed || 0);
         totals.found += Number(data.candidates_found || 0);
@@ -191,11 +198,12 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
           errors: totals.errors,
           lastQuotes: totals.lastQuotes,
           done: totals.done,
+          mode: rescan ? 'rescan' : 'missing',
         });
         if (totals.done || Number(data.processed || 0) === 0) break;
       }
       await load();
-      setPoScan((current) => ({ ...current, running: false, done: current.remaining === 0 }));
+      setPoScan((current) => ({ ...current, running: false, done: current.remaining === 0, mode: rescan ? 'rescan' : 'missing' }));
     } catch (error) {
       const details = await describeQuotationError(error, 'Scan quotations for PO/LPO evidence', 'POST /quotations/quotes/scan_po_evidence/');
       setErrorInfo(details);
@@ -271,6 +279,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
                 <span>{poScan.processed} quotation(s) checked</span>
                 <span>{poScan.found} candidate email(s) found</span>
                 <span>{poScan.remaining ?? 0} remaining</span>
+                {poScan.mode === 'rescan' && <span>Rescan mode</span>}
               </div>
             )}
             {poScan.errors.length > 0 && (
@@ -280,8 +289,11 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
             )}
           </div>
           <div className="qm-po-scan-actions">
-            <button type="button" className="qm-primary" disabled={poScan.running} onClick={runPOEvidenceScan}>
+            <button type="button" className="qm-primary" disabled={poScan.running} onClick={() => runPOEvidenceScan({ rescan: false })}>
               {poScan.running ? 'Scanning...' : poScan.done ? 'Scan Missing Quotes' : 'Scan Sent Quotes'}
+            </button>
+            <button type="button" className="qm-secondary" disabled={poScan.running} onClick={() => runPOEvidenceScan({ rescan: true })}>
+              Rescan All Sent/Finalized
             </button>
             {poScan.running && (
               <button type="button" className="qm-secondary" onClick={stopPOEvidenceScan}>

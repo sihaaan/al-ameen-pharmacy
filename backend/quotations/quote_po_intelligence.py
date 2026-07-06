@@ -3,7 +3,9 @@ import os
 import re
 
 from django.core.exceptions import ValidationError
+from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from .ai_parsing import AIParseError, clean_preview_with_ai
 from .contract_intelligence import gmail_fetch_message, gmail_fetch_message_metadata, gmail_search_messages
@@ -304,7 +306,19 @@ def find_quote_po_evidence(quotation, actor, *, limit=25):
     return {"queries": queries, "count": evidence.count(), "evidence": list(evidence)}
 
 
-def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, rescan=False):
+def _parse_rescan_cutoff(value):
+    if not value:
+        return timezone.now()
+    if hasattr(value, "isoformat"):
+        cutoff = value
+    else:
+        cutoff = parse_datetime(str(value)) or timezone.now()
+    if timezone.is_naive(cutoff):
+        cutoff = timezone.make_aware(cutoff, timezone.get_current_timezone())
+    return cutoff
+
+
+def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, rescan=False, rescan_before=None):
     _get_gmail_connection(actor)
     quote_limit = max(1, min(int(quote_limit or 5), 20))
     message_limit = max(1, min(int(message_limit or 10), 50))
@@ -312,7 +326,14 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
         status__in=[Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT],
         is_historical_import=False,
     )
-    if not rescan:
+    cutoff = None
+    if rescan:
+        cutoff = _parse_rescan_cutoff(rescan_before)
+        queryset = queryset.filter(
+            Q(po_evidence_last_scanned_at__isnull=True) |
+            Q(po_evidence_last_scanned_at__lt=cutoff)
+        )
+    else:
         queryset = queryset.filter(po_evidence_last_scanned_at__isnull=True)
 
     remaining_before = queryset.count()
@@ -375,6 +396,7 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
         "quote_limit": quote_limit,
         "message_limit": message_limit,
         "rescan": bool(rescan),
+        "rescan_before": cutoff.isoformat() if cutoff else "",
     }
 
 
