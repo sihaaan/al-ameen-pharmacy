@@ -2,6 +2,9 @@ import React, { createContext, useState, useEffect, useContext } from 'react';
 import axios from 'axios';
 import axiosInstance from '../utils/axios';
 
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+const AUTH_REQUEST_TIMEOUT_MS = Number(process.env.REACT_APP_AUTH_REQUEST_TIMEOUT_MS || 30000);
+
 // Create the context
 const AuthContext = createContext();
 
@@ -39,10 +42,11 @@ export const AuthProvider = ({ children }) => {
     setError(null);
     try {
       // Call Django JWT token endpoint
-      const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
       const response = await axios.post(`${API_URL}/token/`, {
         username,
         password,
+      }, {
+        timeout: AUTH_REQUEST_TIMEOUT_MS,
       });
 
       const { access, refresh } = response.data;
@@ -65,7 +69,9 @@ export const AuthProvider = ({ children }) => {
       return { success: true };
     } catch (err) {
       console.error('Login error:', err);
-      const errorMessage = err.response?.data?.detail || 'Login failed. Please try again.';
+      const errorMessage = err.code === 'ECONNABORTED'
+        ? 'Login timed out while waiting for the server. Please try again in a moment.'
+        : err.response?.data?.detail || 'Login failed. Please try again.';
       setError(errorMessage);
       return { success: false, error: errorMessage };
     }
@@ -116,9 +122,10 @@ export const AuthProvider = ({ children }) => {
     }
 
     try {
-      const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
       const response = await axios.post(`${API_URL}/token/refresh/`, {
         refresh,
+      }, {
+        timeout: AUTH_REQUEST_TIMEOUT_MS,
       });
 
       const { access, refresh: rotatedRefresh } = response.data;

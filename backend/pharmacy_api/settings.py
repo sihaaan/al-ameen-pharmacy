@@ -169,6 +169,12 @@ DATABASES = {
         conn_max_age=600
     )
 }
+if DATABASES["default"].get("ENGINE", "").endswith("postgresql"):
+    DATABASES["default"].setdefault("OPTIONS", {})
+    DATABASES["default"]["OPTIONS"].setdefault(
+        "connect_timeout",
+        int(os.environ.get("DATABASE_CONNECT_TIMEOUT_SECONDS", "8")),
+    )
 
 # For local development with SQLite (simpler but less realistic):
 # DATABASES = {
