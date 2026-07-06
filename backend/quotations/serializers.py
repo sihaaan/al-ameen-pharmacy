@@ -1788,6 +1788,7 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     attachment_count = serializers.SerializerMethodField()
     parsed_attachment_count = serializers.SerializerMethodField()
+    extracted_text_preview = serializers.SerializerMethodField()
 
     class Meta:
         model = QuotationPOEvidence
@@ -1804,6 +1805,7 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             "attachments",
             "attachment_count",
             "parsed_attachment_count",
+            "extracted_text_preview",
             "source_sha256",
             "matching_reason",
             "confidence",
@@ -1821,6 +1823,12 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
 
     def get_parsed_attachment_count(self, obj):
         return sum(1 for attachment in obj.attachments or [] if (attachment or {}).get("status") == "parsed")
+
+    def get_extracted_text_preview(self, obj):
+        text = (obj.extracted_text or "").strip()
+        if not text:
+            return ""
+        return text[:1500]
 
 
 class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):

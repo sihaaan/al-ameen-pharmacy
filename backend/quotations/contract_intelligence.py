@@ -506,6 +506,19 @@ def gmail_fetch_message_metadata(connection, message_id):
         token=token,
     )
     headers = payload.get("payload", {}).get("headers") or []
+    attachment_refs = []
+    for part in _walk_parts(payload.get("payload") or {}):
+        body = part.get("body") or {}
+        filename = part.get("filename") or ""
+        if filename and body.get("attachmentId"):
+            attachment_refs.append(
+                {
+                    "filename": filename,
+                    "mime_type": part.get("mimeType") or "",
+                    "size": body.get("size") or 0,
+                    "attachment_id": body.get("attachmentId"),
+                }
+            )
     return {
         "gmail_message_id": payload.get("id", message_id),
         "gmail_thread_id": payload.get("threadId", ""),
@@ -514,6 +527,7 @@ def gmail_fetch_message_metadata(connection, message_id):
         "recipients": ", ".join(filter(None, [_header(headers, "To"), _header(headers, "Cc")])),
         "sent_at": _message_datetime(payload),
         "snippet": payload.get("snippet", ""),
+        "attachments": attachment_refs,
     }
 
 

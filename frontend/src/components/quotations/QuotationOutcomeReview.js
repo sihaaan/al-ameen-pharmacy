@@ -11,6 +11,18 @@ const unitMoney = (value, currency = 'AED') => `${currency} ${Number(value || 0)
 
 const percent = (value) => `${Number(value || 0).toFixed(1)}%`;
 
+const splitEvidenceReasons = (reason) => String(reason || '')
+  .split(';')
+  .map((part) => part.trim())
+  .filter(Boolean);
+
+const evidenceConfidenceLabel = (confidence) => {
+  const value = Number(confidence || 0);
+  if (value >= 75) return 'Strong';
+  if (value >= 55) return 'Review';
+  return 'Weak';
+};
+
 const lineStatusLabels = {
   pending: 'Pending',
   accepted: 'Accepted',
@@ -93,6 +105,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [findingEvidence, setFindingEvidence] = useState(false);
   const [parsingEvidenceId, setParsingEvidenceId] = useState(null);
   const [markingEvidenceId, setMarkingEvidenceId] = useState(null);
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState(null);
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
@@ -136,6 +149,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
 
   const lineIds = useMemo(() => (quote?.lines || []).map((line) => line.id), [quote]);
   const selectedActiveLines = selectedLines.filter((id) => lineIds.includes(id));
+  const selectedEvidence = useMemo(
+    () => poEvidence.find((item) => item.id === selectedEvidenceId) || null,
+    [poEvidence, selectedEvidenceId]
+  );
 
   const updateLineDraft = (lineId, patch) => {
     setLineDrafts((current) => ({
@@ -356,22 +373,35 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           <div className="qm-evidence-grid">
             {poEvidence.map((evidence) => {
               const evidenceStatus = evidence.status || 'candidate';
+              const confidence = Math.round(Number(evidence.confidence || 0));
+              const reasons = splitEvidenceReasons(evidence.matching_reason);
               return (
               <article key={evidence.id} className={`qm-evidence-card status-${evidenceStatus}`}>
                 <div className="qm-evidence-card-main">
                   <div>
                     <h4>{evidence.subject || 'Untitled email'}</h4>
                     <p>{evidence.sender || 'Unknown sender'}</p>
-                    <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} · {evidence.attachment_count} attachment(s)</small>
+                    <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} - {evidence.attachment_count} attachment(s)</small>
                   </div>
                   <div className="qm-evidence-badges">
-                    <span className="qm-badge">{Math.round(Number(evidence.confidence || 0))}%</span>
+                    <span className={`qm-badge evidence-${evidenceConfidenceLabel(confidence).toLowerCase()}`}>{confidence}% {evidenceConfidenceLabel(confidence)}</span>
                     <span className={`qm-badge status-${evidenceStatus}`}>{evidenceStatus.replace('_', ' ')}</span>
                   </div>
                 </div>
-                <div className="qm-evidence-reason">{evidence.matching_reason || evidence.snippet || 'Matched by targeted Gmail search.'}</div>
+                <div className="qm-evidence-reason-list">
+                  {(reasons.length ? reasons.slice(0, 3) : [evidence.snippet || 'Matched by targeted Gmail search.']).map((reason) => (
+                    <span key={reason}>{reason}</span>
+                  ))}
+                </div>
                 {evidence.error && <div className="qm-notice warning">{evidence.error}</div>}
                 <div className="qm-evidence-actions">
+                  <button
+                    type="button"
+                    className="qm-secondary small"
+                    onClick={() => setSelectedEvidenceId(evidence.id)}
+                  >
+                    Review evidence
+                  </button>
                   <button
                     type="button"
                     className="qm-secondary small"
@@ -397,6 +427,92 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           <div className="qm-empty subtle">No Gmail evidence candidates yet. Click Find Gmail Evidence to search for related PO/LPO replies.</div>
         )}
       </div>
+
+      {selectedEvidence && (
+        <div className="qm-modal-backdrop" role="presentation" onClick={() => setSelectedEvidenceId(null)}>
+          <div className="qm-modal qm-evidence-detail-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="qm-panel-heading">
+              <div>
+                <span className="qm-step-kicker">Gmail source review</span>
+                <h3>{selectedEvidence.subject || 'Untitled email'}</h3>
+                <p>Confirm whether this email is actually a PO/LPO response before parsing it into outcome suggestions.</p>
+              </div>
+              <button type="button" className="qm-secondary small" onClick={() => setSelectedEvidenceId(null)}>Close</button>
+            </div>
+
+            <div className="qm-evidence-detail-grid">
+              <div>
+                <span>From</span>
+                <strong>{selectedEvidence.sender || '-'}</strong>
+              </div>
+              <div>
+                <span>To / Cc</span>
+                <strong>{selectedEvidence.recipients || '-'}</strong>
+              </div>
+              <div>
+                <span>Date</span>
+                <strong>{selectedEvidence.sent_at ? new Date(selectedEvidence.sent_at).toLocaleString() : '-'}</strong>
+              </div>
+              <div>
+                <span>Confidence</span>
+                <strong>{Math.round(Number(selectedEvidence.confidence || 0))}% {evidenceConfidenceLabel(selectedEvidence.confidence)}</strong>
+              </div>
+            </div>
+
+            <div className="qm-evidence-detail-section">
+              <h4>Why this was suggested</h4>
+              <div className="qm-evidence-reason-list expanded">
+                {(splitEvidenceReasons(selectedEvidence.matching_reason).length
+                  ? splitEvidenceReasons(selectedEvidence.matching_reason)
+                  : [selectedEvidence.snippet || 'Matched by targeted Gmail search.']
+                ).map((reason) => <span key={reason}>{reason}</span>)}
+              </div>
+            </div>
+
+            <div className="qm-evidence-detail-section">
+              <h4>Email preview</h4>
+              <pre className="qm-evidence-preview">{selectedEvidence.extracted_text_preview || selectedEvidence.snippet || 'No preview text available yet. Use Parse & Suggest to fetch the full review source when appropriate.'}</pre>
+            </div>
+
+            <div className="qm-evidence-detail-section">
+              <h4>Attachments</h4>
+              {selectedEvidence.attachments?.length ? (
+                <div className="qm-evidence-attachments">
+                  {selectedEvidence.attachments.map((attachment, index) => (
+                    <div key={`${attachment.filename || 'attachment'}-${index}`} className="qm-evidence-attachment">
+                      <strong>{attachment.filename || 'Unnamed attachment'}</strong>
+                      <span>{attachment.mime_type || 'file'} - {attachment.size ? `${attachment.size} bytes` : 'size unknown'}</span>
+                      {attachment.status && <span>{attachment.status}{attachment.reason ? ` - ${attachment.reason}` : ''}</span>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="qm-empty subtle">No attachments reported on this email.</div>
+              )}
+            </div>
+
+            {selectedEvidence.error && <div className="qm-notice warning">{selectedEvidence.error}</div>}
+            <div className="qm-action-row">
+              <button
+                type="button"
+                className="qm-primary"
+                disabled={parsingEvidenceId === selectedEvidence.id || selectedEvidence.status === 'not_relevant'}
+                onClick={() => parseEvidence(selectedEvidence.id)}
+              >
+                {parsingEvidenceId === selectedEvidence.id ? 'Parsing...' : 'Parse & Suggest'}
+              </button>
+              <button
+                type="button"
+                className="qm-secondary"
+                disabled={markingEvidenceId === selectedEvidence.id || selectedEvidence.status === 'not_relevant'}
+                onClick={() => markEvidenceNotRelevant(selectedEvidence.id)}
+              >
+                {markingEvidenceId === selectedEvidence.id ? 'Saving...' : 'Mark not relevant'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="qm-grid-two">
         <div className="qm-panel">

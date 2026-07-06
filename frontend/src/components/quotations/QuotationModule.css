@@ -880,6 +880,124 @@
   background: #f8fafc;
 }
 
+.qm-evidence-reason-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.qm-evidence-reason-list span {
+  padding: 7px 9px;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-evidence-reason-list.expanded span {
+  border-radius: 7px;
+}
+
+.qm-badge.evidence-strong {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.qm-badge.evidence-review {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.qm-badge.evidence-weak {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.qm-evidence-detail-modal {
+  width: min(920px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.qm-evidence-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.qm-evidence-detail-grid div {
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.qm-evidence-detail-grid span {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.qm-evidence-detail-grid strong {
+  color: #0f172a;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.qm-evidence-detail-section {
+  margin-top: 14px;
+}
+
+.qm-evidence-detail-section h4 {
+  margin: 0 0 8px;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.qm-evidence-preview {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: #334155;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.qm-evidence-attachments {
+  display: grid;
+  gap: 8px;
+}
+
+.qm-evidence-attachment {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.qm-evidence-attachment strong {
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+
+.qm-evidence-attachment span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .qm-outcome-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(180px, 1fr));
@@ -4057,6 +4175,10 @@
 }
 
 @media (max-width: 768px) {
+  .qm-evidence-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
   .qm-panel,
   .qm-subpanel {
     padding: 14px;

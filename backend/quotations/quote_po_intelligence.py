@@ -1,4 +1,5 @@
 import hashlib
+import os
 import re
 
 from django.core.exceptions import ValidationError
@@ -21,6 +22,35 @@ PO_KEYWORDS = [
     "\"order confirmation\"",
 ]
 
+MIN_EVIDENCE_CONFIDENCE = 45
+ORDER_DOCUMENT_TERMS = [
+    "lpo",
+    "mpo",
+    "purchase order",
+    "local purchase order",
+    "order confirmation",
+    "accepted order",
+]
+ACCEPTANCE_TERMS = ["approved", "accepted", "confirmed", "proceed", "go ahead"]
+NEGATIVE_CONTEXT_TERMS = [
+    "invoice",
+    "overdue",
+    "statement",
+    "soa",
+    "payment",
+    "reminder",
+    "receipt",
+    "credit note",
+]
+PO_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
+PO_NUMBER_RE = re.compile(
+    r"\b(?:lpo|mpo|purchase\s+order|local\s+purchase\s+order)\s*(?:no\.?|number|#|:|-)?\s*[A-Z0-9][A-Z0-9/_-]{2,}"
+    r"|\bpo\s*(?:no\.?|number|#|:|-)\s*[A-Z0-9][A-Z0-9/_-]{2,}"
+    r"|\bpo\s+[0-9][A-Z0-9/_-]{2,}",
+    re.IGNORECASE,
+)
+PO_WORD_RE = re.compile(r"\bpo\b", re.IGNORECASE)
+
 
 def _clean_query_text(value):
     value = re.sub(r"[\r\n\t]+", " ", value or "").strip()
@@ -37,6 +67,44 @@ def _quote_term(value):
 def _email_domain(value):
     match = re.search(r"@([A-Za-z0-9.-]+\.[A-Za-z]{2,})", value or "")
     return match.group(1).lower() if match else ""
+
+
+def _contains_any(value, terms):
+    value = (value or "").lower()
+    return [term for term in terms if term in value]
+
+
+def _company_match_strength(company_name, haystack):
+    company_name = (company_name or "").lower()
+    haystack = (haystack or "").lower()
+    if not company_name:
+        return 0, ""
+    compact_company = re.sub(r"[^a-z0-9]+", " ", company_name).strip()
+    if compact_company and compact_company in haystack:
+        return 8, "customer name appears"
+    tokens = [token for token in re.split(r"[^a-z0-9]+", compact_company) if len(token) >= 4]
+    if tokens and any(token in haystack for token in tokens[:3]):
+        return 4, "part of the customer name appears"
+    return 0, ""
+
+
+def _attachment_hint(attachments, subject, snippet):
+    candidates = []
+    for attachment in attachments or []:
+        filename = str((attachment or {}).get("filename") or "")
+        extension = os.path.splitext(filename)[1].lower()
+        filename_lower = filename.lower()
+        if not filename or extension not in PO_ATTACHMENT_EXTENSIONS:
+            continue
+        if (
+            PO_NUMBER_RE.search(filename_lower)
+            or any(term in filename_lower for term in ["lpo", "purchase order", "order", "mpo"])
+            or PO_WORD_RE.search(filename_lower)
+        ):
+            candidates.append(filename)
+        elif _contains_any(f"{subject} {snippet}", ORDER_DOCUMENT_TERMS):
+            candidates.append(filename)
+    return candidates[:3]
 
 
 def _quote_after_date(quotation):
@@ -81,39 +149,64 @@ def _candidate_score(quotation, payload, query):
     snippet = payload.get("snippet", "") or ""
     sender = payload.get("sender", "") or ""
     recipients = payload.get("recipients", "") or ""
+    attachments = payload.get("attachments") or []
     haystack = f"{subject} {snippet} {sender} {recipients}".lower()
-    score = 25
+    subject_lower = subject.lower()
+    snippet_lower = snippet.lower()
+    score = 0
     reasons = []
 
     quote_number = (quotation.quotation_number or "").lower()
     if quote_number and quote_number in haystack:
         score += 45
-        reasons.append("quote number appears in the email")
+        reasons.append("strong match: quote number appears")
 
-    company_name = (quotation.company.name if quotation.company_id else "").lower()
-    company_tokens = [token for token in re.split(r"[^a-z0-9]+", company_name) if len(token) >= 3]
-    if company_tokens and any(token in haystack for token in company_tokens[:4]):
-        score += 15
-        reasons.append("customer name appears in the email")
+    if PO_NUMBER_RE.search(subject_lower):
+        score += 35
+        reasons.append("strong PO/LPO signal in subject")
+    elif _contains_any(subject_lower, ORDER_DOCUMENT_TERMS) or PO_WORD_RE.search(subject_lower):
+        score += 25
+        reasons.append("PO/LPO signal in subject")
 
     contact_email = getattr(quotation.contact, "email", "") if quotation.contact_id else ""
     domain = _email_domain(contact_email) or _email_domain(getattr(quotation.company, "email", ""))
     if domain and domain in haystack:
-        score += 15
-        reasons.append(f"customer email domain {domain} appears")
+        score += 10
+        reasons.append(f"customer email domain matched: {domain}")
 
-    keyword_hits = [
-        keyword.strip('"').lower()
-        for keyword in PO_KEYWORDS
-        if keyword.strip('"').lower() in haystack
-    ]
-    if keyword_hits:
-        score += 15
-        reasons.append("PO/LPO or acceptance keyword appears")
+    company_score, company_reason = _company_match_strength(quotation.company.name if quotation.company_id else "", haystack)
+    if company_score:
+        score += company_score
+        reasons.append(company_reason)
+
+    if PO_NUMBER_RE.search(snippet_lower):
+        score += 20
+        reasons.append("PO/LPO reference appears in preview")
+    elif _contains_any(snippet_lower, ["purchase order", "local purchase order", "lpo", "mpo"]) or PO_WORD_RE.search(snippet_lower):
+        score += 14
+        reasons.append("PO/LPO wording appears in preview")
+
+    accepted_hits = _contains_any(haystack, ACCEPTANCE_TERMS)
+    if accepted_hits:
+        score += 8
+        reasons.append(f"acceptance wording found: {', '.join(accepted_hits[:2])}")
+
+    attachment_matches = _attachment_hint(attachments, subject, snippet)
+    if attachment_matches:
+        score += 22
+        reasons.append(f"likely PO/LPO attachment: {', '.join(attachment_matches)}")
+    elif attachments and (PO_NUMBER_RE.search(haystack) or _contains_any(haystack, ORDER_DOCUMENT_TERMS)):
+        score += 10
+        reasons.append(f"{len(attachments)} attachment(s) on a PO/LPO-like email")
+
+    negative_hits = _contains_any(subject_lower, NEGATIVE_CONTEXT_TERMS)
+    if negative_hits and not (PO_NUMBER_RE.search(haystack) or quote_number and quote_number in haystack):
+        score -= 25
+        reasons.append(f"low priority context: {', '.join(negative_hits[:2])}")
 
     if not reasons:
-        reasons.append(f"matched targeted Gmail query: {query}")
-    return min(score, 98), "; ".join(reasons)
+        reasons.append(f"weak targeted Gmail match: {query}")
+    return max(0, min(score, 98)), "; ".join(reasons)
 
 
 def _source_hash(payload):
@@ -176,6 +269,8 @@ def find_quote_po_evidence(quotation, actor, *, limit=25):
             found_ids.add(message_id)
             payload = gmail_fetch_message_metadata(connection, message_id)
             confidence, reason = _candidate_score(quotation, payload, query)
+            if confidence < MIN_EVIDENCE_CONFIDENCE:
+                continue
             evidence, _ = QuotationPOEvidence.objects.update_or_create(
                 quotation=quotation,
                 gmail_message_id=payload.get("gmail_message_id") or message_id,
@@ -186,6 +281,7 @@ def find_quote_po_evidence(quotation, actor, *, limit=25):
                     "subject": payload.get("subject", "")[:500],
                     "sent_at": payload.get("sent_at"),
                     "snippet": payload.get("snippet", ""),
+                    "attachments": payload.get("attachments") or [],
                     "source_sha256": _source_hash(payload),
                     "matching_reason": reason,
                     "confidence": confidence,

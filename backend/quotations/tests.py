@@ -689,6 +689,70 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIsNotNone(quotation.po_evidence_last_scanned_at)
         self.assertEqual(quotation.po_evidence_last_scan_count, 1)
 
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_find_po_evidence_filters_customer_name_only_messages(self, mock_search, mock_metadata):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        quotation.status = Quotation.STATUS_SENT
+        quotation.sent_at = timezone.now()
+        quotation.save(update_fields=["status", "sent_at", "updated_at"])
+        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        mock_search.return_value = {"messages": [{"id": "gmail-weak"}]}
+        mock_metadata.return_value = {
+            "gmail_message_id": "gmail-weak",
+            "gmail_thread_id": "thread-weak",
+            "sender": "buyer@workflow.example",
+            "recipients": "pharmacy@example.com",
+            "subject": "Meeting notes with Workflow Company",
+            "sent_at": timezone.now(),
+            "snippet": "Workflow Company contact discussion and general follow up.",
+            "attachments": [],
+        }
+
+        response = self.client.post(reverse("quotation-find-po-evidence", args=[quotation.id]), {"limit": 5}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+        self.assertFalse(QuotationPOEvidence.objects.filter(quotation=quotation).exists())
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_find_po_evidence_keeps_lpo_attachment_metadata(self, mock_search, mock_metadata):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        quotation.status = Quotation.STATUS_SENT
+        quotation.sent_at = timezone.now()
+        quotation.save(update_fields=["status", "sent_at", "updated_at"])
+        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        mock_search.return_value = {"messages": [{"id": "gmail-lpo"}]}
+        mock_metadata.return_value = {
+            "gmail_message_id": "gmail-lpo",
+            "gmail_thread_id": "thread-lpo",
+            "sender": "buyer@workflow.example",
+            "recipients": "pharmacy@example.com",
+            "subject": "RE: LPO 1260617-12",
+            "sent_at": timezone.now(),
+            "snippet": "Please find attached.",
+            "attachments": [
+                {
+                    "filename": "MPO-104F078-26-0142.pdf",
+                    "size": 1234,
+                    "mime_type": "application/pdf",
+                }
+            ],
+        }
+
+        response = self.client.post(reverse("quotation-find-po-evidence", args=[quotation.id]), {"limit": 5}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        evidence = QuotationPOEvidence.objects.get(quotation=quotation)
+        self.assertEqual(evidence.attachments[0]["filename"], "MPO-104F078-26-0142.pdf")
+        self.assertIn("PO/LPO", evidence.matching_reason)
+
     @patch("quotations.contract_intelligence._form_request")
     def test_find_po_evidence_invalid_grant_marks_gmail_for_reconnect(self, mock_form_request):
         quotation = self.create_quote()
