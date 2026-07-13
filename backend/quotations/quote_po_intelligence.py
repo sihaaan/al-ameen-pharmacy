@@ -1063,11 +1063,17 @@ def _extract_gmail_lpo_details(preview):
             for key in ("raw_line", "raw_name", "requested_item_name", "item_name")
         )
     text = "\n".join(text_chunks)
+
+    def clean_number(value):
+        candidate = re.sub(r"\s+", "", str(value or "").strip().strip(" .:-#")).upper()
+        candidate = re.sub(r"\.(?:PDF|XLSX?|XLSB)$", "", candidate)
+        return candidate[:120] if candidate and re.search(r"\d", candidate) else ""
+
     lpo_number = ""
     for key in ("lpo_number", "po_number", "purchase_order_number", "document_number"):
-        candidate = re.sub(r"\s+", "", str(meta.get(key) or "").strip().strip(" .:-#")).upper()
-        if candidate and re.search(r"\d", candidate):
-            lpo_number = candidate[:120]
+        candidate = clean_number(meta.get(key))
+        if candidate:
+            lpo_number = candidate
             break
     if not lpo_number:
         match = re.search(
@@ -1076,7 +1082,15 @@ def _extract_gmail_lpo_details(preview):
             re.IGNORECASE,
         )
         if match:
-            lpo_number = match.group(1).strip(" .:-#").upper()[:120]
+            lpo_number = clean_number(match.group(1))
+    if not lpo_number:
+        match = re.search(
+            r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9/_.-]{2,})",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            lpo_number = clean_number(match.group(1))
 
     lpo_date = None
     for key in ("lpo_date", "po_date", "purchase_order_date", "document_date", "date"):

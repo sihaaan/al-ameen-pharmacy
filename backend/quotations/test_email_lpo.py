@@ -37,6 +37,7 @@ from .models import (
 )
 from .quote_po_intelligence import (
     _candidate_score,
+    _extract_gmail_lpo_details,
     _locked_message_evidence_queryset,
     _lock_and_resolve_evidence_approval,
     _search_query_with_complete_flag,
@@ -201,6 +202,18 @@ class SharedMailboxEvidenceTests(TestCase):
         )
         self.assertEqual(confidence, 0)
         self.assertIn("another quotation", reason)
+
+    def test_compact_po_number_is_detected_from_document_filename_without_extension(self):
+        details = _extract_gmail_lpo_details(
+            {
+                "source_filename": "Purchase order PO184718.pdf",
+                "original_text": "",
+                "lines": [],
+                "meta": {},
+            }
+        )
+
+        self.assertEqual(details["lpo_number"], "184718")
 
     def test_legacy_candidate_retirement_migration_is_idempotent_and_preserves_reviewed_rows(self):
         stale = QuotationPOEvidence.objects.create(

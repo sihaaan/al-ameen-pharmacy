@@ -231,6 +231,7 @@ def _clean_lpo_number_candidate(value):
     candidate = str(value or "").strip().strip(" .:-#")
     candidate = re.sub(r"\s+", "", candidate)
     candidate = candidate.upper()
+    candidate = re.sub(r"\.(?:PDF|XLSX?|XLSB)$", "", candidate)
     if not candidate or candidate in {"BOX", "P.O.BOX", "POBOX", "PBOX"}:
         return ""
     if not re.search(r"\d", candidate):
@@ -257,6 +258,7 @@ def _extract_lpo_details(preview):
             r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\b(LPO[-\/.]?[A-Z0-9][A-Z0-9\/\-.]{2,})\b",
+            r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9\/_.-]{2,})",
         ]
         for pattern in number_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
