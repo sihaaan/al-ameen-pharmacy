@@ -19,7 +19,7 @@ from .contract_intelligence import (
 )
 from .import_parsers import parse_text_preview
 from .models import Quotation, QuotationAuditLog, QuotationLPO, QuotationOutcomePOImport, QuotationPOEvidence
-from .services import audit_log, build_po_outcome_suggestions, ensure_outcome_reviewable
+from .services import audit_log, build_guarded_po_outcome_suggestions, ensure_outcome_reviewable
 
 
 PO_KEYWORDS = [
@@ -1028,6 +1028,7 @@ def _preview_from_gmail_payload(payload, evidence, *, relevance_reason=""):
             "meta": {
                 "gmail_message_id": payload.get("gmail_message_id", ""),
                 "gmail_thread_id": payload.get("gmail_thread_id", ""),
+                "gmail_subject": payload.get("subject", ""),
                 "selected_attachment_id": selected_attachment.get("attachment_id") or selected_attachment.get("part_id") or "",
                 "selected_attachment_filename": selected_attachment.get("filename") or "",
             },
@@ -1047,6 +1048,7 @@ def _preview_from_gmail_payload(payload, evidence, *, relevance_reason=""):
         **(preview.get("meta") or {}),
         "gmail_message_id": payload.get("gmail_message_id", ""),
         "gmail_thread_id": payload.get("gmail_thread_id", ""),
+        "gmail_subject": payload.get("subject", ""),
     }
     return preview
 
@@ -1056,6 +1058,7 @@ def _extract_gmail_lpo_details(preview):
     text_chunks = [
         str(preview.get("original_text") or ""),
         str(preview.get("source_filename") or ""),
+        str(meta.get("gmail_subject") or ""),
     ]
     for row in preview.get("lines") or []:
         text_chunks.extend(
@@ -1083,6 +1086,14 @@ def _extract_gmail_lpo_details(preview):
         )
         if match:
             lpo_number = clean_number(match.group(1))
+    if not lpo_number:
+        match = re.search(
+            r"\b(?:PO[_-])?PO(?P<number>\d{3}_\d{5,})(?!\d)",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            lpo_number = clean_number(match.group("number"))
     if not lpo_number:
         match = re.search(
             r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9/_.-]{2,})",
@@ -1238,10 +1249,10 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
             evidence,
             relevance_reason=relevance_reason,
         )
+        deterministic_preview = preview
         warnings = list(preview.get("warnings") or [])
         if use_ai:
             try:
-                deterministic_preview = preview
                 ai_preview = clean_preview_with_ai(
                     deterministic_preview,
                     actor=actor,
@@ -1254,7 +1265,13 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
         warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
         preview["warnings"] = warnings
 
-        suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(evidence.quotation, preview)
+        preview, suggestions, unmatched, missing_line_ids = build_guarded_po_outcome_suggestions(
+            evidence.quotation,
+            deterministic_preview,
+            preview,
+        )
+        warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+        preview["warnings"] = warnings
         details = _extract_gmail_lpo_details(preview)
         with transaction.atomic():
             locked_evidence, superseded_peer_ids = _lock_and_resolve_evidence_approval(

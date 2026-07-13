@@ -45,7 +45,11 @@ from .quote_po_intelligence import (
     find_quote_po_evidence,
     parse_quote_po_evidence,
 )
-from .services import build_po_outcome_suggestions, recalculate_line_outcome
+from .services import (
+    AI_QUOTE_COVERAGE_GUARD_WARNING,
+    build_po_outcome_suggestions,
+    recalculate_line_outcome,
+)
 
 
 def gmail_data(value):
@@ -214,6 +218,26 @@ class SharedMailboxEvidenceTests(TestCase):
         )
 
         self.assertEqual(details["lpo_number"], "184718")
+
+    def test_intermass_po_number_is_detected_from_filename_and_subject(self):
+        cases = (
+            ({
+                "source_filename": "PO_PO111_123301_0.pdf",
+                "original_text": "",
+                "lines": [],
+                "meta": {},
+            }, "111_123301"),
+            ({
+                "source_filename": "attachment.pdf",
+                "original_text": "",
+                "lines": [],
+                "meta": {"gmail_subject": "FW: Document Purchase Order PO112_110916"},
+            }, "112_110916"),
+        )
+        for preview, expected_number in cases:
+            with self.subTest(expected_number=expected_number):
+                details = _extract_gmail_lpo_details(preview)
+                self.assertEqual(details["lpo_number"], expected_number)
 
     def test_legacy_candidate_retirement_migration_is_idempotent_and_preserves_reviewed_rows(self):
         stale = QuotationPOEvidence.objects.create(
@@ -713,6 +737,70 @@ class GmailEvidenceReviewTests(TestCase):
         self.line.refresh_from_db()
         self.assertEqual(self.line.outcome_status, QuotationLine.OUTCOME_PENDING)
         self.assertEqual(fetch.call_args.args[0], self.connection)
+
+    @patch("quotations.quote_po_intelligence.clean_preview_with_ai")
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message")
+    def test_staff_parse_keeps_strong_deterministic_matches_removed_by_ai(self, fetch, clean_with_ai):
+        jacket = QuotationLine.objects.create(
+            quotation=self.quotation,
+            item_name_snapshot="Fire Warden Jacket",
+            quantity=Decimal("20"),
+            unit="No",
+            unit_price=Decimal("10"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+            sort_order=1,
+        )
+        water = QuotationLine.objects.create(
+            quotation=self.quotation,
+            item_name_snapshot="Small Drinking Water 500ml",
+            quantity=Decimal("30"),
+            unit="No",
+            unit_price=Decimal("1"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+            sort_order=2,
+        )
+        fetch.return_value = {
+            "gmail_message_id": self.evidence.gmail_message_id,
+            "gmail_thread_id": "thread-review-coverage",
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": "FW: Document Purchase Order PO112_110916",
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "snippet": "Purchase order attached",
+            "body_text": "",
+            "attachments": [
+                {
+                    "filename": "attachment.pdf",
+                    "attachment_id": "primary",
+                    "size": 100,
+                    "status": "parsed",
+                    "source_file_ref": "private:po-coverage",
+                    "lines": [
+                        {"requested_item_name": "Fire Warden Jacket", "quantity": "20"},
+                        {"requested_item_name": "Small Drinking Water 500ml", "quantity": "30"},
+                    ],
+                }
+            ],
+        }
+        clean_with_ai.return_value = {
+            "lines": [{"requested_item_name": "Fire Warden Jacket", "quantity": "20"}],
+            "warnings": [],
+            "meta": {},
+        }
+
+        parse_quote_po_evidence(self.evidence, self.reviewer, use_ai=True, link_approved=True)
+
+        po_import = QuotationOutcomePOImport.objects.get(gmail_evidence=self.evidence)
+        lpo = QuotationLPO.objects.get(gmail_evidence=self.evidence)
+        self.assertEqual(
+            {row["quotation_line_id"] for row in po_import.suggestions},
+            {jacket.id, water.id},
+        )
+        self.assertIn(AI_QUOTE_COVERAGE_GUARD_WARNING, lpo.warnings)
+        self.assertEqual(lpo.lpo_number, "112_110916")
+        for line in (self.line, jacket, water):
+            line.refresh_from_db()
+            self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_PENDING)
 
     @patch("quotations.quote_po_intelligence.gmail_fetch_message")
     def test_parse_endpoint_rejects_candidate_without_explicit_link_approval(self, fetch):

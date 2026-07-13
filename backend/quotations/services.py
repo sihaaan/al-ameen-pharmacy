@@ -592,6 +592,14 @@ def _po_row_match_candidates(row, quote_lines):
     return item_name, candidates, conflicts
 
 
+def _po_preview_has_aggregate_summary(preview):
+    preview = preview or {}
+    return bool((preview.get("meta") or {}).get("aggregate_po_summary_detected")) or any(
+        "aggregate po item summary detected" in str(warning).lower()
+        for warning in preview.get("warnings") or []
+    )
+
+
 def build_po_outcome_suggestions(quotation, preview):
     quote_lines = [
         line
@@ -599,13 +607,7 @@ def build_po_outcome_suggestions(quotation, preview):
         if line.match_status != QuotationLine.MATCH_IGNORED
     ]
     rows = preview.get("lines") or []
-    aggregate_po_summary_detected = bool(
-        (preview.get("meta") or {}).get("aggregate_po_summary_detected")
-    ) or any(
-        "aggregate po item summary detected" in str(warning).lower()
-        for warning in preview.get("warnings") or []
-    )
-    if aggregate_po_summary_detected:
+    if _po_preview_has_aggregate_summary(preview):
         unmatched = [
             {
                 "po_row_number": index,
@@ -741,6 +743,106 @@ def build_po_outcome_suggestions(quotation, preview):
     unmatched.sort(key=lambda value: value["po_row_number"])
     missing_line_ids = [line.id for line in quote_lines if line.id not in matched_quote_line_ids]
     return suggestions, unmatched, missing_line_ids
+
+
+AI_QUOTE_COVERAGE_GUARD_WARNING = (
+    "AI cleanup was rejected because it removed or changed strong item-to-quotation matches; "
+    "the deterministic extraction was kept for staff review."
+)
+AGGREGATE_PO_REVIEW_WARNING = (
+    "Aggregate PO item summary detected. No automatic line outcomes were created; "
+    "staff must review the source document manually."
+)
+
+
+def build_guarded_po_outcome_suggestions(quotation, deterministic_preview, selected_preview):
+    """Build suggestions without allowing AI cleanup to weaken strong matches."""
+
+    if _po_preview_has_aggregate_summary(deterministic_preview) or _po_preview_has_aggregate_summary(
+        selected_preview
+    ):
+        guarded_preview = dict(selected_preview or deterministic_preview or {})
+        guarded_preview["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *((deterministic_preview or {}).get("warnings") or []),
+                    *((selected_preview or {}).get("warnings") or []),
+                    AGGREGATE_PO_REVIEW_WARNING,
+                ]
+            )
+        )
+        guarded_preview["meta"] = {
+            **((selected_preview or {}).get("meta") or {}),
+            **((deterministic_preview or {}).get("meta") or {}),
+            "aggregate_po_summary_detected": True,
+        }
+        return guarded_preview, *build_po_outcome_suggestions(quotation, guarded_preview)
+
+    deterministic_result = build_po_outcome_suggestions(quotation, deterministic_preview)
+    selected_result = build_po_outcome_suggestions(quotation, selected_preview)
+    deterministic_suggestions = deterministic_result[0]
+    selected_by_line_id = {
+        suggestion.get("quotation_line_id"): suggestion
+        for suggestion in selected_result[0]
+        if suggestion.get("quotation_line_id")
+    }
+
+    def critical_value_changed(deterministic_suggestion, selected_suggestion, field):
+        deterministic_value = _decimal_or_none(deterministic_suggestion.get(field))
+        if deterministic_value is None:
+            return False
+        return _decimal_or_none(selected_suggestion.get(field)) != deterministic_value
+
+    strong_unsafe = []
+    for deterministic_suggestion in deterministic_suggestions:
+        if (
+            float(deterministic_suggestion.get("confidence") or 0) < 85
+            or deterministic_suggestion.get("po_quantity") in (None, "")
+        ):
+            continue
+        selected_suggestion = selected_by_line_id.get(
+            deterministic_suggestion.get("quotation_line_id")
+        )
+        deterministic_total = (deterministic_suggestion.get("po_row") or {}).get("line_total")
+        selected_total = ((selected_suggestion or {}).get("po_row") or {}).get("line_total")
+        if (
+            not selected_suggestion
+            or float(selected_suggestion.get("confidence") or 0) < 85
+            or critical_value_changed(deterministic_suggestion, selected_suggestion, "po_quantity")
+            or critical_value_changed(deterministic_suggestion, selected_suggestion, "po_unit_price")
+            or (
+                _decimal_or_none(deterministic_total) is not None
+                and _decimal_or_none(selected_total) != _decimal_or_none(deterministic_total)
+            )
+        ):
+            strong_unsafe.append(deterministic_suggestion)
+
+    if not strong_unsafe:
+        return selected_preview, *selected_result
+
+    fallback = dict(deterministic_preview or {})
+    fallback["warnings"] = list(
+        dict.fromkeys(
+            [
+                *((deterministic_preview or {}).get("warnings") or []),
+                *((selected_preview or {}).get("warnings") or []),
+                AI_QUOTE_COVERAGE_GUARD_WARNING,
+            ]
+        )
+    )
+    fallback["meta"] = {
+        **((selected_preview or {}).get("meta") or {}),
+        **((deterministic_preview or {}).get("meta") or {}),
+        "ai_cleanup_rejected": True,
+        "ai_cleanup_rejection_reason": "strong_quote_matches_removed_or_changed",
+        "ai_cleanup_lost_quotation_line_ids": [
+            suggestion["quotation_line_id"] for suggestion in strong_unsafe
+        ],
+        "ai_cleanup_unsafe_quotation_line_ids": [
+            suggestion["quotation_line_id"] for suggestion in strong_unsafe
+        ],
+    }
+    return fallback, *build_po_outcome_suggestions(quotation, fallback)
 
 
 def _snapshot_decimal(value):

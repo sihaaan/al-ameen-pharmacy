@@ -11,7 +11,12 @@ from .ai_parsing import AI_DETERMINISTIC_GUARD_WARNING, prefer_safe_ai_preview
 from .import_parsers import _parse_pdf_word_layout_item_rows, parse_pdf_preview, parse_text_preview
 from .import_rules import parse_text_lines
 from .models import Company, Quotation, QuotationLine
-from .services import build_po_outcome_suggestions
+from .services import (
+    AI_QUOTE_COVERAGE_GUARD_WARNING,
+    build_guarded_po_outcome_suggestions,
+    build_po_outcome_suggestions,
+)
+from .views import _extract_lpo_details
 
 
 class LPOTextParserRegressionTests(SimpleTestCase):
@@ -212,6 +217,18 @@ class LPOTextParserRegressionTests(SimpleTestCase):
         self.assertEqual(preview["lines"][0]["unit_price"], "5")
         self.assertTrue(any("no plausible item rows" in warning for warning in preview["warnings"]))
 
+    def test_manual_lpo_upload_detects_intermass_number_from_filename(self):
+        details = _extract_lpo_details(
+            {
+                "source_filename": "PO_PO111_123301_0.pdf",
+                "original_text": "",
+                "lines": [],
+                "meta": {},
+            }
+        )
+
+        self.assertEqual(details["lpo_number"], "111_123301")
+
 
 class LPOOutcomeGuardRegressionTests(TestCase):
     def setUp(self):
@@ -286,3 +303,102 @@ class LPOOutcomeGuardRegressionTests(TestCase):
         self.assertEqual(suggestions[0]["suggested_accepted_quantity"], "20")
         self.assertEqual(unmatched, [])
         self.assertEqual(missing, [])
+
+    def test_ai_cannot_reduce_strong_quotation_line_coverage(self):
+        jacket_line = self.add_line("Fire Warden Jacket", sort_order=1)
+        water_line = self.add_line("Small Drinking Water 500ml", sort_order=2)
+        deterministic = {
+            "lines": [
+                {"raw_name": "Fire Warden Jacket", "quantity": "20"},
+                {"raw_name": "Small Drinking Water 500ml", "quantity": "30"},
+            ],
+            "warnings": [],
+            "meta": {},
+        }
+        ai_preview = {
+            "lines": [{"raw_name": "Fire Warden Jacket", "quantity": "20"}],
+            "warnings": [],
+            "meta": {},
+        }
+
+        selected, suggestions, unmatched, missing = build_guarded_po_outcome_suggestions(
+            self.quotation,
+            deterministic,
+            ai_preview,
+        )
+
+        self.assertEqual({row["quotation_line_id"] for row in suggestions}, {jacket_line.id, water_line.id})
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+        self.assertEqual(selected["lines"], deterministic["lines"])
+        self.assertIn(AI_QUOTE_COVERAGE_GUARD_WARNING, selected["warnings"])
+        self.assertEqual(
+            selected["meta"]["ai_cleanup_rejection_reason"],
+            "strong_quote_matches_removed_or_changed",
+        )
+
+    def test_ai_cannot_change_quantity_for_the_same_strong_quotation_match(self):
+        jacket_line = self.add_line("Fire Warden Jacket")
+        deterministic = {
+            "lines": [
+                {
+                    "raw_name": "Fire Warden Jacket",
+                    "quantity": "20",
+                    "unit_price": "15",
+                    "line_total": "300",
+                }
+            ],
+            "warnings": [],
+            "meta": {},
+        }
+        ai_preview = {
+            "lines": [
+                {
+                    "raw_name": "Fire Warden Jacket",
+                    "quantity": "2",
+                    "unit_price": "15",
+                    "line_total": "30",
+                }
+            ],
+            "warnings": [],
+            "meta": {},
+        }
+
+        selected, suggestions, unmatched, missing = build_guarded_po_outcome_suggestions(
+            self.quotation,
+            deterministic,
+            ai_preview,
+        )
+
+        self.assertEqual(suggestions[0]["quotation_line_id"], jacket_line.id)
+        self.assertEqual(suggestions[0]["po_quantity"], "20")
+        self.assertEqual(suggestions[0]["po_unit_price"], "15.00")
+        self.assertEqual(selected["lines"], deterministic["lines"])
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_aggregate_summary_guard_wins_over_deterministic_suggestions(self):
+        quote_line = self.add_line("Clinic Supplies")
+        deterministic = {
+            "lines": [{"raw_name": "Clinic Supplies", "quantity": "38"}],
+            "warnings": [],
+            "meta": {},
+        }
+        ai_preview = {
+            "lines": [{"raw_name": "Clinic Supplies", "quantity": "38"}],
+            "warnings": [
+                "Aggregate PO item summary detected. Staff must review the source document manually."
+            ],
+            "meta": {},
+        }
+
+        selected, suggestions, unmatched, missing = build_guarded_po_outcome_suggestions(
+            self.quotation,
+            deterministic,
+            ai_preview,
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual(unmatched[0]["reason_code"], "aggregate_summary")
+        self.assertEqual(missing, [quote_line.id])
+        self.assertTrue(selected["meta"]["aggregate_po_summary_detected"])

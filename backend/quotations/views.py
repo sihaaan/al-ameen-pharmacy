@@ -124,7 +124,7 @@ from .services import (
     audit_log,
     apply_product_matches_to_historical_import,
     build_quotation_delete_snapshot,
-    build_po_outcome_suggestions,
+    build_guarded_po_outcome_suggestions,
     bulk_create_quote_items_for_historical_import,
     bulk_create_products_from_quotation_lines,
     bulk_update_quotation_lines,
@@ -258,6 +258,7 @@ def _extract_lpo_details(preview):
             r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\b(LPO[-\/.]?[A-Z0-9][A-Z0-9\/\-.]{2,})\b",
+            r"\b(?:PO[_-])?PO(\d{3}_\d{5,})(?!\d)",
             r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9\/_.-]{2,})",
         ]
         for pattern in number_patterns:
@@ -2032,11 +2033,11 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             else:
                 return Response({"detail": "Upload a PO file or paste PO text."}, status=status.HTTP_400_BAD_REQUEST)
 
+            deterministic_preview = preview
             warnings = list(preview.get("warnings") or [])
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
             if use_ai:
                 try:
-                    deterministic_preview = preview
                     ai_preview = clean_preview_with_ai(
                         deterministic_preview,
                         actor=request.user,
@@ -2049,7 +2050,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
             preview["warnings"] = warnings
 
-            suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(quotation, preview)
+            preview, suggestions, unmatched, missing_line_ids = build_guarded_po_outcome_suggestions(
+                quotation,
+                deterministic_preview,
+                preview,
+            )
+            warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+            preview["warnings"] = warnings
             po_import = QuotationOutcomePOImport.objects.create(
                 quotation=quotation,
                 source_type=source_type,
@@ -2229,11 +2236,11 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 "source_sha256": preview.get("source_sha256") or "",
                 "source_file_ref": preview.get("source_file_ref") or "",
             }
+            deterministic_preview = preview
             warnings = list(preview.get("warnings") or [])
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
             if use_ai:
                 try:
-                    deterministic_preview = preview
                     ai_preview = clean_preview_with_ai(
                         deterministic_preview,
                         actor=request.user,
@@ -2248,6 +2255,14 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             for key, value in source_context.items():
                 if value and not preview.get(key):
                     preview[key] = value
+
+            preview, suggestions, unmatched, missing_line_ids = build_guarded_po_outcome_suggestions(
+                quotation,
+                deterministic_preview,
+                preview,
+            )
+            warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+            preview["warnings"] = warnings
 
             details = _extract_lpo_details(preview)
             if not details["lpo_number"]:
@@ -2273,7 +2288,6 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 warnings=warnings,
                 received_by=request.user if request.user.is_authenticated else None,
             )
-            suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(quotation, preview)
             audit_log(
                 request.user,
                 QuotationAuditLog.ACTION_LPO_UPLOADED,
