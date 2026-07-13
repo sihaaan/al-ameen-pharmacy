@@ -37,6 +37,7 @@ from .models import (
 )
 from .quote_po_intelligence import (
     _candidate_score,
+    _locked_message_evidence_queryset,
     _lock_and_resolve_evidence_approval,
     _search_query_with_complete_flag,
     build_quote_gmail_queries,
@@ -433,6 +434,16 @@ class SharedMailboxEvidenceTests(TestCase):
         peer.refresh_from_db()
         self.assertEqual(peer.status, QuotationPOEvidence.STATUS_SUPERSEDED)
         self.assertIn(self.quotation.quotation_number, peer.error)
+
+    def test_message_arbitration_locks_only_evidence_rows(self):
+        queryset = _locked_message_evidence_queryset(
+            self.connection,
+            self.connection.email,
+            "gmail-postgres-lock-scope",
+        )
+
+        self.assertTrue(queryset.query.select_for_update)
+        self.assertEqual(queryset.query.select_for_update_of, ("self",))
 
     @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
     @patch("quotations.quote_po_intelligence.gmail_search_messages")

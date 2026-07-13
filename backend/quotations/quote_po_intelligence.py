@@ -489,6 +489,18 @@ def _message_evidence_queryset(connection, mailbox_email, message_id):
     )
 
 
+def _locked_message_evidence_queryset(connection, mailbox_email, message_id):
+    # The mailbox scope joins the nullable Gmail connection so legacy rows can
+    # still participate in arbitration. PostgreSQL rejects FOR UPDATE when it
+    # also targets that nullable outer join; only evidence rows need locking.
+    return (
+        _message_evidence_queryset(connection, mailbox_email, message_id)
+        .select_for_update(of=("self",))
+        .select_related("quotation")
+        .order_by("id")
+    )
+
+
 def _eligible_same_customer_quote_ids(quotation, payload):
     if not quotation.company_id:
         return {quotation.id}
@@ -547,10 +559,11 @@ def _store_arbitrated_evidence(quotation, connection, payload, actor, confidence
         # Use the same deterministic mailbox/message lock order as staff
         # approval so a background rescan cannot deadlock with an approval.
         locked_rows = list(
-            _message_evidence_queryset(connection, connection.email or "", message_id)
-            .select_for_update()
-            .select_related("quotation")
-            .order_by("id")
+            _locked_message_evidence_queryset(
+                connection,
+                connection.email or "",
+                message_id,
+            )
         )
         existing = next((row for row in locked_rows if row.quotation_id == quotation.id), None)
         peers = [row for row in locked_rows if row.quotation_id != quotation.id]
@@ -1133,14 +1146,11 @@ def _lock_and_resolve_evidence_approval(evidence, connection, payload):
     # chosen row first lets simultaneous A->B and B->A approvals deadlock when
     # each request later tries to update the other's peer row.
     locked_rows = list(
-        _message_evidence_queryset(
+        _locked_message_evidence_queryset(
             connection,
             mailbox_email,
             evidence.gmail_message_id,
         )
-        .select_for_update()
-        .select_related("quotation")
-        .order_by("id")
     )
     locked_by_id = {row.id: row for row in locked_rows}
     try:
