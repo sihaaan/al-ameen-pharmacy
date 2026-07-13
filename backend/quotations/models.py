@@ -1432,11 +1432,15 @@ class QuotationLine(models.Model):
 
 class QuotationPOEvidence(models.Model):
     STATUS_CANDIDATE = "candidate"
+    STATUS_AMBIGUOUS = "ambiguous"
+    STATUS_SUPERSEDED = "superseded"
     STATUS_PARSED = "parsed"
     STATUS_NOT_RELEVANT = "not_relevant"
     STATUS_FAILED = "failed"
     STATUS_CHOICES = [
         (STATUS_CANDIDATE, "Candidate"),
+        (STATUS_AMBIGUOUS, "Ambiguous"),
+        (STATUS_SUPERSEDED, "Superseded"),
         (STATUS_PARSED, "Parsed"),
         (STATUS_NOT_RELEVANT, "Not relevant"),
         (STATUS_FAILED, "Failed"),

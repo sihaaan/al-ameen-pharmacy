@@ -1,11 +1,14 @@
 import base64
+import importlib
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
 
+from django.apps import apps as django_apps
 from django.contrib.auth.models import User
 from django.core.management import call_command
+from django.db import transaction
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -34,6 +37,8 @@ from .models import (
 )
 from .quote_po_intelligence import (
     _candidate_score,
+    _lock_and_resolve_evidence_approval,
+    _search_query_with_complete_flag,
     build_quote_gmail_queries,
     find_quote_po_evidence,
     parse_quote_po_evidence,
@@ -128,6 +133,306 @@ class SharedMailboxEvidenceTests(TestCase):
         )
         self.assertEqual(confidence, 0)
         self.assertIn("no quotation or customer identity", reason)
+
+    def test_inline_signature_image_does_not_strengthen_lpo_candidate(self):
+        payload = {
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "subject": "Purchase order attached",
+            "snippet": "Please proceed with the order",
+            "attachments": [
+                {"filename": "image001.png", "mime_type": "image/png", "size": 912},
+            ],
+        }
+
+        with_image = _candidate_score(
+            self.quotation,
+            payload,
+            "test",
+            mailbox_email=self.connection.email,
+        )
+        without_image = _candidate_score(
+            self.quotation,
+            {**payload, "attachments": []},
+            "test",
+            mailbox_email=self.connection.email,
+        )
+
+        self.assertEqual(with_image, without_image)
+        self.assertNotIn("attachment", with_image[1].lower())
+
+    def test_quote_reference_in_document_filename_strips_only_known_extension(self):
+        base = {
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "subject": "LPO attached",
+            "snippet": "Purchase order attached",
+        }
+
+        for extension in ("pdf", "xlsx"):
+            with self.subTest(extension=extension):
+                confidence, reason = _candidate_score(
+                    self.quotation,
+                    {
+                        **base,
+                        "attachments": [
+                            {"filename": f"{self.quotation.quotation_number}.{extension}", "size": 100}
+                        ],
+                    },
+                    "test",
+                    mailbox_email=self.connection.email,
+                )
+                self.assertGreaterEqual(confidence, 45)
+                self.assertIn("strong match: quote number appears", reason)
+
+        confidence, reason = _candidate_score(
+            self.quotation,
+            {
+                **base,
+                "attachments": [
+                    {"filename": f"{self.quotation.quotation_number}.backup.pdf", "size": 100}
+                ],
+            },
+            "test",
+            mailbox_email=self.connection.email,
+        )
+        self.assertEqual(confidence, 0)
+        self.assertIn("another quotation", reason)
+
+    def test_legacy_candidate_retirement_migration_is_idempotent_and_preserves_reviewed_rows(self):
+        stale = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_message_id="gmail-pre-hotfix-stale",
+            status=QuotationPOEvidence.STATUS_CANDIDATE,
+        )
+        reviewed = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_message_id="gmail-pre-hotfix-reviewed",
+            status=QuotationPOEvidence.STATUS_CANDIDATE,
+            link_approved_by=self.reviewer,
+            link_approved_at=timezone.now(),
+        )
+        migration = importlib.import_module(
+            "quotations.migrations.0027_alter_quotationpoevidence_status"
+        )
+
+        migration.retire_legacy_unapproved_candidates(django_apps, None)
+        migration.retire_legacy_unapproved_candidates(django_apps, None)
+
+        stale.refresh_from_db()
+        reviewed.refresh_from_db()
+        self.assertEqual(stale.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertIn("safe Gmail matching upgrade", stale.error)
+        self.assertEqual(reviewed.status, QuotationPOEvidence.STATUS_CANDIDATE)
+
+        runtime_superseded = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_message_id="gmail-runtime-superseded",
+            status=QuotationPOEvidence.STATUS_SUPERSEDED,
+            error="Superseded by explicit staff approval.",
+        )
+        runtime_ambiguous = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_message_id="gmail-runtime-ambiguous",
+            status=QuotationPOEvidence.STATUS_AMBIGUOUS,
+            error="Ambiguous across quotations.",
+        )
+
+        migration.restore_legacy_candidate_status(django_apps, None)
+
+        stale.refresh_from_db()
+        runtime_superseded.refresh_from_db()
+        runtime_ambiguous.refresh_from_db()
+        self.assertEqual(stale.status, QuotationPOEvidence.STATUS_CANDIDATE)
+        self.assertEqual(runtime_superseded.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertEqual(runtime_ambiguous.status, QuotationPOEvidence.STATUS_AMBIGUOUS)
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_generic_same_customer_message_is_ambiguous_across_quotes(self, search, fetch):
+        other_quote = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260713-0043",
+            status=Quotation.STATUS_SENT,
+            sent_at=self.sent_at - timedelta(minutes=10),
+            created_by=self.reviewer,
+        )
+        search.return_value = {"messages": [{"id": "gmail-shared-generic"}]}
+        fetch.return_value = {
+            "gmail_message_id": "gmail-shared-generic",
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": "LPO attached",
+            "sent_at": self.sent_at + timedelta(minutes=20),
+            "snippet": "Please find the purchase order attached",
+            "attachments": [{"filename": "LPO-88.pdf", "size": 100}],
+        }
+
+        find_quote_po_evidence(self.quotation, self.reviewer, limit=5)
+        find_quote_po_evidence(other_quote, self.reviewer, limit=5)
+
+        evidence = QuotationPOEvidence.objects.filter(
+            gmail_message_id="gmail-shared-generic"
+        ).order_by("quotation_id")
+        self.assertEqual(evidence.count(), 2)
+        self.assertEqual(
+            set(evidence.values_list("status", flat=True)),
+            {QuotationPOEvidence.STATUS_AMBIGUOUS},
+        )
+        self.assertTrue(all("multiple quotations" in item.error for item in evidence))
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_exact_quote_reference_wins_and_supersedes_unreviewed_peer(self, search, fetch):
+        other_quote = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260713-0043",
+            status=Quotation.STATUS_SENT,
+            sent_at=self.sent_at - timedelta(minutes=10),
+            created_by=self.reviewer,
+        )
+        peer = QuotationPOEvidence.objects.create(
+            quotation=other_quote,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id="gmail-exact-winner",
+            status=QuotationPOEvidence.STATUS_AMBIGUOUS,
+        )
+        search.return_value = {"messages": [{"id": "gmail-exact-winner"}]}
+        fetch.return_value = {
+            "gmail_message_id": "gmail-exact-winner",
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": f"LPO for quotation {self.quotation.quotation_number}",
+            "sent_at": self.sent_at + timedelta(minutes=20),
+            "snippet": "Purchase order attached",
+            "attachments": [{"filename": "LPO-89.pdf", "size": 100}],
+        }
+
+        result = find_quote_po_evidence(self.quotation, self.reviewer, limit=5)
+
+        winner = QuotationPOEvidence.objects.get(
+            quotation=self.quotation,
+            gmail_message_id="gmail-exact-winner",
+        )
+        peer.refresh_from_db()
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(winner.status, QuotationPOEvidence.STATUS_CANDIDATE)
+        self.assertEqual(peer.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertIn(self.quotation.quotation_number, peer.error)
+
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_complete_rescan_supersedes_stale_unreviewed_candidate(self, search):
+        search.return_value = {"messages": []}
+        stale = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id="gmail-stale",
+            status=QuotationPOEvidence.STATUS_CANDIDATE,
+        )
+
+        result = find_quote_po_evidence(self.quotation, self.reviewer, limit=5)
+
+        stale.refresh_from_db()
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(stale.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertIn("latest complete Gmail scan", stale.error)
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_capped_next_page_token_skips_stale_reconciliation(self, search, fetch):
+        search.return_value = {
+            "messages": [{"id": f"gmail-capped-{index}"} for index in range(5)],
+            "next_page_token": "more-results-remain",
+        }
+        fetch.return_value = {
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": "General account update",
+            "sent_at": self.sent_at + timedelta(minutes=20),
+            "snippet": "No purchase order in this message",
+            "attachments": [],
+        }
+        stale = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id="gmail-missed-beyond-cap",
+            status=QuotationPOEvidence.STATUS_CANDIDATE,
+        )
+
+        result = find_quote_po_evidence(self.quotation, self.reviewer, limit=5)
+
+        stale.refresh_from_db()
+        self.quotation.refresh_from_db()
+        self.assertFalse(result["scan_complete"])
+        self.assertEqual(result["incomplete_queries"], result["queries"])
+        self.assertEqual(stale.status, QuotationPOEvidence.STATUS_CANDIDATE)
+        self.assertIn("Partial Gmail scan", self.quotation.po_evidence_last_scan_error)
+        self.assertTrue(all(call.kwargs.get("page_token") == "" for call in search.call_args_list))
+
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_search_paginates_within_bound_until_query_is_exhausted(self, search):
+        search.side_effect = [
+            {"messages": [{"id": "gmail-page-1"}], "next_page_token": "page-2"},
+            {"messages": [{"id": "gmail-page-2"}], "next_page_token": ""},
+        ]
+
+        messages, complete = _search_query_with_complete_flag(
+            self.connection,
+            "test query",
+            max_messages=5,
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual([message["id"] for message in messages], ["gmail-page-1", "gmail-page-2"])
+        self.assertEqual(search.call_args_list[0].kwargs["max_messages"], 5)
+        self.assertEqual(search.call_args_list[0].kwargs["page_token"], "")
+        self.assertEqual(search.call_args_list[1].kwargs["max_messages"], 4)
+        self.assertEqual(search.call_args_list[1].kwargs["page_token"], "page-2")
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
+    @patch("quotations.quote_po_intelligence.gmail_search_messages")
+    def test_arbitration_spans_replacement_connection_for_same_mailbox(self, search, fetch):
+        old_owner = User.objects.create_user("former-mailbox-owner", is_staff=True)
+        old_connection = GmailOAuthConnection.objects.create(
+            user=old_owner,
+            email=self.connection.email.upper(),
+            status=GmailOAuthConnection.STATUS_DISCONNECTED,
+        )
+        other_quote = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260713-0043",
+            status=Quotation.STATUS_SENT,
+            sent_at=self.sent_at - timedelta(minutes=10),
+            created_by=self.reviewer,
+        )
+        peer = QuotationPOEvidence.objects.create(
+            quotation=other_quote,
+            gmail_connection=old_connection,
+            mailbox_email=old_connection.email,
+            gmail_message_id="gmail-replacement-connection",
+            status=QuotationPOEvidence.STATUS_AMBIGUOUS,
+        )
+        search.return_value = {"messages": [{"id": peer.gmail_message_id}]}
+        fetch.return_value = {
+            "gmail_message_id": peer.gmail_message_id,
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": f"LPO for quotation {self.quotation.quotation_number}",
+            "sent_at": self.sent_at + timedelta(minutes=20),
+            "snippet": "Purchase order attached",
+            "attachments": [{"filename": "LPO-90.pdf", "size": 100}],
+        }
+
+        find_quote_po_evidence(self.quotation, self.reviewer, limit=5)
+
+        peer.refresh_from_db()
+        self.assertEqual(peer.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertIn(self.quotation.quotation_number, peer.error)
 
     @patch("quotations.quote_po_intelligence.gmail_fetch_message_metadata")
     @patch("quotations.quote_po_intelligence.gmail_search_messages")
@@ -404,6 +709,189 @@ class GmailEvidenceReviewTests(TestCase):
         self.assertEqual(self.evidence.status, QuotationPOEvidence.STATUS_CANDIDATE)
         self.assertIsNone(self.evidence.link_approved_at)
         fetch.assert_not_called()
+
+    def test_approved_evidence_cannot_be_overwritten_as_not_relevant(self):
+        self.evidence.status = QuotationPOEvidence.STATUS_PARSED
+        self.evidence.link_approved_by = self.reviewer
+        self.evidence.link_approved_at = timezone.now()
+        self.evidence.save(
+            update_fields=["status", "link_approved_by", "link_approved_at", "updated_at"]
+        )
+        client = APIClient()
+        client.force_authenticate(self.reviewer)
+
+        response = client.post(
+            reverse("quotation-mark-po-evidence-not-relevant", args=[self.quotation.id]),
+            {"evidence_id": self.evidence.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cannot be marked not relevant", str(response.json()["detail"]))
+        self.evidence.refresh_from_db()
+        self.assertEqual(self.evidence.status, QuotationPOEvidence.STATUS_PARSED)
+
+    def test_reviewed_evidence_cannot_be_overwritten_as_not_relevant(self):
+        self.evidence.status = QuotationPOEvidence.STATUS_PARSED
+        self.evidence.link_approved_by = self.reviewer
+        self.evidence.link_approved_at = timezone.now()
+        self.evidence.save(
+            update_fields=["status", "link_approved_by", "link_approved_at", "updated_at"]
+        )
+        client = APIClient()
+        client.force_authenticate(self.reviewer)
+
+        response = client.post(
+            reverse("quotation-mark-po-evidence-not-relevant", args=[self.quotation.id]),
+            {"evidence_id": self.evidence.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.evidence.refresh_from_db()
+        self.assertEqual(self.evidence.status, QuotationPOEvidence.STATUS_PARSED)
+
+    def test_outcome_api_returns_every_active_evidence_link_beyond_twelve(self):
+        active_ids = {self.evidence.id}
+        statuses = [
+            QuotationPOEvidence.STATUS_CANDIDATE,
+            QuotationPOEvidence.STATUS_AMBIGUOUS,
+            QuotationPOEvidence.STATUS_PARSED,
+            QuotationPOEvidence.STATUS_FAILED,
+        ]
+        for index in range(15):
+            row = QuotationPOEvidence.objects.create(
+                quotation=self.quotation,
+                gmail_connection=self.connection,
+                mailbox_email=self.connection.email,
+                gmail_message_id=f"gmail-active-{index}",
+                status=statuses[index % len(statuses)],
+                confidence=index,
+            )
+            active_ids.add(row.id)
+        client = APIClient()
+        client.force_authenticate(self.reviewer)
+
+        response = client.get(reverse("quotation-outcome", args=[self.quotation.id]))
+
+        self.assertEqual(response.status_code, 200)
+        returned_ids = {row["id"] for row in response.data["po_evidence"]}
+        self.assertTrue(active_ids.issubset(returned_ids))
+        self.assertGreater(len(returned_ids), 12)
+
+    def test_approval_locks_competing_evidence_in_primary_key_order(self):
+        peer_ids = []
+        for index, confidence in enumerate((10, 99), start=1):
+            other_quote = Quotation.objects.create(
+                company=self.company,
+                quotation_number=f"QT-20260713-007{index}",
+                status=Quotation.STATUS_SENT,
+                sent_at=self.sent_at - timedelta(minutes=index),
+                created_by=self.reviewer,
+            )
+            peer = QuotationPOEvidence.objects.create(
+                quotation=other_quote,
+                gmail_connection=self.connection,
+                mailbox_email=self.connection.email,
+                gmail_message_id=self.evidence.gmail_message_id,
+                status=QuotationPOEvidence.STATUS_AMBIGUOUS,
+                confidence=confidence,
+            )
+            peer_ids.append(peer.id)
+
+        with transaction.atomic():
+            locked_evidence, locked_peer_ids = _lock_and_resolve_evidence_approval(
+                self.evidence,
+                self.connection,
+                {"subject": self.evidence.subject},
+            )
+
+        self.assertEqual(locked_evidence.id, self.evidence.id)
+        self.assertEqual(locked_peer_ids, sorted(peer_ids))
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message")
+    def test_approval_fails_closed_when_same_message_is_already_reviewed_for_another_quote(self, fetch):
+        other_quote = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260713-0067",
+            status=Quotation.STATUS_SENT,
+            sent_at=self.sent_at - timedelta(minutes=5),
+            created_by=self.reviewer,
+        )
+        QuotationPOEvidence.objects.create(
+            quotation=other_quote,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id=self.evidence.gmail_message_id,
+            status=QuotationPOEvidence.STATUS_PARSED,
+            link_approved_by=self.reviewer,
+            link_approved_at=timezone.now(),
+        )
+        fetch.return_value = {
+            "gmail_message_id": self.evidence.gmail_message_id,
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": f"LPO for {self.quotation.quotation_number}",
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "snippet": "Purchase order attached",
+            "body_text": "Purchase Order No: LPO-77",
+            "attachments": [],
+        }
+
+        with self.assertRaisesMessage(Exception, "already approved or parsed"):
+            parse_quote_po_evidence(
+                self.evidence,
+                self.reviewer,
+                use_ai=False,
+                link_approved=True,
+            )
+
+        self.evidence.refresh_from_db()
+        self.assertEqual(self.evidence.status, QuotationPOEvidence.STATUS_AMBIGUOUS)
+        self.assertFalse(QuotationOutcomePOImport.objects.filter(gmail_evidence=self.evidence).exists())
+        self.assertFalse(QuotationLPO.objects.filter(gmail_evidence=self.evidence).exists())
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message")
+    def test_explicit_approval_resolves_unreviewed_ambiguous_peer(self, fetch):
+        other_quote = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260713-0067",
+            status=Quotation.STATUS_SENT,
+            sent_at=self.sent_at - timedelta(minutes=5),
+            created_by=self.reviewer,
+        )
+        self.evidence.status = QuotationPOEvidence.STATUS_AMBIGUOUS
+        self.evidence.save(update_fields=["status", "updated_at"])
+        peer = QuotationPOEvidence.objects.create(
+            quotation=other_quote,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id=self.evidence.gmail_message_id,
+            status=QuotationPOEvidence.STATUS_AMBIGUOUS,
+        )
+        fetch.return_value = {
+            "gmail_message_id": self.evidence.gmail_message_id,
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": f"LPO for {self.quotation.quotation_number}",
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "snippet": "Purchase order attached",
+            "body_text": "Purchase Order No: LPO-77\nBandage Pack 2 box 10",
+            "attachments": [],
+        }
+
+        parse_quote_po_evidence(
+            self.evidence,
+            self.reviewer,
+            use_ai=False,
+            link_approved=True,
+        )
+
+        self.evidence.refresh_from_db()
+        peer.refresh_from_db()
+        self.assertEqual(self.evidence.status, QuotationPOEvidence.STATUS_PARSED)
+        self.assertEqual(peer.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertIn(self.quotation.quotation_number, peer.error)
 
 
 class POAssignmentTests(TestCase):

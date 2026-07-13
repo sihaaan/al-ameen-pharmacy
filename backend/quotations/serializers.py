@@ -1759,6 +1759,7 @@ class QuotationListSerializer(serializers.ModelSerializer):
     follow_up_status_display = serializers.CharField(source="get_follow_up_status_display", read_only=True)
     po_evidence_count = serializers.SerializerMethodField()
     po_evidence_candidate_count = serializers.SerializerMethodField()
+    po_evidence_ambiguous_count = serializers.SerializerMethodField()
     po_evidence_parsed_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -1787,6 +1788,7 @@ class QuotationListSerializer(serializers.ModelSerializer):
             "follow_up_status_display",
             "po_evidence_count",
             "po_evidence_candidate_count",
+            "po_evidence_ambiguous_count",
             "po_evidence_parsed_count",
             "po_evidence_last_scanned_at",
             "po_evidence_last_scan_count",
@@ -1808,7 +1810,15 @@ class QuotationListSerializer(serializers.ModelSerializer):
         annotated = getattr(obj, "po_evidence_candidate_count", None)
         if annotated is not None:
             return annotated
-        return obj.po_evidence.filter(status__in=[QuotationPOEvidence.STATUS_CANDIDATE, QuotationPOEvidence.STATUS_PARSED]).count()
+        return obj.po_evidence.filter(
+            status__in=[QuotationPOEvidence.STATUS_CANDIDATE, QuotationPOEvidence.STATUS_PARSED]
+        ).count()
+
+    def get_po_evidence_ambiguous_count(self, obj):
+        annotated = getattr(obj, "po_evidence_ambiguous_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.po_evidence.filter(status=QuotationPOEvidence.STATUS_AMBIGUOUS).count()
 
     def get_po_evidence_parsed_count(self, obj):
         annotated = getattr(obj, "po_evidence_parsed_count", None)

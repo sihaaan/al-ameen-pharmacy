@@ -506,8 +506,59 @@ def _has_item_spec_conflict(po_name, quotation_name):
     return not (po_specs <= quotation_specs or quotation_specs <= po_specs)
 
 
+AGGREGATE_PO_ROW_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s+(?:individual\s+)?(?:line\s+)?items?\b",
+    re.IGNORECASE,
+)
+PO_METADATA_ITEM_RE = re.compile(
+    r"^\s*(?:description|item description|quantity|qty|unit|unit price|price|amount|subtotal|"
+    r"grand total|total|vat|date|lpo|local purchase order|purchase order|po number|from|to|buyer|seller)"
+    r"\s*(?::|#|-|$)",
+    re.IGNORECASE,
+)
+
+
+def _po_row_item_name(row):
+    return str(
+        (row or {}).get("requested_item_name")
+        or (row or {}).get("raw_name")
+        or (row or {}).get("item_name")
+        or ""
+    ).strip()
+
+
+def _po_row_review_rejection(row):
+    item_name = _po_row_item_name(row)
+    raw_text = " ".join(
+        str((row or {}).get(key) or "")
+        for key in ("raw_line", "raw_source_line", "requested_item_name", "raw_name", "item_name")
+    ).strip()
+    if AGGREGATE_PO_ROW_RE.search(raw_text):
+        return {
+            "reason_code": "aggregate_summary",
+            "reason": (
+                "Aggregate PO summary is not an individual item line. Staff must review the selected "
+                "PO document manually; no automatic line outcome was created."
+            ),
+        }
+    # Prices, totals, serials, and other numeric fragments are document
+    # metadata, even when fuzzy matching could find a shared number in an item
+    # description (for example, ``20.00`` versus a pack/size number).
+    if not item_name or not re.search(r"[A-Za-z]", item_name):
+        return {
+            "reason_code": "non_item_metadata",
+            "reason": "Numeric-only or empty PO metadata was ignored before item matching.",
+        }
+    if PO_METADATA_ITEM_RE.search(item_name):
+        return {
+            "reason_code": "non_item_metadata",
+            "reason": "PO header or document metadata was ignored before item matching.",
+        }
+    return None
+
+
 def _po_row_match_candidates(row, quote_lines):
-    item_name = row.get("requested_item_name") or row.get("raw_name") or row.get("item_name") or ""
+    item_name = _po_row_item_name(row)
     candidates = []
     conflicts = []
     for line in quote_lines:
@@ -548,9 +599,32 @@ def build_po_outcome_suggestions(quotation, preview):
         if line.match_status != QuotationLine.MATCH_IGNORED
     ]
     rows = preview.get("lines") or []
+    aggregate_po_summary_detected = bool(
+        (preview.get("meta") or {}).get("aggregate_po_summary_detected")
+    ) or any(
+        "aggregate po item summary detected" in str(warning).lower()
+        for warning in preview.get("warnings") or []
+    )
+    if aggregate_po_summary_detected:
+        unmatched = [
+            {
+                "po_row_number": index,
+                "po_item_name": _po_row_item_name(row),
+                "reason": "This is an aggregate PO item summary; staff must review the source document manually.",
+                "reason_code": "aggregate_summary",
+            }
+            for index, row in enumerate(rows, start=1)
+        ]
+        return [], unmatched, [line.id for line in quote_lines]
+
     row_records = []
     for index, row in enumerate(rows, start=1):
-        item_name, candidates, conflicts = _po_row_match_candidates(row, quote_lines)
+        item_name = _po_row_item_name(row)
+        review_rejection = _po_row_review_rejection(row)
+        if review_rejection:
+            candidates, conflicts = [], []
+        else:
+            item_name, candidates, conflicts = _po_row_match_candidates(row, quote_lines)
         row_records.append(
             {
                 "index": index,
@@ -558,12 +632,22 @@ def build_po_outcome_suggestions(quotation, preview):
                 "item_name": item_name,
                 "candidates": candidates,
                 "conflicts": conflicts,
+                "review_rejection": review_rejection,
             }
         )
 
     unmatched = []
     assignable = []
     for record in row_records:
+        if record["review_rejection"]:
+            unmatched.append(
+                {
+                    "po_row_number": record["index"],
+                    "po_item_name": record["item_name"],
+                    **record["review_rejection"],
+                }
+            )
+            continue
         candidates = record["candidates"]
         if not candidates:
             conflict = record["conflicts"][0] if record["conflicts"] else None

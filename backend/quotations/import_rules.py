@@ -1014,20 +1014,31 @@ def _reconstruct_cell_per_line_table(raw_text):
     if len(cells) < 8:
         return []
 
+    # Selectable PDF text often starts with document metadata before emitting a
+    # table one cell per line. Scan for the first complete header sequence
+    # instead of requiring that sequence to start at the first text line.
     roles = []
     header_cells = []
     index = 0
-    while index < len(cells):
-        role = classify_header_cell(cells[index])
-        if not role:
-            break
-        roles.append(role)
-        header_cells.append(cells[index])
-        index += 1
-        if "requested_item_name" in roles and "quantity" in roles and "unit" in roles:
-            next_role = classify_header_cell(cells[index]) if index < len(cells) else None
-            if next_role:
-                continue
+    for header_start in range(len(cells)):
+        candidate_roles = []
+        candidate_headers = []
+        candidate_index = header_start
+        while candidate_index < len(cells):
+            role = classify_header_cell(cells[candidate_index])
+            if not role or role in candidate_roles:
+                break
+            candidate_roles.append(role)
+            candidate_headers.append(cells[candidate_index])
+            candidate_index += 1
+        if {
+            "requested_item_name",
+            "quantity",
+            "unit",
+        }.issubset(candidate_roles):
+            roles = candidate_roles
+            header_cells = candidate_headers
+            index = candidate_index
             break
 
     if "requested_item_name" not in roles or "quantity" not in roles or "unit" not in roles:
@@ -1076,7 +1087,133 @@ def parse_text_table_lines(raw_text, **source_meta):
     return _parse_structured_rows(reconstructed_rows, **source_meta)
 
 
+DESCRIPTION_BLOCK_RE = re.compile(r"^\s*description\s*:\s*(?P<name>.+?)\s*$", re.IGNORECASE)
+QUANTITY_BLOCK_RE = re.compile(
+    rf"^\s*(?:[\-*\u2022]\s*)?quantity\s*:\s*(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})?"
+    r"\s*[.;,\-*\u2022]*\s*$",
+    re.IGNORECASE,
+)
+DESCRIPTION_QUANTITY_INLINE_RE = re.compile(
+    rf"^\s*(?:[\-*\u2022]\s*)?description\s*:\s*(?P<name>.+?)\s+quantity\s*:\s*"
+    rf"(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})?\s*[.;,\-*\u2022]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_description_quantity_blocks(raw_text, **source_meta):
+    """Parse customer portal ``Description`` / ``Quantity`` item blocks.
+
+    These blocks are common in PO notification emails. Treating each label as
+    an independent line creates fake items named ``Description`` and
+    ``Quantity``; keeping the pair atomic also prevents nearby prices and email
+    metadata from being offered as products.
+    """
+
+    raw_lines = str(raw_text or "").splitlines()
+    lines = []
+    consumed = set()
+    index = 0
+    while index < len(raw_lines):
+        normalized = normalize_import_line(raw_lines[index])
+        inline_match = DESCRIPTION_QUANTITY_INLINE_RE.match(normalized)
+        if inline_match:
+            quantity, unit = split_quantity_unit(inline_match.group("qty"), inline_match.group("unit") or "")
+            lines.append(
+                make_preview_line(
+                    raw_line=normalized,
+                    raw_source_line=normalized,
+                    raw_name=inline_match.group("name"),
+                    quantity=quantity,
+                    unit=unit,
+                    parse_status=InquiryLine.PARSE_PARSED,
+                    parse_confidence=0.95,
+                    source_line=index + 1,
+                    row_number=index + 1,
+                    **source_meta,
+                )
+            )
+            consumed.add(index)
+            index += 1
+            continue
+
+        description_match = DESCRIPTION_BLOCK_RE.match(normalized)
+        if not description_match:
+            index += 1
+            continue
+
+        quantity_index = index + 1
+        while quantity_index < len(raw_lines) and not normalize_import_line(raw_lines[quantity_index]):
+            quantity_index += 1
+        if quantity_index >= len(raw_lines):
+            index += 1
+            continue
+        quantity_text = normalize_import_line(raw_lines[quantity_index])
+        quantity_match = QUANTITY_BLOCK_RE.match(quantity_text)
+        if not quantity_match:
+            index += 1
+            continue
+
+        quantity, unit = split_quantity_unit(quantity_match.group("qty"), quantity_match.group("unit") or "")
+        raw_source_line = f"{normalized} | {quantity_text}"
+        lines.append(
+            make_preview_line(
+                raw_line=raw_source_line,
+                raw_source_line=raw_source_line,
+                raw_name=description_match.group("name"),
+                quantity=quantity,
+                unit=unit,
+                parse_status=InquiryLine.PARSE_PARSED,
+                parse_confidence=0.95,
+                source_line=index + 1,
+                row_number=index + 1,
+                **source_meta,
+            )
+        )
+        consumed.update(range(index, quantity_index + 1))
+        index = quantity_index + 1
+    return lines, consumed
+
+
+def _is_plausible_mixed_item_line(line):
+    item_name = str(
+        (line or {}).get("requested_item_name")
+        or (line or {}).get("raw_name")
+        or (line or {}).get("item_name")
+        or ""
+    ).strip()
+    if not item_name or not re.search(r"[A-Za-z]", item_name):
+        return False
+    if re.match(
+        r"^\s*(?:description|quantity|qty|unit|price|amount|total|date|from|to|buyer|seller)\s*(?::|$)",
+        item_name,
+        re.IGNORECASE,
+    ):
+        return False
+    return any(
+        (line or {}).get(key) not in (None, "")
+        for key in ("quantity", "unit", "unit_price", "amount", "line_total")
+    )
+
+
 def parse_text_lines(raw_text, **source_meta):
+    description_lines, consumed_description_lines = _parse_description_quantity_blocks(raw_text, **source_meta)
+    if description_lines:
+        raw_lines = str(raw_text or "").splitlines()
+        remaining_text = "\n".join(
+            "" if index in consumed_description_lines else raw_line
+            for index, raw_line in enumerate(raw_lines)
+        )
+        remaining_lines, skipped = parse_text_lines(remaining_text, **source_meta)
+        remaining_lines = [line for line in remaining_lines if _is_plausible_mixed_item_line(line)]
+        combined = [*description_lines, *remaining_lines]
+        combined.sort(
+            key=lambda line: (
+                int(line.get("source_line") or line.get("row_number") or line.get("source_row") or 0),
+                str(line.get("raw_line") or ""),
+            )
+        )
+        return combined, skipped
+
     table_lines, table_skipped = parse_text_table_lines(raw_text, **source_meta)
     if table_lines:
         return table_lines, table_skipped

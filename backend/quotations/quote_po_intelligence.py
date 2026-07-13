@@ -33,6 +33,12 @@ PO_KEYWORDS = [
 ]
 
 MIN_EVIDENCE_CONFIDENCE = 45
+# ``limit`` is the total Gmail result budget for each generated query, not an
+# invitation to walk an unbounded mailbox. We may consume multiple Gmail pages
+# within this budget, but stale reconciliation is only safe when every query
+# reports that no further page exists.
+MAX_EVIDENCE_MESSAGES_PER_QUERY = 50
+MAX_EVIDENCE_PAGES_PER_QUERY = 10
 ORDER_DOCUMENT_TERMS = [
     "lpo",
     "mpo",
@@ -52,7 +58,10 @@ NEGATIVE_CONTEXT_TERMS = [
     "receipt",
     "credit note",
 ]
-PO_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
+# Only formats the Gmail ingestion path can treat as business documents count
+# as PO/LPO attachment evidence. Inline signature/logo images are common and
+# must never strengthen a match merely because the email mentions an order.
+PO_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".xlsb"}
 PO_NUMBER_RE = re.compile(
     r"\b(?:lpo|mpo|purchase\s+order|local\s+purchase\s+order)\s*(?:no\.?|number|#|:|-)?\s*[A-Z0-9][A-Z0-9/_-]{2,}"
     r"|\bpo\s*(?:no\.?|number|#|:|-)\s*[A-Z0-9][A-Z0-9/_-]{2,}"
@@ -92,6 +101,10 @@ COMPANY_TOKEN_STOPWORDS = {
     "services",
     "trading",
 }
+
+
+class EvidenceLinkConflict(ValidationError):
+    """Raised when an email cannot safely be linked to one quotation."""
 
 
 def _clean_query_text(value):
@@ -176,6 +189,15 @@ def _attachment_hint(attachments, subject, snippet):
     return candidates[:3]
 
 
+def _document_attachments(attachments):
+    return [
+        attachment
+        for attachment in attachments or []
+        if os.path.splitext(str((attachment or {}).get("filename") or ""))[1].lower()
+        in PO_ATTACHMENT_EXTENSIONS
+    ]
+
+
 def _quote_after_datetime(quotation):
     candidate = quotation.sent_at or quotation.finalized_at or quotation.created_at
     if not candidate:
@@ -225,9 +247,41 @@ def _reference_key(value):
 
 
 def _explicit_quote_references(value):
-    refs = {match.group(0).upper() for match in AUTO_QUOTE_REFERENCE_RE.finditer(value or "")}
-    refs.update(match.group(1).upper().rstrip(".,;:") for match in QUOTE_REFERENCE_RE.finditer(value or ""))
+    def clean_reference(reference):
+        reference = str(reference or "").upper().rstrip(".,;:")
+        root, extension = os.path.splitext(reference)
+        # The reference regex intentionally permits dots because some real
+        # quote numbers contain them. Strip only document extensions we know
+        # can follow a quote number in an attachment filename; arbitrary
+        # suffixes remain part of the reference and therefore cannot produce
+        # a false exact match.
+        if extension.lower() in PO_ATTACHMENT_EXTENSIONS:
+            reference = root
+        return reference
+
+    refs = {clean_reference(match.group(0)) for match in AUTO_QUOTE_REFERENCE_RE.finditer(value or "")}
+    refs.update(clean_reference(match.group(1)) for match in QUOTE_REFERENCE_RE.finditer(value or ""))
     return {ref for ref in refs if _reference_key(ref) and re.search(r"\d", ref)}
+
+
+def _payload_quote_reference_keys(payload):
+    attachments = _document_attachments(payload.get("attachments") or [])
+    attachment_names = " ".join(str((attachment or {}).get("filename") or "") for attachment in attachments)
+    value = " ".join(
+        [
+            str(payload.get("subject") or ""),
+            str(payload.get("snippet") or ""),
+            str(payload.get("body_text") or "")[:5000],
+            attachment_names,
+        ]
+    )
+    return {_reference_key(reference) for reference in _explicit_quote_references(value)}
+
+
+def _payload_exactly_references_quote(quotation, payload):
+    quote_key = _reference_key(quotation.quotation_number)
+    reference_keys = _payload_quote_reference_keys(payload)
+    return bool(quote_key and reference_keys == {quote_key})
 
 
 def _candidate_score(quotation, payload, query, *, mailbox_email=""):
@@ -236,7 +290,10 @@ def _candidate_score(quotation, payload, query, *, mailbox_email=""):
     sender = payload.get("sender", "") or ""
     recipients = payload.get("recipients", "") or ""
     attachments = payload.get("attachments") or []
-    attachment_names = " ".join(str((attachment or {}).get("filename") or "") for attachment in attachments)
+    document_attachments = _document_attachments(attachments)
+    attachment_names = " ".join(
+        str((attachment or {}).get("filename") or "") for attachment in document_attachments
+    )
     body_text = payload.get("body_text", "") or ""
     raw_haystack = f"{subject} {snippet} {body_text[:5000]} {sender} {recipients} {attachment_names}"
     haystack = raw_haystack.lower()
@@ -267,10 +324,10 @@ def _candidate_score(quotation, payload, query, *, mailbox_email=""):
         if sent_at <= cutoff:
             return 0, "rejected: message predates the quotation send/finalize timestamp"
 
-    quote_number = (quotation.quotation_number or "").lower()
-    quote_reference_match = bool(quote_number and quote_number in haystack)
     references = _explicit_quote_references(raw_haystack)
     quote_key = _reference_key(quotation.quotation_number)
+    reference_keys = {_reference_key(reference) for reference in references}
+    quote_reference_match = bool(quote_key and quote_key in reference_keys)
     wrong_refs = sorted(ref for ref in references if _reference_key(ref) != quote_key)
     if wrong_refs:
         return 0, f"rejected: explicit reference belongs to another quotation ({', '.join(wrong_refs[:2])})"
@@ -326,12 +383,12 @@ def _candidate_score(quotation, payload, query, *, mailbox_email=""):
     if attachment_matches:
         score += 22
         reasons.append(f"likely PO/LPO attachment: {', '.join(attachment_matches)}")
-    elif attachments and (PO_NUMBER_RE.search(haystack) or _contains_any(haystack, ORDER_DOCUMENT_TERMS)):
+    elif document_attachments and (PO_NUMBER_RE.search(haystack) or _contains_any(haystack, ORDER_DOCUMENT_TERMS)):
         score += 10
-        reasons.append(f"{len(attachments)} attachment(s) on a PO/LPO-like email")
+        reasons.append(f"{len(document_attachments)} document attachment(s) on a PO/LPO-like email")
 
     negative_hits = _contains_any(subject_lower, NEGATIVE_CONTEXT_TERMS)
-    if negative_hits and not (PO_NUMBER_RE.search(haystack) or quote_number and quote_number in haystack):
+    if negative_hits and not (PO_NUMBER_RE.search(haystack) or quote_reference_match):
         score -= 25
         reasons.append(f"low priority context: {', '.join(negative_hits[:2])}")
 
@@ -410,19 +467,270 @@ def _mark_quote_po_scan(quotation, *, count=0, error=""):
     )
 
 
+def _message_scope_q(connection, mailbox_email):
+    scope = Q(gmail_connection=connection)
+    normalized_mailbox = str(mailbox_email or getattr(connection, "email", "") or "").strip().lower()
+    if normalized_mailbox:
+        # OAuth credentials can be replaced while the physical shared mailbox
+        # remains the same. Arbitration is mailbox-wide, not FK-wide.
+        scope |= Q(mailbox_email__iexact=normalized_mailbox)
+        scope |= Q(mailbox_email="", gmail_connection__email__iexact=normalized_mailbox)
+    # Evidence created before mailbox provenance was introduced belongs to the
+    # one designated shared mailbox and still needs to participate in safety
+    # arbitration during the migration period.
+    scope |= Q(gmail_connection__isnull=True, mailbox_email="")
+    return scope
+
+
+def _message_evidence_queryset(connection, mailbox_email, message_id):
+    return QuotationPOEvidence.objects.filter(
+        _message_scope_q(connection, mailbox_email),
+        gmail_message_id=message_id,
+    )
+
+
+def _eligible_same_customer_quote_ids(quotation, payload):
+    if not quotation.company_id:
+        return {quotation.id}
+    message_at = payload.get("sent_at")
+    if message_at and timezone.is_naive(message_at):
+        message_at = timezone.make_aware(message_at, timezone.get_current_timezone())
+    eligible = set()
+    quotations = Quotation.objects.filter(
+        company_id=quotation.company_id,
+        status__in=[Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT],
+        is_historical_import=False,
+    ).only("id", "sent_at", "finalized_at", "created_at")
+    for candidate in quotations:
+        if not message_at or _quote_after_datetime(candidate) < message_at:
+            eligible.add(candidate.id)
+    eligible.add(quotation.id)
+    return eligible
+
+
+def _unreviewed_evidence_statuses():
+    return [
+        QuotationPOEvidence.STATUS_CANDIDATE,
+        QuotationPOEvidence.STATUS_AMBIGUOUS,
+        QuotationPOEvidence.STATUS_SUPERSEDED,
+        QuotationPOEvidence.STATUS_FAILED,
+    ]
+
+
+def _discovery_defaults(connection, payload, actor, confidence, reason):
+    return {
+        "gmail_connection": connection,
+        "mailbox_email": connection.email or "",
+        "gmail_thread_id": payload.get("gmail_thread_id", ""),
+        "sender": payload.get("sender", "")[:500],
+        "recipients": payload.get("recipients", ""),
+        "subject": payload.get("subject", "")[:500],
+        "sent_at": payload.get("sent_at"),
+        "snippet": payload.get("snippet", ""),
+        "attachments": payload.get("attachments") or [],
+        "source_sha256": _source_hash(payload),
+        "matching_reason": reason,
+        "confidence": confidence,
+        "error": "",
+        "created_by": actor if getattr(actor, "is_authenticated", False) else None,
+    }
+
+
+def _store_arbitrated_evidence(quotation, connection, payload, actor, confidence, reason):
+    message_id = payload.get("gmail_message_id")
+    exact_reference = _payload_exactly_references_quote(quotation, payload)
+    potential_quote_ids = _eligible_same_customer_quote_ids(quotation, payload)
+    defaults = _discovery_defaults(connection, payload, actor, confidence, reason)
+    arbitration = {"ambiguous_ids": [], "superseded_ids": []}
+
+    with transaction.atomic():
+        # Use the same deterministic mailbox/message lock order as staff
+        # approval so a background rescan cannot deadlock with an approval.
+        locked_rows = list(
+            _message_evidence_queryset(connection, connection.email or "", message_id)
+            .select_for_update()
+            .select_related("quotation")
+            .order_by("id")
+        )
+        existing = next((row for row in locked_rows if row.quotation_id == quotation.id), None)
+        peers = [row for row in locked_rows if row.quotation_id != quotation.id]
+        reviewed_peers = [
+            peer
+            for peer in peers
+            if peer.status == QuotationPOEvidence.STATUS_PARSED or peer.link_approved_at
+        ]
+        competing_peers = [
+            peer
+            for peer in peers
+            if peer.status != QuotationPOEvidence.STATUS_NOT_RELEVANT
+        ]
+
+        if exact_reference and not reviewed_peers:
+            desired_status = QuotationPOEvidence.STATUS_CANDIDATE
+            desired_error = ""
+            peer_ids = [
+                peer.id
+                for peer in peers
+                if peer.status in _unreviewed_evidence_statuses()
+            ]
+            if peer_ids:
+                superseded_error = (
+                    f"Superseded because this email explicitly references {quotation.quotation_number}."
+                )
+                QuotationPOEvidence.objects.filter(id__in=peer_ids).update(
+                    status=QuotationPOEvidence.STATUS_SUPERSEDED,
+                    error=superseded_error,
+                    updated_at=timezone.now(),
+                )
+                arbitration["superseded_ids"].extend(peer_ids)
+        else:
+            is_ambiguous = bool(
+                reviewed_peers
+                or competing_peers
+                or (not exact_reference and len(potential_quote_ids) > 1)
+            )
+            desired_status = (
+                QuotationPOEvidence.STATUS_AMBIGUOUS
+                if is_ambiguous
+                else QuotationPOEvidence.STATUS_CANDIDATE
+            )
+            if reviewed_peers:
+                desired_error = (
+                    "Ambiguous: this Gmail message is already approved or parsed for another quotation."
+                )
+            elif is_ambiguous:
+                desired_error = (
+                    "Ambiguous: this Gmail message can match multiple quotations. "
+                    "A staff member must choose the correct quotation explicitly."
+                )
+            else:
+                desired_error = ""
+            if is_ambiguous:
+                peer_ids = [
+                    peer.id
+                    for peer in peers
+                    if peer.status in _unreviewed_evidence_statuses()
+                ]
+                if peer_ids:
+                    QuotationPOEvidence.objects.filter(id__in=peer_ids).update(
+                        status=QuotationPOEvidence.STATUS_AMBIGUOUS,
+                        error=desired_error,
+                        updated_at=timezone.now(),
+                    )
+                    arbitration["ambiguous_ids"].extend(peer_ids)
+
+        defaults["status"] = desired_status
+        defaults["error"] = desired_error
+        if existing:
+            defaults.pop("created_by", None)
+            if existing.gmail_connection_id:
+                defaults.pop("gmail_connection", None)
+            if existing.mailbox_email:
+                defaults.pop("mailbox_email", None)
+            if existing.status == QuotationPOEvidence.STATUS_PARSED:
+                # Full parse provenance is richer than metadata discovery;
+                # a rescan must not replace it with attachment stubs or alter
+                # the completed staff review.
+                defaults.pop("attachments", None)
+                defaults.pop("source_sha256", None)
+                defaults.pop("status", None)
+                defaults.pop("error", None)
+            elif existing.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
+                # Explicit staff rejection is immutable across rescans.
+                defaults.pop("status", None)
+                defaults.pop("error", None)
+
+        evidence, _ = QuotationPOEvidence.objects.update_or_create(
+            quotation=quotation,
+            gmail_message_id=message_id,
+            defaults=defaults,
+        )
+        if evidence.status == QuotationPOEvidence.STATUS_AMBIGUOUS:
+            arbitration["ambiguous_ids"].append(evidence.id)
+        elif evidence.status == QuotationPOEvidence.STATUS_SUPERSEDED:
+            arbitration["superseded_ids"].append(evidence.id)
+    return evidence, arbitration
+
+
+def _supersede_stale_unreviewed_evidence(quotation, active_evidence_ids):
+    stale = quotation.po_evidence.filter(
+        status__in=[
+            QuotationPOEvidence.STATUS_CANDIDATE,
+            QuotationPOEvidence.STATUS_AMBIGUOUS,
+            QuotationPOEvidence.STATUS_FAILED,
+        ]
+    )
+    if active_evidence_ids:
+        stale = stale.exclude(id__in=active_evidence_ids)
+    stale_ids = list(stale.values_list("id", flat=True))
+    if stale_ids:
+        QuotationPOEvidence.objects.filter(id__in=stale_ids).update(
+            status=QuotationPOEvidence.STATUS_SUPERSEDED,
+            error=(
+                "Superseded by the latest complete Gmail scan because the message "
+                "was not returned as an active match."
+            ),
+            updated_at=timezone.now(),
+        )
+    return stale_ids
+
+
+def _search_query_with_complete_flag(connection, query, *, max_messages):
+    """Search within a bounded budget and report whether Gmail was exhausted."""
+    messages = []
+    page_token = ""
+    seen_page_tokens = set()
+    pages_fetched = 0
+
+    while len(messages) < max_messages and pages_fetched < MAX_EVIDENCE_PAGES_PER_QUERY:
+        remaining = max_messages - len(messages)
+        result = gmail_search_messages(
+            connection,
+            query,
+            max_messages=remaining,
+            page_token=page_token,
+        )
+        pages_fetched += 1
+        page_messages = list(result.get("messages") or [])
+        messages.extend(page_messages[:remaining])
+        next_page_token = str(result.get("next_page_token") or "")
+
+        # A response that fits in the remaining budget and has no continuation
+        # token is the only proof that this query was exhaustively fetched.
+        if not next_page_token:
+            return messages, len(page_messages) <= remaining
+        if next_page_token in seen_page_tokens:
+            return messages, False
+        seen_page_tokens.add(next_page_token)
+        if len(page_messages) > remaining or len(messages) >= max_messages:
+            return messages, False
+        page_token = next_page_token
+
+    return messages, False
+
+
 def find_quote_po_evidence(quotation, actor, *, limit=25):
     ensure_outcome_reviewable(quotation)
     connection = _get_gmail_connection(actor)
-    limit = max(1, min(int(limit or 25), 50))
+    limit = max(1, min(int(limit or 25), MAX_EVIDENCE_MESSAGES_PER_QUERY))
     queries = build_quote_gmail_queries(quotation)
     if not queries:
         raise ValidationError("This quotation does not have enough customer or quote details for Gmail search.")
 
     found_ids = set()
     evidence_ids = []
+    ambiguous_ids = []
+    superseded_ids = []
+    incomplete_queries = []
     for query in queries:
-        result = gmail_search_messages(connection, query, max_messages=limit)
-        for message in result.get("messages") or []:
+        messages, query_complete = _search_query_with_complete_flag(
+            connection,
+            query,
+            max_messages=limit,
+        )
+        if not query_complete:
+            incomplete_queries.append(query)
+        for message in messages:
             message_id = message.get("id")
             if not message_id or message_id in found_ids:
                 continue
@@ -436,67 +744,72 @@ def find_quote_po_evidence(quotation, actor, *, limit=25):
             )
             if confidence < MIN_EVIDENCE_CONFIDENCE:
                 continue
-            existing = QuotationPOEvidence.objects.filter(
-                quotation=quotation,
-                gmail_message_id=payload.get("gmail_message_id") or message_id,
-            ).first()
-            defaults = {
-                "gmail_connection": connection,
-                "mailbox_email": connection.email or "",
-                "gmail_thread_id": payload.get("gmail_thread_id", ""),
-                "sender": payload.get("sender", "")[:500],
-                "recipients": payload.get("recipients", ""),
-                "subject": payload.get("subject", "")[:500],
-                "sent_at": payload.get("sent_at"),
-                "snippet": payload.get("snippet", ""),
-                "attachments": payload.get("attachments") or [],
-                "source_sha256": _source_hash(payload),
-                "matching_reason": reason,
-                "confidence": confidence,
-                "error": "",
-            }
-            if not existing:
-                defaults.update(
-                    {
-                        "status": QuotationPOEvidence.STATUS_CANDIDATE,
-                        "created_by": actor if getattr(actor, "is_authenticated", False) else None,
-                    }
-                )
-            else:
-                if existing.gmail_connection_id:
-                    defaults.pop("gmail_connection", None)
-                if existing.mailbox_email:
-                    defaults.pop("mailbox_email", None)
-                if existing.status == QuotationPOEvidence.STATUS_PARSED:
-                    # Full parse provenance is richer than metadata discovery;
-                    # a rescan must not replace it with attachment stubs.
-                    defaults.pop("attachments", None)
-                    defaults.pop("source_sha256", None)
-                    defaults.pop("error", None)
-                elif existing.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
-                    defaults.pop("error", None)
-                else:
-                    defaults["status"] = QuotationPOEvidence.STATUS_CANDIDATE
-            evidence, _ = QuotationPOEvidence.objects.update_or_create(
-                quotation=quotation,
-                gmail_message_id=payload.get("gmail_message_id") or message_id,
-                defaults=defaults,
+            payload["gmail_message_id"] = payload.get("gmail_message_id") or message_id
+            evidence, arbitration = _store_arbitrated_evidence(
+                quotation,
+                connection,
+                payload,
+                actor,
+                confidence,
+                reason,
             )
-            # A rejected link remains visible in the evidence history but is
-            # not reintroduced as a new candidate on every periodic rescan.
-            if evidence.status != QuotationPOEvidence.STATUS_NOT_RELEVANT:
+            ambiguous_ids.extend(arbitration["ambiguous_ids"])
+            superseded_ids.extend(arbitration["superseded_ids"])
+            if evidence.status in {
+                QuotationPOEvidence.STATUS_CANDIDATE,
+                QuotationPOEvidence.STATUS_AMBIGUOUS,
+                QuotationPOEvidence.STATUS_PARSED,
+            }:
                 evidence_ids.append(evidence.id)
 
+    scan_complete = not incomplete_queries
+    if scan_complete:
+        stale_ids = _supersede_stale_unreviewed_evidence(quotation, evidence_ids)
+        superseded_ids.extend(stale_ids)
     evidence = quotation.po_evidence.filter(id__in=evidence_ids).order_by("-confidence", "-sent_at", "-created_at")
-    _mark_quote_po_scan(quotation, count=evidence.count())
+    candidate_count = evidence.filter(
+        status__in=[
+            QuotationPOEvidence.STATUS_CANDIDATE,
+            QuotationPOEvidence.STATUS_PARSED,
+        ]
+    ).count()
+    ambiguous_count = evidence.filter(status=QuotationPOEvidence.STATUS_AMBIGUOUS).count()
+    evidence_count = evidence.count()
+    scan_warning = ""
+    if not scan_complete:
+        query_label = "query" if len(incomplete_queries) == 1 else "queries"
+        scan_warning = (
+            f"Partial Gmail scan: {len(incomplete_queries)} search {query_label} could not be "
+            f"exhausted within the {limit}-message safety cap. Existing evidence was preserved."
+        )
+    _mark_quote_po_scan(quotation, count=candidate_count, error=scan_warning)
     audit_log(
         actor,
         QuotationAuditLog.ACTION_UPDATED,
         quotation,
-        message=f"Found {evidence.count()} Gmail PO evidence candidate(s) for {quotation.quotation_number}.",
-        changes={"evidence_ids": list(evidence.values_list("id", flat=True)), "queries": queries},
+        message=(
+            f"Found {candidate_count} Gmail PO evidence candidate(s) and "
+            f"{ambiguous_count} ambiguous link(s) for {quotation.quotation_number}."
+        ),
+        changes={
+            "evidence_ids": list(evidence.values_list("id", flat=True)),
+            "ambiguous_ids": sorted(set(ambiguous_ids)),
+            "superseded_ids": sorted(set(superseded_ids)),
+            "queries": queries,
+            "scan_complete": scan_complete,
+            "incomplete_queries": incomplete_queries,
+        },
     )
-    return {"queries": queries, "count": evidence.count(), "evidence": list(evidence)}
+    return {
+        "queries": queries,
+        "count": candidate_count,
+        "ambiguous_count": ambiguous_count,
+        "evidence_count": evidence_count,
+        "scan_complete": scan_complete,
+        "incomplete_queries": incomplete_queries,
+        "scan_warning": scan_warning,
+        "evidence": list(evidence),
+    }
 
 
 def _parse_rescan_cutoff(value):
@@ -514,7 +827,7 @@ def _parse_rescan_cutoff(value):
 def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, rescan=False, rescan_before=None):
     _get_gmail_connection(actor)
     quote_limit = max(1, min(int(quote_limit or 5), 20))
-    message_limit = max(1, min(int(message_limit or 10), 50))
+    message_limit = max(1, min(int(message_limit or 10), MAX_EVIDENCE_MESSAGES_PER_QUERY))
     queryset = Quotation.objects.filter(
         status__in=[Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT],
         is_historical_import=False,
@@ -537,6 +850,8 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
 
     processed = 0
     candidates_found = 0
+    ambiguous_found = 0
+    incomplete_scans = 0
     errors = []
     scanned_quotes = []
     for quotation in quotations:
@@ -551,12 +866,18 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
         try:
             result = find_quote_po_evidence(quotation, actor, limit=message_limit)
             candidates_found += result["count"]
+            ambiguous_found += result["ambiguous_count"]
             scanned_quotes[-1]["candidate_count"] = result["count"]
-            scanned_quotes[-1]["error"] = ""
+            scanned_quotes[-1]["ambiguous_count"] = result["ambiguous_count"]
+            scanned_quotes[-1]["scan_complete"] = result["scan_complete"]
+            scanned_quotes[-1]["error"] = result["scan_warning"]
+            if not result["scan_complete"]:
+                incomplete_scans += 1
         except ValidationError as exc:
             detail = _validation_message(exc)
             _mark_quote_po_scan(quotation, count=0, error=detail)
             scanned_quotes[-1]["candidate_count"] = 0
+            scanned_quotes[-1]["ambiguous_count"] = 0
             scanned_quotes[-1]["error"] = detail
             errors.append(
                 {
@@ -569,6 +890,7 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
             detail = f"Gmail PO evidence search failed. {str(exc)[:250]}"
             _mark_quote_po_scan(quotation, count=0, error=detail)
             scanned_quotes[-1]["candidate_count"] = 0
+            scanned_quotes[-1]["ambiguous_count"] = 0
             scanned_quotes[-1]["error"] = detail
             errors.append(
                 {
@@ -582,6 +904,8 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
     return {
         "processed": processed,
         "candidates_found": candidates_found,
+        "ambiguous_found": ambiguous_found,
+        "incomplete_scans": incomplete_scans,
         "remaining": remaining_after,
         "done": remaining_after == 0,
         "errors": errors,
@@ -773,6 +1097,95 @@ def _extract_gmail_lpo_details(preview):
     }
 
 
+def _reviewed_message_conflicts(evidence, connection):
+    mailbox_email = evidence.mailbox_email or connection.email or ""
+    return list(
+        _message_evidence_queryset(connection, mailbox_email, evidence.gmail_message_id)
+        .exclude(pk=evidence.pk)
+        .filter(Q(status=QuotationPOEvidence.STATUS_PARSED) | Q(link_approved_at__isnull=False))
+        .select_related("quotation")
+    )
+
+
+def _preflight_evidence_approval(evidence, connection, payload):
+    evidence.refresh_from_db(fields=["status", "link_approved_at", "error"])
+    if evidence.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
+        raise EvidenceLinkConflict("This email was explicitly marked not relevant and cannot be approved.")
+    if (
+        evidence.status == QuotationPOEvidence.STATUS_SUPERSEDED
+        and not _payload_exactly_references_quote(evidence.quotation, payload)
+    ):
+        raise EvidenceLinkConflict(
+            "This email link was superseded by a newer scan and cannot be approved for this quotation."
+        )
+    conflicts = _reviewed_message_conflicts(evidence, connection)
+    if conflicts:
+        quote_numbers = ", ".join(conflict.quotation.quotation_number for conflict in conflicts[:3])
+        raise EvidenceLinkConflict(
+            "This Gmail message is already approved or parsed for another quotation"
+            f" ({quote_numbers}). Contact support or an administrator before approving this one."
+        )
+
+
+def _lock_and_resolve_evidence_approval(evidence, connection, payload):
+    mailbox_email = evidence.mailbox_email or connection.email or ""
+    # Lock every competing row in the same primary-key order. Locking only the
+    # chosen row first lets simultaneous A->B and B->A approvals deadlock when
+    # each request later tries to update the other's peer row.
+    locked_rows = list(
+        _message_evidence_queryset(
+            connection,
+            mailbox_email,
+            evidence.gmail_message_id,
+        )
+        .select_for_update()
+        .select_related("quotation")
+        .order_by("id")
+    )
+    locked_by_id = {row.id: row for row in locked_rows}
+    try:
+        locked_evidence = locked_by_id[evidence.pk]
+    except KeyError as exc:
+        raise EvidenceLinkConflict(
+            "This Gmail evidence is no longer available for the connected mailbox."
+        ) from exc
+    if locked_evidence.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
+        raise EvidenceLinkConflict("This email was explicitly marked not relevant and cannot be approved.")
+    if (
+        locked_evidence.status == QuotationPOEvidence.STATUS_SUPERSEDED
+        and not _payload_exactly_references_quote(locked_evidence.quotation, payload)
+    ):
+        raise EvidenceLinkConflict(
+            "This email link was superseded by a newer scan and cannot be approved for this quotation."
+        )
+
+    peers = [row for row in locked_rows if row.pk != locked_evidence.pk]
+    reviewed_conflicts = [
+        row
+        for row in peers
+        if row.status == QuotationPOEvidence.STATUS_PARSED or row.link_approved_at
+    ]
+    if reviewed_conflicts:
+        quote_numbers = ", ".join(conflict.quotation.quotation_number for conflict in reviewed_conflicts[:3])
+        raise EvidenceLinkConflict(
+            "This Gmail message is already approved or parsed for another quotation"
+            f" ({quote_numbers}). Contact support or an administrator before approving this one."
+        )
+
+    unreviewed_statuses = set(_unreviewed_evidence_statuses())
+    peer_ids = [row.id for row in peers if row.status in unreviewed_statuses]
+    if peer_ids:
+        QuotationPOEvidence.objects.filter(id__in=peer_ids).update(
+            status=QuotationPOEvidence.STATUS_SUPERSEDED,
+            error=(
+                f"Superseded by explicit staff approval of this Gmail message for "
+                f"{locked_evidence.quotation.quotation_number}."
+            ),
+            updated_at=timezone.now(),
+        )
+    return locked_evidence, peer_ids
+
+
 def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False):
     ensure_outcome_reviewable(evidence.quotation)
     if not link_approved:
@@ -789,10 +1202,12 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
             mailbox_email=connection.email,
         )
         if confidence < MIN_EVIDENCE_CONFIDENCE:
-            evidence.status = QuotationPOEvidence.STATUS_NOT_RELEVANT
+            evidence.status = QuotationPOEvidence.STATUS_SUPERSEDED
             evidence.error = relevance_reason[:1000]
             evidence.save(update_fields=["status", "error", "updated_at"])
-            raise ValidationError(f"This email cannot be linked to the quotation: {relevance_reason}")
+            raise EvidenceLinkConflict(f"This email cannot be linked to the quotation: {relevance_reason}")
+
+        _preflight_evidence_approval(evidence, connection, payload)
 
         preview = _preview_from_gmail_payload(
             payload,
@@ -806,11 +1221,16 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
             except AIParseError as exc:
                 warnings.append(str(exc))
         warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+        preview["warnings"] = warnings
 
         suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(evidence.quotation, preview)
         details = _extract_gmail_lpo_details(preview)
         with transaction.atomic():
-            locked_evidence = QuotationPOEvidence.objects.select_for_update().get(pk=evidence.pk)
+            locked_evidence, superseded_peer_ids = _lock_and_resolve_evidence_approval(
+                evidence,
+                connection,
+                payload,
+            )
             evidence_mailbox_email = locked_evidence.mailbox_email or connection.email or ""
             po_import = (
                 QuotationOutcomePOImport.objects.filter(gmail_evidence=locked_evidence)
@@ -936,6 +1356,7 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
                 "evidence_id": evidence.id,
                 "po_import_id": po_import.id,
                 "lpo_id": lpo.id,
+                "superseded_evidence_ids": superseded_peer_ids,
                 "suggestions": len(suggestions),
                 "unmatched": len(unmatched),
             },
@@ -945,7 +1366,16 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
         # Do not erase a completed or explicitly rejected review because a
         # later retry failed (for example, a temporary Gmail/API outage).
         current_status = QuotationPOEvidence.objects.filter(pk=evidence.pk).values_list("status", flat=True).first()
-        if current_status not in {
+        if isinstance(exc, EvidenceLinkConflict):
+            if current_status not in {
+                QuotationPOEvidence.STATUS_PARSED,
+                QuotationPOEvidence.STATUS_NOT_RELEVANT,
+                QuotationPOEvidence.STATUS_SUPERSEDED,
+            }:
+                evidence.status = QuotationPOEvidence.STATUS_AMBIGUOUS
+            else:
+                evidence.status = current_status
+        elif current_status not in {
             QuotationPOEvidence.STATUS_PARSED,
             QuotationPOEvidence.STATUS_NOT_RELEVANT,
         }:
@@ -955,4 +1385,3 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
         evidence.error = str(exc)[:1000]
         evidence.save(update_fields=["status", "error", "updated_at"])
         raise
-

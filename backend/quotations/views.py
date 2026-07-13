@@ -1707,6 +1707,11 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     filter=Q(po_evidence__status__in=["candidate", "parsed"]),
                     distinct=True,
                 ),
+                po_evidence_ambiguous_count=Count(
+                    "po_evidence",
+                    filter=Q(po_evidence__status="ambiguous"),
+                    distinct=True,
+                ),
                 po_evidence_parsed_count=Count(
                     "po_evidence",
                     filter=Q(po_evidence__status="parsed"),
@@ -1961,7 +1966,20 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             .get(pk=quotation.pk)
         )
         serializer = self.get_serializer(quotation)
-        evidence = quotation.po_evidence.order_by("-confidence", "-sent_at", "-created_at")[:12]
+        evidence_order = ("-confidence", "-sent_at", "-created_at")
+        active_statuses = ["candidate", "ambiguous", "parsed", "failed"]
+        active_evidence = list(
+            quotation.po_evidence.filter(
+                status__in=active_statuses
+            ).order_by(*evidence_order)
+        )
+        # Every active link must be reachable from the outcome review. Only
+        # archived/rejected history is capped to keep the response bounded.
+        archived_evidence = list(
+            quotation.po_evidence.exclude(status__in=active_statuses)
+            .order_by(*evidence_order)[:12]
+        )
+        evidence = active_evidence + archived_evidence
         return Response(
             {
                 "quotation": serializer.data,
@@ -2018,6 +2036,8 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
                 except AIParseError as exc:
                     warnings.append(str(exc))
+            warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+            preview["warnings"] = warnings
 
             suggestions, unmatched, missing_line_ids = build_po_outcome_suggestions(quotation, preview)
             po_import = QuotationOutcomePOImport.objects.create(
@@ -2068,7 +2088,18 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = QuotationPOEvidenceSerializer(result["evidence"], many=True, context={"request": request})
-        return Response({"count": result["count"], "queries": result["queries"], "results": serializer.data})
+        return Response(
+            {
+                "count": result["count"],
+                "ambiguous_count": result["ambiguous_count"],
+                "evidence_count": result["evidence_count"],
+                "scan_complete": result["scan_complete"],
+                "incomplete_queries": result["incomplete_queries"],
+                "scan_warning": result["scan_warning"],
+                "queries": result["queries"],
+                "results": serializer.data,
+            }
+        )
 
     @action(detail=False, methods=["post"], parser_classes=[JSONParser])
     def scan_po_evidence(self, request):
@@ -2120,13 +2151,25 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def mark_po_evidence_not_relevant(self, request, pk=None):
         quotation = self.get_object()
         evidence_id = request.data.get("evidence_id")
-        try:
-            evidence = quotation.po_evidence.get(pk=evidence_id)
-        except quotation.po_evidence.model.DoesNotExist:
-            return Response({"detail": "Select a valid Gmail evidence candidate."}, status=status.HTTP_400_BAD_REQUEST)
-        evidence.status = evidence.STATUS_NOT_RELEVANT
-        evidence.error = ""
-        evidence.save(update_fields=["status", "error", "updated_at"])
+        with transaction.atomic():
+            try:
+                # Serialize this decision against approval/parsing. Without a
+                # row lock, a stale candidate instance could overwrite a
+                # concurrently completed approval back to not_relevant.
+                evidence = quotation.po_evidence.select_for_update().get(pk=evidence_id)
+            except quotation.po_evidence.model.DoesNotExist:
+                return Response(
+                    {"detail": "Select a valid Gmail evidence candidate."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if evidence.status == evidence.STATUS_PARSED or evidence.link_approved_at:
+                return Response(
+                    {"detail": "Approved or parsed Gmail evidence cannot be marked not relevant."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            evidence.status = evidence.STATUS_NOT_RELEVANT
+            evidence.error = ""
+            evidence.save(update_fields=["status", "error", "updated_at"])
         serializer = QuotationPOEvidenceSerializer(evidence, context={"request": request})
         return Response(serializer.data)
 
@@ -2183,6 +2226,8 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
                 except AIParseError as exc:
                     warnings.append(str(exc))
+            warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+            preview["warnings"] = warnings
             for key, value in source_context.items():
                 if value and not preview.get(key):
                     preview[key] = value

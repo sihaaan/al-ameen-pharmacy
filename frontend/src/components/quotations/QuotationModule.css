@@ -62,6 +62,13 @@
   flex-wrap: wrap;
 }
 
+.qm-evidence-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
 .qm-header h2,
 .qm-editor-header h3,
 .qm-panel h3 {
@@ -841,13 +848,56 @@
   background: #f0fdf4;
 }
 
+.qm-evidence-card.status-ambiguous {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
 .qm-evidence-card.status-failed {
   border-color: #fecaca;
   background: #fff7f7;
 }
 
-.qm-evidence-card.status-not_relevant {
+.qm-evidence-card.status-not_relevant,
+.qm-evidence-card.status-superseded {
   opacity: 0.68;
+  border-style: dashed;
+  background: #f8fafc;
+}
+
+.qm-evidence-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  color: #0f172a;
+}
+
+.qm-evidence-section-heading span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-evidence-archive {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.qm-evidence-archive summary {
+  width: fit-content;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.qm-evidence-archive > p {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .qm-evidence-card-main {
@@ -1950,6 +2000,7 @@
 .qm-badge.status-finalized,
 .qm-badge.status-sent,
 .qm-badge.status-ready,
+.qm-badge.status-parsed,
 .qm-badge.status-committed {
   background: #d1fae5;
   color: #065f46;
@@ -1958,14 +2009,16 @@
 .qm-badge.status-draft,
 .qm-badge.status-pending_review,
 .qm-badge.status-approved,
-.qm-badge.status-needs_review {
+.qm-badge.status-needs_review,
+.qm-badge.status-ambiguous {
   background: #fef3c7;
   color: #92400e;
 }
 
 .qm-badge.status-cancelled,
 .qm-badge.status-revised,
-.qm-badge.status-duplicate {
+.qm-badge.status-duplicate,
+.qm-badge.status-failed {
   background: #fee2e2;
   color: #991b1b;
 }
@@ -1973,6 +2026,12 @@
 .qm-badge.status-skipped {
   background: #e5e7eb;
   color: #4b5563;
+}
+
+.qm-badge.status-superseded,
+.qm-badge.status-not_relevant {
+  background: #e2e8f0;
+  color: #475569;
 }
 
 .qm-badge.muted {

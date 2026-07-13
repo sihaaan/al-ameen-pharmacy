@@ -36,15 +36,31 @@ const emptyContactForm = {
   is_primary: false,
 };
 
-const poEvidenceLabel = (quote) => {
-  const candidates = Number(quote.po_evidence_candidate_count || 0);
+const poEvidenceBadges = (quote) => {
+  const active = Number(quote.po_evidence_candidate_count || 0);
   const parsed = Number(quote.po_evidence_parsed_count || 0);
-  if (parsed > 0) return `${parsed} parsed`;
-  if (candidates > 0) return `${candidates} candidate${candidates === 1 ? '' : 's'}`;
-  if (quote.po_evidence_last_scanned_at) {
-    return quote.po_evidence_last_scan_error ? 'Scan issue' : 'Checked';
+  const candidates = Math.max(0, active - parsed);
+  const ambiguous = Number(quote.po_evidence_ambiguous_count || 0);
+  const badges = [];
+
+  if (candidates > 0) {
+    badges.push({ key: 'candidate', label: `${candidates} candidate${candidates === 1 ? '' : 's'}`, className: 'status-sent' });
   }
-  return 'Not checked';
+  if (ambiguous > 0) {
+    badges.push({ key: 'ambiguous', label: `${ambiguous} need${ambiguous === 1 ? 's' : ''} assignment`, className: 'status-needs_review' });
+  }
+  if (parsed > 0) {
+    badges.push({ key: 'parsed', label: `${parsed} parsed`, className: 'status-ready' });
+  }
+  if (badges.length) return badges;
+  if (quote.po_evidence_last_scanned_at) {
+    return [{
+      key: 'checked',
+      label: quote.po_evidence_last_scan_error ? 'Scan issue' : 'Checked',
+      className: quote.po_evidence_last_scan_error ? 'status-cancelled' : 'status-pending',
+    }];
+  }
+  return [{ key: 'unchecked', label: 'Not checked', className: 'status-pending' }];
 };
 
 const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
@@ -65,6 +81,10 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
     running: false,
     processed: 0,
     found: 0,
+    ambiguous: 0,
+    hasAmbiguousCount: false,
+    incomplete: 0,
+    hasIncompleteCount: false,
     remaining: null,
     errors: [],
     lastQuotes: [],
@@ -158,6 +178,10 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
       running: true,
       processed: 0,
       found: 0,
+      ambiguous: 0,
+      hasAmbiguousCount: false,
+      incomplete: 0,
+      hasIncompleteCount: false,
       remaining: null,
       errors: [],
       lastQuotes: [],
@@ -168,6 +192,10 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
     const totals = {
       processed: 0,
       found: 0,
+      ambiguous: 0,
+      hasAmbiguousCount: false,
+      incomplete: 0,
+      hasIncompleteCount: false,
       errors: [],
       lastQuotes: [],
       remaining: null,
@@ -186,6 +214,14 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
         const data = response.data || {};
         totals.processed += Number(data.processed || 0);
         totals.found += Number(data.candidates_found || 0);
+        if (Object.prototype.hasOwnProperty.call(data, 'ambiguous_found')) {
+          totals.hasAmbiguousCount = true;
+          totals.ambiguous += Number(data.ambiguous_found || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'incomplete_scans')) {
+          totals.hasIncompleteCount = true;
+          totals.incomplete += Number(data.incomplete_scans || 0);
+        }
         totals.remaining = Number(data.remaining || 0);
         totals.done = Boolean(data.done);
         totals.errors = [...totals.errors, ...(data.errors || [])].slice(-8);
@@ -194,6 +230,10 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
           running: !totals.done,
           processed: totals.processed,
           found: totals.found,
+          ambiguous: totals.ambiguous,
+          hasAmbiguousCount: totals.hasAmbiguousCount,
+          incomplete: totals.incomplete,
+          hasIncompleteCount: totals.hasIncompleteCount,
           remaining: totals.remaining,
           errors: totals.errors,
           lastQuotes: totals.lastQuotes,
@@ -277,7 +317,13 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
             {(poScan.processed > 0 || poScan.remaining !== null) && (
               <div className="qm-po-scan-meta">
                 <span>{poScan.processed} quotation(s) checked</span>
-                <span>{poScan.found} candidate email(s) found</span>
+                <span>{poScan.found} candidate/parsed email {poScan.found === 1 ? 'match' : 'matches'}</span>
+                {poScan.hasAmbiguousCount && (
+                  <span>{poScan.ambiguous} {poScan.ambiguous === 1 ? 'needs' : 'need'} assignment</span>
+                )}
+                {poScan.hasIncompleteCount && poScan.incomplete > 0 && (
+                  <span>{poScan.incomplete} partial {poScan.incomplete === 1 ? 'scan' : 'scans'} (older evidence preserved)</span>
+                )}
                 <span>{poScan.remaining ?? 0} remaining</span>
                 {poScan.mode === 'rescan' && <span>Rescan mode</span>}
               </div>
@@ -327,9 +373,11 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
                   <td><span className={`qm-badge status-${quote.status}`}>{statusLabels[quote.status] || quote.status}</span></td>
                   <td><span className={`qm-badge status-${quote.outcome_status || 'pending'}`}>{outcomeLabels[quote.outcome_status] || quote.outcome_status || 'Pending'}</span></td>
                   <td>
-                    <span className={`qm-badge ${quote.po_evidence_candidate_count ? 'status-sent' : 'status-pending'}`}>
-                      {poEvidenceLabel(quote)}
-                    </span>
+                    <div className="qm-evidence-summary">
+                      {poEvidenceBadges(quote).map((badge) => (
+                        <span key={badge.key} className={`qm-badge ${badge.className}`}>{badge.label}</span>
+                      ))}
+                    </div>
                   </td>
                   <td>{quote.version}</td>
                   <td>{quote.currency} {parseFloat(quote.total || 0).toFixed(2)}</td>

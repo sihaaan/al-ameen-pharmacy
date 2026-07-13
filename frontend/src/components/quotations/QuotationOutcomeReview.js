@@ -23,6 +23,91 @@ const evidenceConfidenceLabel = (confidence) => {
   return 'Weak';
 };
 
+const archivedEvidenceStatuses = new Set(['superseded', 'not_relevant']);
+
+const evidenceStatusDetails = {
+  candidate: {
+    label: 'Candidate',
+    description: 'Ready for staff review before this email is linked and parsed.',
+  },
+  ambiguous: {
+    label: 'Needs assignment',
+    description: 'Ambiguous match: this email may belong to more than one quotation. Assign it here only after checking the quotation reference and attachments.',
+  },
+  parsed: {
+    label: 'Parsed',
+    description: 'This email link was approved and parsed into review-only suggestions.',
+  },
+  failed: {
+    label: 'Parse failed',
+    description: 'The last parse attempt failed. Review the source before retrying.',
+  },
+  superseded: {
+    label: 'Superseded (archived)',
+    description: 'A newer scan or explicit assignment replaced this match. It cannot be parsed for this quotation.',
+  },
+  not_relevant: {
+    label: 'Not relevant (archived)',
+    description: 'Staff rejected this match. It is retained only as audit history and cannot be parsed.',
+  },
+};
+
+const evidenceStatus = (evidence) => evidence?.status || 'candidate';
+const evidenceStatusInfo = (evidence) => evidenceStatusDetails[evidenceStatus(evidence)] || {
+  label: evidenceStatus(evidence).replaceAll('_', ' '),
+  description: 'Review this email source before taking any action.',
+};
+const isEvidenceArchived = (evidence) => archivedEvidenceStatuses.has(evidenceStatus(evidence));
+
+const GmailEvidenceCard = ({ evidence, markingEvidenceId, onReview, onMarkNotRelevant }) => {
+  const status = evidenceStatus(evidence);
+  const statusInfo = evidenceStatusInfo(evidence);
+  const archived = isEvidenceArchived(evidence);
+  const confidence = Math.round(Number(evidence.confidence || 0));
+  const reasons = splitEvidenceReasons(evidence.matching_reason);
+  const showStatusExplanation = ['ambiguous', 'superseded', 'not_relevant'].includes(status);
+
+  return (
+    <article className={`qm-evidence-card status-${status}`}>
+      <div className="qm-evidence-card-main">
+        <div>
+          <h4>{evidence.subject || 'Untitled email'}</h4>
+          <p>{evidence.sender || 'Unknown sender'}</p>
+          <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} - {evidence.attachment_count} attachment(s)</small>
+        </div>
+        <div className="qm-evidence-badges">
+          <span className={`qm-badge evidence-${evidenceConfidenceLabel(confidence).toLowerCase()}`}>{confidence}% {evidenceConfidenceLabel(confidence)}</span>
+          <span className={`qm-badge status-${status}`}>{statusInfo.label}</span>
+        </div>
+      </div>
+      <div className="qm-evidence-reason-list">
+        {(reasons.length ? reasons.slice(0, 3) : [evidence.snippet || 'Matched by targeted Gmail search.']).map((reason) => (
+          <span key={reason}>{reason}</span>
+        ))}
+      </div>
+      {showStatusExplanation && <div className={`qm-notice ${status === 'ambiguous' ? 'warning' : ''}`}>{statusInfo.description}</div>}
+      {evidence.error && evidence.error !== statusInfo.description && <div className="qm-notice warning">{evidence.error}</div>}
+      <div className="qm-evidence-actions">
+        <button
+          type="button"
+          className="qm-secondary small"
+          onClick={() => onReview(evidence.id)}
+        >
+          {archived ? 'View archived evidence' : 'Review evidence'}
+        </button>
+        <button
+          type="button"
+          className="qm-secondary small"
+          disabled={archived || markingEvidenceId === evidence.id}
+          onClick={() => onMarkNotRelevant(evidence.id)}
+        >
+          {markingEvidenceId === evidence.id ? 'Saving...' : 'Not relevant'}
+        </button>
+      </div>
+    </article>
+  );
+};
+
 const lineStatusLabels = {
   pending: 'Pending',
   accepted: 'Accepted',
@@ -153,6 +238,14 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     () => poEvidence.find((item) => item.id === selectedEvidenceId) || null,
     [poEvidence, selectedEvidenceId]
   );
+  const activeEvidence = useMemo(
+    () => poEvidence.filter((item) => !isEvidenceArchived(item)),
+    [poEvidence]
+  );
+  const archivedEvidence = useMemo(
+    () => poEvidence.filter((item) => isEvidenceArchived(item)),
+    [poEvidence]
+  );
 
   const updateLineDraft = (lineId, patch) => {
     setLineDrafts((current) => ({
@@ -237,10 +330,12 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     try {
       const response = await quotationAPI.quotes.poEvidence(quoteId);
       setPoEvidence(response.data.results || []);
+      return true;
     } catch (error) {
       const details = await describeQuotationError(error, 'Load Gmail PO evidence', `GET /quotations/quotes/${quoteId}/po_evidence/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
+      return false;
     }
   };
 
@@ -250,10 +345,19 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.findPOEvidence(quoteId, { limit: 25 });
-      setPoEvidence(response.data.results || []);
+      const historyRefreshed = await loadPOEvidence();
+      const hasAmbiguousCount = Object.prototype.hasOwnProperty.call(response.data || {}, 'ambiguous_count');
+      const matchCount = Number(response.data.count || 0);
+      const ambiguousCount = Number(response.data.ambiguous_count || 0);
+      const ambiguousMessage = hasAmbiguousCount
+        ? ` ${ambiguousCount} ${ambiguousCount === 1 ? 'needs' : 'need'} assignment.`
+        : '';
+      const refreshMessage = historyRefreshed
+        ? ''
+        : ' The full evidence history could not be refreshed, so the existing history was preserved.';
       setNotice({
         type: 'success',
-        message: `Found ${response.data.count || 0} Gmail evidence candidate(s). Nothing was saved to the outcome yet.`,
+        message: `Found ${matchCount} candidate/parsed Gmail ${matchCount === 1 ? 'match' : 'matches'}.${ambiguousMessage} Nothing was saved to the outcome yet.${refreshMessage}`,
       });
     } catch (error) {
       const details = await describeQuotationError(error, 'Find Gmail PO evidence', `POST /quotations/quotes/${quoteId}/find_po_evidence/`);
@@ -374,54 +478,47 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             </button>
           </div>
         </div>
-        {poEvidence.length ? (
-          <div className="qm-evidence-grid">
-            {poEvidence.map((evidence) => {
-              const evidenceStatus = evidence.status || 'candidate';
-              const confidence = Math.round(Number(evidence.confidence || 0));
-              const reasons = splitEvidenceReasons(evidence.matching_reason);
-              return (
-              <article key={evidence.id} className={`qm-evidence-card status-${evidenceStatus}`}>
-                <div className="qm-evidence-card-main">
-                  <div>
-                    <h4>{evidence.subject || 'Untitled email'}</h4>
-                    <p>{evidence.sender || 'Unknown sender'}</p>
-                    <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} - {evidence.attachment_count} attachment(s)</small>
-                  </div>
-                  <div className="qm-evidence-badges">
-                    <span className={`qm-badge evidence-${evidenceConfidenceLabel(confidence).toLowerCase()}`}>{confidence}% {evidenceConfidenceLabel(confidence)}</span>
-                    <span className={`qm-badge status-${evidenceStatus}`}>{evidenceStatus.replace('_', ' ')}</span>
-                  </div>
-                </div>
-                <div className="qm-evidence-reason-list">
-                  {(reasons.length ? reasons.slice(0, 3) : [evidence.snippet || 'Matched by targeted Gmail search.']).map((reason) => (
-                    <span key={reason}>{reason}</span>
-                  ))}
-                </div>
-                {evidence.error && <div className="qm-notice warning">{evidence.error}</div>}
-                <div className="qm-evidence-actions">
-                  <button
-                    type="button"
-                    className="qm-secondary small"
-                    onClick={() => setSelectedEvidenceId(evidence.id)}
-                  >
-                    Review evidence
-                  </button>
-                  <button
-                    type="button"
-                    className="qm-secondary small"
-                    disabled={markingEvidenceId === evidence.id || evidenceStatus === 'not_relevant'}
-                    onClick={() => markEvidenceNotRelevant(evidence.id)}
-                  >
-                    {markingEvidenceId === evidence.id ? 'Saving...' : 'Not relevant'}
-                  </button>
-                </div>
-              </article>
-              );
-            })}
-          </div>
+        {activeEvidence.length ? (
+          <>
+            <div className="qm-evidence-section-heading">
+              <strong>Active evidence</strong>
+              <span>{activeEvidence.length} {activeEvidence.length === 1 ? 'match' : 'matches'} awaiting review or already parsed</span>
+            </div>
+            <div className="qm-evidence-grid">
+              {activeEvidence.map((evidence) => (
+                <GmailEvidenceCard
+                  key={evidence.id}
+                  evidence={evidence}
+                  markingEvidenceId={markingEvidenceId}
+                  onReview={setSelectedEvidenceId}
+                  onMarkNotRelevant={markEvidenceNotRelevant}
+                />
+              ))}
+            </div>
+          </>
         ) : (
-          <div className="qm-empty subtle">No Gmail evidence candidates yet. Click Find Gmail Evidence to search for related PO/LPO replies.</div>
+          <div className="qm-empty subtle">
+            {archivedEvidence.length
+              ? 'No active Gmail evidence. Archived scan history is available below.'
+              : 'No Gmail evidence candidates yet. Click Find Gmail Evidence to search for related PO/LPO replies.'}
+          </div>
+        )}
+        {archivedEvidence.length > 0 && (
+          <details className="qm-evidence-archive">
+            <summary>Archived evidence ({archivedEvidence.length})</summary>
+            <p>Superseded and rejected matches are retained for audit only. They cannot be parsed for this quotation.</p>
+            <div className="qm-evidence-grid">
+              {archivedEvidence.map((evidence) => (
+                <GmailEvidenceCard
+                  key={evidence.id}
+                  evidence={evidence}
+                  markingEvidenceId={markingEvidenceId}
+                  onReview={setSelectedEvidenceId}
+                  onMarkNotRelevant={markEvidenceNotRelevant}
+                />
+              ))}
+            </div>
+          </details>
         )}
       </div>
 
@@ -432,7 +529,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <div>
                 <span className="qm-step-kicker">Gmail source review</span>
                 <h3>{selectedEvidence.subject || 'Untitled email'}</h3>
-                <p>Confirm whether this email is actually a PO/LPO response before parsing it into outcome suggestions.</p>
+                <p>{evidenceStatusInfo(selectedEvidence).description}</p>
               </div>
               <button type="button" className="qm-secondary small" onClick={() => setSelectedEvidenceId(null)}>Close</button>
             </div>
@@ -457,6 +554,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <div>
                 <span>Confidence</span>
                 <strong>{Math.round(Number(selectedEvidence.confidence || 0))}% {evidenceConfidenceLabel(selectedEvidence.confidence)}</strong>
+              </div>
+              <div>
+                <span>Assignment status</span>
+                <strong>{evidenceStatusInfo(selectedEvidence).label}</strong>
               </div>
             </div>
 
@@ -497,15 +598,23 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <button
                 type="button"
                 className="qm-primary"
-                disabled={parsingEvidenceId === selectedEvidence.id || selectedEvidence.status === 'not_relevant'}
+                disabled={parsingEvidenceId === selectedEvidence.id || isEvidenceArchived(selectedEvidence)}
                 onClick={() => approveAndParseEvidence(selectedEvidence.id)}
               >
-                {parsingEvidenceId === selectedEvidence.id ? 'Approving & parsing...' : 'Approve this email link & parse'}
+                {parsingEvidenceId === selectedEvidence.id
+                  ? 'Approving & parsing...'
+                  : isEvidenceArchived(selectedEvidence)
+                    ? 'Archived - cannot parse'
+                    : evidenceStatus(selectedEvidence) === 'ambiguous'
+                      ? 'Assign to this quotation & parse'
+                      : evidenceStatus(selectedEvidence) === 'parsed'
+                        ? 'Reparse approved email'
+                        : 'Approve this email link & parse'}
               </button>
               <button
                 type="button"
                 className="qm-secondary"
-                disabled={markingEvidenceId === selectedEvidence.id || selectedEvidence.status === 'not_relevant'}
+                disabled={markingEvidenceId === selectedEvidence.id || isEvidenceArchived(selectedEvidence)}
                 onClick={() => markEvidenceNotRelevant(selectedEvidence.id)}
               >
                 {markingEvidenceId === selectedEvidence.id ? 'Saving...' : 'Mark not relevant'}

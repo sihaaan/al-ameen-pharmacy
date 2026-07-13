@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover - libmagic is optional and platform depend
     magic = None
 
 from .import_rules import (
+    classify_header_cell,
     detect_header_row,
     parse_inquiry_line,
     parse_html_table_lines,
@@ -46,6 +47,10 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 XLSB_MIME = "application/vnd.ms-excel.sheet.binary.macroenabled.12"
 XLS_MIME = "application/vnd.ms-excel"
 OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+AGGREGATE_ITEM_SUMMARY_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s+(?:individual\s+)?(?:line\s+)?items?\b",
+    re.IGNORECASE,
+)
 
 
 def max_upload_bytes():
@@ -155,7 +160,22 @@ def _preview_response(
     meta=None,
 ):
     lines = lines or []
-    warnings = warnings or []
+    warnings = list(warnings or [])
+    aggregate_po_summary_detected = any(
+        AGGREGATE_ITEM_SUMMARY_RE.search(
+            " ".join(
+                str(line.get(key) or "")
+                for key in ("raw_line", "raw_source_line", "raw_name", "requested_item_name")
+            )
+        )
+        for line in lines
+    )
+    if aggregate_po_summary_detected:
+        warnings.append(
+            "Aggregate PO item summary detected. No individual line outcome should be inferred from it; "
+            "staff must review the selected PO document manually."
+        )
+    warnings = list(dict.fromkeys(warnings))
     summary = summarize_lines(lines, skipped_count=skipped_count)
     payload = {
         "source_type": source_type,
@@ -172,6 +192,7 @@ def _preview_response(
         "meta": {
             "line_count": len(lines),
             **(meta or {}),
+            "aggregate_po_summary_detected": aggregate_po_summary_detected,
         },
     }
     return payload
@@ -427,26 +448,132 @@ def _preflight_pdf(data):
     return page_count
 
 
+def _words_to_layout_text(words):
+    """Recreate visually aligned PDF rows with explicit cell separators."""
+
+    normalized_words = []
+    for word in words or []:
+        if len(word) < 5:
+            continue
+        text = str(word[4] or "").strip()
+        if not text:
+            continue
+        x0, y0, x1, y1 = (float(word[index]) for index in range(4))
+        normalized_words.append(
+            {
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "height": max(1.0, y1 - y0),
+                "center": (y0 + y1) / 2,
+                "text": text,
+            }
+        )
+    normalized_words.sort(key=lambda value: (value["center"], value["x0"]))
+
+    visual_lines = []
+    for word in normalized_words:
+        if visual_lines:
+            current = visual_lines[-1]
+            tolerance = max(2.5, min(current["height"], word["height"]) * 0.45)
+            if abs(word["center"] - current["center"]) <= tolerance:
+                current["words"].append(word)
+                count = len(current["words"])
+                current["center"] = ((current["center"] * (count - 1)) + word["center"]) / count
+                current["height"] = max(current["height"], word["height"])
+                continue
+        visual_lines.append(
+            {
+                "center": word["center"],
+                "height": word["height"],
+                "words": [word],
+            }
+        )
+
+    rendered_lines = []
+    for visual_line in visual_lines:
+        line_words = sorted(visual_line["words"], key=lambda value: value["x0"])
+        cells = []
+        current_cell = [line_words[0]["text"]]
+        previous = line_words[0]
+        for word in line_words[1:]:
+            gap = word["x0"] - previous["x1"]
+            separator_gap = max(8.0, min(previous["height"], word["height"]) * 0.9)
+            if gap >= separator_gap:
+                cells.append(" ".join(current_cell))
+                current_cell = [word["text"]]
+            else:
+                current_cell.append(word["text"])
+            previous = word
+        cells.append(" ".join(current_cell))
+        rendered_lines.append(" | ".join(cells))
+    return "\n".join(rendered_lines)
+
+
 def _extract_pymupdf_text(data):
     text_chunks = []
+    word_layout_chunks = []
     page_metadata = []
     if fitz is None:
-        return text_chunks, page_metadata
+        return text_chunks, word_layout_chunks, page_metadata
 
     with fitz.open(stream=data, filetype="pdf") as document:
         for page_number, page in enumerate(document, start=1):
             words = page.get_text("words") or []
             text = page.get_text("text") or ""
+            word_layout_text = _words_to_layout_text(words)
             text_chunks.append(text)
+            word_layout_chunks.append(word_layout_text)
             page_metadata.append(
                 {
                     "page_number": page_number,
                     "text_based": len(words) >= 3 or len(text.strip()) >= 20,
                     "word_count": len(words),
                     "text_length": len(text.strip()),
+                    "word_layout_text_length": len(word_layout_text.strip()),
                 }
             )
-    return text_chunks, page_metadata
+    return text_chunks, word_layout_chunks, page_metadata
+
+
+def _is_plausible_pdf_item_line(line):
+    item_name = str(
+        (line or {}).get("requested_item_name")
+        or (line or {}).get("raw_name")
+        or (line or {}).get("item_name")
+        or ""
+    ).strip()
+    if not item_name or not re.search(r"[A-Za-z]", item_name):
+        return False
+    normalized = re.sub(r"[^a-z0-9]+", " ", item_name.lower()).strip()
+    if classify_header_cell(item_name):
+        return False
+    if normalized in {
+        "description",
+        "item",
+        "item description",
+        "item number",
+        "items",
+        "ln",
+        "line",
+        "material description",
+        "product",
+        "req quote no",
+        "request quote no",
+        "quantity",
+        "qty",
+        "unit",
+        "unit price",
+        "price",
+        "amount",
+        "total",
+    }:
+        return False
+    return any(
+        (line or {}).get(key) not in (None, "")
+        for key in ("quantity", "unit", "unit_price", "amount", "line_total")
+    )
 
 
 def _looks_like_pdf_metadata_table(rows):
@@ -549,20 +676,38 @@ def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="
     page_count = _preflight_pdf(data)
     warnings = []
     skipped_count = 0
-    pymupdf_text_chunks, pymupdf_page_metadata = _extract_pymupdf_text(data)
+    pymupdf_text_chunks, pymupdf_word_layout_chunks, pymupdf_page_metadata = _extract_pymupdf_text(data)
     selectable_text = "\n".join(chunk for chunk in pymupdf_text_chunks if chunk and chunk.strip()).strip()
+    selectable_word_layout = "\n".join(
+        chunk for chunk in pymupdf_word_layout_chunks if chunk and chunk.strip()
+    ).strip()
 
     lines = []
     pdfplumber_page_metadata = []
     table_rows_seen = 0
+    table_layout_fallback_needed = False
     if selectable_text:
         try:
             lines, pdfplumber_page_metadata, table_rows_seen, table_skipped = _parse_pdfplumber_tables(data)
             skipped_count += table_skipped
+            if table_rows_seen and not any(_is_plausible_pdf_item_line(line) for line in lines):
+                lines = []
+                table_layout_fallback_needed = True
+                warnings.append(
+                    "Extracted PDF tables contained headers or metadata but no plausible item rows; "
+                    "used selectable text layout instead."
+                )
         except Exception as exc:
             warnings.append(f"PDF table extraction failed; fell back to text lines. Detail: {exc}")
 
     parse_method = "pymupdf_pdfplumber_table_v2" if lines else "pymupdf_text_v2"
+    if not lines and table_layout_fallback_needed and selectable_word_layout:
+        layout_lines, layout_skipped = parse_text_lines(selectable_word_layout)
+        plausible_layout_lines = [line for line in layout_lines if _is_plausible_pdf_item_line(line)]
+        if plausible_layout_lines:
+            lines = plausible_layout_lines
+            skipped_count += layout_skipped
+            parse_method = "pymupdf_word_layout_v1"
     if not lines and selectable_text:
         parsed_lines, skipped = parse_text_lines(selectable_text)
         lines = parsed_lines
