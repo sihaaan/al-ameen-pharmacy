@@ -227,7 +227,7 @@ class LPOTextParserRegressionTests(SimpleTestCase):
             }
         )
 
-        self.assertEqual(details["lpo_number"], "111_123301")
+        self.assertEqual(details["lpo_number"], "PO111_123301")
 
 
 class LPOOutcomeGuardRegressionTests(TestCase):

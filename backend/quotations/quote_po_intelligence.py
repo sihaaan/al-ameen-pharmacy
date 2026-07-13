@@ -1088,7 +1088,7 @@ def _extract_gmail_lpo_details(preview):
             lpo_number = clean_number(match.group(1))
     if not lpo_number:
         match = re.search(
-            r"\b(?:PO[_-])?PO(?P<number>\d{3}_\d{5,})(?!\d)",
+            r"\b(?:PO[_-])?(?P<number>PO\d{3}_\d{5,})(?!\d)",
             text,
             re.IGNORECASE,
         )

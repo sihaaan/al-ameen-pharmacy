@@ -258,7 +258,7 @@ def _extract_lpo_details(preview):
             r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\b(LPO[-\/.]?[A-Z0-9][A-Z0-9\/\-.]{2,})\b",
-            r"\b(?:PO[_-])?PO(\d{3}_\d{5,})(?!\d)",
+            r"\b(?:PO[_-])?(PO\d{3}_\d{5,})(?!\d)",
             r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9\/_.-]{2,})",
         ]
         for pattern in number_patterns:

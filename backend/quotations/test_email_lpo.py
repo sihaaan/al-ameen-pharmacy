@@ -226,13 +226,13 @@ class SharedMailboxEvidenceTests(TestCase):
                 "original_text": "",
                 "lines": [],
                 "meta": {},
-            }, "111_123301"),
+            }, "PO111_123301"),
             ({
                 "source_filename": "attachment.pdf",
                 "original_text": "",
                 "lines": [],
                 "meta": {"gmail_subject": "FW: Document Purchase Order PO112_110916"},
-            }, "112_110916"),
+            }, "PO112_110916"),
         )
         for preview, expected_number in cases:
             with self.subTest(expected_number=expected_number):
@@ -797,7 +797,7 @@ class GmailEvidenceReviewTests(TestCase):
             {jacket.id, water.id},
         )
         self.assertIn(AI_QUOTE_COVERAGE_GUARD_WARNING, lpo.warnings)
-        self.assertEqual(lpo.lpo_number, "112_110916")
+        self.assertEqual(lpo.lpo_number, "PO112_110916")
         for line in (self.line, jacket, water):
             line.refresh_from_db()
             self.assertEqual(line.outcome_status, QuotationLine.OUTCOME_PENDING)
