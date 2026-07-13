@@ -1087,10 +1087,17 @@ def parse_text_table_lines(raw_text, **source_meta):
     return _parse_structured_rows(reconstructed_rows, **source_meta)
 
 
-DESCRIPTION_BLOCK_RE = re.compile(r"^\s*description\s*:\s*(?P<name>.+?)\s*$", re.IGNORECASE)
+DESCRIPTION_BLOCK_RE = re.compile(
+    r"^\s*(?:[\-*\u2022]\s*)?description\s*:\s*(?P<name>.+?)\s*$",
+    re.IGNORECASE,
+)
 QUANTITY_BLOCK_RE = re.compile(
     rf"^\s*(?:[\-*\u2022]\s*)?quantity\s*:\s*(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{UNIT_PATTERN})?"
     r"\s*[.;,\-*\u2022]*\s*$",
+    re.IGNORECASE,
+)
+DESCRIPTION_DETAIL_BLOCK_RE = re.compile(
+    r"^\s*(?:[\-*\u2022]\s*)?(?:location|frequency|service\s+provider|quotation\s+ref\.?|crm\s+ref|warehouse)\s*:",
     re.IGNORECASE,
 )
 DESCRIPTION_QUANTITY_INLINE_RE = re.compile(
@@ -1142,13 +1149,25 @@ def _parse_description_quantity_blocks(raw_text, **source_meta):
             continue
 
         quantity_index = index + 1
-        while quantity_index < len(raw_lines) and not normalize_import_line(raw_lines[quantity_index]):
-            quantity_index += 1
-        if quantity_index >= len(raw_lines):
-            index += 1
-            continue
-        quantity_text = normalize_import_line(raw_lines[quantity_index])
-        quantity_match = QUANTITY_BLOCK_RE.match(quantity_text)
+        quantity_text = ""
+        quantity_match = None
+        # Customer portals commonly place Location/Frequency bullets between
+        # the authoritative Description and Quantity fields. Look through only
+        # those known detail labels so an unrelated later quantity can never be
+        # attached to this description.
+        while quantity_index < min(len(raw_lines), index + 7):
+            quantity_text = normalize_import_line(raw_lines[quantity_index])
+            if not quantity_text:
+                quantity_index += 1
+                continue
+            quantity_match = QUANTITY_BLOCK_RE.match(quantity_text)
+            if quantity_match:
+                break
+            if DESCRIPTION_DETAIL_BLOCK_RE.match(quantity_text):
+                quantity_index += 1
+                continue
+            quantity_match = None
+            break
         if not quantity_match:
             index += 1
             continue
@@ -1199,6 +1218,15 @@ def parse_text_lines(raw_text, **source_meta):
     description_lines, consumed_description_lines = _parse_description_quantity_blocks(raw_text, **source_meta)
     if description_lines:
         raw_lines = str(raw_text or "").splitlines()
+        if any(DESCRIPTION_DETAIL_BLOCK_RE.match(normalize_import_line(raw_line)) for raw_line in raw_lines):
+            # In this portal format the Description/Quantity blocks are the
+            # item source of truth. Surrounding layout rows and legal terms are
+            # document metadata, not additional products.
+            skipped = max(
+                0,
+                sum(bool(normalize_import_line(line)) for line in raw_lines) - len(description_lines),
+            )
+            return description_lines, skipped
         remaining_text = "\n".join(
             "" if index in consumed_description_lines else raw_line
             for index, raw_line in enumerate(raw_lines)

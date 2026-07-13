@@ -27,6 +27,7 @@ from .ai_parsing import (
     clean_historical_import_with_ai,
     clean_preview_with_ai,
     maybe_attach_auto_ai_candidate,
+    prefer_safe_ai_preview,
 )
 from .ai_learning import (
     append_batch_file_result,
@@ -2033,7 +2034,14 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
             if use_ai:
                 try:
-                    preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
+                    deterministic_preview = preview
+                    ai_preview = clean_preview_with_ai(
+                        deterministic_preview,
+                        actor=request.user,
+                        requested_mode="auto",
+                        allow_vision=True,
+                    )
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
@@ -2223,7 +2231,14 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
             if use_ai:
                 try:
-                    preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
+                    deterministic_preview = preview
+                    ai_preview = clean_preview_with_ai(
+                        deterministic_preview,
+                        actor=request.user,
+                        requested_mode="auto",
+                        allow_vision=True,
+                    )
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
@@ -2515,9 +2530,18 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
             if use_ai:
                 try:
-                    preview = clean_preview_with_ai(preview, actor=request.user, requested_mode="auto", allow_vision=True)
+                    deterministic_preview = preview
+                    ai_preview = clean_preview_with_ai(
+                        deterministic_preview,
+                        actor=request.user,
+                        requested_mode="auto",
+                        allow_vision=True,
+                    )
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
                 except AIParseError as exc:
                     warnings.append(str(exc))
+            warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+            preview["warnings"] = warnings
             for key, value in source_context.items():
                 if value and not preview.get(key):
                     preview[key] = value

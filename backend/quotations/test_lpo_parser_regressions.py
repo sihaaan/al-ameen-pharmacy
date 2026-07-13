@@ -7,7 +7,8 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from reportlab.pdfgen import canvas
 
-from .import_parsers import parse_pdf_preview, parse_text_preview
+from .ai_parsing import AI_DETERMINISTIC_GUARD_WARNING, prefer_safe_ai_preview
+from .import_parsers import _parse_pdf_word_layout_item_rows, parse_pdf_preview, parse_text_preview
 from .import_rules import parse_text_lines
 from .models import Company, Quotation, QuotationLine
 from .services import build_po_outcome_suggestions
@@ -39,7 +40,7 @@ class LPOTextParserRegressionTests(SimpleTestCase):
         lines, skipped = parse_text_lines(
             "\n".join(
                 [
-                    "Description: COVERALL JACKET",
+                    "• Description: COVERALL JACKET",
                     "Quantity: 20 nos",
                     "20.00",
                     "Order total",
@@ -67,6 +68,113 @@ class LPOTextParserRegressionTests(SimpleTestCase):
             {("Coverall Jacket", "20"), ("Bandage Pack", "4")},
         )
         self.assertLessEqual(skipped, 1)
+
+    def test_portal_description_blocks_skip_layout_and_legal_metadata(self):
+        lines, skipped = parse_text_lines(
+            "\n".join(
+                [
+                    "Line number | Item number | Name | Unit | Quantity | Unit price",
+                    "1 | 10111782 | University of | LS | 20.00 | 0.00",
+                    "Description: Supply of fire warden jackets",
+                    "• Location: University of Birmingham, Dubai",
+                    "• Frequency: One time Service",
+                    "• Quantity: 20 nos.",
+                    "• Service Provider: Al Ameen Pharmacy",
+                    "Description: Supply of small drinking water 500ml",
+                    "• Location: University of Birmingham, Dubai",
+                    "• Frequency: One time Service",
+                    "• Quantity: 30 nos.",
+                    "• Service Provider: Al Ameen Pharmacy",
+                    "The supplier shall comply with all terms and conditions.",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            [(line["raw_name"], line["quantity"], line["unit"].lower()) for line in lines],
+            [
+                ("Supply of Fire Warden Jackets", "20", "nos"),
+                ("Supply of Small Drinking Water 500ml", "30", "nos"),
+            ],
+        )
+        self.assertGreater(skipped, 0)
+
+    def test_word_layout_item_row_preserves_quantity_and_unit_price_columns(self):
+        rows = _parse_pdf_word_layout_item_rows(
+            "\n".join(
+                [
+                    "Ln | Req/Quote | Item Number | Description | Quantity | Unit | Unit Price | Total Price",
+                    "1 | 69706 81.14.15.01.000966 | DETTOL ANTISEPTIC LIQUID 60ML | 20.00 NO | 5.00 | 100.00",
+                ]
+            )
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["raw_name"], "Dettol Antiseptic Liquid 60ml")
+        self.assertEqual(rows[0]["quantity"], "20")
+        self.assertEqual(rows[0]["unit"], "NO")
+        self.assertEqual(rows[0]["unit_price"], "5")
+        self.assertEqual(rows[0]["line_total"], "100")
+
+    def test_ai_cannot_change_strong_deterministic_quantity_or_price(self):
+        deterministic = {
+            "lines": [
+                {
+                    "raw_name": "Dettol Antiseptic Liquid 60ml",
+                    "quantity": "20",
+                    "unit": "NO",
+                    "unit_price": "5",
+                    "line_total": "100",
+                    "parse_confidence": 0.92,
+                }
+            ],
+            "warnings": [],
+            "meta": {},
+        }
+        ai_preview = {
+            "lines": [
+                {
+                    "raw_name": "Dettol Antiseptic Liquid 60ml",
+                    "quantity": "1",
+                    "unit": "No",
+                    "unit_price": "100",
+                    "line_total": "100",
+                }
+            ],
+            "warnings": ["AI changed the row."],
+        }
+
+        selected = prefer_safe_ai_preview(deterministic, ai_preview)
+
+        self.assertEqual(selected["lines"], deterministic["lines"])
+        self.assertTrue(selected["meta"]["ai_cleanup_rejected"])
+        self.assertIn(AI_DETERMINISTIC_GUARD_WARNING, selected["warnings"])
+
+    def test_ai_cannot_replace_strong_items_with_unrelated_metadata(self):
+        deterministic = {
+            "lines": [
+                {
+                    "raw_name": "Supply of fire warden jackets",
+                    "quantity": "20",
+                    "unit": "nos",
+                    "parse_confidence": 0.95,
+                },
+                {
+                    "raw_name": "Supply of small drinking water 500ml",
+                    "quantity": "30",
+                    "unit": "nos",
+                    "parse_confidence": 0.95,
+                },
+            ],
+            "warnings": [],
+            "meta": {},
+        }
+        ai_preview = {"lines": [{"raw_name": "University of", "quantity": ""}], "warnings": []}
+
+        selected = prefer_safe_ai_preview(deterministic, ai_preview)
+
+        self.assertEqual(selected["lines"], deterministic["lines"])
+        self.assertTrue(selected["meta"]["ai_cleanup_rejected"])
 
     def test_pdf_header_only_table_falls_back_to_word_layout_for_dettol_row(self):
         buffer = BytesIO()

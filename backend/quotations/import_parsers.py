@@ -31,6 +31,7 @@ from .import_rules import (
     parse_structured_row,
     parse_text_table_lines,
     parse_text_lines,
+    split_quantity_unit,
     row_to_text,
     is_noise_line,
     summarize_lines,
@@ -672,6 +673,54 @@ def _try_ocr_fallback(data, filename):
         return "", str(exc)
 
 
+def _parse_pdf_word_layout_item_rows(raw_text):
+    """Recover compact pipe-delimited item rows from a PDF visual layout."""
+
+    parsed_rows = []
+    seen = set()
+    for raw_line in str(raw_text or "").splitlines():
+        normalized = re.sub(r"\s+", " ", raw_line or "").strip()
+        cells = [cell.strip() for cell in normalized.split("|") if cell.strip()]
+        if len(cells) < 4:
+            continue
+        for index, cell in enumerate(cells):
+            quantity, unit = split_quantity_unit(cell)
+            if quantity is None or not unit or index < 1 or index + 1 >= len(cells):
+                continue
+            description = cells[index - 1]
+            if classify_header_cell(description) or len(re.findall(r"[A-Za-z]", description)) < 4:
+                continue
+            numeric_tail = [
+                candidate
+                for candidate in cells[index + 1 :]
+                if re.fullmatch(r"\d+(?:[.,]\d+)?", candidate)
+            ]
+            if not numeric_tail:
+                continue
+            unit_price = numeric_tail[0]
+            line_total = numeric_tail[-1] if len(numeric_tail) > 1 else ""
+            reconstructed = " ".join(
+                value for value in (description, cell, unit_price, line_total) if value
+            )
+            parsed = parse_inquiry_line(reconstructed)
+            if not parsed:
+                continue
+            parsed["raw_line"] = normalized
+            parsed["raw_source_line"] = normalized
+            parsed["parse_confidence"] = max(float(parsed.get("parse_confidence") or 0), 0.92)
+            key = (
+                parsed.get("requested_item_name"),
+                parsed.get("quantity"),
+                parsed.get("unit"),
+                parsed.get("unit_price"),
+            )
+            if key not in seen:
+                seen.add(key)
+                parsed_rows.append(parsed)
+            break
+    return parsed_rows
+
+
 def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref=""):
     page_count = _preflight_pdf(data)
     warnings = []
@@ -702,7 +751,10 @@ def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="
 
     parse_method = "pymupdf_pdfplumber_table_v2" if lines else "pymupdf_text_v2"
     if not lines and table_layout_fallback_needed and selectable_word_layout:
-        layout_lines, layout_skipped = parse_text_lines(selectable_word_layout)
+        layout_lines = _parse_pdf_word_layout_item_rows(selectable_word_layout)
+        layout_skipped = 0
+        if not layout_lines:
+            layout_lines, layout_skipped = parse_text_lines(selectable_word_layout)
         plausible_layout_lines = [line for line in layout_lines if _is_plausible_pdf_item_line(line)]
         if plausible_layout_lines:
             lines = plausible_layout_lines

@@ -31,6 +31,10 @@ AI_STATUS_AVAILABLE = "ai_available"
 
 MAX_ROWS = 250
 VALID_PARSE_STATUSES = {"parsed", "needs_review", "ignored"}
+AI_DETERMINISTIC_GUARD_WARNING = (
+    "AI cleanup was rejected because it removed or changed high-confidence deterministic item data; "
+    "the deterministic extraction was kept for staff review."
+)
 
 
 AI_PARSE_JSON_SCHEMA = {
@@ -274,6 +278,107 @@ def is_parse_quality_poor(preview):
     if "no selectable text" in warnings or "no item lines" in warnings:
         return True
     return False
+
+
+def _guard_item_name(row):
+    return _clean_text(
+        (row or {}).get("requested_item_name")
+        or (row or {}).get("raw_name")
+        or (row or {}).get("item_name")
+        or (row or {}).get("raw_line")
+    )
+
+
+def _guard_item_tokens(row):
+    stopwords = {"and", "for", "from", "of", "supply", "the"}
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", _guard_item_name(row).lower())
+        if len(token) > 1 and token not in stopwords
+    }
+
+
+def _guard_decimal(value):
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def prefer_safe_ai_preview(deterministic_preview, ai_preview):
+    """Keep a small, strong deterministic parse when AI loses source data."""
+
+    deterministic_rows = list((deterministic_preview or {}).get("lines") or [])
+    ai_rows = list((ai_preview or {}).get("lines") or [])
+    if not 1 <= len(deterministic_rows) <= 10:
+        return ai_preview
+
+    strong_rows = [
+        row
+        for row in deterministic_rows
+        if _safe_float((row or {}).get("parse_confidence"), default=0.0) >= 0.80
+        and _guard_decimal((row or {}).get("quantity")) is not None
+        and _guard_item_tokens(row)
+    ]
+    if not strong_rows:
+        return ai_preview
+
+    unsafe = False
+    used_ai_rows = set()
+    for deterministic_row in strong_rows:
+        deterministic_tokens = _guard_item_tokens(deterministic_row)
+        ranked = sorted(
+            (
+                (
+                    len(deterministic_tokens & _guard_item_tokens(ai_row)) / len(deterministic_tokens),
+                    index,
+                    ai_row,
+                )
+                for index, ai_row in enumerate(ai_rows)
+                if index not in used_ai_rows
+            ),
+            key=lambda value: value[0],
+            reverse=True,
+        )
+        if not ranked or ranked[0][0] < 0.60:
+            unsafe = True
+            break
+        used_ai_rows.add(ranked[0][1])
+        ai_row = ranked[0][2]
+        for field in ("quantity", "unit_price", "line_total"):
+            deterministic_value = _guard_decimal(deterministic_row.get(field))
+            if deterministic_value is None:
+                continue
+            ai_value = _guard_decimal(ai_row.get(field))
+            if ai_value is None or ai_value != deterministic_value:
+                unsafe = True
+                break
+        if unsafe:
+            break
+
+    if not unsafe:
+        return ai_preview
+
+    fallback = dict(deterministic_preview or {})
+    fallback["warnings"] = list(
+        dict.fromkeys(
+            [
+                *((deterministic_preview or {}).get("warnings") or []),
+                *((ai_preview or {}).get("warnings") or []),
+                AI_DETERMINISTIC_GUARD_WARNING,
+            ]
+        )
+    )
+    fallback["meta"] = {
+        **((deterministic_preview or {}).get("meta") or {}),
+        "ai_cleanup_rejected": True,
+        "ai_cleanup_rejection_reason": "deterministic_item_data_changed",
+    }
+    fallback["ai_status"] = AI_STATUS_FAILED
+    fallback["ai_status_label"] = "AI cleanup rejected; deterministic extraction kept."
+    return fallback
 
 
 def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_vision=True):

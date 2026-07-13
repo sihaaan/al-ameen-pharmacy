@@ -10,7 +10,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
-from .ai_parsing import AIParseError, clean_preview_with_ai
+from .ai_parsing import AIParseError, clean_preview_with_ai, prefer_safe_ai_preview
 from .contract_intelligence import (
     gmail_fetch_message,
     gmail_fetch_message_metadata,
@@ -1227,7 +1227,14 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
         warnings = list(preview.get("warnings") or [])
         if use_ai:
             try:
-                preview = clean_preview_with_ai(preview, actor=actor, requested_mode="auto", allow_vision=True)
+                deterministic_preview = preview
+                ai_preview = clean_preview_with_ai(
+                    deterministic_preview,
+                    actor=actor,
+                    requested_mode="auto",
+                    allow_vision=True,
+                )
+                preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
             except AIParseError as exc:
                 warnings.append(str(exc))
         warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
