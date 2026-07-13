@@ -459,9 +459,17 @@ def outcome_summary_for_quotation(quotation):
     }
 
 
+def _text_match_normalize(value):
+    text = normalize_label(value)
+    text = re.sub(r"[-–—_]+", " ", text)
+    text = re.sub(r"(?<=[a-z])/(?=[a-z])", " ", text)
+    text = re.sub(r"[(),:;]+", " ", text)
+    return normalize_label(text)
+
+
 def _text_match_score(left, right):
-    left_norm = normalize_label(left)
-    right_norm = normalize_label(right)
+    left_norm = _text_match_normalize(left)
+    right_norm = _text_match_normalize(right)
     if not left_norm or not right_norm:
         return 0
     if left_norm == right_norm:

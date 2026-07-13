@@ -373,6 +373,31 @@ class LPOOutcomeGuardRegressionTests(TestCase):
         self.assertEqual(unmatched, [])
         self.assertEqual(missing, [])
 
+    def test_item_matching_ignores_name_separator_punctuation(self):
+        quoted_line = self.add_line("MED-SAVOY BURN SPRAY")
+
+        for po_name in (
+            "Med - Savoy Burn Spray",
+            "Med – Savoy Burn Spray",
+            "Med—Savoy Burn Spray",
+            "Med_Savoy Burn Spray",
+            "Med/Savoy Burn Spray",
+            "Med (Savoy) Burn Spray",
+            "Med, Savoy: Burn Spray",
+        ):
+            with self.subTest(po_name=po_name):
+                suggestions, unmatched, missing = build_po_outcome_suggestions(
+                    self.quotation,
+                    {"lines": [{"raw_name": po_name, "quantity": "6"}]},
+                )
+
+                self.assertEqual(len(suggestions), 1)
+                self.assertEqual(suggestions[0]["quotation_line_id"], quoted_line.id)
+                self.assertEqual(suggestions[0]["po_quantity"], "6")
+                self.assertEqual(suggestions[0]["confidence"], 99)
+                self.assertEqual(unmatched, [])
+                self.assertEqual(missing, [])
+
     def test_ai_cannot_reduce_strong_quotation_line_coverage(self):
         jacket_line = self.add_line("Fire Warden Jacket", sort_order=1)
         water_line = self.add_line("Small Drinking Water 500ml", sort_order=2)
