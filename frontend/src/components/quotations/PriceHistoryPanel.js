@@ -8,11 +8,11 @@ const formatUnitMoney = (value, currency = 'AED') => `${currency || 'AED'} ${Num
   maximumFractionDigits: 3,
 })}`;
 
-const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
+const PriceHistoryPanel = ({ companyId = '', productId = '' }) => {
   const [history, setHistory] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [items, setItems] = useState([]);
-  const [filters, setFilters] = useState({ company: companyId, item: itemId });
+  const [filters, setFilters] = useState({ company: String(companyId || ''), product: String(productId || '') });
   const [loading, setLoading] = useState(true);
   const [errorInfo, setErrorInfo] = useState(null);
 
@@ -23,7 +23,7 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
       const [historyRes, companiesRes, itemsRes] = await Promise.all([
         quotationAPI.priceHistory.list({
           company: filters.company || undefined,
-          item: filters.item || undefined,
+          product: filters.product || undefined,
         }),
         quotationAPI.companies.list(),
         quotationAPI.items.list(),
@@ -42,7 +42,15 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
     } finally {
       setLoading(false);
     }
-  }, [filters.company, filters.item]);
+  }, [filters.company, filters.product]);
+
+  useEffect(() => {
+    setFilters((current) => ({
+      ...current,
+      company: String(companyId || ''),
+      product: String(productId || ''),
+    }));
+  }, [companyId, productId]);
 
   useEffect(() => {
     load();
@@ -72,7 +80,7 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
               setFilters((current) => ({ ...current, company: String(company.id) }));
             }}
           />
-          <select className="qm-input" value={filters.item} onChange={(event) => setFilters({ ...filters, item: event.target.value })}>
+          <select className="qm-input" value={filters.product} onChange={(event) => setFilters({ ...filters, product: event.target.value })}>
             <option value="">All items</option>
             {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
@@ -80,6 +88,8 @@ const PriceHistoryPanel = ({ companyId = '', itemId = '' }) => {
       </div>
       {loading ? (
         <div className="qm-loading">Loading price history...</div>
+      ) : history.length === 0 ? (
+        <div className="qm-empty">No quoted prices match these filters yet.</div>
       ) : (
         <div className="qm-table-wrap">
           <table className="qm-table">

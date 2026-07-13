@@ -12,7 +12,7 @@
     "axios": "^1.11.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "react-router-dom": "^7.9.4",
+    "react-router-dom": "6.30.4",
     "react-scripts": "5.0.1",
     "serve": "^14.2.5",
     "web-vitals": "^2.1.4"
@@ -21,6 +21,7 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
+    "test:ci": "react-scripts test --watchAll=false --runInBand",
     "eject": "react-scripts eject",
     "serve": "serve -s build -l 3000"
   },

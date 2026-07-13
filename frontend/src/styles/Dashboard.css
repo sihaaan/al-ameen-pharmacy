@@ -1775,6 +1775,62 @@
   color: #ef4444;
 }
 
+.pm-duplicate-warning {
+  margin: 20px 24px 0;
+  padding: 14px;
+  border: 1px solid #f2cc72;
+  border-radius: 10px;
+  background: #fffbeb;
+  color: #78350f;
+}
+
+.pm-duplicate-warning.blocked {
+  border-color: #f4a6a6;
+  background: #fff1f2;
+  color: #9f1239;
+}
+
+.pm-duplicate-warning h3,
+.pm-duplicate-warning p {
+  margin: 0 0 8px;
+}
+
+.pm-duplicate-candidates {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0;
+}
+
+.pm-duplicate-candidates button {
+  border: 1px solid #d5dfdc;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px 11px;
+  color: #134e4a;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pm-duplicate-candidates button:hover {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.pm-duplicate-candidates strong,
+.pm-duplicate-candidates small {
+  display: block;
+}
+
+.pm-duplicate-candidates small {
+  margin-top: 3px;
+  color: #64748b;
+}
+
+.pm-btn-warning {
+  border-color: #d97706;
+  color: #92400e;
+}
+
 /* Quick Create */
 .pm-quick-create {
   margin-top: 12px;

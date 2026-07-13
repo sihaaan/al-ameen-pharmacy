@@ -14,12 +14,15 @@ const QuoteItemManager = () => {
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
-  const load = async () => {
+  const load = async (selectedId = null) => {
     setLoading(true);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.items.list();
       setItems(response.data);
+      if (selectedId) {
+        setSelectedItem(response.data.find((item) => String(item.id) === String(selectedId)) || null);
+      }
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotation products', 'GET /quotations/items/');
       setErrorInfo(details);
@@ -61,9 +64,8 @@ const QuoteItemManager = () => {
   };
 
   const handleProductSaved = async (product) => {
-    setSelectedItem(product || null);
     setNotice({ type: 'success', message: product?.status === 'active' ? 'Product saved and visible publicly.' : 'Draft/internal product saved for quotations.' });
-    await load();
+    await load(product?.id || null);
   };
 
   const deleteOrArchive = async (item = selectedItem) => {

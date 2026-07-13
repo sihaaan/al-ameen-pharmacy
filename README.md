@@ -46,11 +46,11 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 - **Gmail SMTP** — Transactional emails (password reset)
 - **Gunicorn** + **WhiteNoise** — Production WSGI server and static file serving
 - **Railway** — Deployment with smart migration runner
-- **Python 3.13**
+- **Python 3.12** (deployment runtime: 3.12.8)
 
 ### Frontend
 - **React 19**
-- **React Router v7**
+- **React Router 6.30**
 - **Axios** with JWT interceptors
 - **Context API** — `AuthContext`, `CartContext`
 - **Stripe SDK** — `@stripe/react-stripe-js` installed; Order model has Stripe fields (payment not yet live)
@@ -60,8 +60,8 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 
 ## Prerequisites
 
-- Python 3.13+
-- Node.js 18+
+- Python 3.12
+- Node.js 20
 - PostgreSQL database (Neon free tier works)
 - Cloudinary account (free tier works)
 - Git
@@ -75,10 +75,10 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 ```bash
 cd backend
 python -m venv .venv
-source .venv/Scripts/activate   # Windows Git Bash
-# .venv\Scripts\activate.bat    # Windows CMD
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
 
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — use SQLite/local PostgreSQL for development and fill in local credentials
 #
@@ -97,11 +97,44 @@ Backend: http://localhost:8000
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm start
 ```
 
 Frontend: http://localhost:3000
+
+---
+
+## Quality Checks
+
+Run these commands before opening a pull request. They mirror the checks in
+`.github/workflows/ci.yml`.
+
+### Backend
+
+```bash
+cd backend
+python manage.py makemigrations --check --dry-run
+python manage.py check
+python manage.py test --keepdb
+```
+
+Use a Django test label for a focused run, for example:
+
+```bash
+python manage.py test quotations.test_price_history_context
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm ci
+npm run test:ci
+npm run build
+```
+
+`npm test` remains available for interactive watch mode during development.
 
 ---
 
@@ -289,10 +322,15 @@ DATABASE_URL=sqlite:///db.sqlite3
 DJANGO_SECRET_KEY=...
 DEBUG=True
 ALLOWED_HOSTS=127.0.0.1,localhost
+FRONTEND_URL=http://localhost:3000
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 CLOUDINARY_URL=cloudinary://...
 EMAIL_HOST_USER=...
 EMAIL_HOST_PASSWORD=...
+# Optional read-only Gmail OAuth for quotation/LPO discovery:
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/quotations/gmail/oauth/callback/
 ```
 
 **Database safety:** Do not point local `backend/.env` at the production Neon
@@ -306,7 +344,6 @@ Neon dev database.
 
 ```env
 REACT_APP_API_URL=http://localhost:8000/api
-CI=false
 ```
 
 ---

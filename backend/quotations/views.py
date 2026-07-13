@@ -7,7 +7,8 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, F, Prefetch, Q, Window
+from django.db.models.functions import RowNumber
 from django.http import HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -39,6 +40,7 @@ from .company_matching import find_similar_companies
 from .contract_intelligence import (
     build_contract_intelligence_export,
     build_gmail_auth_url,
+    can_manage_shared_gmail,
     clean_contract_run_items,
     discover_contract_sources,
     disconnect_gmail,
@@ -46,12 +48,13 @@ from .contract_intelligence import (
     gmail_frontend_redirect_url,
     gmail_oauth_configured,
     parse_gmail_oauth_state,
+    resolve_gmail_connection,
     refresh_contract_run_summary,
     analyze_contract_run,
 )
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
-from .matching import apply_match_to_preview_line
+from .matching import apply_match_to_preview_line, create_or_reuse_product
 from .models import (
     Company,
     CompanyContact,
@@ -437,15 +440,13 @@ class GmailConnectionView(APIView):
     permission_classes = [IsQuotationStaff]
 
     def get(self, request):
-        try:
-            connection = request.user.quotation_gmail_connection
-        except GmailOAuthConnection.DoesNotExist:
-            connection = None
+        connection = resolve_gmail_connection(request.user, connected_only=False)
         return Response(
             {
                 "configured": gmail_oauth_configured(),
                 "scope": "https://www.googleapis.com/auth/gmail.readonly",
                 "connection": GmailOAuthConnectionSerializer(connection).data if connection else None,
+                "can_manage": can_manage_shared_gmail(request.user, connection),
                 "railway_env_vars": [
                     "GOOGLE_OAUTH_CLIENT_ID",
                     "GOOGLE_OAUTH_CLIENT_SECRET",
@@ -455,18 +456,26 @@ class GmailConnectionView(APIView):
         )
 
     def post(self, request):
+        connection = resolve_gmail_connection(request.user, connected_only=False, shared_only=True)
+        if not can_manage_shared_gmail(request.user, connection):
+            return Response(
+                {"detail": "Only the shared Gmail credential owner or a superuser can replace the mailbox."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             return Response({"auth_url": build_gmail_auth_url(request.user, request)})
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request):
-        try:
-            connection = request.user.quotation_gmail_connection
-        except GmailOAuthConnection.DoesNotExist:
-            connection = None
+        connection = resolve_gmail_connection(request.user, connected_only=False)
         if not connection:
             return Response({"detail": "Gmail is not connected."}, status=status.HTTP_400_BAD_REQUEST)
+        if not can_manage_shared_gmail(request.user, connection):
+            return Response(
+                {"detail": "Only the shared Gmail credential owner or a superuser can disconnect the mailbox."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         disconnect_gmail(connection)
         return Response({"detail": "Gmail disconnected."})
 
@@ -1085,6 +1094,237 @@ class QuotationFollowupsView(APIView):
         )
 
 
+PRICE_CONTEXT_HISTORY_DEFAULT = 10
+PRICE_CONTEXT_HISTORY_MAX = 50
+
+
+def _positive_pk(value):
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _filter_price_history_item(queryset, params):
+    """Apply Product-first, typed filters without mixing Product and QuoteItem IDs."""
+    product_value = params.get("product")
+    quote_item_value = params.get("quote_item")
+    compatibility_value = params.get("item")
+
+    if product_value not in (None, ""):
+        product_id = _positive_pk(product_value)
+        queryset = queryset.filter(product_id=product_id) if product_id else queryset.none()
+    if quote_item_value not in (None, ""):
+        quote_item_id = _positive_pk(quote_item_value)
+        queryset = queryset.filter(quote_item_id=quote_item_id) if quote_item_id else queryset.none()
+
+    # `item` used to OR together two unrelated ID namespaces. Runtime item
+    # selectors now contain Products, so keep `item` compatible as Product-only.
+    # Old callers can still request QuoteItem rows explicitly with
+    # `item_type=quote_item` (or the typed `quote_item` parameter above).
+    if (
+        product_value in (None, "")
+        and quote_item_value in (None, "")
+        and compatibility_value not in (None, "")
+    ):
+        item_id = _positive_pk(compatibility_value)
+        if not item_id:
+            return queryset.none()
+        if params.get("item_type") == "quote_item":
+            return queryset.filter(quote_item_id=item_id)
+        return queryset.filter(product_id=item_id)
+    return queryset
+
+
+def _price_context_history_limit(value):
+    try:
+        requested = int(value)
+    except (TypeError, ValueError):
+        requested = PRICE_CONTEXT_HISTORY_DEFAULT
+    return min(max(requested, 1), PRICE_CONTEXT_HISTORY_MAX)
+
+
+def _price_context_date(value):
+    if not value:
+        return None
+    if isinstance(value, datetime) and timezone.is_aware(value):
+        value = timezone.localtime(value)
+    if isinstance(value, datetime):
+        value = value.date()
+    return value.isoformat()
+
+
+def _price_context_queryset(quotation):
+    confirmed_lpos = (
+        QuotationLPO.objects.filter(status=QuotationLPO.STATUS_CONFIRMED)
+        .exclude(lpo_number="")
+        .only("id", "quotation_id", "lpo_number", "status", "received_at")
+        .order_by("-received_at", "-id")
+    )
+    return (
+        CompanyPriceHistory.objects.filter(company=quotation.company, product__isnull=False)
+        .exclude(quotation=quotation)
+        .select_related("quotation", "quotation_line")
+        .prefetch_related(
+            Prefetch(
+                "quotation__lpos",
+                queryset=confirmed_lpos,
+                to_attr="confirmed_lpos_for_price_context",
+            )
+        )
+    )
+
+
+def _price_context_row(entry):
+    quotation = entry.quotation
+    line = entry.quotation_line
+    is_accepted = (
+        line.outcome_status
+        in {QuotationLine.OUTCOME_ACCEPTED, QuotationLine.OUTCOME_QUANTITY_CHANGED}
+        and line.accepted_unit_price is not None
+    )
+    confirmed_lpos = (
+        getattr(quotation, "confirmed_lpos_for_price_context", [])
+        if is_accepted
+        else []
+    )
+    accepted_at = None
+    if is_accepted:
+        accepted_at = quotation.outcome_date or quotation.outcome_last_updated_at or line.updated_at
+    return {
+        "quotation": quotation.id,
+        "quotation_number": quotation.quotation_number,
+        "quoted_at": _price_context_date(entry.quoted_at),
+        "quoted_unit_price": format_unit_price_value(entry.unit_price),
+        "quantity": str(entry.quantity),
+        "unit": entry.unit or "",
+        "currency": entry.currency,
+        "outcome_status": line.outcome_status,
+        "accepted_unit_price": format_unit_price_value(line.accepted_unit_price) if is_accepted else None,
+        "accepted_quantity": str(line.accepted_quantity) if is_accepted and line.accepted_quantity is not None else None,
+        "accepted_at": _price_context_date(accepted_at),
+        "lpo_number": confirmed_lpos[0].lpo_number if confirmed_lpos else "",
+    }
+
+
+def _accepted_price_ordering():
+    return [
+        F("quotation__outcome_date").desc(nulls_last=True),
+        F("quotation__outcome_last_updated_at").desc(nulls_last=True),
+        F("quotation_line__updated_at").desc(nulls_last=True),
+        F("quoted_at").desc(),
+        F("id").desc(),
+    ]
+
+
+def _product_price_context_payload(quotation, product, history_entries, latest_accepted_entry):
+    history_rows = [_price_context_row(entry) for entry in history_entries]
+    latest_quoted = history_rows[0] if history_rows else None
+    latest_accepted = _price_context_row(latest_accepted_entry) if latest_accepted_entry else None
+
+    if latest_quoted:
+        return {
+            "product": product.id,
+            "product_name": product.name,
+            "unit_price": latest_quoted["quoted_unit_price"],
+            "unit": latest_quoted["unit"],
+            "currency": latest_quoted["currency"],
+            "source": "company_price_history",
+            "source_label": f"Latest {quotation.company.name} price",
+            "quoted_at": latest_quoted["quoted_at"],
+            "latest_quoted": latest_quoted,
+            "latest_accepted": latest_accepted,
+            "history": history_rows,
+        }
+
+    return {
+        "product": product.id,
+        "product_name": product.name,
+        "unit_price": "",
+        "unit": "",
+        "currency": quotation.currency,
+        "source": "no_company_price_history",
+        "source_label": f"No previous {quotation.company.name} price",
+        "quoted_at": "",
+        "latest_quoted": None,
+        "latest_accepted": None,
+        "history": [],
+    }
+
+
+def _build_product_price_context(quotation, product, history_limit):
+    history_queryset = _price_context_queryset(quotation).filter(product=product)
+    history_entries = list(history_queryset.order_by("-quoted_at", "-id")[:history_limit])
+    latest_accepted_entry = (
+        history_queryset.filter(
+            quotation_line__outcome_status__in=[
+                QuotationLine.OUTCOME_ACCEPTED,
+                QuotationLine.OUTCOME_QUANTITY_CHANGED,
+            ],
+            quotation_line__accepted_unit_price__isnull=False,
+        )
+        .order_by(*_accepted_price_ordering())
+        .first()
+    )
+    return _product_price_context_payload(
+        quotation,
+        product,
+        history_entries,
+        latest_accepted_entry,
+    )
+
+
+def _build_product_price_contexts(quotation, products_by_id, product_ids, history_limit):
+    history_queryset = _price_context_queryset(quotation).filter(product_id__in=product_ids)
+    history_entries = list(
+        history_queryset.annotate(
+            price_context_rank=Window(
+                expression=RowNumber(),
+                partition_by=[F("product_id")],
+                order_by=[F("quoted_at").desc(), F("id").desc()],
+            )
+        )
+        .filter(price_context_rank__lte=history_limit)
+        .order_by("product_id", "-quoted_at", "-id")
+    )
+    latest_accepted_entries = list(
+        history_queryset.filter(
+            quotation_line__outcome_status__in=[
+                QuotationLine.OUTCOME_ACCEPTED,
+                QuotationLine.OUTCOME_QUANTITY_CHANGED,
+            ],
+            quotation_line__accepted_unit_price__isnull=False,
+        )
+        .annotate(
+            accepted_price_rank=Window(
+                expression=RowNumber(),
+                partition_by=[F("product_id")],
+                order_by=_accepted_price_ordering(),
+            )
+        )
+        .filter(accepted_price_rank=1)
+        .order_by("product_id")
+    )
+
+    history_by_product = {product_id: [] for product_id in product_ids}
+    for entry in history_entries:
+        history_by_product[entry.product_id].append(entry)
+    latest_accepted_by_product = {entry.product_id: entry for entry in latest_accepted_entries}
+
+    return {
+        str(product_id): _product_price_context_payload(
+            quotation,
+            products_by_id[product_id],
+            history_by_product[product_id],
+            latest_accepted_by_product.get(product_id),
+        )
+        for product_id in product_ids
+    }
+
+
 class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = CompanySerializer
     queryset = Company.objects.all()
@@ -1154,9 +1394,7 @@ class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         queryset = CompanyPriceHistory.objects.filter(company=company).select_related(
             "company", "product", "quote_item", "quotation", "created_by"
         )
-        item_id = request.query_params.get("item")
-        if item_id:
-            queryset = queryset.filter(Q(product_id=item_id) | Q(quote_item_id=item_id))
+        queryset = _filter_price_history_item(queryset, request.query_params)
         serializer = CompanyPriceHistorySerializer(queryset, many=True)
         return Response(serializer.data)
 
@@ -1213,6 +1451,32 @@ class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 | Q(quotation_lines__quotation__company_id=company_used)
             ).distinct()
         return queryset.order_by("name")
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        values = dict(serializer.validated_data)
+        name = values.pop("name")
+        resolution = create_or_reuse_product(
+            name=name,
+            sku=values.get("sku") or "",
+            barcode=values.get("barcode") or "",
+            dosage=values.get("dosage") or "",
+            pack_size=values.get("pack_size") or "",
+            defaults=values,
+            confirm_create=str(request.data.get("confirm_create") or "").lower() in {"1", "true", "yes", "on"},
+        )
+        if resolution.requires_confirmation:
+            return Response(
+                {"detail": resolution.warning, **resolution.as_dict()},
+                status=status.HTTP_409_CONFLICT,
+            )
+        item = resolution.product
+        if resolution.created:
+            audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, item, message="Created quotation product.")
+        payload = dict(QuoteItemSerializer(item, context={"request": request}).data)
+        payload.update(resolution.as_dict())
+        return Response(payload, status=status.HTTP_201_CREATED if resolution.created else status.HTTP_200_OK)
 
     def perform_create(self, serializer):
         item = serializer.save()
@@ -1299,6 +1563,8 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         preview = parse_text_preview(raw_text, raw_html=raw_html)
         self._apply_product_matches(preview, request.data.get("company"))
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=False)
+        if preview.get("ai_candidate"):
+            self._apply_product_matches(preview["ai_candidate"], request.data.get("company"))
         return Response(preview)
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
@@ -1309,6 +1575,8 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return self.handle_workflow_error(exc)
         self._apply_product_matches(preview, request.data.get("company"))
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
+        if preview.get("ai_candidate"):
+            self._apply_product_matches(preview["ai_candidate"], request.data.get("company"))
         return Response(preview)
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
@@ -1605,34 +1873,58 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         except (Product.DoesNotExist, ValueError):
             return Response({"detail": "Selected Product was not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        history = CompanyPriceHistory.objects.filter(
-            company=quotation.company,
-            product=product,
-        ).order_by("-quoted_at", "-id").first()
-        if history:
+        history_limit = _price_context_history_limit(request.query_params.get("history_limit"))
+        return Response(_build_product_price_context(quotation, product, history_limit))
+
+    @action(detail=True, methods=["get"])
+    def product_prices(self, request, pk=None):
+        quotation = self.get_object()
+        raw_values = request.query_params.getlist("products")
+        tokens = [token.strip() for raw in raw_values for token in raw.split(",") if token.strip()]
+        product_ids = []
+        seen = set()
+        for token in tokens:
+            product_id = _positive_pk(token)
+            if not product_id:
+                return Response(
+                    {"detail": "Products must be a comma-separated list of positive IDs."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if product_id not in seen:
+                product_ids.append(product_id)
+                seen.add(product_id)
+
+        if not product_ids:
             return Response(
-                {
-                    "product": product.id,
-                    "product_name": product.name,
-                    "unit_price": format_unit_price_value(history.unit_price),
-                    "unit": history.unit or "",
-                    "currency": history.currency,
-                    "source": "company_price_history",
-                    "source_label": f"Latest {quotation.company.name} price",
-                    "quoted_at": history.quoted_at.date().isoformat(),
-                }
+                {"detail": "Select at least one Product before requesting prices."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(product_ids) > 100:
+            return Response(
+                {"detail": "Request price context for at most 100 Products at a time."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+        products_by_id = Product.objects.in_bulk(product_ids)
+        missing_product_ids = [product_id for product_id in product_ids if product_id not in products_by_id]
+        if missing_product_ids:
+            return Response(
+                {
+                    "detail": "One or more selected Products were not found.",
+                    "missing_product_ids": missing_product_ids,
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        history_limit = _price_context_history_limit(request.query_params.get("history_limit"))
         return Response(
             {
-                "product": product.id,
-                "product_name": product.name,
-                "unit_price": "",
-                "unit": "",
-                "currency": quotation.currency,
-                "source": "no_company_price_history",
-                "source_label": f"No previous {quotation.company.name} price",
-                "quoted_at": "",
+                "results": _build_product_price_contexts(
+                    quotation,
+                    products_by_id,
+                    product_ids,
+                    history_limit,
+                )
             }
         )
 
@@ -1808,6 +2100,8 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 evidence,
                 request.user,
                 use_ai=str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"},
+                link_approved=str(request.data.get("approve_link", "false")).lower()
+                in {"1", "true", "yes", "on"},
             )
         except quotation.po_evidence.model.DoesNotExist:
             return Response({"detail": "Select a valid Gmail evidence candidate."}, status=status.HTTP_400_BAD_REQUEST)
@@ -2012,6 +2306,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 line_ids,
                 request.user,
                 names_by_id=request.data.get("names") or {},
+                confirm_create_line_ids=_request_int_list(request.data, "confirm_create_line_ids"),
             )
         except Exception as exc:
             return self.handle_safe_workflow_exception(exc, "Create Products from quote lines failed. Check selected line IDs and Product names.")
@@ -2022,9 +2317,16 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 "created_products": summary["created_products"],
                 "reused_products": summary["reused_products"],
                 "unique_products": summary["unique_products"],
+                "confirmation_required": summary["confirmation_required"],
+                "resolutions": summary["resolutions"],
                 "message": (
                     f"Linked {len(summary['updated_lines'])} line(s) to "
                     f"{summary['unique_products']} Product(s)."
+                    + (
+                        f" {len(summary['confirmation_required'])} line(s) need confirmation before creating a new Product."
+                        if summary["confirmation_required"]
+                        else ""
+                    )
                 ),
             }
         )
@@ -2387,18 +2689,31 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def create_product(self, request, pk=None):
         try:
-            line, product, created = create_product_from_quotation_line(
+            line, resolution = create_product_from_quotation_line(
                 self.get_object(),
                 request.user,
                 product_name=request.data.get("product_name") or "",
+                confirm_create=str(request.data.get("confirm_create") or "").lower() in {"1", "true", "yes", "on"},
             )
         except Exception as exc:
             return self.handle_safe_workflow_exception(exc, "Create Product from quote line failed. Check the Product name and line status.")
+        if resolution.requires_confirmation:
+            return Response(
+                {
+                    "detail": resolution.warning,
+                    **resolution.as_dict(),
+                    "line": QuotationLineSerializer(line, context={"request": request}).data,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        product = resolution.product
+        created = resolution.created
         return Response(
             {
                 "line": QuotationLineSerializer(line, context={"request": request}).data,
                 "product": QuoteItemSerializer(product, context={"request": request}).data,
                 "created": created,
+                **resolution.as_dict(),
                 "message": (
                     f"Created draft/internal Product '{product.name}' and linked the row."
                     if created
@@ -2897,6 +3212,7 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 historical_import,
                 self._bulk_row_ids(request),
                 request.user,
+                confirm_create_row_ids=_request_int_list(request.data, "confirm_create_row_ids"),
             )
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
@@ -3059,12 +3375,9 @@ class CompanyPriceHistoryViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelVie
     def get_queryset(self):
         queryset = super().get_queryset()
         company_id = self.request.query_params.get("company")
-        item_id = self.request.query_params.get("item")
         if company_id:
             queryset = queryset.filter(company_id=company_id)
-        if item_id:
-            queryset = queryset.filter(Q(product_id=item_id) | Q(quote_item_id=item_id))
-        return queryset
+        return _filter_price_history_item(queryset, self.request.query_params)
 
 
 class QuotationAuditLogViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):

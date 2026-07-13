@@ -1,0 +1,205 @@
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import QuotationEditor from './QuotationEditor';
+import quotationAPI from '../../api/quotations';
+
+jest.mock('../../api/quotations', () => ({
+  __esModule: true,
+  default: {
+    quotes: {
+      retrieve: jest.fn(),
+      productPrices: jest.fn(),
+      productPrice: jest.fn(),
+      lpos: jest.fn(),
+      bulkUpdateLines: jest.fn(),
+      bulkCreateProductsForLines: jest.fn(),
+    },
+    items: { list: jest.fn() },
+    companies: { list: jest.fn(), create: jest.fn() },
+    contacts: { list: jest.fn(), create: jest.fn() },
+    auditLogs: { list: jest.fn() },
+    lines: { createProduct: jest.fn(), rememberAlias: jest.fn() },
+  },
+  describeQuotationError: jest.fn(async (error, action, endpoint) => ({
+    action,
+    endpoint,
+    status: error?.response?.status || 'Network error',
+    detail: error?.message || 'Request failed',
+  })),
+  formatQuotationError: jest.fn(() => 'Request failed'),
+}));
+
+const products = [
+  { id: 11, name: 'Gloves A', unit: 'box', primary_image_url: '' },
+  { id: 12, name: 'Gloves B', unit: 'box', primary_image_url: '' },
+];
+
+const quote = {
+  id: 21,
+  quotation_number: 'Q-0021',
+  company: 7,
+  company_name: 'Customer A',
+  contact: null,
+  contact_name: '',
+  status: 'draft',
+  status_display: 'Draft',
+  version: 1,
+  currency: 'AED',
+  payment_terms: 'as_per_agreement',
+  valid_until: '2026-08-01',
+  subtotal: '0.00',
+  total: '0.00',
+  lines: [{
+    id: 31,
+    sort_order: 0,
+    product: null,
+    item_name_snapshot: 'Imported gloves',
+    description: '',
+    quantity: '1.000',
+    unit: 'box',
+    unit_price: '',
+    vat_rate: '0.000',
+    match_status: 'unresolved',
+    notes: '',
+  }],
+};
+
+const priceContext = (product, productName, price) => ({
+  product,
+  product_name: productName,
+  unit_price: String(price),
+  currency: 'AED',
+  source: 'company_price_history',
+  latest_quoted: {
+    quotation: product,
+    quotation_number: `Q-${product}`,
+    quoted_at: '2026-06-01',
+    quoted_unit_price: String(price),
+    quantity: '1.000',
+    unit: 'box',
+    currency: 'AED',
+    outcome_status: 'accepted',
+    accepted_unit_price: String(Number(price) - 1),
+    accepted_quantity: '1.000',
+    accepted_at: '2026-06-02',
+    lpo_number: `LPO-${product}`,
+  },
+  latest_accepted: {
+    quotation: product,
+    quotation_number: `Q-${product}`,
+    quoted_at: '2026-06-01',
+    quoted_unit_price: String(price),
+    quantity: '1.000',
+    unit: 'box',
+    currency: 'AED',
+    outcome_status: 'accepted',
+    accepted_unit_price: String(Number(price) - 1),
+    accepted_quantity: '1.000',
+    accepted_at: '2026-06-02',
+    lpo_number: `LPO-${product}`,
+  },
+  history: [],
+});
+
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+describe('QuotationEditor Product price context', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: quote });
+    quotationAPI.quotes.productPrices.mockResolvedValue({ data: { results: {} } });
+    quotationAPI.quotes.lpos.mockResolvedValue({ data: [] });
+    quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
+      data: params?.company_used ? [products[0]] : products,
+    }));
+    quotationAPI.companies.list.mockResolvedValue({ data: [{ id: 7, name: 'Customer A' }] });
+    quotationAPI.contacts.list.mockResolvedValue({ data: [] });
+    quotationAPI.auditLogs.list.mockResolvedValue({ data: [] });
+    quotationAPI.lines.rememberAlias.mockResolvedValue({ data: {} });
+  });
+
+  test('shows the full catalog and ignores an older Product lookup that resolves last', async () => {
+    const first = deferred();
+    const second = deferred();
+    quotationAPI.quotes.productPrice
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const productSelect = await screen.findByLabelText('Product for Imported gloves');
+    expect(within(productSelect).getByRole('option', { name: 'Gloves B' })).toBeInTheDocument();
+
+    fireEvent.change(productSelect, { target: { value: '11' } });
+    fireEvent.change(productSelect, { target: { value: '12' } });
+
+    await act(async () => second.resolve({ data: priceContext(12, 'Gloves B', 22) }));
+    const priceInput = await screen.findByLabelText('Unit price for Gloves B');
+    await waitFor(() => expect(priceInput).toHaveValue(22));
+    expect(within(screen.getByRole('dialog', { name: /price history/i })).getByText(/Gloves B/)).toBeInTheDocument();
+
+    await act(async () => first.resolve({ data: priceContext(11, 'Gloves A', 10) }));
+    expect(priceInput).toHaveValue(22);
+    expect(within(screen.getByRole('dialog', { name: /price history/i })).getByText(/Gloves B/)).toBeInTheDocument();
+  });
+
+  test('never overwrites a price typed while history is loading', async () => {
+    const request = deferred();
+    quotationAPI.quotes.productPrice.mockImplementationOnce(() => request.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    const priceInput = await screen.findByLabelText('Unit price for Gloves A');
+    fireEvent.change(priceInput, { target: { value: '73' } });
+
+    await act(async () => request.resolve({ data: priceContext(11, 'Gloves A', 10) }));
+    await waitFor(() => expect(priceInput).toHaveValue(73));
+    expect(screen.getByText(/current price kept/i)).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: /price history/i })).toBeInTheDocument();
+  });
+
+  test('warns about a similar Product and only creates after an explicit override', async () => {
+    quotationAPI.lines.createProduct.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          detail: 'A similar Product exists.',
+          warning: 'A similar Product exists.',
+          requires_confirmation: true,
+          creation_blocked: false,
+          candidates: [{
+            product_id: 11,
+            product_name: 'Gloves A',
+            confidence: 0.92,
+            pack_size: 'box',
+          }],
+        },
+      },
+    });
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValue({
+      data: {
+        updated_lines: [{ ...quote.lines[0], product: 13, product_name: 'Imported gloves', match_status: 'confirmed' }],
+        confirmation_required: [],
+        message: 'Created and linked one Product.',
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+
+    expect(await screen.findByText('Likely existing Product found')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Use Gloves A/i })).toBeInTheDocument();
+    const override = screen.getByRole('button', { name: /Create new Product anyway/i });
+    await waitFor(() => expect(override).toBeEnabled());
+    fireEvent.click(override);
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenCalledWith(21, {
+      line_ids: [31],
+      names: { 31: 'Imported gloves' },
+      confirm_create_line_ids: [31],
+    }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+  });
+});

@@ -1,6 +1,7 @@
 import axiosInstance from '../utils/axios';
+import { API_BASE_URL } from '../config';
 
-const apiBaseURL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+const apiBaseURL = API_BASE_URL;
 
 const stringifyBackendData = (data) => {
   if (!data) return '';
@@ -182,6 +183,7 @@ const quotationAPI = {
     bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_update_lines/`, data),
     bulkCreateProductsForLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_create_products_for_lines/`, data),
     productPrice: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_price/`, { params }),
+    productPrices: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_prices/`, { params }),
     lpos: (id) => axiosInstance.get(`/quotations/quotes/${id}/lpos/`),
     uploadLpo: (id, data, isMultipart = false) => axiosInstance.post(
       `/quotations/quotes/${id}/upload_lpo/`,

@@ -930,7 +930,7 @@ class QuotationWorkflowTests(APITestCase):
 
         response = self.client.post(
             reverse("quotation-parse-po-evidence", args=[quotation.id]),
-            {"evidence_id": evidence.id, "use_ai": "false"},
+            {"evidence_id": evidence.id, "use_ai": "false", "approve_link": True},
             format="json",
         )
 
@@ -1558,14 +1558,15 @@ class ProductCatalogMatchingTests(APITestCase):
         self.assertEqual(match.product, self.product_a)
         self.assertEqual(match.method, "global_alias")
 
-    def test_company_safe_preview_matching_requires_alias_or_company_history(self):
+    def test_company_preview_matching_falls_back_to_catalog_then_prefers_company_history(self):
         exact_catalog_product = Product.objects.create(name="Pulse Oxmeter", price=Decimal("1.00"), status="draft")
         line = {"raw_name": "Pulse Oxmeter"}
 
         apply_match_to_preview_line(line, self.company_a)
 
-        self.assertIsNone(line["matched_product"])
-        self.assertEqual(line["match_status"], "unresolved")
+        self.assertEqual(line["matched_product"], exact_catalog_product.id)
+        self.assertEqual(line["match_status"], "confirmed")
+        self.assertEqual(line["match_method"], "canonical_name")
 
         quotation = Quotation.objects.create(company=self.company_a, created_by=self.staff)
         quotation_line = QuotationLine.objects.create(

@@ -23,7 +23,7 @@ from .ai_parsing import (
     get_ai_parse_provider,
     settings_ai_status,
 )
-from .matching import create_product_alias, product_catalog_queryset, suggest_product_for_text
+from .matching import create_or_reuse_product, create_product_alias, product_catalog_queryset, suggest_product_for_text
 from .models import (
     Company,
     CompanyPriceHistory,
@@ -246,10 +246,24 @@ def _historical_noise_reason(line):
 
 
 def _candidate_products_for_line(line, company=None):
-    seen = {}
-    match = suggest_product_for_text(line.item_name, company)
-    if match.product:
-        seen[match.product.id] = match.product
+    ranked = []
+    seen = set()
+    match = suggest_product_for_text(line.item_name, company, unit=line.unit or "")
+    for candidate in match.candidates:
+        if candidate.product.id in seen:
+            continue
+        seen.add(candidate.product.id)
+        ranked.append(
+            {
+                **_product_payload(candidate.product),
+                "match_score": round(float(candidate.score), 3),
+                "match_method": candidate.method,
+                "match_reason": candidate.reason,
+                "price_context": _product_price_context(candidate.product, company),
+            }
+        )
+        if len(ranked) >= MAX_CANDIDATES_PER_ROW:
+            return ranked
 
     terms = [token for token in normalize_label(line.item_name).split() if len(token) >= 4][:5]
     query = Q()
@@ -257,14 +271,22 @@ def _candidate_products_for_line(line, company=None):
         query |= Q(name__icontains=token) | Q(sku__icontains=token) | Q(barcode__icontains=token)
     if query:
         for product in product_catalog_queryset().filter(query).order_by("name")[:12]:
-            seen.setdefault(product.id, product)
-            if len(seen) >= MAX_CANDIDATES_PER_ROW:
+            if product.id in seen:
+                continue
+            seen.add(product.id)
+            ranked.append(
+                {
+                    **_product_payload(product),
+                    "match_score": 0.0,
+                    "match_method": "catalog_search",
+                    "match_reason": "Catalog keyword candidate; review before selecting.",
+                    "price_context": _product_price_context(product, company),
+                }
+            )
+            if len(ranked) >= MAX_CANDIDATES_PER_ROW:
                 break
 
-    return [
-        {**_product_payload(product), "price_context": _product_price_context(product, company)}
-        for product in list(seen.values())[:MAX_CANDIDATES_PER_ROW]
-    ]
+    return ranked
 
 
 def _candidate_companies_for_import(historical_import):
@@ -747,33 +769,6 @@ def _summary_from_results(results):
     }
 
 
-def _find_existing_product_by_normalized_name(name, *, pack_size="", dosage="", unit=""):
-    normalized = normalize_label(name)
-    if not normalized:
-        return None
-    candidates = list(Product.objects.exclude(status="archived").filter(name__iexact=name.strip())[:10])
-    if not candidates:
-        candidates = [
-            product
-            for product in Product.objects.exclude(status="archived").filter(name__icontains=name.strip()[:80])[:50]
-            if normalize_label(product.name) == normalized
-        ]
-    if not candidates:
-        return None
-    desired_pack = normalize_label(pack_size or unit)
-    desired_dosage = normalize_label(dosage)
-    if desired_pack or desired_dosage:
-        for product in candidates:
-            product_pack = normalize_label(getattr(product, "pack_size", "") or "")
-            product_dosage = normalize_label(getattr(product, "dosage", "") or "")
-            if desired_pack and product_pack and desired_pack != product_pack:
-                continue
-            if desired_dosage and product_dosage and desired_dosage != product_dosage:
-                continue
-            return product
-    return candidates[0]
-
-
 def _line_units_are_compatible(source_line, target_line):
     source_unit = normalize_label(source_line.unit or "")
     target_unit = normalize_label(target_line.unit or "")
@@ -1093,26 +1088,23 @@ def _apply_one_suggestion(suggestion, actor):
 
     if suggestion.action == HistoricalImportAISuggestion.ACTION_CREATE_NEW_PRODUCT:
         name = suggestion.proposed_product_name or line.item_name
-        product = _find_existing_product_by_normalized_name(
-            name,
+        resolution = create_or_reuse_product(
+            name=name,
+            company=historical_import.company,
             pack_size=suggestion.proposed_pack_size,
             dosage=suggestion.proposed_dosage,
             unit=suggestion.proposed_unit or line.unit,
+            defaults={
+                "short_description": f"Internal quotation item approved from {historical_import.source_filename}".strip(),
+            },
+            # Applying a reviewed create-new AI suggestion is the explicit staff
+            # confirmation required to create despite similar candidates.
+            confirm_create=True,
         )
-        created = False
-        if not product:
-            product = Product.objects.create(
-                name=name[:200],
-                price=Decimal("0.01"),
-                stock_quantity=0,
-                status="draft",
-                show_price=False,
-                requires_manual_review=True,
-                pack_size=(suggestion.proposed_pack_size or suggestion.proposed_unit or line.unit)[:100],
-                dosage=suggestion.proposed_dosage[:100],
-                short_description=f"Internal quotation item approved from {historical_import.source_filename}".strip(),
-            )
-            created = True
+        if resolution.requires_confirmation or not resolution.product:
+            raise ValidationError(resolution.warning or "Select the existing Product with this SKU/barcode before applying.")
+        product = resolution.product
+        created = resolution.created
         line.product = product
         line.match_reason = "Approved AI new draft Product." if created else "Approved AI suggestion linked existing exact Product."
         line.status = _ready_or_review(line)
@@ -1121,6 +1113,9 @@ def _apply_one_suggestion(suggestion, actor):
             "product_id": product.id,
             "product_name": product.name,
             "created": created,
+            "match_method": resolution.match.method,
+            "match_confidence": resolution.match.confidence,
+            "candidates": [candidate.as_dict() for candidate in resolution.match.candidates],
             "row_status": line.status,
             "message": (
                 f"Draft Product created: {product.name}. Row is {line.status}."

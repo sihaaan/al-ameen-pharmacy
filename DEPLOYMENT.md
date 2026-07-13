@@ -25,36 +25,21 @@ Before you begin, make sure you have:
 
 ---
 
-## Part 1: Prepare Frontend for Deployment
+## Part 1: Verify the Frontend Build
 
-### Step 1: Add `serve` package to frontend
+The repository already includes the `serve` dependency, lockfile, and start
+scripts required by Railway. Verify the exact committed dependency tree and
+production build before deploying:
 
 ```bash
 cd frontend
-npm install --save serve
+npm ci
+npm run test:ci
+npm run build
 ```
 
-### Step 2: Update `package.json`
-
-Make sure your `frontend/package.json` has these scripts:
-
-```json
-{
-  "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "serve": "serve -s build -l $PORT"
-  }
-}
-```
-
-### Step 3: Commit and push
-
-```bash
-git add frontend/package.json frontend/package-lock.json
-git commit -m "Add serve package for Railway deployment"
-git push origin main
-```
+Do not run `npm install --save` as a deployment step. Dependency changes should
+be reviewed and committed separately from a release.
 
 ---
 
@@ -91,9 +76,10 @@ DATABASE_URL=postgresql://username:password@your-host.neon.tech/database?sslmode
 PRODUCTION_DATABASE_HOSTS=your-host.neon.tech
 
 # Allowed Hosts (update after getting Railway domain)
-ALLOWED_HOSTS=*.up.railway.app,localhost,127.0.0.1
+ALLOWED_HOSTS=.up.railway.app,localhost,127.0.0.1
 
 # CORS Origins (update after deploying frontend)
+FRONTEND_URL=https://pharmacy-frontend-production-xxxx.up.railway.app
 CORS_ALLOWED_ORIGINS=http://localhost:3000
 
 # Cloudinary (Cloud Image Storage)
@@ -107,9 +93,18 @@ EMAIL_USE_TLS=1
 EMAIL_HOST_USER=your-email@gmail.com
 EMAIL_HOST_PASSWORD=your-gmail-app-password
 DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <your-email@gmail.com>
+
+# Read-only Gmail OAuth for quotation/LPO discovery (optional)
+GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_OAUTH_REDIRECT_URI=https://pharmacy-backend-production-xxxx.up.railway.app/api/quotations/gmail/oauth/callback/
 ```
 
 **SECURITY NOTE:** Never commit actual credentials to git! Use the values from your `.env` file.
+
+If Gmail OAuth is enabled, replace the placeholder backend domain and register
+the exact `GOOGLE_OAUTH_REDIRECT_URI` in the Google Cloud OAuth client. The
+mailbox integration requests read-only Gmail access.
 
 **Important:** Images uploaded via admin panel will be stored on Cloudinary's CDN, so they persist across Railway deployments!
 
@@ -123,29 +118,25 @@ run with `DEBUG=0`; local `DEBUG=True` is guarded against accidental Neon use.
 
 1. Click "Deploy" - Railway will automatically:
    - Install dependencies from `requirements.txt`
-   - Run `gunicorn` (detected automatically)
+   - Use `backend/Procfile`
+   - Run migrations and `collectstatic` in the release command
+   - Start Gunicorn with the configured worker and timeout settings
 
 2. Wait for deployment to complete (2-3 minutes)
 
 3. Copy your backend URL (e.g., `pharmacy-backend-production-xxxx.up.railway.app`)
 
-### Step 5: Run Post-Deployment Commands
+### Step 5: Create the Initial Admin User
 
-1. Click on your backend service
-2. Go to "Settings" → "Deploy" → "Custom Start Command"
-3. First, run migrations via Railway CLI or console:
+Migrations and static collection are handled by the `Procfile` release command
+on every deployment. Run only the one-time interactive admin creation command
+from the Railway console or CLI:
 
-**Option A: Using Railway Dashboard Console**
 ```bash
-python manage.py migrate
-python manage.py collectstatic --noinput
+# Railway dashboard console:
 python manage.py createsuperuser
-```
 
-**Option B: Using Railway CLI** (if installed)
-```bash
-railway run python manage.py migrate
-railway run python manage.py collectstatic --noinput
+# Local terminal with Railway CLI:
 railway run python manage.py createsuperuser
 ```
 
@@ -198,6 +189,7 @@ Now that both services are deployed, update the backend CORS settings:
 Go back to your **backend service** → "Variables" and update:
 
 ```bash
+FRONTEND_URL=https://pharmacy-frontend-production-xxxx.up.railway.app
 CORS_ALLOWED_ORIGINS=https://pharmacy-frontend-production-xxxx.up.railway.app,http://localhost:3000
 
 ALLOWED_HOSTS=pharmacy-backend-production-xxxx.up.railway.app,localhost,127.0.0.1
@@ -425,9 +417,17 @@ git add .
 git commit -m "Add new feature"
 git push origin dev
 
-# Test locally
-npm start  # frontend
-python manage.py runserver  # backend
+# Run the same checks as CI
+cd backend
+python manage.py makemigrations --check --dry-run
+python manage.py check
+python manage.py test --keepdb
+
+cd ../frontend
+npm ci
+npm run test:ci
+npm run build
+cd ..
 
 # When ready to deploy, merge to main
 git checkout main
@@ -458,7 +458,7 @@ git push origin main
 - [x] HTTPS enforced (Railway handles this)
 - [x] Database uses SSL (`?sslmode=require`)
 - [x] Admin panel not publicly advertised
-- [ ] Consider rate limiting (add later if needed)
+- [x] Authentication and password-reset endpoints use scoped API throttles
 - [ ] Consider Cloudflare (add later for DDoS protection)
 
 ---
@@ -467,7 +467,7 @@ git push origin main
 
 - **Railway Docs:** https://docs.railway.app
 - **Railway Discord:** https://discord.gg/railway
-- **Django Deployment:** https://docs.djangoproject.com/en/5.0/howto/deployment/
+- **Django Deployment:** https://docs.djangoproject.com/en/5.2/howto/deployment/
 - **React Deployment:** https://create-react-app.dev/docs/deployment/
 
 ---

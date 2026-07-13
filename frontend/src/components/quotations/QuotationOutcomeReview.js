@@ -264,16 +264,21 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
-  const parseEvidence = async (evidenceId) => {
+  const approveAndParseEvidence = async (evidenceId) => {
     setParsingEvidenceId(evidenceId);
     setNotice(null);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.quotes.parsePOEvidence(quoteId, { evidence_id: evidenceId, use_ai: evidenceUseAi ? '1' : '0' });
+      const response = await quotationAPI.quotes.parsePOEvidence(quoteId, {
+        evidence_id: evidenceId,
+        approve_link: true,
+        use_ai: evidenceUseAi,
+      });
       setPoResult(response.data);
       setSelectedSuggestions((response.data.suggestions || []).map((suggestion) => suggestion.quotation_line_id).filter(Boolean));
       await loadPOEvidence();
-      setNotice({ type: 'success', message: 'Gmail evidence parsed into review-only PO suggestions.' });
+      setSelectedEvidenceId(null);
+      setNotice({ type: 'success', message: 'Email link approved and parsed into review-only PO suggestions. No line outcome was applied.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse Gmail PO evidence', `POST /quotations/quotes/${quoteId}/parse_po_evidence/`);
       setErrorInfo(details);
@@ -357,7 +362,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           <div>
             <span className="qm-step-kicker">Gmail evidence</span>
             <h3>Find PO/LPO replies for this quotation</h3>
-            <p>Searches Gmail only for this quote, customer, and post-quote PO/LPO signals. Evidence is parsed into suggestions only.</p>
+            <p>Searches the shared Gmail mailbox for this quote, customer, and post-quote PO/LPO signals. A staff member must review and approve each email link before it can be parsed.</p>
           </div>
           <div className="qm-evidence-controls">
             <label className="qm-checkbox">
@@ -405,14 +410,6 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                   <button
                     type="button"
                     className="qm-secondary small"
-                    disabled={parsingEvidenceId === evidence.id || evidenceStatus === 'not_relevant'}
-                    onClick={() => parseEvidence(evidence.id)}
-                  >
-                    {parsingEvidenceId === evidence.id ? 'Parsing...' : 'Parse & Suggest'}
-                  </button>
-                  <button
-                    type="button"
-                    className="qm-secondary small"
                     disabled={markingEvidenceId === evidence.id || evidenceStatus === 'not_relevant'}
                     onClick={() => markEvidenceNotRelevant(evidence.id)}
                   >
@@ -444,6 +441,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <div>
                 <span>From</span>
                 <strong>{selectedEvidence.sender || '-'}</strong>
+              </div>
+              <div>
+                <span>Shared mailbox</span>
+                <strong>{selectedEvidence.mailbox_email || 'Mailbox identity not recorded'}</strong>
               </div>
               <div>
                 <span>To / Cc</span>
@@ -497,9 +498,9 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                 type="button"
                 className="qm-primary"
                 disabled={parsingEvidenceId === selectedEvidence.id || selectedEvidence.status === 'not_relevant'}
-                onClick={() => parseEvidence(selectedEvidence.id)}
+                onClick={() => approveAndParseEvidence(selectedEvidence.id)}
               >
-                {parsingEvidenceId === selectedEvidence.id ? 'Parsing...' : 'Parse & Suggest'}
+                {parsingEvidenceId === selectedEvidence.id ? 'Approving & parsing...' : 'Approve this email link & parse'}
               </button>
               <button
                 type="button"

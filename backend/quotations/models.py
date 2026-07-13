@@ -401,6 +401,10 @@ class GmailOAuthConnection(models.Model):
         on_delete=models.CASCADE,
         related_name="quotation_gmail_connection",
     )
+    # The quotation workflow uses one company mailbox. The user remains the
+    # OAuth credential owner/audit principal; ``is_shared`` identifies the
+    # connection all quotation staff should resolve for read-only discovery.
+    is_shared = models.BooleanField(default=False, db_index=True)
     email = models.EmailField(blank=True)
     google_subject = models.CharField(max_length=255, blank=True)
     access_token_encrypted = models.TextField(blank=True)
@@ -418,6 +422,13 @@ class GmailOAuthConnection(models.Model):
         indexes = [
             models.Index(fields=["status"]),
             models.Index(fields=["email"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["is_shared"],
+                condition=models.Q(is_shared=True),
+                name="unique_shared_gmail_connection",
+            ),
         ]
 
     def __str__(self):
@@ -503,6 +514,14 @@ class ContractIntelligenceSource(models.Model):
     ]
 
     run = models.ForeignKey(ContractIntelligenceRun, on_delete=models.CASCADE, related_name="sources")
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contract_sources",
+    )
+    mailbox_email = models.EmailField(blank=True)
     gmail_message_id = models.CharField(max_length=255, blank=True)
     gmail_thread_id = models.CharField(max_length=255, blank=True)
     subject = models.CharField(max_length=500, blank=True)
@@ -1424,6 +1443,14 @@ class QuotationPOEvidence(models.Model):
     ]
 
     quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="po_evidence")
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="po_evidence",
+    )
+    mailbox_email = models.EmailField(blank=True)
     gmail_message_id = models.CharField(max_length=255, blank=True, db_index=True)
     gmail_thread_id = models.CharField(max_length=255, blank=True, db_index=True)
     sender = models.CharField(max_length=500, blank=True)
@@ -1445,6 +1472,14 @@ class QuotationPOEvidence(models.Model):
         blank=True,
         related_name="created_quote_po_evidence",
     )
+    link_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_quote_po_evidence",
+    )
+    link_approved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1540,12 +1575,23 @@ class QuotationLPO(models.Model):
 
     SOURCE_FILE = "file"
     SOURCE_PASTED_TEXT = "pasted_text"
+    SOURCE_GMAIL = "gmail"
     SOURCE_TYPE_CHOICES = [
         (SOURCE_FILE, "File"),
         (SOURCE_PASTED_TEXT, "Pasted text"),
+        (SOURCE_GMAIL, "Gmail evidence"),
     ]
 
     quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="lpos")
+    gmail_evidence = models.OneToOneField(
+        QuotationPOEvidence,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="canonical_lpo",
+    )
+    gmail_message_id = models.CharField(max_length=255, blank=True, db_index=True)
+    mailbox_email = models.EmailField(blank=True)
     source_type = models.CharField(max_length=30, choices=SOURCE_TYPE_CHOICES, default=SOURCE_FILE)
     source_filename = models.CharField(max_length=255, blank=True)
     source_sha256 = models.CharField(max_length=64, blank=True, db_index=True)

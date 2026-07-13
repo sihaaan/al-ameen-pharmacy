@@ -46,6 +46,7 @@ from .throttles import (
     RegistrationRateThrottle,
 )
 from .upload_validation import validate_image_upload
+from quotations.matching import create_or_reuse_product
 
 
 logger = logging.getLogger(__name__)
@@ -289,7 +290,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
-        """Create product with optional image upload."""
+        """Create or safely reuse a product, with optional image upload."""
         # Extract image from request before serializer validation
         image_file = request.FILES.get('image')
         if image_file:
@@ -297,16 +298,33 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        product = serializer.save()
+        values = dict(serializer.validated_data)
+        name = values.pop('name')
+        resolution = create_or_reuse_product(
+            name=name,
+            sku=values.get('sku') or '',
+            barcode=values.get('barcode') or '',
+            dosage=values.get('dosage') or '',
+            pack_size=values.get('pack_size') or '',
+            defaults=values,
+            confirm_create=str(request.data.get('confirm_create') or '').lower() in {'1', 'true', 'yes', 'on'},
+        )
+        if resolution.requires_confirmation:
+            return Response(
+                {'detail': resolution.warning, **resolution.as_dict()},
+                status=status.HTTP_409_CONFLICT,
+            )
+        product = resolution.product
 
-        # Handle image upload
-        self._handle_product_image(product, image_file)
+        # A create request that safely reuses an existing identity must not
+        # silently replace that Product's image or other catalog fields.
+        if resolution.created:
+            self._handle_product_image(product, image_file)
 
         # Return full product details
-        return Response(
-            ProductDetailSerializer(product, context={'request': request}).data,
-            status=status.HTTP_201_CREATED
-        )
+        payload = dict(ProductDetailSerializer(product, context={'request': request}).data)
+        payload.update(resolution.as_dict())
+        return Response(payload, status=status.HTTP_201_CREATED if resolution.created else status.HTTP_200_OK)
 
     def update(self, request, *args, **kwargs):
         """Update product with optional image upload."""

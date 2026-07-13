@@ -20,22 +20,28 @@ const ProductDetail = () => {
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    const fetchProduct = async () => {
+      try {
+        setLoading(true);
+        const response = await axiosInstance.get(`/products/${id}/`);
+        if (cancelled) return;
+        setProduct(response.data);
+        setSelectedImageIndex(0);
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Error fetching product:', err);
+        setError('Product not found');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
     fetchProduct();
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
-
-  const fetchProduct = async () => {
-    try {
-      setLoading(true);
-      const response = await axiosInstance.get(`/products/${id}/`);
-      setProduct(response.data);
-      setSelectedImageIndex(0);
-      setLoading(false);
-    } catch (err) {
-      console.error('Error fetching product:', err);
-      setError('Product not found');
-      setLoading(false);
-    }
-  };
 
   // Get all images
   const getImages = () => {

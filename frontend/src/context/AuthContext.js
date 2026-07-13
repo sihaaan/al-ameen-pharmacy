@@ -1,9 +1,8 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import axios from 'axios';
 import axiosInstance from '../utils/axios';
+import { API_BASE_URL, AUTH_REQUEST_TIMEOUT_MS } from '../config';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
-const AUTH_REQUEST_TIMEOUT_MS = Number(process.env.REACT_APP_AUTH_REQUEST_TIMEOUT_MS || 30000);
 
 // Create the context
 const AuthContext = createContext();
@@ -42,7 +41,7 @@ export const AuthProvider = ({ children }) => {
     setError(null);
     try {
       // Call Django JWT token endpoint
-      const response = await axios.post(`${API_URL}/token/`, {
+      const response = await axios.post(`${API_BASE_URL}/token/`, {
         username,
         password,
       }, {
@@ -122,7 +121,7 @@ export const AuthProvider = ({ children }) => {
     }
 
     try {
-      const response = await axios.post(`${API_URL}/token/refresh/`, {
+      const response = await axios.post(`${API_BASE_URL}/token/refresh/`, {
         refresh,
       }, {
         timeout: AUTH_REQUEST_TIMEOUT_MS,

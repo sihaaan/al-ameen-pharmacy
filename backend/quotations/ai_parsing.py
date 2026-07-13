@@ -613,6 +613,15 @@ def _build_preview_text_context(preview):
         f"Parse method: {preview.get('parse_method') or '-'}",
         "",
     ]
+    relevance_context = preview.get("relevance_context")
+    if relevance_context:
+        context_lines.extend(
+            [
+                "Workflow relevance context (authoritative; do not broaden beyond it):",
+                json.dumps(relevance_context, ensure_ascii=False, default=str),
+                "",
+            ]
+        )
     original_text = preview.get("original_text") or ""
     if original_text:
         context_lines.extend(["Original pasted/extracted text:", original_text, ""])

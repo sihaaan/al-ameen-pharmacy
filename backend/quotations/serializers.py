@@ -9,6 +9,7 @@ from api.models import Product, ProductImage
 from api.serializers import ProductListSerializer
 
 from .company_matching import find_similar_companies
+from .matching import normalize_item_text
 from .models import (
     Company,
     CompanyContact,
@@ -211,12 +212,15 @@ class CompanyListSerializer(serializers.ModelSerializer):
 
 class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
     is_connected = serializers.SerializerMethodField()
+    credential_owner_username = serializers.CharField(source="user.username", read_only=True)
 
     class Meta:
         model = GmailOAuthConnection
         fields = [
             "id",
             "email",
+            "is_shared",
+            "credential_owner_username",
             "google_subject",
             "status",
             "is_connected",
@@ -293,6 +297,8 @@ class ContractIntelligenceSourceSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "run",
+            "gmail_connection",
+            "mailbox_email",
             "gmail_message_id",
             "gmail_thread_id",
             "subject",
@@ -515,6 +521,33 @@ class ProductAliasSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "normalized_alias", "company_name", "product_name", "created_by", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        company = attrs.get("company", getattr(self.instance, "company", None))
+        product = attrs.get("product", getattr(self.instance, "product", None))
+        alias_text = attrs.get("alias", getattr(self.instance, "alias", ""))
+        identity = normalize_item_text(alias_text)
+        if not identity:
+            return attrs
+        queryset = ProductAlias.objects.filter(company=company)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        first_term = identity.split()[0]
+        for existing in queryset.filter(alias__icontains=first_term).select_related("product")[:100]:
+            if normalize_item_text(existing.alias) != identity:
+                continue
+            if product and existing.product_id != product.id:
+                raise serializers.ValidationError(
+                    {
+                        "alias": (
+                            f"Equivalent alias '{existing.alias}' already points to "
+                            f"'{existing.product.name}' in this scope."
+                        )
+                    }
+                )
+            raise serializers.ValidationError({"alias": f"Equivalent alias '{existing.alias}' already exists in this scope."})
+        return attrs
 
 
 class QuotationSettingsSerializer(serializers.ModelSerializer):
@@ -1786,6 +1819,11 @@ class QuotationListSerializer(serializers.ModelSerializer):
 
 class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
+    link_approved_by_username = serializers.CharField(
+        source="link_approved_by.username",
+        read_only=True,
+        allow_null=True,
+    )
     attachment_count = serializers.SerializerMethodField()
     parsed_attachment_count = serializers.SerializerMethodField()
     extracted_text_preview = serializers.SerializerMethodField()
@@ -1795,6 +1833,8 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "quotation",
+            "gmail_connection",
+            "mailbox_email",
             "gmail_message_id",
             "gmail_thread_id",
             "sender",
@@ -1813,6 +1853,9 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             "error",
             "created_by",
             "created_by_username",
+            "link_approved_by",
+            "link_approved_by_username",
+            "link_approved_at",
             "created_at",
             "updated_at",
         ]
@@ -1834,6 +1877,7 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
 class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     gmail_evidence_subject = serializers.CharField(source="gmail_evidence.subject", read_only=True, allow_null=True)
+    canonical_lpo = serializers.SerializerMethodField()
 
     class Meta:
         model = QuotationOutcomePOImport
@@ -1842,9 +1886,11 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "quotation",
             "gmail_evidence",
             "gmail_evidence_subject",
+            "canonical_lpo",
             "source_type",
             "source_filename",
             "source_sha256",
+            "source_file_ref",
             "parse_method",
             "status",
             "parsed_rows",
@@ -1858,6 +1904,16 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_canonical_lpo(self, obj):
+        evidence = obj.gmail_evidence
+        if not evidence:
+            return None
+        try:
+            lpo = evidence.canonical_lpo
+        except QuotationLPO.DoesNotExist:
+            return None
+        return {"id": lpo.id, "status": lpo.status, "lpo_number": lpo.lpo_number}
 
 
 class ProformaInvoiceLineSerializer(serializers.ModelSerializer):
@@ -2008,10 +2064,14 @@ class QuotationLPOSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "quotation",
+            "gmail_evidence",
+            "gmail_message_id",
+            "mailbox_email",
             "source_type",
             "source_type_display",
             "source_filename",
             "source_sha256",
+            "source_file_ref",
             "source_file_size",
             "parse_method",
             "lpo_number",
@@ -2032,10 +2092,14 @@ class QuotationLPOSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "quotation",
+            "gmail_evidence",
+            "gmail_message_id",
+            "mailbox_email",
             "source_type",
             "source_type_display",
             "source_filename",
             "source_sha256",
+            "source_file_ref",
             "source_file_size",
             "parse_method",
             "parsed_meta",

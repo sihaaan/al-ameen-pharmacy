@@ -1,10 +1,9 @@
 // frontend/src/components/OrderManagement.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axiosInstance from '../utils/axios';
 
 const OrderManagement = ({ onUpdate }) => {
   const [orders, setOrders] = useState([]);
-  const [filteredOrders, setFilteredOrders] = useState([]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedOrder, setSelectedOrder] = useState(null);
@@ -18,15 +17,7 @@ const OrderManagement = ({ onUpdate }) => {
     { value: 'cancelled', label: 'Cancelled', color: '#ef4444' },
   ];
 
-  useEffect(() => {
-    fetchOrders();
-  }, []);
-
-  useEffect(() => {
-    filterOrders();
-  }, [orders, statusFilter, searchTerm]);
-
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     try {
       const response = await axiosInstance.get('/orders/');
       setOrders(response.data);
@@ -36,9 +27,13 @@ const OrderManagement = ({ onUpdate }) => {
       console.error('Error fetching orders:', error);
       setLoading(false);
     }
-  };
+  }, [onUpdate]);
 
-  const filterOrders = () => {
+  useEffect(() => {
+    fetchOrders();
+  }, [fetchOrders]);
+
+  const filteredOrders = useMemo(() => {
     let result = [...orders];
 
     // Filter by status
@@ -56,19 +51,21 @@ const OrderManagement = ({ onUpdate }) => {
       );
     }
 
-    setFilteredOrders(result);
-  };
+    return result;
+  }, [orders, searchTerm, statusFilter]);
 
   const handleStatusUpdate = async (orderId, newStatus) => {
     try {
-      await axiosInstance.patch(`/orders/${orderId}/update_status/`, {
+      const response = await axiosInstance.patch(`/orders/${orderId}/update_status/`, {
         status: newStatus
       });
+      const updatedOrder = response.data;
+      setOrders((current) => current.map((order) => (
+        order.id === orderId ? updatedOrder : order
+      )));
       alert('Order status updated successfully!');
-      fetchOrders();
       if (selectedOrder?.id === orderId) {
-        const updatedOrder = orders.find(o => o.id === orderId);
-        setSelectedOrder({ ...updatedOrder, status: newStatus });
+        setSelectedOrder(updatedOrder);
       }
     } catch (error) {
       console.error('Error updating order status:', error);

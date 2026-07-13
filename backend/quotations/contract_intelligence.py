@@ -16,6 +16,7 @@ from django.conf import settings
 from django.core import signing
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
+from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from openpyxl import Workbook
@@ -233,7 +234,11 @@ def _form_request(url, data, timeout=60):
         raise RuntimeError(f"Google OAuth request failed with HTTP {exc.code}: {detail[:400]}") from exc
 
 
+@transaction.atomic
 def exchange_gmail_code(user, code, request=None):
+    designated = GmailOAuthConnection.objects.filter(is_shared=True).first()
+    if designated and designated.user_id != user.id and not getattr(user, "is_superuser", False):
+        raise PermissionError("Only the shared Gmail credential owner or a superuser can replace the mailbox.")
     token_payload = _form_request(
         GOOGLE_TOKEN_URL,
         {
@@ -257,12 +262,52 @@ def exchange_gmail_code(user, code, request=None):
     connection.refresh_token_encrypted = encrypt_token(refresh_token)
     connection.token_expiry = timezone.now() + timedelta(seconds=max(expires_in - 60, 60))
     connection.scopes = token_payload.get("scope", GMAIL_READONLY_SCOPE).split()
+    # Connecting Gmail from quotation settings designates the one company
+    # mailbox used by every staff member. Clear the previous designation first
+    # so the conditional database constraint is never raced by normal saves.
+    GmailOAuthConnection.objects.filter(is_shared=True).exclude(pk=connection.pk).update(is_shared=False)
+    connection.is_shared = True
     connection.status = GmailOAuthConnection.STATUS_CONNECTED
     connection.last_error = ""
     connection.connected_at = timezone.now()
     connection.disconnected_at = None
     connection.save()
     return connection
+
+
+def resolve_gmail_connection(user=None, *, connected_only=True, shared_only=False):
+    """Resolve the company mailbox, with a compatibility fallback for old data.
+
+    New OAuth connections are explicitly marked shared. Existing installations
+    may have a single per-user connection from before that field existed; the
+    requesting user's connection remains a temporary fallback until Gmail is
+    reconnected and designated shared.
+    """
+
+    base_queryset = GmailOAuthConnection.objects.select_related("user")
+    designated = base_queryset.filter(is_shared=True).order_by("-updated_at", "-id").first()
+    if designated:
+        if connected_only and designated.status != GmailOAuthConnection.STATUS_CONNECTED:
+            return None
+        return designated
+    if shared_only:
+        return None
+    queryset = base_queryset
+    if connected_only:
+        queryset = queryset.filter(status=GmailOAuthConnection.STATUS_CONNECTED)
+    if user is not None and getattr(user, "is_authenticated", False):
+        return queryset.filter(user=user).first()
+    return None
+
+
+def can_manage_shared_gmail(user, connection=None):
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return True
+    if connection is None:
+        return True
+    return connection.user_id == user.id
 
 
 def disconnect_gmail(connection):
@@ -401,6 +446,12 @@ def _walk_parts(payload):
         yield from _walk_parts(part)
 
 
+def _walk_parts_with_path(payload, path="0"):
+    yield payload, path
+    for index, part in enumerate(payload.get("parts") or []):
+        yield from _walk_parts_with_path(part, f"{path}.{index}")
+
+
 def _header(headers, name):
     name = name.lower()
     for header in headers or []:
@@ -419,6 +470,91 @@ def _message_datetime(message):
     return None
 
 
+def _decode_text_part(part):
+    body = part.get("body") or {}
+    data = body.get("data")
+    if not data:
+        return ""
+    decoded = _decode_gmail_data(data).decode("utf-8", errors="replace")
+    return _strip_html(decoded) if (part.get("mimeType") or "").lower() == "text/html" else decoded
+
+
+def _message_body_parts(part):
+    """Return body text while respecting multipart/alternative semantics."""
+
+    if not isinstance(part, dict) or part.get("filename"):
+        return []
+    mime = (part.get("mimeType") or "").lower()
+    children = part.get("parts") or []
+    if mime == "multipart/alternative":
+        # Plain text is less noisy and retains table line breaks. HTML is only
+        # a fallback; returning both duplicates every row in many Gmail emails.
+        for preferred in ("text/plain", "text/html"):
+            for child in children:
+                if (child.get("mimeType") or "").lower() == preferred:
+                    selected = _message_body_parts(child)
+                    if any(value.strip() for value in selected):
+                        return selected
+        for child in children:
+            selected = _message_body_parts(child)
+            if any(value.strip() for value in selected):
+                return selected
+        return []
+    if mime.startswith("multipart/") or children:
+        values = []
+        for child in children:
+            values.extend(_message_body_parts(child))
+        return values
+    if mime in {"text/plain", "text/html"}:
+        value = _decode_text_part(part)
+        return [value] if value else []
+    return []
+
+
+QUOTED_REPLY_MARKERS = (
+    re.compile(r"^\s*on .+ wrote:\s*$", re.IGNORECASE),
+    re.compile(r"^\s*-{2,}\s*original message\s*-{2,}\s*$", re.IGNORECASE),
+    re.compile(r"^\s*from:\s+.+$", re.IGNORECASE),
+)
+
+
+def _trim_quoted_reply(value):
+    """Keep the newest message and discard quoted thread history."""
+
+    kept = []
+    for line in (value or "").splitlines():
+        if kept and any(pattern.match(line) for pattern in QUOTED_REPLY_MARKERS):
+            break
+        if line.lstrip().startswith(">"):
+            continue
+        kept.append(line.rstrip())
+    return "\n".join(kept).strip()
+
+
+def _attachment_refs(message_payload, message_id, *, include_inline_data=False):
+    refs = []
+    for part, path in _walk_parts_with_path(message_payload or {}):
+        body = part.get("body") or {}
+        filename = part.get("filename") or ""
+        attachment_id = body.get("attachmentId") or ""
+        inline_data = body.get("data") or ""
+        if not filename or not (attachment_id or inline_data):
+            continue
+        ref = {
+            "filename": filename,
+            "mime_type": part.get("mimeType") or "",
+            "size": body.get("size") or 0,
+            "attachment_id": attachment_id,
+            "gmail_message_id": message_id,
+            "part_id": str(part.get("partId") or ""),
+            "part_path": path,
+        }
+        if include_inline_data and inline_data:
+            ref["_inline_data"] = inline_data
+        refs.append(ref)
+    return refs
+
+
 def gmail_fetch_message(connection, message_id, *, include_attachments=True):
     token = get_valid_access_token(connection)
     payload = _json_request(
@@ -426,59 +562,75 @@ def gmail_fetch_message(connection, message_id, *, include_attachments=True):
         token=token,
     )
     headers = payload.get("payload", {}).get("headers") or []
-    text_parts = []
-    attachment_refs = []
-    for part in _walk_parts(payload.get("payload") or {}):
-        mime = part.get("mimeType") or ""
-        body = part.get("body") or {}
-        filename = part.get("filename") or ""
-        data = body.get("data")
-        if data and mime == "text/plain":
-            text_parts.append(_decode_gmail_data(data).decode("utf-8", errors="replace"))
-        elif data and mime == "text/html":
-            text_parts.append(_strip_html(_decode_gmail_data(data).decode("utf-8", errors="replace")))
-        if filename and body.get("attachmentId"):
-            attachment_refs.append(
-                {
-                    "filename": filename,
-                    "mime_type": mime,
-                    "size": body.get("size") or 0,
-                    "attachment_id": body.get("attachmentId"),
-                }
-            )
+    text_parts = _message_body_parts(payload.get("payload") or {})
+    attachment_refs = _attachment_refs(
+        payload.get("payload") or {},
+        payload.get("id", message_id),
+        include_inline_data=True,
+    )
 
     parsed_attachments = []
     if include_attachments:
         for attachment in attachment_refs[:10]:
+            public_attachment = {key: value for key, value in attachment.items() if key != "_inline_data"}
             extension = os.path.splitext(attachment["filename"])[1].lower()
             if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
-                parsed_attachments.append({**attachment, "status": "skipped", "reason": "Unsupported attachment type for V1."})
+                parsed_attachments.append({**public_attachment, "status": "skipped", "reason": "Unsupported attachment type for V1."})
                 continue
             if int(attachment.get("size") or 0) > MAX_ATTACHMENT_BYTES:
-                parsed_attachments.append({**attachment, "status": "skipped", "reason": "Attachment too large for synchronous V1 parsing."})
+                parsed_attachments.append({**public_attachment, "status": "skipped", "reason": "Attachment too large for synchronous V1 parsing."})
                 continue
             try:
-                attachment_payload = _json_request(
-                    f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(message_id)}/attachments/{urllib.parse.quote(attachment['attachment_id'])}",
-                    token=token,
-                )
-                content = _decode_gmail_data(attachment_payload.get("data", ""))
+                if attachment.get("_inline_data"):
+                    content = _decode_gmail_data(attachment["_inline_data"])
+                else:
+                    attachment_payload = _json_request(
+                        f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(message_id)}/attachments/{urllib.parse.quote(attachment['attachment_id'])}",
+                        token=token,
+                    )
+                    content = _decode_gmail_data(attachment_payload.get("data", ""))
                 upload = SimpleUploadedFile(attachment["filename"], content, content_type=attachment.get("mime_type") or "application/octet-stream")
                 preview = parse_file_preview(upload)
+                provenance = public_attachment
+                source_ref = preview.get("source_file_ref", "")
+                source_sha256 = preview.get("source_sha256") or hashlib.sha256(content).hexdigest()
+                lines = []
+                for row in preview.get("lines") or []:
+                    lines.append(
+                        {
+                            **row,
+                            "source_filename": attachment["filename"],
+                            "source_file_ref": source_ref,
+                            "source_sha256": source_sha256,
+                            "source_gmail_message_id": payload.get("id", message_id),
+                            "source_gmail_attachment_id": attachment.get("attachment_id") or attachment.get("part_id"),
+                        }
+                    )
                 parsed_attachments.append(
                     {
-                        **attachment,
+                        **provenance,
                         "status": "parsed",
-                        "source_file_ref": preview.get("source_file_ref", ""),
-                        "line_count": len(preview.get("lines") or []),
-                        "lines": preview.get("lines") or [],
+                        "source_file_ref": source_ref,
+                        "source_sha256": source_sha256,
+                        "line_count": len(lines),
+                        "lines": lines,
                         "warnings": preview.get("warnings") or [],
                     }
                 )
             except Exception as exc:
-                parsed_attachments.append({**attachment, "status": "failed", "reason": str(exc)[:250]})
+                parsed_attachments.append(
+                    {
+                        **{key: value for key, value in attachment.items() if key != "_inline_data"},
+                        "status": "failed",
+                        "reason": str(exc)[:250],
+                    }
+                )
 
-    body_text = "\n".join(part for part in text_parts if part).strip()
+    body_text = _trim_quoted_reply("\n".join(part for part in text_parts if part))
+    public_attachment_refs = [
+        {key: value for key, value in attachment.items() if key != "_inline_data"}
+        for attachment in attachment_refs
+    ]
     return {
         "gmail_message_id": payload.get("id", message_id),
         "gmail_thread_id": payload.get("threadId", ""),
@@ -488,37 +640,28 @@ def gmail_fetch_message(connection, message_id, *, include_attachments=True):
         "sent_at": _message_datetime(payload),
         "snippet": payload.get("snippet", ""),
         "body_text": body_text,
-        "attachments": parsed_attachments or attachment_refs,
+        "attachments": parsed_attachments or public_attachment_refs,
     }
 
 
 def gmail_fetch_message_metadata(connection, message_id):
     token = get_valid_access_token(connection)
     params = [
-        ("format", "metadata"),
-        ("metadataHeaders", "Subject"),
-        ("metadataHeaders", "From"),
-        ("metadataHeaders", "To"),
-        ("metadataHeaders", "Cc"),
+        # Gmail's metadata projection can omit nested MIME parts and therefore
+        # hide attachments. Full format includes the MIME tree without fetching
+        # separate attachment bytes.
+        ("format", "full"),
     ]
     payload = _json_request(
         f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(message_id)}?{urllib.parse.urlencode(params)}",
         token=token,
     )
     headers = payload.get("payload", {}).get("headers") or []
-    attachment_refs = []
-    for part in _walk_parts(payload.get("payload") or {}):
-        body = part.get("body") or {}
-        filename = part.get("filename") or ""
-        if filename and body.get("attachmentId"):
-            attachment_refs.append(
-                {
-                    "filename": filename,
-                    "mime_type": part.get("mimeType") or "",
-                    "size": body.get("size") or 0,
-                    "attachment_id": body.get("attachmentId"),
-                }
-            )
+    attachment_refs = _attachment_refs(
+        payload.get("payload") or {},
+        payload.get("id", message_id),
+        include_inline_data=False,
+    )
     return {
         "gmail_message_id": payload.get("id", message_id),
         "gmail_thread_id": payload.get("threadId", ""),
@@ -566,10 +709,7 @@ def hydrate_contract_source(source, connection, *, include_attachments=True):
 
 
 def discover_contract_sources(run, user, *, batch_size=None, reset_cursor=False):
-    try:
-        connection = user.quotation_gmail_connection
-    except GmailOAuthConnection.DoesNotExist:
-        connection = None
+    connection = resolve_gmail_connection(user)
     if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
         raise RuntimeError("Connect Gmail read-only before running discovery.")
 
@@ -615,7 +755,20 @@ def discover_contract_sources(run, user, *, batch_size=None, reset_cursor=False)
         message_id = message.get("id")
         if not message_id:
             continue
-        if ContractIntelligenceSource.objects.filter(run=run, gmail_message_id=message_id).exists():
+        existing_source = ContractIntelligenceSource.objects.filter(
+            run=run,
+            gmail_message_id=message_id,
+        ).first()
+        if existing_source:
+            update_fields = []
+            if not existing_source.gmail_connection_id:
+                existing_source.gmail_connection = connection
+                update_fields.append("gmail_connection")
+            if not existing_source.mailbox_email:
+                existing_source.mailbox_email = connection.email or ""
+                update_fields.append("mailbox_email")
+            if update_fields:
+                existing_source.save(update_fields=[*update_fields, "updated_at"])
             reused += 1
             continue
         try:
@@ -625,6 +778,8 @@ def discover_contract_sources(run, user, *, batch_size=None, reset_cursor=False)
             ).hexdigest()
             ContractIntelligenceSource.objects.create(
                 run=run,
+                gmail_connection=connection,
+                mailbox_email=connection.email or "",
                 gmail_message_id=payload.get("gmail_message_id", ""),
                 gmail_thread_id=payload.get("gmail_thread_id", ""),
                 subject=payload.get("subject", "")[:500],
@@ -634,7 +789,7 @@ def discover_contract_sources(run, user, *, batch_size=None, reset_cursor=False)
                 snippet=payload.get("snippet", ""),
                 body_text="",
                 source_sha256=source_hash,
-                attachments=[],
+                attachments=payload.get("attachments") or [],
                 status="candidate",
             )
             created += 1
@@ -1589,22 +1744,33 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     run.ai_status = "running"
     run.started_at = timezone.now()
     run.save(update_fields=["status", "ai_status", "started_at", "updated_at"])
-    try:
-        connection = user.quotation_gmail_connection
-    except GmailOAuthConnection.DoesNotExist:
-        connection = None
+    connection = resolve_gmail_connection(user)
     for source in sources:
         source.status = "analyzing"
         source.save(update_fields=["status", "updated_at"])
         if not source.body_text and source.gmail_message_id:
-            if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+            source_connection = connection
+            if source.gmail_connection_id:
+                source_connection = source.gmail_connection
+            if (
+                not source_connection
+                or source_connection.status != GmailOAuthConnection.STATUS_CONNECTED
+                or (
+                    source.mailbox_email
+                    and source_connection.email.lower() != source.mailbox_email.lower()
+                )
+            ):
                 failed += 1
                 source.status = "failed"
-                source.error = "Connect Gmail read-only to fetch message content before analysis."
+                source.error = "Reconnect the Gmail mailbox that discovered this message before analysis."
                 source.save(update_fields=["status", "error", "updated_at"])
                 continue
             try:
-                source = hydrate_contract_source(source, connection, include_attachments=run.include_attachments)
+                source = hydrate_contract_source(
+                    source,
+                    source_connection,
+                    include_attachments=run.include_attachments,
+                )
             except Exception as exc:
                 failed += 1
                 source.status = "failed"
@@ -1619,7 +1785,7 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
             try:
                 payload = _ai_items_for_source(source, run)
                 classification = payload.get("classification") or classification
-                confidence = float(payload.get("confidence") or confidence)
+                confidence = _confidence(payload.get("confidence"), confidence)
             except Exception as exc:
                 error_text = str(exc)
                 if "timed out" in error_text.lower() or "timeout" in error_text.lower():
@@ -1634,8 +1800,15 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
         try:
             source.classification = classification
             source.confidence = max(0.0, min(confidence, 1.0))
-            item_payloads = (payload or {}).get("items") if payload else None
-            item_payloads = item_payloads or (_deterministic_items_from_attachments(source) + _deterministic_items_from_text(source))
+            # A successful AI result with an empty items array is an explicit
+            # result, especially for irrelevant messages. Falling back here
+            # used to manufacture rows from signatures and quoted replies.
+            if payload is not None:
+                item_payloads = payload.get("items") or []
+            else:
+                item_payloads = _deterministic_items_from_attachments(source) + _deterministic_items_from_text(source)
+            if classification == ContractIntelligenceSource.CLASS_IRRELEVANT:
+                item_payloads = []
             item_errors = []
             for item_payload in item_payloads:
                 try:
@@ -1661,6 +1834,10 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     if total_items:
         run.status = ContractIntelligenceRun.STATUS_REVIEW
     elif pending_sources and sources:
+        run.status = ContractIntelligenceRun.STATUS_READY
+    elif len(sources) > failed:
+        # Successfully analyzed irrelevant/empty sources are a valid ready
+        # state, not an analysis failure.
         run.status = ContractIntelligenceRun.STATUS_READY
     else:
         run.status = ContractIntelligenceRun.STATUS_FAILED

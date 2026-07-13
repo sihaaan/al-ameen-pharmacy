@@ -1,15 +1,15 @@
 from datetime import datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
+import re
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Max, Sum
 from django.utils import timezone
-from django.utils.text import slugify
 
 from api.models import Product, ProductImage, ProductSupplier
 
-from .matching import create_product_alias, suggest_product_for_text
+from .matching import create_or_reuse_product, create_product_alias, suggest_product_for_text
 from .models import (
     Company,
     CompanyPriceHistory,
@@ -182,7 +182,7 @@ def recalculate_line_outcome(line, *, save=True):
             line.outcome_status == QuotationLine.OUTCOME_ACCEPTED
             and accepted_qty is not None
             and line.quantity is not None
-            and accepted_qty < line.quantity
+            and accepted_qty != line.quantity
         ):
             line.outcome_status = QuotationLine.OUTCOME_QUANTITY_CHANGED
             if not line.outcome_reason:
@@ -477,62 +477,184 @@ def _text_match_score(left, right):
     return int((overlap / total) * 100)
 
 
+def _item_spec_tokens(value):
+    text = str(value or "").lower().replace(chr(215), "x")
+    tokens = {
+        re.sub(r"\s+", "", match.group(0)).replace('"', "in")
+        for match in re.finditer(
+            r"\b\d+(?:\.\d+)?\s*(?:mcg|mg|gm|g|kg|ml|l|mm|cm|m|%|inch(?:es)?|in\b|\")"
+            r"|\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?(?:\s*x\s*\d+(?:\.\d+)?)?\s*(?:mm|cm|m|in(?:ch(?:es)?)?|\")?",
+            text,
+            re.IGNORECASE,
+        )
+    }
+    size_match = re.search(r"\bsize\s*[:#-]?\s*(xs|s|m|l|xl|xxl|small|medium|large)\b", text, re.IGNORECASE)
+    if size_match:
+        size = size_match.group(1).lower()
+        size = {"s": "small", "m": "medium", "l": "large"}.get(size, size)
+        tokens.add(f"size:{size}")
+    return tokens
+
+
+def _has_item_spec_conflict(po_name, quotation_name):
+    po_specs = _item_spec_tokens(po_name)
+    quotation_specs = _item_spec_tokens(quotation_name)
+    if not po_specs or not quotation_specs:
+        return False
+    # Extra pack detail on one side is acceptable when all shared explicit
+    # specifications agree. Disjoint explicit strengths/sizes are not.
+    return not (po_specs <= quotation_specs or quotation_specs <= po_specs)
+
+
+def _po_row_match_candidates(row, quote_lines):
+    item_name = row.get("requested_item_name") or row.get("raw_name") or row.get("item_name") or ""
+    candidates = []
+    conflicts = []
+    for line in quote_lines:
+        names = [line.item_name_snapshot]
+        if line.product_id:
+            names.append(line.product.name)
+        if line.quote_item_id:
+            names.append(line.quote_item.name)
+        scored_names = [
+            (_text_match_score(item_name, candidate), candidate)
+            for candidate in names
+            if candidate
+        ]
+        if not scored_names:
+            continue
+        score, matched_name = max(scored_names, key=lambda value: value[0])
+        if score < 60:
+            continue
+        if _has_item_spec_conflict(item_name, matched_name):
+            conflicts.append(
+                {
+                    "quotation_line_id": line.id,
+                    "quotation_item_name": line.item_name_snapshot,
+                    "score": score,
+                }
+            )
+            continue
+        candidates.append({"line": line, "score": score})
+    candidates.sort(key=lambda value: (-value["score"], value["line"].sort_order, value["line"].id))
+    conflicts.sort(key=lambda value: -value["score"])
+    return item_name, candidates, conflicts
+
+
 def build_po_outcome_suggestions(quotation, preview):
     quote_lines = [
         line
         for line in quotation.lines.select_related("product", "quote_item").order_by("sort_order", "id")
         if line.match_status != QuotationLine.MATCH_IGNORED
     ]
-    matched_quote_line_ids = set()
-    suggestions = []
-    unmatched = []
     rows = preview.get("lines") or []
+    row_records = []
     for index, row in enumerate(rows, start=1):
-        item_name = row.get("requested_item_name") or row.get("raw_name") or ""
-        quantity = _decimal_or_none(row.get("quantity"))
-        unit_price = _decimal_or_none(row.get("unit_price"))
-        best = None
-        best_score = 0
-        for line in quote_lines:
-            candidates = [line.item_name_snapshot]
-            if line.product_id:
-                candidates.append(line.product.name)
-            if line.quote_item_id:
-                candidates.append(line.quote_item.name)
-            score = max(_text_match_score(item_name, candidate) for candidate in candidates if candidate)
-            if score > best_score:
-                best_score = score
-                best = line
-        if best and best_score >= 60:
-            matched_quote_line_ids.add(best.id)
-            suggested_quantity = quantity if quantity is not None else best.quantity
-            suggested_unit_price = unit_price if unit_price is not None else best.unit_price
-            suggestions.append(
+        item_name, candidates, conflicts = _po_row_match_candidates(row, quote_lines)
+        row_records.append(
+            {
+                "index": index,
+                "row": row,
+                "item_name": item_name,
+                "candidates": candidates,
+                "conflicts": conflicts,
+            }
+        )
+
+    unmatched = []
+    assignable = []
+    for record in row_records:
+        candidates = record["candidates"]
+        if not candidates:
+            conflict = record["conflicts"][0] if record["conflicts"] else None
+            unmatched.append(
                 {
-                    "po_row_number": index,
-                    "po_row_index": index,
-                    "po_row": row,
-                    "po_item_name": item_name,
-                    "po_quantity": str(quantity) if quantity is not None else "",
-                    "po_unit_price": _unit_price_text(unit_price),
-                    "quotation_line": best.id,
-                    "quotation_line_id": best.id,
-                    "quotation_item_name": best.item_name_snapshot,
-                    "quotation_line_label": best.item_name_snapshot,
-                    "suggested_outcome_status": (
-                        QuotationLine.OUTCOME_QUANTITY_CHANGED
-                        if suggested_quantity is not None and suggested_quantity < best.quantity
-                        else QuotationLine.OUTCOME_ACCEPTED
+                    "po_row_number": record["index"],
+                    "po_item_name": record["item_name"],
+                    "reason": (
+                        "PO item conflicts with the quoted size, strength, or specification."
+                        if conflict
+                        else "PO item not found in quotation."
                     ),
-                    "suggested_accepted_quantity": str(suggested_quantity) if suggested_quantity is not None else "",
-                    "suggested_accepted_unit_price": _unit_price_text(suggested_unit_price),
-                    "confidence": min(best_score, 99),
-                    "match_strength": "high" if best_score >= 85 else "medium",
-                    "reason": "Matched PO item to the closest quotation line for staff review.",
+                    "reason_code": "specification_conflict" if conflict else "no_match",
+                    "candidate_quotation_line_id": conflict.get("quotation_line_id") if conflict else None,
                 }
             )
-        else:
-            unmatched.append({"po_row_number": index, "po_item_name": item_name, "reason": "PO item not found in quotation."})
+            continue
+        if len(candidates) > 1 and candidates[0]["score"] - candidates[1]["score"] <= 5:
+            unmatched.append(
+                {
+                    "po_row_number": record["index"],
+                    "po_item_name": record["item_name"],
+                    "reason": "PO item has multiple equally plausible quotation lines; staff must choose one.",
+                    "reason_code": "ambiguous_match",
+                    "candidate_quotation_line_ids": [value["line"].id for value in candidates[:3]],
+                }
+            )
+            continue
+        assignable.append(record)
+
+    # Rows with fewer alternatives are assigned first, preventing a broad fuzzy
+    # row from consuming the only valid quotation line for a more specific row.
+    assignable.sort(
+        key=lambda record: (
+            len(record["candidates"]),
+            -record["candidates"][0]["score"],
+            record["index"],
+        )
+    )
+    matched_quote_line_ids = set()
+    suggestions = []
+    for record in assignable:
+        selected = next(
+            (candidate for candidate in record["candidates"] if candidate["line"].id not in matched_quote_line_ids),
+            None,
+        )
+        if not selected:
+            unmatched.append(
+                {
+                    "po_row_number": record["index"],
+                    "po_item_name": record["item_name"],
+                    "reason": "The matching quotation line was already assigned to another PO row.",
+                    "reason_code": "quotation_line_already_assigned",
+                }
+            )
+            continue
+        best = selected["line"]
+        best_score = selected["score"]
+        matched_quote_line_ids.add(best.id)
+        row = record["row"]
+        quantity = _decimal_or_none(row.get("quantity"))
+        unit_price = _decimal_or_none(row.get("unit_price"))
+        suggested_quantity = quantity if quantity is not None else best.quantity
+        suggested_unit_price = unit_price if unit_price is not None else best.unit_price
+        suggestions.append(
+            {
+                "po_row_number": record["index"],
+                "po_row_index": record["index"],
+                "po_row": row,
+                "po_item_name": record["item_name"],
+                "po_quantity": str(quantity) if quantity is not None else "",
+                "po_unit_price": _unit_price_text(unit_price),
+                "quotation_line": best.id,
+                "quotation_line_id": best.id,
+                "quotation_item_name": best.item_name_snapshot,
+                "quotation_line_label": best.item_name_snapshot,
+                "suggested_outcome_status": (
+                    QuotationLine.OUTCOME_QUANTITY_CHANGED
+                    if suggested_quantity is not None and suggested_quantity != best.quantity
+                    else QuotationLine.OUTCOME_ACCEPTED
+                ),
+                "suggested_accepted_quantity": str(suggested_quantity) if suggested_quantity is not None else "",
+                "suggested_accepted_unit_price": _unit_price_text(suggested_unit_price),
+                "confidence": min(best_score, 99),
+                "match_strength": "high" if best_score >= 85 else "medium",
+                "reason": "Assigned this PO row to one quotation line for staff review.",
+            }
+        )
+
+    suggestions.sort(key=lambda value: value["po_row_number"])
+    unmatched.sort(key=lambda value: value["po_row_number"])
     missing_line_ids = [line.id for line in quote_lines if line.id not in matched_quote_line_ids]
     return suggestions, unmatched, missing_line_ids
 
@@ -601,50 +723,24 @@ def _product_name_from_line(line, override_name=""):
     return name[:200]
 
 
-def _find_product_by_normalized_name(name):
-    key = normalize_label(name)
-    if not key:
-        return None
-    slug_key = slugify(name)
-    exact = Product.objects.filter(name__iexact=name).first()
-    if exact:
-        return exact
-    if slug_key:
-        slug_match = Product.objects.filter(slug=slug_key).first()
-        if slug_match:
-            return slug_match
-    first_token = key.split()[0] if key.split() else ""
-    candidates = Product.objects.all()
-    if first_token:
-        candidates = candidates.filter(name__icontains=first_token)
-    for product in candidates[:100]:
-        if normalize_label(product.name) == key or (slug_key and slugify(product.name) == slug_key):
-            return product
-    return None
-
-
-def _get_or_create_internal_product_from_line(line, actor, override_name=""):
+def _get_or_create_internal_product_from_line(line, actor, override_name="", *, confirm_create=False):
     product_name = _product_name_from_line(line, override_name)
-    existing = _find_product_by_normalized_name(product_name)
-    if existing:
-        return existing, False
-    product = Product.objects.create(
+    resolution = create_or_reuse_product(
         name=product_name,
-        price=Decimal("0.01"),
-        pack_size=(line.unit or "")[:100],
-        status="draft",
-        show_price=False,
-        requires_manual_review=True,
-    )
-    audit_log(
-        actor,
-        QuotationAuditLog.ACTION_CREATED,
-        product,
-        message=f"Created draft/internal Product '{product.name}' from quotation line {line.pk}.",
-        quotation=line.quotation,
         company=line.quotation.company,
+        unit=line.unit or "",
+        confirm_create=confirm_create,
     )
-    return product, True
+    if resolution.created:
+        audit_log(
+            actor,
+            QuotationAuditLog.ACTION_CREATED,
+            resolution.product,
+            message=f"Created draft/internal Product '{resolution.product.name}' from quotation line {line.pk}.",
+            quotation=line.quotation,
+            company=line.quotation.company,
+        )
+    return resolution
 
 
 def _link_quotation_line_to_product(line, product, actor, *, reason="Created/linked from quotation line."):
@@ -1061,6 +1157,7 @@ def _historical_bulk_summary(results):
     return {
         "created": summary.get("created", 0),
         "linked_existing": summary.get("linked_existing", 0),
+        "confirmation_required": summary.get("confirmation_required", 0),
         "updated": summary.get("updated", 0),
         "skipped": summary.get("skipped", 0),
         "failed": summary.get("failed", 0),
@@ -1090,8 +1187,15 @@ def _get_historical_lines_for_bulk(historical_import, row_ids):
 
 
 @transaction.atomic
-def bulk_create_quote_items_for_historical_import(historical_import, row_ids, actor):
+def bulk_create_quote_items_for_historical_import(
+    historical_import,
+    row_ids,
+    actor,
+    *,
+    confirm_create_row_ids=None,
+):
     historical_import, lines = _get_historical_lines_for_bulk(historical_import, row_ids)
+    confirm_create_row_ids = {int(row_id) for row_id in (confirm_create_row_ids or [])}
     results = []
     created_items = []
 
@@ -1105,24 +1209,35 @@ def bulk_create_quote_items_for_historical_import(historical_import, row_ids, ac
             results.append({"row_id": line.id, "status": "failed", "message": "Row has no item name."})
             continue
 
-        match = suggest_product_for_text(item_name, historical_import.company)
-        product = match.product
-        result_status = "linked_existing"
-        message = match.reason if product else "No matching product found."
-
-        if not product:
-            product = Product.objects.create(
-                name=item_name[:255],
-                pack_size=line.unit or "",
-                price=Decimal("0.01"),
-                status="draft",
-                show_price=False,
-                requires_manual_review=True,
-                short_description=f"Internal quotation item created from {historical_import.source_filename}".strip(),
+        resolution = create_or_reuse_product(
+            name=item_name,
+            company=historical_import.company,
+            unit=line.unit or "",
+            defaults={
+                "short_description": f"Internal quotation item created from {historical_import.source_filename}".strip(),
+            },
+            confirm_create=line.id in confirm_create_row_ids,
+        )
+        if resolution.requires_confirmation:
+            results.append(
+                {
+                    "row_id": line.id,
+                    "status": "confirmation_required",
+                    "message": resolution.warning,
+                    **resolution.as_dict(),
+                }
             )
+            continue
+
+        product = resolution.product
+        result_status = "created" if resolution.created else "linked_existing"
+        message = (
+            "Created internal draft Product and linked row."
+            if resolution.created
+            else resolution.match.reason
+        )
+        if resolution.created:
             created_items.append(product.id)
-            result_status = "created"
-            message = "Created internal draft Product and linked row."
 
         line.product = product
         line.match_reason = message
@@ -1141,6 +1256,9 @@ def bulk_create_quote_items_for_historical_import(historical_import, row_ids, ac
                 "product_name": product.name,
                 "row_status": line.status,
                 "message": message,
+                "match_method": resolution.match.method,
+                "match_confidence": resolution.match.confidence,
+                "candidates": [candidate.as_dict() for candidate in resolution.match.candidates],
             }
         )
 
@@ -1184,6 +1302,8 @@ def apply_product_matches_to_historical_import(historical_import, actor=None):
     auto_match_prefixes = (
         "Matched exact product name.",
         "Matched normalized product name.",
+        "Matched canonical product identity.",
+        "Matched Product previously quoted",
         "Matched global alias",
         "Found one conservative",
         "No safe deterministic",
@@ -1506,29 +1626,49 @@ def remember_quotation_line_alias(line, actor):
 
 
 @transaction.atomic
-def create_product_from_quotation_line(line, actor, product_name=""):
+def create_product_from_quotation_line(line, actor, product_name="", *, confirm_create=False):
     line = (
         QuotationLine.objects.select_for_update()
         .select_related("quotation__company")
         .get(pk=line.pk)
     )
     ensure_quotation_editable(line.quotation)
-    product, created = _get_or_create_internal_product_from_line(line, actor, product_name)
+    resolution = _get_or_create_internal_product_from_line(
+        line,
+        actor,
+        product_name,
+        confirm_create=confirm_create,
+    )
+    if resolution.requires_confirmation:
+        return line, resolution
+    product = resolution.product
     line = _link_quotation_line_to_product(
         line,
         product,
         actor,
-        reason="Created draft/internal Product from quotation line." if created else "Linked to existing Product with the same name.",
+        reason=(
+            "Created draft/internal Product from quotation line."
+            if resolution.created
+            else resolution.match.reason
+        ),
     )
     recalculate_quotation_totals(line.quotation)
-    return line, product, created
+    return line, resolution
 
 
 @transaction.atomic
-def bulk_create_products_from_quotation_lines(quotation, line_ids, actor, names_by_id=None):
+def bulk_create_products_from_quotation_lines(
+    quotation,
+    line_ids,
+    actor,
+    names_by_id=None,
+    *,
+    confirm_create_line_ids=None,
+):
     quotation = Quotation.objects.select_for_update().select_related("company").get(pk=quotation.pk)
     ensure_quotation_editable(quotation)
     names_by_id = {int(key): value for key, value in (names_by_id or {}).items() if str(key).isdigit()}
+    confirm_create_line_ids = {int(line_id) for line_id in (confirm_create_line_ids or [])}
     lines = list(
         quotation.lines.select_for_update()
         .select_related("quotation__company")
@@ -1538,28 +1678,50 @@ def bulk_create_products_from_quotation_lines(quotation, line_ids, actor, names_
     if not lines:
         raise ValidationError(f"No selected quotation lines were found for this quotation. Selected ids: {line_ids or 'none'}.")
 
+    confirmed_keys = {
+        normalize_label(_product_name_from_line(line, names_by_id.get(line.id, "")))
+        for line in lines
+        if line.id in confirm_create_line_ids
+    }
+
     products_by_key = {}
     updated_lines = []
     created_count = 0
     reused_count = 0
+    confirmation_required = []
+    resolutions = []
     for line in lines:
         product_name = _product_name_from_line(line, names_by_id.get(line.id, ""))
         key = normalize_label(product_name)
         if key in products_by_key:
-            product, created = products_by_key[key]
+            resolution = products_by_key[key]
         else:
-            product, created = _get_or_create_internal_product_from_line(line, actor, product_name)
-            products_by_key[key] = (product, created)
-            if created:
+            resolution = _get_or_create_internal_product_from_line(
+                line,
+                actor,
+                product_name,
+                confirm_create=key in confirmed_keys,
+            )
+            products_by_key[key] = resolution
+            if resolution.created:
                 created_count += 1
-            else:
+            elif resolution.product:
                 reused_count += 1
+        if resolution.requires_confirmation:
+            confirmation_required.append({"line_id": line.id, **resolution.as_dict()})
+            continue
+        product = resolution.product
+        resolutions.append({"line_id": line.id, **resolution.as_dict()})
         updated_lines.append(
             _link_quotation_line_to_product(
                 line,
                 product,
                 actor,
-                reason="Bulk created/linked draft/internal Product from quotation line." if created else "Bulk linked to existing Product with the same name.",
+                reason=(
+                    "Bulk created/linked draft/internal Product from quotation line."
+                    if resolution.created
+                    else resolution.match.reason
+                ),
             )
         )
     recalculate_quotation_totals(quotation)
@@ -1567,7 +1729,9 @@ def bulk_create_products_from_quotation_lines(quotation, line_ids, actor, names_
         "updated_lines": updated_lines,
         "created_products": created_count,
         "reused_products": reused_count,
-        "unique_products": len(products_by_key),
+        "unique_products": len({line.product_id for line in updated_lines if line.product_id}),
+        "confirmation_required": confirmation_required,
+        "resolutions": resolutions,
     }
 
 

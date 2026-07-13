@@ -586,6 +586,7 @@ const ContractIntelligenceManager = () => {
 
   const gmailConnected = gmail?.connection?.is_connected;
   const gmailConfigured = gmail?.configured;
+  const gmailCanManage = gmail?.can_manage !== false;
 
   return (
     <div className="qm-section qm-contract-intel">
@@ -601,20 +602,24 @@ const ContractIntelligenceManager = () => {
           </p>
         </div>
         <div className="qm-contract-gmail-card">
-          <span>Gmail</span>
+          <span>Shared Gmail mailbox</span>
           <strong>{gmailConnected ? gmail.connection.email : gmailConfigured ? 'Ready to connect' : 'Not configured'}</strong>
-          <small>Scope: gmail.readonly. AI suggestions are review-only.</small>
+          <small>
+            Scope: gmail.readonly. AI suggestions are review-only.
+            {gmail?.connection?.credential_owner_username ? ` Credential owner: ${gmail.connection.credential_owner_username}.` : ''}
+          </small>
           <div className="qm-actions">
             {gmailConnected ? (
-              <button type="button" className="qm-secondary small" onClick={disconnectGmail} disabled={busyAction === 'gmail-disconnect'}>
+              <button type="button" className="qm-secondary small" onClick={disconnectGmail} disabled={!gmailCanManage || busyAction === 'gmail-disconnect'}>
                 {busyAction === 'gmail-disconnect' ? 'Disconnecting...' : 'Disconnect'}
               </button>
             ) : (
-              <button type="button" className="qm-primary small" onClick={connectGmail} disabled={!gmailConfigured || busyAction === 'gmail-connect'}>
+              <button type="button" className="qm-primary small" onClick={connectGmail} disabled={!gmailConfigured || !gmailCanManage || busyAction === 'gmail-connect'}>
                 {busyAction === 'gmail-connect' ? 'Opening Google...' : 'Connect Gmail'}
               </button>
             )}
           </div>
+          {!gmailCanManage && <p className="qm-field-warning">Only the credential owner or a superuser can replace or disconnect this shared mailbox.</p>}
           {!gmailConfigured && (
             <p className="qm-field-warning">
               Add GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI on the Railway backend.

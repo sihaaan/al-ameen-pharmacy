@@ -52,6 +52,7 @@ const ProductFormModal = ({
   const [categoryError, setCategoryError] = useState('');
   const [saving, setSaving] = useState(false);
   const [loadingProduct, setLoadingProduct] = useState(false);
+  const [duplicateWarning, setDuplicateWarning] = useState(null);
 
   const resetProductForm = () => {
     setEditingProduct(null);
@@ -63,6 +64,7 @@ const ProductFormModal = ({
     setBrandError('');
     setNewCategoryName('');
     setCategoryError('');
+    setDuplicateWarning(null);
   };
 
   const closeModal = () => {
@@ -147,6 +149,7 @@ const ProductFormModal = ({
 
   const handleInputChange = (event) => {
     const { name, value, type, checked } = event.target;
+    setDuplicateWarning(null);
     setFormData((current) => ({
       ...current,
       [name]: type === 'checkbox' ? checked : value,
@@ -253,8 +256,8 @@ const ProductFormModal = ({
     }
   };
 
-  const handleProductSubmit = async (event) => {
-    event.preventDefault();
+  const handleProductSubmit = async (event, confirmCreate = false) => {
+    if (event) event.preventDefault();
     if (saving) return;
     setSaving(true);
 
@@ -272,6 +275,7 @@ const ProductFormModal = ({
         data.append(key, typeof value === 'boolean' ? value.toString() : value);
       }
     });
+    if (confirmCreate) data.append('confirm_create', 'true');
 
     const primaryNewImage = newImages.find((image) => image.isPrimary);
     if (primaryNewImage) {
@@ -323,6 +327,11 @@ const ProductFormModal = ({
       if (onSaved) await onSaved(savedProduct);
       closeModal();
     } catch (error) {
+      const warning = error.response?.data;
+      if (!editingProduct && error.response?.status === 409 && warning?.requires_confirmation) {
+        setDuplicateWarning(warning);
+        return;
+      }
       console.error('Error saving product:', error);
       alert(`Error saving product: ${error.response?.data ? JSON.stringify(error.response.data) : error.message}`);
     } finally {
@@ -550,12 +559,54 @@ const ProductFormModal = ({
               </div>
             </div>
 
+            {duplicateWarning && (
+              <div className={`pm-duplicate-warning ${duplicateWarning.creation_blocked ? 'blocked' : ''}`} role="alert">
+                <h3>{duplicateWarning.creation_blocked ? 'Existing identifier conflict' : 'Check likely existing Products'}</h3>
+                <p>{duplicateWarning.warning || duplicateWarning.detail || duplicateWarning.match_reason}</p>
+                {(duplicateWarning.candidates || []).length > 0 && (
+                  <div className="pm-duplicate-candidates">
+                    {(duplicateWarning.candidates || []).map((candidate) => (
+                      <button
+                        type="button"
+                        key={candidate.product_id}
+                        onClick={async () => {
+                          if (onSaved) await onSaved({
+                            id: candidate.product_id,
+                            name: candidate.product_name,
+                            status: candidate.status,
+                            sku: candidate.sku,
+                            barcode: candidate.barcode,
+                            dosage: candidate.dosage,
+                            pack_size: candidate.pack_size,
+                          });
+                          closeModal();
+                        }}
+                      >
+                        <strong>Use existing: {candidate.product_name}</strong>
+                        <small>
+                          {Math.round(Number(candidate.confidence || candidate.score || 0) * 100)}% match
+                          {candidate.dosage ? ` · ${candidate.dosage}` : ''}
+                          {candidate.pack_size ? ` · ${candidate.pack_size}` : ''}
+                        </small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {duplicateWarning.creation_blocked && <small>Correct the conflicting SKU/barcode, or use the existing Product.</small>}
+              </div>
+            )}
+
             <div className="pm-modal-footer">
               <button type="button" className="pm-btn-secondary" onClick={closeModal}>
                 Cancel
               </button>
+              {duplicateWarning && !duplicateWarning.creation_blocked && (
+                <button type="button" className="pm-btn-secondary pm-btn-warning" disabled={saving} onClick={() => handleProductSubmit(null, true)}>
+                  {saving ? 'Creating...' : 'Create new Product anyway'}
+                </button>
+              )}
               <button type="submit" className="pm-btn-primary" disabled={saving}>
-                {saving ? 'Saving...' : (editingProduct ? 'Update Product' : 'Create Product')}
+                {saving ? 'Saving...' : (editingProduct ? 'Update Product' : duplicateWarning ? 'Recheck Product' : 'Create Product')}
               </button>
             </div>
           </form>

@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
-import PriceHistoryPanel from './PriceHistoryPanel';
+import ProductPriceHistoryDialog from './ProductPriceHistoryDialog';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationErrorNotice from './QuotationErrorNotice';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
@@ -194,7 +194,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [items, setItems] = useState([]);
   const [companyItems, setCompanyItems] = useState([]);
-  const showFullProductCatalog = false;
   const [lineForm, setLineForm] = useState(emptyLine);
   const [lineDrafts, setLineDrafts] = useState({});
   const [savedLineDrafts, setSavedLineDrafts] = useState({});
@@ -206,7 +205,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [proformaDownloadLoading, setProformaDownloadLoading] = useState(false);
   const [lineFeedback, setLineFeedback] = useState(null);
   const [linePriceHints, setLinePriceHints] = useState({});
-  const [historyItem, setHistoryItem] = useState('');
+  const [priceContexts, setPriceContexts] = useState({});
+  const [priceHistoryDialog, setPriceHistoryDialog] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [lineFilter, setLineFilter] = useState('active');
@@ -222,6 +222,11 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [lpoUploading, setLpoUploading] = useState(false);
   const [lpoSaving, setLpoSaving] = useState(false);
   const [lpoFeedback, setLpoFeedback] = useState(null);
+  const linePriceVersionRef = useRef({});
+  const lineSelectedProductRef = useRef({});
+  const lineFormPriceVersionRef = useRef(0);
+  const lineFormSelectedProductRef = useRef('');
+  const priceContextGenerationRef = useRef(0);
 
   const setLoadedQuote = useCallback((quoteData) => {
     setQuote(quoteData);
@@ -235,6 +240,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setLineDrafts(drafts);
     setSavedLineDrafts(drafts);
     setLinePriceHints({});
+    setPriceContexts({});
+    setPriceHistoryDialog(null);
+    priceContextGenerationRef.current += 1;
+    linePriceVersionRef.current = {};
+    lineSelectedProductRef.current = Object.fromEntries(
+      (quoteData.lines || []).map((line) => [line.id, String(line.product || '')])
+    );
+    lineFormPriceVersionRef.current += 1;
+    lineFormSelectedProductRef.current = '';
     setSelectedLineIds((current) => current.filter((id) => (quoteData.lines || []).some((line) => line.id === id)));
   }, []);
 
@@ -249,7 +263,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setErrorInfo(null);
     try {
       const quoteRes = await quotationAPI.quotes.retrieve(quoteId);
-      const [itemsRes, companyItemsRes, companiesRes, contactsRes, lposRes] = await Promise.all([
+      const productIds = Array.from(new Set(
+        (quoteRes.data.lines || []).map((line) => line.product).filter(Boolean).map(String)
+      ));
+      const contextRequests = [];
+      for (let index = 0; index < productIds.length; index += 100) {
+        contextRequests.push(quotationAPI.quotes.productPrices(quoteId, {
+          products: productIds.slice(index, index + 100).join(','),
+          history_limit: 10,
+        }));
+      }
+      const priceContextsPromise = contextRequests.length ? Promise.all(contextRequests) : Promise.resolve([]);
+      const [itemsRes, companyItemsRes, companiesRes, contactsRes, lposRes, contextResponses] = await Promise.all([
         quotationAPI.items.list({ active: 'true' }),
         quotationAPI.items.list({ active: 'true', company_used: quoteRes.data.company }),
         quotationAPI.companies.list({ active: 'true' }),
@@ -257,13 +282,24 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           ? quotationAPI.contacts.list({ company: quoteRes.data.company, active: 'true' })
           : Promise.resolve({ data: [] }),
         quotationAPI.quotes.lpos(quoteId),
+        priceContextsPromise,
       ]);
+      const nextPriceContexts = Object.assign({}, ...contextResponses.map((response) => response.data?.results || {}));
       setLoadedQuote(quoteRes.data);
       setItems(itemsRes.data);
       setCompanyItems(companyItemsRes.data);
       setCompanies(companiesRes.data);
       setContacts(contactsRes.data);
       syncLpos(lposRes.data);
+      setPriceContexts(nextPriceContexts);
+      setLinePriceHints(Object.fromEntries(
+        (quoteRes.data.lines || [])
+          .filter((line) => line.product && nextPriceContexts[String(line.product)])
+          .map((line) => {
+            const context = nextPriceContexts[String(line.product)];
+            return [line.id, { ...context, mode: context.latest_quoted ? 'history_found' : 'no_history' }];
+          })
+      ));
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/, GET /quotations/items/`);
       setErrorInfo(details);
@@ -309,13 +345,39 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
 
   const productOptionsForDraft = (draft = {}) => {
-    const baseItems = showFullProductCatalog ? items : companyItems;
-    const byId = new Map(baseItems.map((item) => [String(item.id), item]));
+    const companyProductIds = new Set(companyItems.map((item) => String(item.id)));
+    const byId = new Map(items.map((item) => [String(item.id), item]));
     if (draft.product && !byId.has(String(draft.product))) {
       const selected = items.find((item) => String(item.id) === String(draft.product));
       if (selected) byId.set(String(selected.id), selected);
     }
-    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+    return Array.from(byId.values()).sort((a, b) => {
+      const aUsed = companyProductIds.has(String(a.id));
+      const bUsed = companyProductIds.has(String(b.id));
+      if (aUsed !== bUsed) return aUsed ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  };
+
+  const renderProductOptions = (draft = {}) => {
+    const companyProductIds = new Set(companyItems.map((item) => String(item.id)));
+    const options = productOptionsForDraft(draft);
+    const previouslyUsed = options.filter((item) => companyProductIds.has(String(item.id)));
+    const remaining = options.filter((item) => !companyProductIds.has(String(item.id)));
+    return (
+      <>
+        {previouslyUsed.length > 0 && (
+          <optgroup label="Previously quoted for this customer">
+            {previouslyUsed.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </optgroup>
+        )}
+        {remaining.length > 0 && (
+          <optgroup label="All other Products">
+            {remaining.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </optgroup>
+        )}
+      </>
+    );
   };
 
   const lineTotalForDraft = (draft = {}) => {
@@ -370,17 +432,23 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const updateLineDraft = (lineId, patch) => {
     setLineFeedback(null);
-    if (Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'product')) {
+    const affectsPriceRequest = Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'product');
+    if (affectsPriceRequest) {
+      linePriceVersionRef.current[lineId] = (linePriceVersionRef.current[lineId] || 0) + 1;
       setLinePriceHints((current) => {
         const next = { ...current };
         delete next[lineId];
         return next;
       });
     }
+    if (Object.prototype.hasOwnProperty.call(patch, 'product')) {
+      lineSelectedProductRef.current[lineId] = String(patch.product || '');
+    }
     setLineDrafts((current) => ({
       ...current,
       [lineId]: { ...current[lineId], ...patch },
     }));
+    return linePriceVersionRef.current[lineId] || 0;
   };
 
   const updateQuoteTermDraft = (patch) => {
@@ -427,18 +495,19 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setLinePriceHints((current) => ({
       ...current,
       [lineId]: {
+        ...suggestion,
         mode,
-        unit_price: suggestion?.unit_price || '',
-        quoted_at: suggestion?.quoted_at || '',
-        source_label: suggestion?.source_label || '',
       },
     }));
   };
 
   const maybeFetchProductPrice = async (productId) => {
     if (!quote?.id || !productId) return null;
+    const cached = priceContexts[String(productId)];
+    if (cached) return cached;
     try {
       const response = await quotationAPI.quotes.productPrice(quote.id, { product: productId });
+      setPriceContexts((current) => ({ ...current, [String(productId)]: response.data }));
       return response.data;
     } catch (error) {
       const details = await describeQuotationError(error, 'Load company Product price', `GET /quotations/quotes/${quote.id}/product_price/?product=${productId}`);
@@ -450,11 +519,16 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const priceHintText = (hint) => {
     if (!hint) return '';
-    const dateText = hint.quoted_at ? ` • ${hint.quoted_at}` : '';
-    if (hint.mode === 'autofilled') return `Price history AED ${hint.unit_price}${dateText} applied`;
-    if (hint.mode === 'current_kept') return `Last price AED ${hint.unit_price}${dateText}; current price kept`;
-    if (hint.mode === 'history_found') return `Last price AED ${hint.unit_price}${dateText}`;
-    return 'No previous company price';
+    const quoted = hint.latest_quoted;
+    const accepted = hint.latest_accepted;
+    const parts = [];
+    if (quoted?.quoted_unit_price) parts.push(`Last quoted ${quoted.currency || 'AED'} ${quoted.quoted_unit_price}`);
+    if (accepted?.accepted_unit_price) {
+      parts.push(`Last accepted ${accepted.currency || 'AED'} ${accepted.accepted_unit_price}${accepted.lpo_number ? ` (LPO ${accepted.lpo_number})` : ''}`);
+    }
+    if (!parts.length) return 'No previous customer price';
+    const prefix = hint.mode === 'autofilled' ? 'Applied · ' : hint.mode === 'current_kept' ? 'Current price kept · ' : '';
+    return `${prefix}${parts.join(' · ')}`;
   };
 
   const handleLineProductChange = async (line, productId) => {
@@ -464,19 +538,25 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     }
     const currentDraft = lineDrafts[line.id] || {};
     const patch = productPatch(currentDraft, productId);
-    updateLineDraft(line.id, patch);
-    setHistoryItem(productId);
+    const requestVersion = updateLineDraft(line.id, patch);
+    const requestGeneration = priceContextGenerationRef.current;
     if (!productId) return;
 
     const suggestion = await maybeFetchProductPrice(productId);
     if (!suggestion) return;
+    if (priceContextGenerationRef.current !== requestGeneration || lineSelectedProductRef.current[line.id] !== String(productId)) return;
+    setPriceHistoryDialog({
+      productId,
+      productName: suggestion.product_name || items.find((item) => String(item.id) === String(productId))?.name || '',
+      context: suggestion,
+    });
     if (suggestion.source !== 'company_price_history') {
       setPriceHintForLine(line.id, suggestion, 'no_history');
       return;
     }
     if (!suggestion?.unit_price) return;
     const pricePatch = {};
-    if (priceShouldAutofill(currentDraft)) {
+    if (linePriceVersionRef.current[line.id] === requestVersion && priceShouldAutofill(currentDraft)) {
       pricePatch.unit_price = suggestion.unit_price;
     }
     if (Object.keys(pricePatch).length) {
@@ -489,14 +569,25 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const handleLineFormProductChange = async (productId) => {
     const patch = productPatch(lineForm, productId);
+    lineFormPriceVersionRef.current += 1;
+    const requestVersion = lineFormPriceVersionRef.current;
+    const requestGeneration = priceContextGenerationRef.current;
+    lineFormSelectedProductRef.current = String(productId || '');
     setLineForm((current) => ({ ...current, ...patch }));
     if (!productId) return;
     const suggestion = await maybeFetchProductPrice(productId);
-    if (!suggestion?.unit_price) return;
-    if (suggestion.source !== 'company_price_history') return;
+    if (!suggestion || priceContextGenerationRef.current !== requestGeneration || lineFormSelectedProductRef.current !== String(productId)) return;
+    setPriceHistoryDialog({
+      productId,
+      productName: suggestion.product_name || items.find((item) => String(item.id) === String(productId))?.name || '',
+      context: suggestion,
+    });
+    if (!suggestion?.unit_price || suggestion.source !== 'company_price_history') return;
     setLineForm((current) => ({
       ...current,
-      unit_price: priceShouldAutofill(current) ? suggestion.unit_price : current.unit_price,
+      unit_price: lineFormPriceVersionRef.current === requestVersion && priceShouldAutofill(current)
+        ? suggestion.unit_price
+        : current.unit_price,
     }));
   };
 
@@ -599,21 +690,11 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setLineFeedback(null);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.quotes.update(quote.id, {
+      await quotationAPI.quotes.update(quote.id, {
         company: quotePartyDraft.company,
         contact: quotePartyDraft.contact || null,
       });
-      setQuote(response.data);
-      const nextPartyDraft = partyDraftFromQuote(response.data);
-      setQuotePartyDraft(nextPartyDraft);
-      setSavedQuotePartyDraft(nextPartyDraft);
-      const [companyItemsRes, companiesRes] = await Promise.all([
-        quotationAPI.items.list({ active: 'true', company_used: response.data.company }),
-        quotationAPI.companies.list({ active: 'true' }),
-      ]);
-      setCompanyItems(companyItemsRes.data);
-      setCompanies(companiesRes.data);
-      await loadContactsForCompany(response.data.company);
+      await load();
       setLineFeedback({ type: 'success', message: 'Customer and contact saved.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Save quotation customer/contact', `PATCH /quotations/quotes/${quote.id}/`);
@@ -660,6 +741,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         quotation: quote.id,
         sort_order: quote.lines.length,
       });
+      lineFormPriceVersionRef.current += 1;
+      lineFormSelectedProductRef.current = '';
       setLineForm(emptyLine);
       await load();
       setLineFeedback({ type: 'success', message: 'Line added.' });
@@ -716,10 +799,10 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const line = activeLines.find((candidate) => candidate.id === lineId);
       return [lineId, lineLabel(line, lineDrafts[lineId])];
     }));
-    setProductCreateModal({ lineIds: ids, names });
+    setProductCreateModal({ lineIds: ids, names, confirmations: {} });
   };
 
-  const confirmCreateProducts = async () => {
+  const confirmCreateProducts = async (forceCreate = false) => {
     if (!productCreateModal || saving || actionInFlight) return;
     setSaving(true);
     setErrorInfo(null);
@@ -728,8 +811,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const response = await quotationAPI.quotes.bulkCreateProductsForLines(quote.id, {
         line_ids: productCreateModal.lineIds,
         names: productCreateModal.names,
+        confirm_create_line_ids: forceCreate
+          ? productCreateModal.lineIds.filter((lineId) => {
+            const warning = productCreateModal.confirmations?.[lineId];
+            return warning && !warning.creation_blocked;
+          })
+          : [],
       });
       const updatedLines = response.data.updated_lines || [];
+      const confirmationRequired = response.data.confirmation_required || [];
       const updatedById = Object.fromEntries(updatedLines.map((line) => [line.id, line]));
       setQuote((current) => ({
         ...current,
@@ -751,11 +841,77 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         additions.forEach((item) => byId.set(String(item.id), { ...(byId.get(String(item.id)) || {}), ...item }));
         return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
       });
-      setSelectedLineIds((current) => current.filter((id) => !productCreateModal.lineIds.includes(id)));
-      setProductCreateModal(null);
-      setLineFeedback({ type: 'success', message: response.data.message || 'Products created/linked.' });
+      const updatedIds = updatedLines.map((line) => line.id);
+      setSelectedLineIds((current) => current.filter((id) => !updatedIds.includes(id)));
+      if (confirmationRequired.length > 0) {
+        const pendingIds = confirmationRequired.map((entry) => entry.line_id);
+        setProductCreateModal((current) => ({
+          ...current,
+          lineIds: pendingIds,
+          confirmations: Object.fromEntries(confirmationRequired.map((entry) => [entry.line_id, entry])),
+        }));
+        setLineFeedback({
+          type: 'warning',
+          message: `${confirmationRequired.length} row${confirmationRequired.length === 1 ? '' : 's'} look like existing Products. Review the matches before creating anything new.`,
+        });
+      } else {
+        setProductCreateModal(null);
+        setLineFeedback({ type: 'success', message: response.data.message || 'Products created/linked.' });
+      }
     } catch (error) {
       const details = await describeQuotationError(error, 'Create Products from quote lines', `POST /quotations/quotes/${quote.id}/bulk_create_products_for_lines/`);
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const linkCandidateFromCreateModal = async (lineId, candidate) => {
+    if (!candidate?.product_id || saving || actionInFlight) return;
+    const currentDraft = lineDrafts[lineId] || {};
+    const linkedDraft = {
+      ...currentDraft,
+      product: String(candidate.product_id),
+      item_name_snapshot: candidate.product_name || currentDraft.item_name_snapshot,
+      match_status: 'confirmed',
+      product_image: '',
+      product_image_url: '',
+      has_product_image: false,
+      include_product_image: false,
+    };
+    setSaving(true);
+    setErrorInfo(null);
+    setLineFeedback(null);
+    try {
+      const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
+        lines: [{ id: lineId, ...payloadForLine(linkedDraft) }],
+      });
+      mergeSavedQuote(response.data.quotation, [lineId]);
+      rememberProductsInList([{
+        id: candidate.product_id,
+        name: candidate.product_name,
+        sku: candidate.sku || '',
+        barcode: candidate.barcode || '',
+        dosage: candidate.dosage || '',
+        pack_size: candidate.pack_size || '',
+        status: candidate.status || 'draft',
+      }]);
+      setProductCreateModal((current) => {
+        if (!current) return null;
+        const remainingIds = current.lineIds.filter((id) => id !== lineId);
+        if (!remainingIds.length) return null;
+        const confirmations = { ...current.confirmations };
+        delete confirmations[lineId];
+        return { ...current, lineIds: remainingIds, confirmations };
+      });
+      setSelectedLineIds((current) => current.filter((id) => id !== lineId));
+      setLineFeedback({ type: 'success', message: `Linked the row to existing Product '${candidate.product_name}'.` });
+      quotationAPI.lines.rememberAlias(lineId).catch((error) => {
+        console.warn('The row was linked, but its source wording could not be remembered as an alias.', error);
+      });
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Link existing Product to quote line', `POST /quotations/quotes/${quote.id}/bulk_update_lines/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -816,6 +972,22 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setSelectedLineIds((current) => current.filter((id) => id !== lineId));
       setLineFeedback({ type: 'success', message: response.data.message || 'Created Product and linked row.' });
     } catch (error) {
+      const warning = error?.response?.data;
+      if (error?.response?.status === 409 && warning?.requires_confirmation) {
+        const draft = lineDrafts[lineId] || {};
+        setProductCreateModal({
+          lineIds: [lineId],
+          names: { [lineId]: draft.item_name_snapshot || '' },
+          confirmations: { [lineId]: { line_id: lineId, ...warning } },
+        });
+        setLineFeedback({
+          type: 'warning',
+          message: warning.creation_blocked
+            ? 'This Product conflicts with an existing identifier. Select the existing Product or correct the name/details.'
+            : 'A similar Product already exists. Review it before choosing to create a new one.',
+        });
+        return;
+      }
       const details = await describeQuotationError(error, 'Create Product from quote line', `POST /quotations/quote-lines/${lineId}/create_product/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -1048,6 +1220,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const latestLpo = lpos[0] || null;
   const canUseLpoWorkflow = ['approved', 'finalized', 'sent'].includes(quote.status);
+  const productCreationWarnings = productCreateModal ? Object.values(productCreateModal.confirmations || {}) : [];
+  const hasProductCreationWarnings = productCreationWarnings.length > 0;
+  const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked);
 
   return (
     <div className="qm-editor">
@@ -1346,17 +1521,16 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                 const draft = lineDrafts[line.id] || {};
                 const isDirty = !draftsMatch(draft, savedLineDrafts[line.id]);
                 const statusInfo = derivedLineStatus(line);
-                const productOptions = productOptionsForDraft(draft);
                 const priceHint = linePriceHints[line.id];
                 return (
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
                     <td className="qm-serial-cell">{lineIndex + 1}</td>
                     <td>
-                      <select disabled={!isEditable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
+                      <select aria-label={`Product for ${lineLabel(line, draft)}`} disabled={!isEditable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>
-                        {!showFullProductCatalog && productOptions.length === 0 && <option disabled value="__none__">No Products used by this company yet</option>}
-                        {productOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        {isEditable && <option value="__create__">+ Create a new Product…</option>}
+                        {renderProductOptions(draft)}
                       </select>
                     </td>
                     <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
@@ -1374,8 +1548,19 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                       />
                     </td>
                     <td className="qm-price-cell">
-                      <input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
-                      {priceHint && <span className={`qm-price-hint ${priceHint.mode}`}>{priceHintText(priceHint)}</span>}
+                      <input aria-label={`Unit price for ${lineLabel(line, draft)}`} disabled={!isEditable} type="number" min="0" step="0.001" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
+                      {priceHint && (
+                        <span className={`qm-price-hint ${priceHint.mode}`}>
+                          {priceHintText(priceHint)}
+                          {draft.product && (
+                            <button type="button" onClick={() => setPriceHistoryDialog({
+                              productId: draft.product,
+                              productName: priceHint.product_name || items.find((item) => String(item.id) === String(draft.product))?.name || '',
+                              context: priceContexts[String(draft.product)] || priceHint,
+                            })}>View price history</button>
+                          )}
+                        </span>
+                      )}
                     </td>
                     <td className="qm-vat-cell">
                       <select className="qm-vat-select" disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
@@ -1425,8 +1610,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           <form onSubmit={addLine} className="qm-add-line">
             <select value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
               <option value="">Select item</option>
-              {!showFullProductCatalog && productOptionsForDraft(lineForm).length === 0 && <option disabled value="__none__">No Products used by this company yet</option>}
-              {productOptionsForDraft(lineForm).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {renderProductOptions(lineForm)}
             </select>
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
@@ -1438,7 +1622,10 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               onKeyDown={preventUnitNumberKey}
               onChange={(event) => setLineForm({ ...lineForm, unit: sanitizeUnitText(event.target.value) })}
             />
-            <input type="number" min="0" step="0.001" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, unit_price: event.target.value })} />
+            <input type="number" min="0" step="0.001" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => {
+              lineFormPriceVersionRef.current += 1;
+              setLineForm({ ...lineForm, unit_price: event.target.value });
+            }} />
             <select value={lineForm.vat_rate} onChange={(event) => setLineForm({ ...lineForm, vat_rate: event.target.value })}>
               <option value="0">VAT 0%</option>
               <option value="5">VAT 5%</option>
@@ -1454,7 +1641,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             <div className="qm-panel-heading">
               <div>
                 <h3>Create Products from unmatched rows</h3>
-                <p>Products will be draft/internal and hidden from public product pages. Same normalized names are created once and linked to all matching selected rows.</p>
+                <p>The catalog is checked first. Exact matches are reused automatically; similar matches must be reviewed before a new internal Product is created.</p>
               </div>
               <button type="button" className="qm-secondary small" onClick={() => setProductCreateModal(null)}>Close</button>
             </div>
@@ -1469,17 +1656,50 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                 <tbody>
                   {productCreateModal.lineIds.map((lineId) => {
                     const line = activeLines.find((candidate) => candidate.id === lineId);
+                    const warning = productCreateModal.confirmations?.[lineId];
                     return (
                       <tr key={lineId}>
                         <td>{line ? lineLabel(line, lineDrafts[lineId]) : `Line ${lineId}`}</td>
                         <td>
                           <input
                             value={productCreateModal.names[lineId] || ''}
-                            onChange={(event) => setProductCreateModal((current) => ({
-                              ...current,
-                              names: { ...current.names, [lineId]: event.target.value },
-                            }))}
+                            onChange={(event) => setProductCreateModal((current) => {
+                              const confirmations = { ...current.confirmations };
+                              delete confirmations[lineId];
+                              return {
+                                ...current,
+                                names: { ...current.names, [lineId]: event.target.value },
+                                confirmations,
+                              };
+                            })}
                           />
+                          {warning && (
+                            <div className={`qm-product-match-warning ${warning.creation_blocked ? 'blocked' : ''}`}>
+                              <strong>{warning.creation_blocked ? 'Identifier conflict — a new Product cannot be created' : 'Likely existing Product found'}</strong>
+                              <p>{warning.warning || warning.match_reason}</p>
+                              {(warning.candidates || []).length > 0 && (
+                                <div className="qm-product-candidate-list">
+                                  {(warning.candidates || []).map((candidate) => (
+                                    <button
+                                      type="button"
+                                      className="qm-product-candidate"
+                                      key={candidate.product_id}
+                                      disabled={saving}
+                                      onClick={() => linkCandidateFromCreateModal(lineId, candidate)}
+                                    >
+                                      <span>Use {candidate.product_name}</span>
+                                      <small>
+                                        {Math.round(Number(candidate.confidence || candidate.score || 0) * 100)}% match
+                                        {candidate.dosage ? ` · ${candidate.dosage}` : ''}
+                                        {candidate.pack_size ? ` · ${candidate.pack_size}` : ''}
+                                      </small>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              {!warning.creation_blocked && <small>Only choose “Create anyway” if none of these Products is actually the same item.</small>}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1488,8 +1708,13 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               </table>
             </div>
             <div className="qm-action-row">
-              <button type="button" className="qm-primary" disabled={saving} onClick={confirmCreateProducts}>
-                {saving ? 'Creating...' : 'Create / Link Products'}
+              <button
+                type="button"
+                className="qm-primary"
+                disabled={saving || (hasProductCreationWarnings && !canOverrideProductCreationWarning)}
+                onClick={() => confirmCreateProducts(hasProductCreationWarnings)}
+              >
+                {saving ? 'Checking catalog...' : hasProductCreationWarnings ? 'Create new Product anyway' : 'Check catalog and continue'}
               </button>
               <button type="button" className="qm-secondary" disabled={saving} onClick={() => setProductCreateModal(null)}>Cancel</button>
             </div>
@@ -1497,8 +1722,17 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         </div>
       )}
 
-      <div className="qm-grid-two bottom-panels">
-        <PriceHistoryPanel companyId={quote.company} itemId={historyItem} />
+      {priceHistoryDialog && (
+        <ProductPriceHistoryDialog
+          quoteId={quote.id}
+          productId={priceHistoryDialog.productId}
+          productName={priceHistoryDialog.productName}
+          initialContext={priceHistoryDialog.context}
+          onClose={() => setPriceHistoryDialog(null)}
+        />
+      )}
+
+      <div className="bottom-panels">
         <AuditLogPanel quotationId={quote.id} />
       </div>
     </div>
