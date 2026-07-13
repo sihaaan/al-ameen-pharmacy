@@ -1,16 +1,23 @@
 import hashlib
 from decimal import Decimal
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from reportlab.pdfgen import canvas
 
-from .ai_parsing import AI_DETERMINISTIC_GUARD_WARNING, prefer_safe_ai_preview
+from .ai_parsing import (
+    AI_DETERMINISTIC_GUARD_WARNING,
+    AIParseError,
+    _select_mode,
+    clean_preview_with_ai,
+    prefer_safe_ai_preview,
+)
 from .import_parsers import _parse_pdf_word_layout_item_rows, parse_pdf_preview, parse_text_preview
 from .import_rules import parse_text_lines
-from .models import Company, Quotation, QuotationLine
+from .models import AIParseCache, Company, Quotation, QuotationLPO, QuotationLine
 from .services import (
     AI_QUOTE_COVERAGE_GUARD_WARNING,
     build_guarded_po_outcome_suggestions,
@@ -228,6 +235,68 @@ class LPOTextParserRegressionTests(SimpleTestCase):
         )
 
         self.assertEqual(details["lpo_number"], "PO111_123301")
+
+    @override_settings(QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model")
+    def test_gmail_pdf_attachment_uses_vision_in_auto_mode(self):
+        mode = _select_mode(
+            {
+                "source_type": QuotationLPO.SOURCE_GMAIL,
+                "source_filename": "customer-po.pdf",
+                "source_file_ref": "inquiry_sources/customer-po.pdf",
+            },
+            requested_mode="auto",
+            allow_vision=True,
+            settings_obj=SimpleNamespace(ai_pdf_vision_enabled=True),
+        )
+
+        self.assertEqual(mode, AIParseCache.MODE_VISION)
+
+    @override_settings(QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model")
+    def test_gmail_pdf_without_private_source_uses_text_in_auto_mode(self):
+        mode = _select_mode(
+            {
+                "source_type": QuotationLPO.SOURCE_GMAIL,
+                "source_filename": "customer-po.pdf",
+                "source_file_ref": "gmail:message-only",
+            },
+            requested_mode="auto",
+            allow_vision=True,
+            settings_obj=SimpleNamespace(ai_pdf_vision_enabled=True),
+        )
+
+        self.assertEqual(mode, AIParseCache.MODE_TEXT)
+
+    @override_settings(QUOTATION_AI_PARSE_VISION_MODEL="test-vision-model")
+    @patch("quotations.ai_parsing._run_ai_cleanup", return_value={"lines": []})
+    @patch(
+        "quotations.ai_parsing._render_pdf_images",
+        side_effect=AIParseError("Source PDF is not available in private storage."),
+    )
+    @patch("quotations.ai_parsing._assert_ai_allowed")
+    @patch("quotations.ai_parsing.QuotationSettings.get_solo")
+    def test_auto_vision_render_failure_falls_back_to_text(
+        self,
+        get_settings,
+        _assert_allowed,
+        _render,
+        run_cleanup,
+    ):
+        get_settings.return_value = SimpleNamespace(ai_pdf_vision_enabled=True)
+
+        clean_preview_with_ai(
+            {
+                "source_type": QuotationLPO.SOURCE_GMAIL,
+                "source_filename": "customer-po.pdf",
+                "source_file_ref": "inquiry_sources/customer-po.pdf",
+                "meta": {},
+                "lines": [],
+            },
+            requested_mode="auto",
+            allow_vision=True,
+        )
+
+        self.assertEqual(run_cleanup.call_args.kwargs["mode"], AIParseCache.MODE_TEXT)
+        self.assertEqual(run_cleanup.call_args.kwargs["images"], [])
 
 
 class LPOOutcomeGuardRegressionTests(TestCase):

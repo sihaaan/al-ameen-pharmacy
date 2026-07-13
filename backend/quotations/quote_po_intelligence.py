@@ -69,6 +69,33 @@ PO_NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 PO_WORD_RE = re.compile(r"\bpo\b", re.IGNORECASE)
+PO_FILENAME_RE = re.compile(
+    r"(?:^|[^A-Z0-9])(?:LPO|MPO|PO)(?=(?:[_\-\s#.:]|\d))",
+    re.IGNORECASE,
+)
+PO_CONTENT_RE = re.compile(
+    r"\b(?:local\s+purchase\s+order|purchase\s+order|order\s+confirmation)\b"
+    r"|\b(?:LPO|MPO)\b"
+    r"|\bPO\s*(?:NO\.?|NUMBER|#|:|-)\s*[A-Z0-9]",
+    re.IGNORECASE,
+)
+PO_REFERENCE_CAPTURE_RE = re.compile(
+    r"\b(?:LPO|MPO|PO|LOCAL\s+PURCHASE\s+ORDER|PURCHASE\s+ORDER)"
+    r"(?:\s*(?:NO\.?|NUMBER))?\s*[:#_-]?\s*"
+    r"(?P<number>[A-Z0-9][A-Z0-9/_-]{2,})",
+    re.IGNORECASE,
+)
+PO_DOCUMENT_HEADING_RE = re.compile(
+    r"(?:^|\n)\s*(?:LOCAL\s+)?PURCHASE\s+ORDER\b",
+    re.IGNORECASE,
+)
+NON_PO_DOCUMENT_HEADING_RE = re.compile(
+    r"(?:^|\n)\s*(?:TAX\s+INVOICE|SALES\s+INVOICE|QUOTATION|SALES\s+QUOTATION)\b",
+    re.IGNORECASE,
+)
+AMBIGUOUS_PO_ATTACHMENT_WARNING = (
+    "Multiple PO/LPO files were equally plausible; staff must choose the customer document."
+)
 QUOTE_REFERENCE_RE = re.compile(
     r"\b(?:quotation|quote)\s*(?:(?:no\.?|number|ref(?:erence)?|#)\s*[:#-]?|[:#-])\s*([A-Z0-9][A-Z0-9/_.-]{3,})",
     re.IGNORECASE,
@@ -930,26 +957,107 @@ def scan_quote_po_evidence_batch(actor, *, quote_limit=5, message_limit=10, resc
     }
 
 
+def _attachment_document_text(attachment):
+    chunks = [str((attachment or {}).get("original_text") or "")]
+    chunks.extend(
+        str(
+            (row or {}).get("raw_line")
+            or (row or {}).get("raw_source_line")
+            or (row or {}).get("raw_name")
+            or ""
+        )
+        for row in ((attachment or {}).get("lines") or [])[:20]
+    )
+    return " ".join(chunks)[:120000]
+
+
+def _has_numbered_po_reference(value):
+    return any(
+        re.search(r"\d", match.group("number"))
+        for match in PO_REFERENCE_CAPTURE_RE.finditer(value or "")
+    )
+
+
 def _attachment_relevance_score(attachment, quotation):
     filename = str((attachment or {}).get("filename") or "")
     lowered = filename.lower()
+    content = _attachment_document_text(attachment)
+    filename_has_po = bool(_has_numbered_po_reference(filename) or PO_FILENAME_RE.search(filename))
+    content_has_po_number = _has_numbered_po_reference(content)
+    content_has_po = bool(content_has_po_number or PO_CONTENT_RE.search(content))
+    content_has_po_heading = bool(PO_DOCUMENT_HEADING_RE.search(content[:4000]))
+    content_has_non_po_heading = bool(NON_PO_DOCUMENT_HEADING_RE.search(content[:4000]))
+    content_is_quote = bool(
+        QUOTE_REFERENCE_RE.search(content)
+        or re.search(r"\bquotation\s*(?:#|no\.?\b|number\b)", content, re.IGNORECASE)
+    )
+    filename_is_non_po = bool(
+        (quotation.quotation_number and quotation.quotation_number.lower() in lowered)
+        or AUTO_QUOTE_REFERENCE_RE.search(filename)
+        or re.search(
+            r"(?:^|[^a-z0-9])(?:"
+            r"tax[_\-\s]*invoice|sales[_\-\s]*invoice|invoice|"
+            r"proforma(?:[_\-\s]*invoice)?|delivery[_\-\s]*note|"
+            r"statement|receipt|quotation|quote"
+            r")(?=[^a-z]|$)",
+            lowered,
+        )
+    )
     score = 0
-    if PO_NUMBER_RE.search(lowered):
+    if filename_has_po:
         score += 100
-    elif PO_WORD_RE.search(lowered) or any(term in lowered for term in ["lpo", "mpo", "purchase order"]):
+    elif re.search(r"(?:^|[^a-z0-9])purchase[_\-\s]*order(?:[^a-z0-9]|$)", lowered):
         score += 80
-    elif "order" in lowered:
+    elif re.search(r"(?:^|[^a-z0-9])order(?:[^a-z0-9]|$)", lowered):
         score += 45
-    if quotation.quotation_number and quotation.quotation_number.lower() in lowered:
-        score += 60
+    if content_has_po:
+        score += 120
+    if content_has_non_po_heading:
+        score -= 240
+    elif content_is_quote and not content_has_po_number:
+        score -= 160
+    if filename_is_non_po and not content_has_po_heading:
+        score -= 200
+    if (filename_has_po or content_has_po) and quotation.quotation_number:
+        if quotation.quotation_number.lower() in f"{lowered} {content.lower()}":
+            score += 10
     return score
+
+
+def _normalize_po_reference(value):
+    normalized = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    for prefix in ("LPO", "MPO", "PO"):
+        if normalized.startswith(prefix) and re.search(r"\d", normalized[len(prefix) :]):
+            return normalized[len(prefix) :]
+    return normalized
+
+
+def _po_references_from_text(text):
+    return {
+        _normalize_po_reference(match.group("number"))
+        for match in PO_REFERENCE_CAPTURE_RE.finditer(text)
+        if re.search(r"\d", match.group("number"))
+    }
+
+
+def _subject_po_references(payload):
+    return _po_references_from_text(
+        f"{payload.get('subject', '')} {payload.get('snippet', '')}"
+    )
+
+
+def _attachment_po_references(attachment):
+    return _po_references_from_text(
+        f"{attachment.get('filename', '')} {_attachment_document_text(attachment)}"
+    )
 
 
 def _select_primary_po_attachment(payload, quotation):
     parsed = [
         attachment
         for attachment in payload.get("attachments") or []
-        if (attachment or {}).get("status") == "parsed" and (attachment or {}).get("lines")
+        if (attachment or {}).get("status") == "parsed"
+        and ((attachment or {}).get("lines") or (attachment or {}).get("source_file_ref"))
     ]
     if not parsed:
         return None, []
@@ -961,14 +1069,33 @@ def _select_primary_po_attachment(payload, quotation):
     best, best_score = ranked[0]
     warnings = []
     if best_score <= 0:
-        if len(ranked) == 1 and (
-            PO_NUMBER_RE.search(f"{payload.get('subject', '')} {payload.get('snippet', '')}")
-            or _contains_any(f"{payload.get('subject', '')} {payload.get('snippet', '')}", ORDER_DOCUMENT_TERMS)
-        ):
-            return best, warnings
-        warnings.append("No attachment was selected because multiple generic files could not be identified as the PO/LPO document.")
-        return None, warnings
-    for attachment, _score in ranked[1:]:
+        subject_text = f"{payload.get('subject', '')} {payload.get('snippet', '')}"
+        uniquely_best_generic = best_score == 0 and sum(
+            1 for _attachment, score in ranked if score == best_score
+        ) == 1
+        subject_has_po = bool(
+            _has_numbered_po_reference(subject_text) or PO_CONTENT_RE.search(subject_text)
+        )
+        if not uniquely_best_generic or not subject_has_po:
+            warnings.append(
+                "No attachment was selected because the available files could not be identified as the customer PO/LPO document."
+            )
+            return None, warnings
+    tied = [attachment for attachment, score in ranked if score == best_score]
+    if len(tied) > 1:
+        subject_references = _subject_po_references(payload)
+        referenced = [
+            attachment
+            for attachment in tied
+            if subject_references & _attachment_po_references(attachment)
+        ]
+        if len(referenced) != 1:
+            warnings.append(AMBIGUOUS_PO_ATTACHMENT_WARNING)
+            return None, warnings
+        best = referenced[0]
+    for attachment, _score in ranked:
+        if attachment is best:
+            continue
         warnings.append(
             f"{attachment.get('filename', 'Attachment')}: not merged; only the strongest PO/LPO attachment was parsed."
         )
@@ -995,6 +1122,8 @@ def _preview_from_gmail_payload(payload, evidence, *, relevance_reason=""):
     rows = []
     selected_attachment, selection_warnings = _select_primary_po_attachment(payload, evidence.quotation)
     warnings.extend(selection_warnings)
+    if not selected_attachment and AMBIGUOUS_PO_ATTACHMENT_WARNING in selection_warnings:
+        raise EvidenceLinkConflict(AMBIGUOUS_PO_ATTACHMENT_WARNING)
     for attachment in payload.get("attachments") or []:
         status = attachment.get("status")
         if status == "parsed" and attachment is selected_attachment:
@@ -1012,20 +1141,24 @@ def _preview_from_gmail_payload(payload, evidence, *, relevance_reason=""):
             warnings.append(f"{attachment.get('filename', 'Attachment')}: {attachment.get('reason', status)}")
 
     relevance_context = _po_relevance_context(evidence, payload, relevance_reason)
-    if rows:
+    if selected_attachment:
         return {
             "source_type": QuotationLPO.SOURCE_GMAIL,
             "source_filename": selected_attachment.get("filename") or payload.get("subject") or "Gmail PO evidence",
-            "source_sha256": _source_hash(payload),
+            "source_mime_type": selected_attachment.get("source_mime_type")
+            or selected_attachment.get("mime_type")
+            or "",
+            "source_sha256": selected_attachment.get("source_sha256") or _source_hash(payload),
             "source_file_ref": selected_attachment.get("source_file_ref") or f"gmail:{payload.get('gmail_message_id', '')}",
             "source_file_size": int(selected_attachment.get("size") or 0),
-            "parse_method": "gmail_primary_attachment",
-            "original_text": payload.get("body_text") or "",
+            "parse_method": selected_attachment.get("parse_method") or "gmail_primary_attachment",
+            "original_text": selected_attachment.get("original_text") or payload.get("body_text") or "",
             "lines": rows,
             "warnings": warnings,
             "parsed_attachment_count": 1,
             "relevance_context": relevance_context,
             "meta": {
+                **(selected_attachment.get("meta") or {}),
                 "gmail_message_id": payload.get("gmail_message_id", ""),
                 "gmail_thread_id": payload.get("gmail_thread_id", ""),
                 "gmail_subject": payload.get("subject", ""),

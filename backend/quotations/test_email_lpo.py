@@ -36,11 +36,15 @@ from .models import (
     QuotationPOEvidence,
 )
 from .quote_po_intelligence import (
+    EvidenceLinkConflict,
     _candidate_score,
     _extract_gmail_lpo_details,
+    _has_numbered_po_reference,
     _locked_message_evidence_queryset,
     _lock_and_resolve_evidence_approval,
+    _preview_from_gmail_payload,
     _search_query_with_complete_flag,
+    _select_primary_po_attachment,
     build_quote_gmail_queries,
     find_quote_po_evidence,
     parse_quote_po_evidence,
@@ -238,6 +242,257 @@ class SharedMailboxEvidenceTests(TestCase):
             with self.subTest(expected_number=expected_number):
                 details = _extract_gmail_lpo_details(preview)
                 self.assertEqual(details["lpo_number"], expected_number)
+
+    def test_customer_po_attachment_outranks_attached_copy_of_our_quote(self):
+        quote_attachment = {
+            "filename": f"Customer-{self.quotation.quotation_number}.pdf",
+            "status": "parsed",
+            "original_text": (
+                "AL AMEEN PHARMACY\nQUOTATION\n"
+                f"Quotation # {self.quotation.quotation_number}\n"
+                "Customer PO NUMBER: 75B0600313340"
+            ),
+            "lines": [
+                {"raw_line": "Shampoo 500ml | 12 | bottle | 8.00"},
+                {"raw_line": "Please issue a purchase order before delivery."},
+            ],
+        }
+        po_attachment = {
+            "filename": "customer-document.pdf",
+            "status": "parsed",
+            "original_text": "PURCHASE ORDER\nPO NUMBER : 75B0600313340",
+            "lines": [{"raw_line": "PO NUMBER : 75B0600313340"}],
+        }
+
+        selected, warnings = _select_primary_po_attachment(
+            {
+                "subject": "A Purchase Order: 75B0600313340 has been submitted",
+                "attachments": [quote_attachment, po_attachment],
+            },
+            self.quotation,
+        )
+
+        self.assertIs(selected, po_attachment)
+        self.assertTrue(any(quote_attachment["filename"] in warning for warning in warnings))
+
+    def test_numbered_po_labels_allow_punctuation_but_require_a_digit(self):
+        for value in (
+            "PO NUMBER: 778",
+            "PO No.: 778",
+            "Purchase Order No: ABC123",
+            "LPO No: LPO-77",
+        ):
+            with self.subTest(value=value):
+                self.assertTrue(_has_numbered_po_reference(value))
+        self.assertFalse(_has_numbered_po_reference("Purchase order before delivery"))
+
+    def test_attached_copy_of_our_quote_is_not_treated_as_the_customer_po(self):
+        quote_attachment = {
+            "filename": f"Customer-{self.quotation.quotation_number}.pdf",
+            "status": "parsed",
+            "original_text": (
+                "AL AMEEN PHARMACY\nQUOTATION\n"
+                f"Quotation # {self.quotation.quotation_number}\n"
+                "Customer PO NUMBER: 75B0600313340"
+            ),
+            "lines": [
+                {"raw_line": "Shampoo 500ml | 12 | bottle | 8.00"},
+                {"raw_line": "Please issue a purchase order before delivery."},
+            ],
+        }
+
+        selected, warnings = _select_primary_po_attachment(
+            {
+                "subject": "A Purchase Order has been submitted",
+                "attachments": [quote_attachment],
+            },
+            self.quotation,
+        )
+
+        self.assertIsNone(selected)
+        self.assertTrue(warnings)
+
+    def test_scanned_generic_po_outranks_tax_invoice_with_po_reference(self):
+        tax_invoice = {
+            "filename": "tax-invoice.pdf",
+            "status": "parsed",
+            "source_file_ref": "inquiry_sources/tax-invoice.pdf",
+            "original_text": "TAX INVOICE\nCustomer PO NUMBER: 778",
+            "lines": [{"raw_line": "Shampoo 500ml | 12 | bottle | 8.00"}],
+        }
+        scanned_po = {
+            "filename": "scan.pdf",
+            "status": "parsed",
+            "source_file_ref": "inquiry_sources/scan.pdf",
+            "original_text": "",
+            "lines": [],
+        }
+
+        selected, warnings = _select_primary_po_attachment(
+            {
+                "subject": "Purchase Order: 778",
+                "attachments": [tax_invoice, scanned_po],
+            },
+            self.quotation,
+        )
+
+        self.assertIs(selected, scanned_po)
+        self.assertTrue(any(tax_invoice["filename"] in warning for warning in warnings))
+
+    def test_scanned_non_po_filename_is_not_selected_from_po_subject_alone(self):
+        for filename in (
+            "tax-invoice.pdf",
+            "proforma_invoice.pdf",
+            "delivery-note.pdf",
+            "statement.pdf",
+            "receipt.pdf",
+            "quotation.pdf",
+            "invoice778.pdf",
+            "taxinvoice778.pdf",
+            "proforma778.pdf",
+            "deliverynote778.pdf",
+            "statement778.pdf",
+            "receipt778.pdf",
+            "quotation778.pdf",
+        ):
+            with self.subTest(filename=filename):
+                selected, warnings = _select_primary_po_attachment(
+                    {
+                        "subject": "Purchase Order: 778",
+                        "attachments": [
+                            {
+                                "filename": filename,
+                                "status": "parsed",
+                                "source_file_ref": f"inquiry_sources/{filename}",
+                                "original_text": "",
+                                "lines": [],
+                            }
+                        ],
+                    },
+                    self.quotation,
+                )
+
+                self.assertIsNone(selected)
+                self.assertTrue(warnings)
+
+    def test_tied_po_attachments_fail_closed_unless_subject_identifies_one(self):
+        first = {
+            "filename": "PO_111.pdf",
+            "status": "parsed",
+            "lines": [{"raw_line": "PO NUMBER: 111"}],
+        }
+        second = {
+            "filename": "PO_222.pdf",
+            "status": "parsed",
+            "lines": [{"raw_line": "PO NUMBER: 222"}],
+        }
+
+        selected, warnings = _select_primary_po_attachment(
+            {"subject": "Purchase order documents", "attachments": [first, second]},
+            self.quotation,
+        )
+        self.assertIsNone(selected)
+        self.assertTrue(any("equally plausible" in warning for warning in warnings))
+
+        evidence = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id="gmail-ambiguous-attachments",
+        )
+        with self.assertRaisesMessage(EvidenceLinkConflict, "equally plausible"):
+            _preview_from_gmail_payload(
+                {
+                    "gmail_message_id": evidence.gmail_message_id,
+                    "subject": "Purchase order documents",
+                    "body_text": "Please process the attached order.",
+                    "attachments": [first, second],
+                },
+                evidence,
+            )
+
+        selected, warnings = _select_primary_po_attachment(
+            {"subject": "Purchase Order: 222", "attachments": [first, second]},
+            self.quotation,
+        )
+        self.assertIs(selected, second)
+        self.assertTrue(any(first["filename"] in warning for warning in warnings))
+
+    def test_tie_resolution_uses_exact_normalized_po_references(self):
+        prefix_collision = {
+            "filename": "PO-1234.pdf",
+            "status": "parsed",
+            "lines": [{"raw_line": "PO NUMBER: PO-1234"}],
+        }
+        exact = {
+            "filename": "PO_123.pdf",
+            "status": "parsed",
+            "lines": [{"raw_line": "PO NUMBER: 123"}],
+        }
+
+        selected, _warnings = _select_primary_po_attachment(
+            {
+                "subject": "Purchase Order: PO-123",
+                "attachments": [prefix_collision, exact],
+            },
+            self.quotation,
+        )
+        self.assertIs(selected, exact)
+
+        separator_variant = {
+            "filename": "PO_12-34.pdf",
+            "status": "parsed",
+            "lines": [{"raw_line": "PO NUMBER: PO_12-34"}],
+        }
+        unrelated = {
+            "filename": "PO-5678.pdf",
+            "status": "parsed",
+            "lines": [{"raw_line": "PO NUMBER: PO-5678"}],
+        }
+        selected, _warnings = _select_primary_po_attachment(
+            {
+                "subject": "Purchase Order: PO-12/34",
+                "attachments": [unrelated, separator_variant],
+            },
+            self.quotation,
+        )
+        self.assertIs(selected, separator_variant)
+
+    def test_selected_gmail_pdf_preserves_source_for_vision_even_without_rows(self):
+        evidence = QuotationPOEvidence.objects.create(
+            quotation=self.quotation,
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_message_id="gmail-empty-pdf-preview",
+        )
+        preview = _preview_from_gmail_payload(
+            {
+                "gmail_message_id": evidence.gmail_message_id,
+                "subject": "Purchase Order: PO-77",
+                "body_text": "Please process the attached PO.",
+                "attachments": [
+                    {
+                        "filename": "PO-77.pdf",
+                        "mime_type": "application/pdf",
+                        "status": "parsed",
+                        "source_file_ref": "inquiry_sources/po-77.pdf",
+                        "source_sha256": "a" * 64,
+                        "parse_method": "pymupdf_text_v1",
+                        "original_text": "PURCHASE ORDER\nPO NUMBER: PO-77",
+                        "meta": {"page_count": 2},
+                        "lines": [],
+                    }
+                ],
+            },
+            evidence,
+        )
+
+        self.assertEqual(preview["source_filename"], "PO-77.pdf")
+        self.assertEqual(preview["source_mime_type"], "application/pdf")
+        self.assertEqual(preview["source_file_ref"], "inquiry_sources/po-77.pdf")
+        self.assertEqual(preview["original_text"], "PURCHASE ORDER\nPO NUMBER: PO-77")
+        self.assertEqual(preview["meta"]["page_count"], 2)
+        self.assertEqual(preview["lines"], [])
 
     def test_legacy_candidate_retirement_migration_is_idempotent_and_preserves_reviewed_rows(self):
         stale = QuotationPOEvidence.objects.create(
@@ -608,6 +863,10 @@ class GmailMimeParsingTests(TestCase):
         parsed_preview = {
             "source_file_ref": "private:po-1",
             "source_sha256": "a" * 64,
+            "source_mime_type": "application/pdf",
+            "parse_method": "pymupdf_text_v1",
+            "original_text": "PURCHASE ORDER\nPO NUMBER: LPO-77",
+            "meta": {"page_count": 2},
             "lines": [{"raw_name": "Bandage Pack", "quantity": "2"}],
             "warnings": [],
         }
@@ -620,6 +879,10 @@ class GmailMimeParsingTests(TestCase):
         self.assertEqual(attachment["gmail_message_id"], "message-1")
         self.assertEqual(attachment["part_id"], "1")
         self.assertEqual(attachment["source_file_ref"], "private:po-1")
+        self.assertEqual(attachment["source_mime_type"], "application/pdf")
+        self.assertEqual(attachment["parse_method"], "pymupdf_text_v1")
+        self.assertEqual(attachment["original_text"], "PURCHASE ORDER\nPO NUMBER: LPO-77")
+        self.assertEqual(attachment["meta"]["page_count"], 2)
         self.assertEqual(attachment["lines"][0]["source_gmail_message_id"], "message-1")
 
     @patch("quotations.contract_intelligence.get_valid_access_token", return_value="token")

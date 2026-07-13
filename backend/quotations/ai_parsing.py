@@ -389,9 +389,18 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
     images = []
     page_count = _safe_int(preview.get("meta", {}).get("page_count"), default=0)
     if mode == AIParseCache.MODE_VISION:
-        images, rendered_page_count = _render_pdf_images(preview.get("source_file_ref", ""))
+        try:
+            images, rendered_page_count = _render_pdf_images(preview.get("source_file_ref", ""))
+        except Exception:
+            if requested_mode != "auto":
+                raise
+            images, rendered_page_count = [], 0
+            mode = AIParseCache.MODE_TEXT
         if not images:
-            raise AIParseError("AI vision cleanup could not render the source PDF. Use text cleanup or review manually.")
+            if requested_mode == "auto":
+                mode = AIParseCache.MODE_TEXT
+            else:
+                raise AIParseError("AI vision cleanup could not render the source PDF. Use text cleanup or review manually.")
         page_count = page_count or rendered_page_count
 
     return _run_ai_cleanup(
@@ -489,10 +498,19 @@ def _assert_ai_allowed(settings_obj):
 
 def _select_mode(preview, *, requested_mode, allow_vision, settings_obj):
     source_type = (preview.get("source_type") or "").lower()
+    source_mime_type = (preview.get("source_mime_type") or "").lower()
+    source_filename = (preview.get("source_filename") or "").lower()
+    source_file_ref = str(preview.get("source_file_ref") or "")
+    has_renderable_source = bool(source_file_ref) and not source_file_ref.startswith("gmail:")
+    is_pdf_source = (
+        source_type == Inquiry.SOURCE_TYPE_PDF
+        or source_mime_type == "application/pdf"
+        or source_filename.endswith(".pdf")
+    ) and has_renderable_source
     if requested_mode == AIParseCache.MODE_TEXT:
         return AIParseCache.MODE_TEXT
     wants_vision = requested_mode == AIParseCache.MODE_VISION or (
-        requested_mode == "auto" and source_type == Inquiry.SOURCE_TYPE_PDF
+        requested_mode == "auto" and is_pdf_source
     )
     if wants_vision:
         if not allow_vision or not settings_obj.ai_pdf_vision_enabled:

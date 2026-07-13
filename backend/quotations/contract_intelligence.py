@@ -612,6 +612,12 @@ def gmail_fetch_message(connection, message_id, *, include_attachments=True):
                         "status": "parsed",
                         "source_file_ref": source_ref,
                         "source_sha256": source_sha256,
+                        "source_mime_type": preview.get("source_mime_type")
+                        or attachment.get("mime_type")
+                        or "",
+                        "parse_method": preview.get("parse_method") or "",
+                        "original_text": str(preview.get("original_text") or "")[:120000],
+                        "meta": preview.get("meta") or {},
                         "line_count": len(lines),
                         "lines": lines,
                         "warnings": preview.get("warnings") or [],
