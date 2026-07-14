@@ -5069,6 +5069,7 @@ class AIImportParsingTests(APITestCase):
         non_staff = self.client.post(url, payload, format="json")
         self.assertEqual(non_staff.status_code, status.HTTP_403_FORBIDDEN)
 
+    @override_settings(QUOTATION_AI_PARSE_GLOBAL_ENABLED=True)
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_ai_disabled_returns_clear_response_without_provider_call(self):
         provider = MockAIProvider()

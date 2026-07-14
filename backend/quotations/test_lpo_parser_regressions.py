@@ -512,6 +512,154 @@ class LPOOutcomeGuardRegressionTests(TestCase):
         self.assertEqual(unmatched, [])
         self.assertEqual(missing, [])
 
+    def test_item_matching_accepts_ocr_split_millimetre_unit(self):
+        quoted_line = self.add_line(
+            "STEP UP STOOL SINGLE STEP 400X380X260M M SINGLE STEP"
+        )
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Step Up Stool Single Step 400 x 380 x 260mm Single Step",
+                        "quantity": "1",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual([row["quotation_line_id"] for row in suggestions], [quoted_line.id])
+        self.assertEqual([row["confidence"] for row in suggestions], [99])
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_split_mm_repair_does_not_merge_separate_metre_dimensions(self):
+        quoted_line = self.add_line("Safety Mat 5 m x 2 m")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Safety Mat 5 mm x 2 mm", "quantity": "1"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["specification_conflict"])
+        self.assertEqual(missing, [quoted_line.id])
+
+    def test_split_mm_repair_does_not_merge_a_metre_and_size_marker(self):
+        quoted_line = self.add_line("Cable 5m M")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Cable 5mm", "quantity": "1"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["specification_conflict"])
+        self.assertEqual(missing, [quoted_line.id])
+
+    def test_item_matching_accepts_ocr_split_gram_unit_for_medication(self):
+        quoted_line = self.add_line("DEEP HEAT OINTMENT 100G M", quantity="5", unit_price="18")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Deep Heat Ointment 100gm",
+                        "quantity": "5",
+                        "unit_price": "17.46",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual([row["quotation_line_id"] for row in suggestions], [quoted_line.id])
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_split_gm_repair_does_not_rewrite_unrelated_size_marker(self):
+        quoted_line = self.add_line("Cream Colored Cable 100g M")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Cream Colored Cable 100gm", "quantity": "1"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["specification_conflict"])
+        self.assertEqual(missing, [quoted_line.id])
+
+    def test_item_matching_accepts_ocr_space_inside_decimal_spec(self):
+        quoted_line = self.add_line("GAUZE SWAB 7. 5CM", quantity="10", unit_price="10")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Gauze Swab 7.5cm",
+                        "quantity": "10",
+                        "unit_price": "9.70",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual([row["quotation_line_id"] for row in suggestions], [quoted_line.id])
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_dual_volume_quote_identity_does_not_match_one_volume(self):
+        quoted_line = self.add_line("OPTREX EYE LOTION 110 ML (Omivis eye wash 100ml)")
+
+        for po_name in ("Optrex Eye Lotion 110 ml", "Omivis Eye Wash 100ml"):
+            with self.subTest(po_name=po_name):
+                suggestions, unmatched, missing = build_po_outcome_suggestions(
+                    self.quotation,
+                    {"lines": [{"raw_name": po_name, "quantity": "1"}]},
+                )
+
+                self.assertEqual(suggestions, [])
+                self.assertEqual(
+                    [row["reason_code"] for row in unmatched],
+                    ["specification_conflict"],
+                )
+                self.assertEqual(missing, [quoted_line.id])
+
+    def test_identical_dual_specs_and_dimensions_can_still_match(self):
+        dual_line = self.add_line("Medicine 500mg/125mg", sort_order=0)
+        dimension_line = self.add_line("Gauze 5cm x 7.5cm", sort_order=1)
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {"raw_name": "Medicine 500 mg / 125 mg", "quantity": "1"},
+                    {"raw_name": "Gauze 5 cm x 7.5 cm", "quantity": "1"},
+                ]
+            },
+        )
+
+        self.assertEqual(
+            {row["quotation_line_id"] for row in suggestions},
+            {dual_line.id, dimension_line.id},
+        )
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_x_separated_compound_strength_is_not_treated_as_a_dimension(self):
+        quoted_line = self.add_line("Medicine 500mg x 125mg")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Medicine 500mg", "quantity": "1"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["specification_conflict"])
+        self.assertEqual(missing, [quoted_line.id])
+
     def test_quantity_breaks_an_exact_duplicate_name_tie(self):
         ordered_line = self.add_line("Betadine Dry Powder Spray", quantity="2")
         unselected_line = self.add_line("Betadine Dry Powder Spray", sort_order=1, quantity="5")

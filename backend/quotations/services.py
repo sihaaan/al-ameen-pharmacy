@@ -493,8 +493,45 @@ def _text_match_score(left, right):
     return int((overlap / total) * 100)
 
 
-def _item_spec_tokens(value):
+ITEM_SPEC_UNIT_PATTERN = r"(?:mcg|mg|gm|kg|ml|mm|cm|g|l|m|%|inch(?:es)?|in\b|\")"
+ITEM_DIMENSION_UNIT_PATTERN = r"(?:mm|cm|m|inch(?:es)?|in\b|\")"
+SPLIT_GRAM_MEDICATION_PATTERN = re.compile(
+    r"\b(creams?|gels?|ointments?|oinments?|powders?)\b\s+"
+    r"(\d+(?:\.\d+)?)g\s+m\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_item_spec_text(value):
     text = str(value or "").lower().replace(chr(215), "x")
+    # PDF text extraction can insert a space inside a decimal immediately
+    # before its unit (``7. 5CM``). Keep the repair limited to an explicit
+    # measurement so sentence/list punctuation is not rewritten.
+    text = re.sub(
+        r"\b(\d+)\.\s+(\d+)(?=\s*(?:mcg|mg|gm|kg|ml|mm|cm|g|l|m|inch(?:es)?|in)\b|\s*[\"%])",
+        r"\1.\2",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # The production stool OCR split ``260mm`` into ``260m m``. Require a
+    # three-axis dimension chain: a standalone trailing M can instead be a
+    # size/model marker and must never turn an ordinary metre into millimetres.
+    text = re.sub(
+        r"\b((?:\d+(?:\.\d+)?\s*x\s*){2}\d+(?:\.\d+)?)m\s+m\b",
+        r"\1mm",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Gram-sold pharmacy forms immediately followed by the measurement do not
+    # use a trailing medium-size marker. Requiring adjacency prevents a word
+    # such as ``cream`` elsewhere in an unrelated item name from authorizing
+    # every later ``100g M`` fragment to become ``100gm``.
+    text = SPLIT_GRAM_MEDICATION_PATTERN.sub(r"\1 \2gm", text)
+    return text
+
+
+def _item_spec_tokens(value):
+    text = _normalize_item_spec_text(value)
     tokens = {
         re.sub(r"\s+", "", match.group(0)).replace('"', "in")
         for match in re.finditer(
@@ -512,11 +549,51 @@ def _item_spec_tokens(value):
     return tokens
 
 
+def _scalar_item_specs_by_unit(value):
+    """Return scalar specs, excluding values that belong to dimensions."""
+
+    text = _normalize_item_spec_text(value)
+    dimension_component = rf"\d+(?:\.\d+)?\s*{ITEM_DIMENSION_UNIT_PATTERN}?"
+    dimension_spans = [
+        match.span()
+        for match in re.finditer(
+            rf"\b{dimension_component}\s*x\s*{dimension_component}"
+            rf"(?:\s*x\s*{dimension_component})?",
+            text,
+            re.IGNORECASE,
+        )
+    ]
+    grouped = {}
+    for match in re.finditer(
+        rf"\b(?P<amount>\d+(?:\.\d+)?)\s*(?P<unit>{ITEM_SPEC_UNIT_PATTERN})",
+        text,
+        re.IGNORECASE,
+    ):
+        if any(start <= match.start() and match.end() <= end for start, end in dimension_spans):
+            continue
+        unit = match.group("unit").lower().replace('"', "in")
+        if unit.startswith("inch"):
+            unit = "in"
+        grouped.setdefault(unit, set()).add(match.group("amount"))
+    return grouped
+
+
 def _has_item_spec_conflict(po_name, quotation_name):
     po_specs = _item_spec_tokens(po_name)
     quotation_specs = _item_spec_tokens(quotation_name)
     if not po_specs or not quotation_specs:
         return False
+    # A line containing alternatives or a compound strength (for example,
+    # ``110ml (100ml)``) must not match a PO that names only one of those
+    # values. Identical multi-value identities are still valid, and dimensions
+    # are excluded above so ``5cm x 7.5cm`` keeps working normally.
+    po_scalar_specs = _scalar_item_specs_by_unit(po_name)
+    quotation_scalar_specs = _scalar_item_specs_by_unit(quotation_name)
+    for unit in po_scalar_specs.keys() | quotation_scalar_specs.keys():
+        po_values = po_scalar_specs.get(unit, set())
+        quotation_values = quotation_scalar_specs.get(unit, set())
+        if (len(po_values) > 1 or len(quotation_values) > 1) and po_values != quotation_values:
+            return True
     # Extra pack detail on one side is acceptable when all shared explicit
     # specifications agree. Disjoint explicit strengths/sizes are not.
     return not (po_specs <= quotation_specs or quotation_specs <= po_specs)
