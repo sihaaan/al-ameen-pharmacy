@@ -8,6 +8,8 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase, override_settings
 from reportlab.pdfgen import canvas
 
+from api.models import Product
+
 from .ai_parsing import (
     AI_DETERMINISTIC_GUARD_WARNING,
     AIParseError,
@@ -346,13 +348,13 @@ class LPOOutcomeGuardRegressionTests(TestCase):
         self.company = Company.objects.create(name="LPO Parser Regression Customer")
         self.quotation = Quotation.objects.create(company=self.company, created_by=self.user)
 
-    def add_line(self, name, *, sort_order=0):
+    def add_line(self, name, *, sort_order=0, quantity="1", unit_price="10", unit="No"):
         return QuotationLine.objects.create(
             quotation=self.quotation,
             item_name_snapshot=name,
-            quantity=Decimal("1"),
-            unit="No",
-            unit_price=Decimal("10"),
+            quantity=Decimal(quantity),
+            unit=unit,
+            unit_price=Decimal(unit_price),
             match_status=QuotationLine.MATCH_CONFIRMED,
             sort_order=sort_order,
         )
@@ -488,18 +490,341 @@ class LPOOutcomeGuardRegressionTests(TestCase):
                 self.assertEqual(missing, [])
 
     def test_item_matching_accepts_joined_or_split_compound_words(self):
-        quoted_line = self.add_line("dependa plaster water proof")
+        waterproof_line = self.add_line("dependa plaster water proof")
+        betadine_line = self.add_line("Betadine Solution 500ML", sort_order=1)
 
         suggestions, unmatched, missing = build_po_outcome_suggestions(
             self.quotation,
-            {"lines": [{"raw_name": "Dependa Plaster Waterproof", "quantity": "1"}]},
+            {
+                "lines": [
+                    {"raw_name": "Dependa Plaster Waterproof", "quantity": "1"},
+                    {"raw_name": "Betadine Solution 500 ml", "quantity": "1"},
+                ]
+            },
         )
 
-        self.assertEqual(len(suggestions), 1)
-        self.assertEqual(suggestions[0]["quotation_line_id"], quoted_line.id)
-        self.assertEqual(suggestions[0]["confidence"], 99)
+        self.assertEqual(len(suggestions), 2)
+        self.assertEqual(
+            {suggestion["quotation_line_id"] for suggestion in suggestions},
+            {waterproof_line.id, betadine_line.id},
+        )
+        self.assertEqual({suggestion["confidence"] for suggestion in suggestions}, {99})
         self.assertEqual(unmatched, [])
         self.assertEqual(missing, [])
+
+    def test_quantity_breaks_an_exact_duplicate_name_tie(self):
+        ordered_line = self.add_line("Betadine Dry Powder Spray", quantity="2")
+        unselected_line = self.add_line("Betadine Dry Powder Spray", sort_order=1, quantity="5")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Betadine Dry Powder Spray", "quantity": "2"}]},
+        )
+
+        self.assertEqual([row["quotation_line_id"] for row in suggestions], [ordered_line.id])
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [unselected_line.id])
+
+    def test_price_breaks_an_exact_duplicate_name_tie_after_quantity(self):
+        lower_price_line = self.add_line("Alcohol Pads", quantity="2", unit_price="10")
+        ordered_line = self.add_line(
+            "Alcohol Pads",
+            sort_order=1,
+            quantity="2",
+            unit_price="12",
+        )
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Alcohol Pads",
+                        "quantity": "2",
+                        "unit_price": "12",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual([row["quotation_line_id"] for row in suggestions], [ordered_line.id])
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [lower_price_line.id])
+
+    def test_conflicting_duplicate_quantity_and_price_stay_ambiguous(self):
+        quantity_line = self.add_line("Alcohol Pads", quantity="2", unit_price="10")
+        price_line = self.add_line(
+            "Alcohol Pads",
+            sort_order=1,
+            quantity="5",
+            unit_price="12",
+        )
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Alcohol Pads",
+                        "quantity": "2",
+                        "unit_price": "12",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["ambiguous_match"])
+        self.assertEqual(missing, [quantity_line.id, price_line.id])
+
+    def test_quantity_never_breaks_a_tie_between_different_item_names(self):
+        blue_line = self.add_line("Nitrile Gloves Medium Blue", quantity="1")
+        black_line = self.add_line("Nitrile Gloves Medium Black", sort_order=1, quantity="2")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Nitrile Gloves Medium", "quantity": "2"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["ambiguous_match"])
+        self.assertEqual(missing, [blue_line.id, black_line.id])
+
+    def test_equal_duplicate_rows_are_assigned_one_to_one(self):
+        first_line = self.add_line("Pickup Forceps", sort_order=0)
+        second_line = self.add_line("Pickup Forceps", sort_order=1)
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {"raw_name": "Pickup Forceps", "quantity": "1"},
+                    {"raw_name": "Pickup Forceps", "quantity": "1"},
+                ]
+            },
+        )
+
+        self.assertEqual(
+            [
+                (row["po_row_number"], row["quotation_line_id"])
+                for row in suggestions
+            ],
+            [(1, first_line.id), (2, second_line.id)],
+        )
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_one_duplicate_row_against_two_quote_lines_stays_ambiguous(self):
+        first_line = self.add_line("Pickup Forceps", sort_order=0)
+        second_line = self.add_line("Pickup Forceps", sort_order=1)
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Pickup Forceps", "quantity": "1"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["ambiguous_match"])
+        self.assertEqual(missing, [first_line.id, second_line.id])
+
+    def test_two_duplicate_rows_against_three_quote_lines_stay_ambiguous(self):
+        quote_lines = [
+            self.add_line("Pickup Forceps", sort_order=index)
+            for index in range(3)
+        ]
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {"raw_name": "Pickup Forceps", "quantity": "1"},
+                    {"raw_name": "Pickup Forceps", "quantity": "1"},
+                ]
+            },
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual(
+            [row["reason_code"] for row in unmatched],
+            ["ambiguous_match", "ambiguous_match"],
+        )
+        self.assertEqual(missing, [line.id for line in quote_lines])
+
+    def test_duplicate_group_with_different_units_stays_ambiguous(self):
+        box_line = self.add_line("Alcohol Pads", sort_order=0, unit="Box")
+        each_line = self.add_line("Alcohol Pads", sort_order=1, unit="No")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Alcohol Pads",
+                        "quantity": "1",
+                        "unit_price": "10",
+                        "unit": "No",
+                    },
+                    {
+                        "raw_name": "Alcohol Pads",
+                        "quantity": "1",
+                        "unit_price": "10",
+                        "unit": "Box",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual(
+            [row["reason_code"] for row in unmatched],
+            ["ambiguous_match", "ambiguous_match"],
+        )
+        self.assertEqual(missing, [box_line.id, each_line.id])
+
+    def test_priced_item_raw_line_recovers_description_and_size(self):
+        seven_line = self.add_line(
+            "Conforming Gauze Bandage Pbt Confirming Dressing Bandage - 7.5 cm",
+            sort_order=0,
+            quantity="2",
+            unit_price="0.80",
+        )
+        five_line = self.add_line(
+            "Conforming Gauze Bandage Pbt Confirming Dressing Bandage - 5 cm",
+            sort_order=1,
+            quantity="2",
+            unit_price="0.70",
+        )
+        knee_line = self.add_line(
+            "Bandage Knee Bandage",
+            sort_order=2,
+            quantity="2",
+            unit_price="22",
+        )
+        preview = {
+            "lines": [
+                {
+                    "raw_name": "Conforming Gauze Bandage",
+                    "raw_line": (
+                        "6 | MED10050 | CONFORMING GAUZE BANDAGE | "
+                        "PBT CONFIRMING DRESSING BANDAGE-7.5 CM | 2 | NUM | 0.78 | 1.55"
+                    ),
+                    "quantity": "2",
+                    "unit_price": "0.78",
+                },
+                {
+                    "raw_name": "Conforming Gauze Bandage",
+                    "raw_line": (
+                        "7 | MED10050 | CONFORMING GAUZE BANDAGE | "
+                        "PBT CONFIRMING DRESSING BANDAGE - 5 CM | 2 | NUM | 0.68 | 1.36"
+                    ),
+                    "quantity": "2",
+                    "unit_price": "0.68",
+                },
+                {
+                    "raw_name": "Bandage",
+                    "raw_line": "8 | MED10024 | BANDAGE | KNEE BANDAGE | 2 | PKT | 21.34 | 42.68",
+                    "quantity": "2",
+                    "unit_price": "21.34",
+                },
+            ]
+        }
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(self.quotation, preview)
+
+        self.assertEqual(
+            {row["quotation_line_id"] for row in suggestions},
+            {seven_line.id, five_line.id, knee_line.id},
+        )
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
+    def test_raw_line_match_cannot_override_an_explicit_primary_spec_conflict(self):
+        quoted_line = self.add_line("Sterile Gauze 5 cm x 5 m", quantity="2")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Sterile Gauze 10 cm x 5 m",
+                        "raw_line": (
+                            "1 | MED10050 | STERILE GAUZE 5 CM X 5 M | "
+                            "2 | NUM | 10.00 | 20.00"
+                        ),
+                        "quantity": "2",
+                        "unit_price": "10",
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["specification_conflict"])
+        self.assertEqual(missing, [quoted_line.id])
+
+    def test_generic_product_alias_cannot_override_snapshot_spec_conflict(self):
+        quoted_line = self.add_line("Sterile Gauze 5 cm", quantity="2")
+        quoted_line.product = Product.objects.create(name="Sterile Gauze", price=Decimal("10"))
+        quoted_line.save(update_fields=["product"])
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Sterile Gauze 10 cm", "quantity": "2"}]},
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual([row["reason_code"] for row in unmatched], ["specification_conflict"])
+        self.assertEqual(missing, [quoted_line.id])
+
+    def test_comment_raw_line_cannot_create_an_item_match(self):
+        quoted_line = self.add_line("First Aid Box")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {
+                "lines": [
+                    {
+                        "raw_name": "Comments",
+                        "raw_line": "Comments | First Aid Box | approved",
+                        "quantity": "1",
+                        "unit_price": "10",
+                    },
+                    {
+                        "raw_name": "Remarks",
+                        "raw_line": "Remarks | First Aid Box | approved | 1 | NUM | 10 | 10",
+                        "quantity": "1",
+                        "unit_price": "10",
+                    },
+                    {
+                        "raw_name": "Notes",
+                        "raw_line": "Notes | First Aid Box | approved | 1 | NUM | 10 | 10",
+                        "quantity": "1",
+                        "unit_price": "10",
+                    },
+                ]
+            },
+        )
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual(
+            [row["reason_code"] for row in unmatched],
+            ["non_item_metadata"] * 3,
+        )
+        self.assertEqual(missing, [quoted_line.id])
+
+    def test_possessive_ocr_spelling_matches_plural_item_name(self):
+        quoted_line = self.add_line("SURGICAL GLOVES (M SIZE)")
+
+        for po_name in ("Surgical Glove's m Sizes", "Surgical Glove’s m Sizes"):
+            with self.subTest(po_name=po_name):
+                suggestions, unmatched, missing = build_po_outcome_suggestions(
+                    self.quotation,
+                    {"lines": [{"raw_name": po_name, "quantity": "1"}]},
+                )
+
+                self.assertEqual([row["quotation_line_id"] for row in suggestions], [quoted_line.id])
+                self.assertEqual(unmatched, [])
+                self.assertEqual(missing, [])
 
     def test_ai_cannot_reduce_strong_quotation_line_coverage(self):
         jacket_line = self.add_line("Fire Warden Jacket", sort_order=1)

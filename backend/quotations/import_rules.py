@@ -155,10 +155,17 @@ OBVIOUS_PO_METADATA_ITEM_RE = re.compile(
     r"|^\s*(?:delivery date|requested delivery date|expected delivery date|po submit date|order date|"
     r"document date|phone|telephone|tel|mobile|fax|e-?mail|address|delivery address|"
     r"billing address|shipping address|contact|contact person|payment terms|customer account|"
-    r"tax registration|tax registration number|trn|status|created by|requested by)"
+    r"tax registration|tax registration number|trn|status|created by|requested by|comment|comments|"
+    r"remark|remarks|note|notes|terms|terms and conditions)"
     r"\s*(?::|#|$)"
     r"|^\s*(?:requested\s+|expected\s+)?delivery\s+date\s*(?:[:#-]\s*)?"
     r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}\s*$",
+    re.IGNORECASE,
+)
+PO_DOCUMENT_FIELD_PREFIX_RE = re.compile(
+    r"^\s*(?:supplier name|supplier number|supplier site|supplier address|po currency|"
+    r"purchaser name|purchaser email|ship to department|purchase site|rfq reference|"
+    r"supplier vat|requisition number)\b",
     re.IGNORECASE,
 )
 PO_PHONE_METADATA_ITEM_RE = re.compile(
@@ -170,7 +177,7 @@ PO_PHONE_METADATA_ITEM_RE = re.compile(
 
 def is_obvious_po_metadata_item(value):
     item_name = str(value or "")
-    if OBVIOUS_PO_METADATA_ITEM_RE.search(item_name):
+    if OBVIOUS_PO_METADATA_ITEM_RE.search(item_name) or PO_DOCUMENT_FIELD_PREFIX_RE.search(item_name):
         return True
     phone_match = PO_PHONE_METADATA_ITEM_RE.search(item_name)
     return bool(phone_match and len(re.sub(r"\D", "", phone_match.group("number"))) >= 5)

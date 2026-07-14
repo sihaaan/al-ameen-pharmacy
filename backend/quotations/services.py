@@ -462,9 +462,10 @@ def outcome_summary_for_quotation(quotation):
 
 def _text_match_normalize(value):
     text = normalize_label(value)
+    text = re.sub(r"(?<=\w)['’](?=s\b)", "", text)
     text = re.sub(r"[-–—_]+", " ", text)
     text = re.sub(r"(?<=[a-z])/(?=[a-z])", " ", text)
-    text = re.sub(r"[(),:;]+", " ", text)
+    text = re.sub(r"[(),:;|]+", " ", text)
     return normalize_label(text)
 
 
@@ -534,6 +535,67 @@ def _po_row_item_name(row):
     ).strip()
 
 
+def _trusted_po_pipe_text_cell(value):
+    cell = str(value or "").strip()
+    if not re.search(r"[A-Za-z]", cell):
+        return False
+    if normalize_label(cell) in {
+        "box",
+        "btl",
+        "ea",
+        "no",
+        "nos",
+        "num",
+        "pc",
+        "pcs",
+        "pkt",
+        "rl",
+        "roll",
+        "set",
+        "tin",
+        "unit",
+    }:
+        return False
+    return not bool(re.fullmatch(r"[A-Za-z]{1,12}[\d._/-]+", cell))
+
+
+def _po_row_match_texts(row):
+    """Return safe item text variants that may be matched to a quote line."""
+
+    item_name = _po_row_item_name(row)
+    texts = [item_name] if item_name else []
+    # Structured PO parsers sometimes keep a short item name in ``raw_name``
+    # and the discriminating description/size in the pipe-delimited source
+    # row. Only use that broader context for a priced item row; this prevents
+    # headers and comments that merely mention an item from becoming matches.
+    if _decimal_or_none((row or {}).get("quantity")) is not None and _decimal_or_none(
+        (row or {}).get("unit_price")
+    ) is not None:
+        for key in ("raw_line", "raw_source_line"):
+            value = str((row or {}).get(key) or "").strip()
+            if not value:
+                continue
+            if "|" not in value:
+                continue
+            cells = [cell.strip() for cell in value.split("|")]
+            for index, cell in enumerate(cells):
+                cell_is_text = _trusted_po_pipe_text_cell(cell)
+                if (
+                    cell_is_text
+                    and (len(re.findall(r"[A-Za-z]+", cell)) >= 2 or _item_spec_tokens(cell))
+                    and cell not in texts
+                ):
+                    texts.append(cell)
+                if index + 1 >= len(cells):
+                    continue
+                next_cell = cells[index + 1]
+                if cell_is_text and _trusted_po_pipe_text_cell(next_cell):
+                    combined = f"{cell} {next_cell}".strip()
+                    if combined and combined not in texts:
+                        texts.append(combined)
+    return texts
+
+
 def _po_row_review_rejection(row):
     item_name = _po_row_item_name(row)
     raw_text = " ".join(
@@ -566,6 +628,7 @@ def _po_row_review_rejection(row):
 
 def _po_row_match_candidates(row, quote_lines):
     item_name = _po_row_item_name(row)
+    row_match_texts = _po_row_match_texts(row)
     candidates = []
     conflicts = []
     for line in quote_lines:
@@ -575,16 +638,28 @@ def _po_row_match_candidates(row, quote_lines):
         if line.quote_item_id:
             names.append(line.quote_item.name)
         scored_names = [
-            (_text_match_score(item_name, candidate), candidate)
+            (_text_match_score(row_text, candidate), candidate, row_text)
             for candidate in names
+            for row_text in row_match_texts
             if candidate
         ]
         if not scored_names:
             continue
-        score, matched_name = max(scored_names, key=lambda value: value[0])
+        score, _matched_name, _matched_row_text = max(
+            scored_names,
+            key=lambda value: (
+                value[0],
+                len(_item_spec_tokens(value[2])),
+                len(_text_match_normalize(value[2]).split()),
+            ),
+        )
         if score < 60:
             continue
-        if _has_item_spec_conflict(item_name, matched_name):
+        if any(
+            _has_item_spec_conflict(row_text, quote_name)
+            for row_text in row_match_texts
+            for quote_name in names
+        ):
             conflicts.append(
                 {
                     "quotation_line_id": line.id,
@@ -597,6 +672,45 @@ def _po_row_match_candidates(row, quote_lines):
     candidates.sort(key=lambda value: (-value["score"], value["line"].sort_order, value["line"].id))
     conflicts.sort(key=lambda value: -value["score"])
     return item_name, candidates, conflicts
+
+
+def _narrow_tied_po_candidates_by_values(row, candidates):
+    """Use exact quantity/price only to break otherwise tied name matches."""
+
+    if len(candidates) <= 1:
+        return candidates
+    top_score = candidates[0]["score"]
+    tied = [candidate for candidate in candidates if top_score - candidate["score"] <= 5]
+    remainder = [candidate for candidate in candidates if top_score - candidate["score"] > 5]
+    if len(tied) <= 1:
+        return candidates
+    tied_identities = {
+        _text_match_normalize(candidate["line"].item_name_snapshot).replace(" ", "")
+        for candidate in tied
+    }
+    if len(tied_identities) != 1:
+        return candidates
+    exact_sets = []
+    for row_field, line_field in (("quantity", "quantity"), ("unit_price", "unit_price")):
+        row_value = _decimal_or_none((row or {}).get(row_field))
+        if row_value is None:
+            continue
+        exact_ids = {
+            candidate["line"].id
+            for candidate in tied
+            if _decimal_or_none(getattr(candidate["line"], line_field, None)) == row_value
+        }
+        if exact_ids:
+            exact_sets.append(exact_ids)
+    if not exact_sets:
+        return candidates
+    selected_ids = set.intersection(*exact_sets)
+    # Quantity and price pointing to different duplicate lines is conflicting
+    # evidence, so retain the original ambiguity for staff review.
+    if not selected_ids:
+        return candidates
+    narrowed = [candidate for candidate in tied if candidate["line"].id in selected_ids]
+    return [*narrowed, *remainder]
 
 
 def _po_preview_has_aggregate_summary(preview):
@@ -634,6 +748,27 @@ def build_po_outcome_suggestions(quotation, preview):
             candidates, conflicts = [], []
         else:
             item_name, candidates, conflicts = _po_row_match_candidates(row, quote_lines)
+            candidates = _narrow_tied_po_candidates_by_values(row, candidates)
+        top_candidate_ids = ()
+        if candidates and candidates[0]["score"] >= 99:
+            top_score = candidates[0]["score"]
+            exact_candidates = [
+                candidate
+                for candidate in candidates
+                if top_score - candidate["score"] <= 5
+                and candidate["score"] >= 99
+            ]
+            candidate_identities = {
+                _text_match_normalize(candidate["line"].item_name_snapshot).replace(" ", "")
+                for candidate in exact_candidates
+            }
+            if len(candidate_identities) == 1:
+                top_candidate_ids = tuple(
+                    sorted(
+                        candidate["line"].id
+                        for candidate in exact_candidates
+                    )
+                )
         row_records.append(
             {
                 "index": index,
@@ -642,7 +777,51 @@ def build_po_outcome_suggestions(quotation, preview):
                 "candidates": candidates,
                 "conflicts": conflicts,
                 "review_rejection": review_rejection,
+                "top_candidate_ids": top_candidate_ids,
+                "safe_equivalent_duplicate_group": False,
             }
+        )
+
+    # When N indistinguishable PO rows map exactly to N indistinguishable quote
+    # lines, their individual identity is immaterial. Let the one-to-one
+    # allocator pair them deterministically. A single PO row against multiple
+    # duplicate quote lines remains ambiguous and is still left for staff.
+    for record in row_records:
+        candidate_ids = record["top_candidate_ids"]
+        if len(candidate_ids) <= 1:
+            continue
+        related_rows = [
+            other
+            for other in row_records
+            if other["top_candidate_ids"] == candidate_ids
+        ]
+        row_value_signatures = {
+            (
+                _decimal_or_none(other["row"].get("quantity")),
+                _decimal_or_none(other["row"].get("unit_price")),
+                normalize_label(other["row"].get("unit")),
+            )
+            for other in related_rows
+        }
+        candidate_lines = {
+            candidate["line"].id: candidate["line"]
+            for other in related_rows
+            for candidate in other["candidates"]
+            if candidate["line"].id in candidate_ids
+        }
+        line_value_signatures = {
+            (
+                _decimal_or_none(line.quantity),
+                _decimal_or_none(line.unit_price),
+                normalize_label(line.unit),
+            )
+            for line in candidate_lines.values()
+        }
+        record["safe_equivalent_duplicate_group"] = (
+            len(related_rows) == len(candidate_ids)
+            and len(candidate_lines) == len(candidate_ids)
+            and len(row_value_signatures) == 1
+            and len(line_value_signatures) == 1
         )
 
     unmatched = []
@@ -674,7 +853,11 @@ def build_po_outcome_suggestions(quotation, preview):
                 }
             )
             continue
-        if len(candidates) > 1 and candidates[0]["score"] - candidates[1]["score"] <= 5:
+        if (
+            len(candidates) > 1
+            and candidates[0]["score"] - candidates[1]["score"] <= 5
+            and not record["safe_equivalent_duplicate_group"]
+        ):
             unmatched.append(
                 {
                     "po_row_number": record["index"],
