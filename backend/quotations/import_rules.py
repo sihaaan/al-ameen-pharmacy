@@ -148,6 +148,34 @@ HEADER_ROLE_LABELS = {
     "line_total": "Total",
 }
 
+OBVIOUS_PO_METADATA_ITEM_RE = re.compile(
+    r"^\s*(?:description|item description|quantity|qty|unit|unit price|price|amount|subtotal|"
+    r"grand total|total|vat|date|lpo|local purchase order|purchase order|po number|from|to|buyer|seller)"
+    r"\s*(?::|#|-|$)"
+    r"|^\s*(?:delivery date|requested delivery date|expected delivery date|po submit date|order date|"
+    r"document date|phone|telephone|tel|mobile|fax|e-?mail|address|delivery address|"
+    r"billing address|shipping address|contact|contact person|payment terms|customer account|"
+    r"tax registration|tax registration number|trn|status|created by|requested by)"
+    r"\s*(?::|#|$)"
+    r"|^\s*(?:requested\s+|expected\s+)?delivery\s+date\s*(?:[:#-]\s*)?"
+    r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}\s*$",
+    re.IGNORECASE,
+)
+PO_PHONE_METADATA_ITEM_RE = re.compile(
+    r"^\s*(?:phone|telephone|tel|mobile|fax)\s*(?:no\.?\s*)?(?:[:#-]\s*)?"
+    r"(?P<number>\+?[\d() ./-]+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_obvious_po_metadata_item(value):
+    item_name = str(value or "")
+    if OBVIOUS_PO_METADATA_ITEM_RE.search(item_name):
+        return True
+    phone_match = PO_PHONE_METADATA_ITEM_RE.search(item_name)
+    return bool(phone_match and len(re.sub(r"\D", "", phone_match.group("number"))) >= 5)
+
+
 NOISE_PATTERNS = [
     re.compile(r"^\s*$"),
     re.compile(r"^\s*(page|p\.)\s*\d+(\s+of\s+\d+)?\s*$", re.IGNORECASE),

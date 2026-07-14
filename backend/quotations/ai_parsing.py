@@ -11,7 +11,12 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
-from .import_rules import preserve_specific_item_details, standardize_item_display_name, summarize_lines
+from .import_rules import (
+    is_obvious_po_metadata_item,
+    preserve_specific_item_details,
+    standardize_item_display_name,
+    summarize_lines,
+)
 from .models import AIParseCache, AIParseLog, HistoricalPriceImport, Inquiry, QuotationSettings
 from .private_storage import read_private_ref
 
@@ -298,6 +303,10 @@ def _guard_item_tokens(row):
     }
 
 
+def _guard_row_is_obvious_metadata(row):
+    return is_obvious_po_metadata_item(_guard_item_name(row))
+
+
 def _guard_decimal(value):
     if value in (None, ""):
         return None
@@ -321,6 +330,7 @@ def prefer_safe_ai_preview(deterministic_preview, ai_preview):
         if _safe_float((row or {}).get("parse_confidence"), default=0.0) >= 0.80
         and _guard_decimal((row or {}).get("quantity")) is not None
         and _guard_item_tokens(row)
+        and not _guard_row_is_obvious_metadata(row)
     ]
     if not strong_rows:
         return ai_preview

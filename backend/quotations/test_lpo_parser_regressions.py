@@ -188,6 +188,47 @@ class LPOTextParserRegressionTests(SimpleTestCase):
         self.assertEqual(selected["lines"], deterministic["lines"])
         self.assertTrue(selected["meta"]["ai_cleanup_rejected"])
 
+    def test_element_metadata_rows_do_not_override_ai_vision_items(self):
+        deterministic = {
+            "lines": [
+                {
+                    "raw_name": "Delivery Date : 08/07/2026",
+                    "quantity": "8",
+                    "parse_confidence": 0.82,
+                },
+                {
+                    "raw_name": "Phone",
+                    "raw_line": "Phone 42713695",
+                    "quantity": "42713695",
+                    "parse_confidence": 0.82,
+                },
+                {
+                    "raw_name": "Phone 042487029",
+                    "quantity": "042487029",
+                    "parse_confidence": 0.82,
+                },
+            ],
+            "warnings": [],
+            "meta": {},
+        }
+        ai_preview = {
+            "lines": [
+                {"raw_name": "Small First Aid Box", "quantity": "8", "parse_confidence": 0.96},
+                {"raw_name": "Savoy Burn Spray", "quantity": "4", "parse_confidence": 0.96},
+                {"raw_name": "Eye Wash Bottle", "quantity": "2", "parse_confidence": 0.96},
+            ],
+            "warnings": [],
+            "meta": {"ai_mode": "vision"},
+        }
+
+        selected = prefer_safe_ai_preview(deterministic, ai_preview)
+
+        self.assertIs(selected, ai_preview)
+        self.assertEqual(
+            [row["raw_name"] for row in selected["lines"]],
+            ["Small First Aid Box", "Savoy Burn Spray", "Eye Wash Bottle"],
+        )
+
     def test_pdf_header_only_table_falls_back_to_word_layout_for_dettol_row(self):
         buffer = BytesIO()
         pdf = canvas.Canvas(buffer)
@@ -355,6 +396,54 @@ class LPOOutcomeGuardRegressionTests(TestCase):
         self.assertEqual(suggestions, [])
         self.assertEqual(unmatched[0]["reason_code"], "non_item_metadata")
         self.assertEqual(missing, [water_line.id])
+
+    def test_po_contact_and_delivery_metadata_are_rejected_before_item_matching(self):
+        quoted_metadata_line = self.add_line("Phone")
+        preview = {
+            "lines": [
+                {"raw_name": "Delivery Date : 08/07/2026", "quantity": "8"},
+                {"raw_name": "Phone", "quantity": "42713695"},
+                {"raw_name": "Phone 042487029", "quantity": "042487029"},
+                {"raw_name": "Phone-42713695", "quantity": "42713695"},
+                {"raw_name": "Phone - 42713695", "quantity": "42713695"},
+                {"raw_name": "Delivery Date - 08/07/2026", "quantity": "8"},
+                {"raw_name": "Payment Terms: 30 Days", "quantity": "30"},
+            ]
+        }
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(self.quotation, preview)
+
+        self.assertEqual(suggestions, [])
+        self.assertEqual(
+            [row["reason_code"] for row in unmatched],
+            ["non_item_metadata"] * 7,
+        )
+        self.assertEqual(missing, [quoted_metadata_line.id])
+
+    def test_hyphenated_item_names_near_metadata_labels_are_preserved(self):
+        item_names = [
+            "TEL - 40",
+            "Contact - Lens Solution",
+            "TRN - 500 Tablets",
+            "Mobile - Toilet Chair",
+            "Status - Cream",
+        ]
+        quote_lines = [self.add_line(item_name) for item_name in item_names]
+        preview = {
+            "lines": [
+                {"raw_name": item_name, "quantity": "1"}
+                for item_name in item_names
+            ]
+        }
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(self.quotation, preview)
+
+        self.assertEqual(
+            {row["quotation_line_id"] for row in suggestions},
+            {line.id for line in quote_lines},
+        )
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
 
     def test_description_quantity_item_can_reach_outcome_suggestion(self):
         jacket_line = self.add_line("Coverall Jacket")

@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from api.models import Product, ProductImage, ProductSupplier
 
+from .import_rules import is_obvious_po_metadata_item
 from .matching import create_or_reuse_product, create_product_alias, suggest_product_for_text
 from .models import (
     Company,
@@ -518,14 +519,6 @@ AGGREGATE_PO_ROW_RE = re.compile(
     r"\b\d+(?:[.,]\d+)?\s+(?:individual\s+)?(?:line\s+)?items?\b",
     re.IGNORECASE,
 )
-PO_METADATA_ITEM_RE = re.compile(
-    r"^\s*(?:description|item description|quantity|qty|unit|unit price|price|amount|subtotal|"
-    r"grand total|total|vat|date|lpo|local purchase order|purchase order|po number|from|to|buyer|seller)"
-    r"\s*(?::|#|-|$)",
-    re.IGNORECASE,
-)
-
-
 def _po_row_item_name(row):
     return str(
         (row or {}).get("requested_item_name")
@@ -557,7 +550,7 @@ def _po_row_review_rejection(row):
             "reason_code": "non_item_metadata",
             "reason": "Numeric-only or empty PO metadata was ignored before item matching.",
         }
-    if PO_METADATA_ITEM_RE.search(item_name):
+    if is_obvious_po_metadata_item(item_name):
         return {
             "reason_code": "non_item_metadata",
             "reason": "PO header or document metadata was ignored before item matching.",
