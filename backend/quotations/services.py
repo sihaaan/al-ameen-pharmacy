@@ -475,6 +475,12 @@ def _text_match_score(left, right):
         return 0
     if left_norm == right_norm:
         return 100
+    # OCR and manual entry often disagree only on whether a compound word is
+    # joined (``waterproof``) or split (``water proof``). Treat an otherwise
+    # identical character sequence as a near-exact name match; explicit
+    # strength and size conflicts are still rejected separately below.
+    if left_norm.replace(" ", "") == right_norm.replace(" ", ""):
+        return 99
     if left_norm in right_norm or right_norm in left_norm:
         return 88
     left_tokens = set(left_norm.split())

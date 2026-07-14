@@ -487,6 +487,20 @@ class LPOOutcomeGuardRegressionTests(TestCase):
                 self.assertEqual(unmatched, [])
                 self.assertEqual(missing, [])
 
+    def test_item_matching_accepts_joined_or_split_compound_words(self):
+        quoted_line = self.add_line("dependa plaster water proof")
+
+        suggestions, unmatched, missing = build_po_outcome_suggestions(
+            self.quotation,
+            {"lines": [{"raw_name": "Dependa Plaster Waterproof", "quantity": "1"}]},
+        )
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["quotation_line_id"], quoted_line.id)
+        self.assertEqual(suggestions[0]["confidence"], 99)
+        self.assertEqual(unmatched, [])
+        self.assertEqual(missing, [])
+
     def test_ai_cannot_reduce_strong_quotation_line_coverage(self):
         jacket_line = self.add_line("Fire Warden Jacket", sort_order=1)
         water_line = self.add_line("Small Drinking Water 500ml", sort_order=2)
