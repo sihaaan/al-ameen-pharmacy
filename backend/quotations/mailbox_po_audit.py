@@ -38,6 +38,7 @@ from .contract_intelligence import (
     _message_datetime,
     _trim_quoted_reply,
     _walk_parts,
+    extract_nested_email_document,
     get_valid_access_token,
 )
 from .import_parsers import parse_file_preview
@@ -64,6 +65,7 @@ MAX_CANDIDATE_ATTACHMENTS = 50
 MAILBOX_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAILBOX_AI_MAX_PDF_PAGES = 25
+MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS = SUPPORTED_ATTACHMENT_EXTENSIONS | {".eml"}
 MAX_RUN_ERRORS = 500
 MAX_MESSAGE_FETCH_ATTEMPTS = 3
 SCAN_LEASE_SECONDS = 10 * 60
@@ -139,11 +141,27 @@ UNSUPPORTED_DOCUMENT_EXTENSIONS = {".doc", ".docm", ".docx", ".odt", ".rtf"}
 UNSUPPORTED_IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 LARGE_UNSUPPORTED_IMAGE_BYTES = 256 * 1024
 QUOTATION_REFERENCE = re.compile(r"\bQT[-_\s]?\d{8}[-_]\d{4}\b", re.IGNORECASE)
-LABELLED_PO_REFERENCE = re.compile(
-    r"\b(?P<label>L\.?\s*P\.?\s*O\.?|P(?:URCHASE)?\.?\s*O(?:RDER)?\.?)"
-    r"\s*(?:NO\.?|NUMBER|#)?\s*[:#-]?\s*(?P<value>[A-Z0-9][A-Z0-9_./-]{2,})",
+PO_LABEL_PATTERN = (
+    r"(?:L\.?\s*P\.?\s*O\.?|M\.?\s*P\.?\s*O\.?|"
+    r"P(?:URCHASE)?\.?\s*O(?:RDER)?\.?)"
+)
+PO_REFERENCE_VALUE_PATTERN = r"[A-Z0-9][A-Z0-9_./-]{2,}"
+EXPLICIT_LABELLED_PO_REFERENCE = re.compile(
+    rf"\b(?P<label>{PO_LABEL_PATTERN})[ \t]*(?:NO\.?|NUMBER|#)[ \t]*[:#-]?"
+    rf"[ \t]*(?:\r?\n[ \t]*)?(?P<value>{PO_REFERENCE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
+LABELLED_PO_REFERENCE = re.compile(
+    rf"\b(?P<label>{PO_LABEL_PATTERN})(?:[ \t]*[:#-][ \t]*|[ \t]+)"
+    rf"(?P<value>{PO_REFERENCE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
+BARE_ORDER_NUMBER_REFERENCE = re.compile(
+    rf"\bORDER[ \t]*(?:NO\.?|NUMBER|#)[ \t]*[:#-]?[ \t]*"
+    rf"(?:\r?\n[ \t]*)?(?P<value>{PO_REFERENCE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
+PURCHASE_ORDER_HEADING = re.compile(r"\b(?:LOCAL[ \t]+)?PURCHASE[ \t]+ORDER\b", re.IGNORECASE)
 PREFIXED_PO_REFERENCE = re.compile(r"\b(?P<value>(?:LPO|MPO|PO)[-_]?[A-Z0-9][A-Z0-9_./-]{3,})\b", re.IGNORECASE)
 PO_BOX_REFERENCE = re.compile(r"^(?:PO)?BOX(?:NO)?[._/-]?\d", re.IGNORECASE)
 REFERENCE_STOP_WORDS = {
@@ -353,8 +371,17 @@ def extract_po_references(text):
 
     for match in QUOTATION_REFERENCE.finditer(text):
         add("quotation", match.group(0).replace("_", "-"))
+    for match in EXPLICIT_LABELLED_PO_REFERENCE.finditer(text):
+        add("po", match.group("value"))
     for match in LABELLED_PO_REFERENCE.finditer(text):
         add("po", match.group("value"))
+    # Some purchase-order PDFs use a standalone title followed by a supplier
+    # account code, then print the real reference under ``Order No``. Do not
+    # bind the title to the next line; accept a bare Order No only when the
+    # same source independently identifies itself as a purchase order.
+    if PURCHASE_ORDER_HEADING.search(text):
+        for match in BARE_ORDER_NUMBER_REFERENCE.finditer(text):
+            add("po", match.group("value"))
     for match in PREFIXED_PO_REFERENCE.finditer(text):
         add("po", match.group("value"))
     return references
@@ -636,7 +663,7 @@ def _is_plausible_document_attachment(attachment):
     if not isinstance(attachment, dict):
         return False
     extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
-    if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+    if extension not in MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS:
         return False
     try:
         declared_size = int(attachment.get("size") or 0)
@@ -651,7 +678,7 @@ def _is_overlimit_supported_document_attachment(attachment):
     if not isinstance(attachment, dict):
         return False
     extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
-    if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+    if extension not in MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS:
         return False
     try:
         return int(attachment.get("size") or 0) > mailbox_max_attachment_bytes()
@@ -794,7 +821,7 @@ def _should_surface_unsupported_order_attachment(
     if not message_is_relevant or not isinstance(attachment, dict):
         return False
     _filename, _stem, extension, _normalized = _attachment_filename_parts(attachment)
-    if extension in SUPPORTED_ATTACHMENT_EXTENSIONS:
+    if extension in MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS:
         return bool(
             _is_overlimit_supported_document_attachment(attachment)
             and (explicit_order_context or _has_strong_order_filename(attachment))
@@ -914,7 +941,7 @@ def classify_mailbox_message(message):
         for attachment in (message.get("attachment_manifest") or [])
         if isinstance(attachment, dict)
         and os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
-        not in SUPPORTED_ATTACHMENT_EXTENSIONS
+        not in MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS
         and _should_surface_unsupported_order_attachment(
             attachment,
             message_is_relevant=True,
@@ -1032,6 +1059,7 @@ def _preview_attachment(
         }, 0
 
     content = b""
+    downloaded_bytes = 0
     try:
         if attachment.get("_inline_data"):
             content = _decode_gmail_data(attachment["_inline_data"])
@@ -1071,6 +1099,37 @@ def _preview_attachment(
                 "status": "skipped",
                 "reason": "Decoded attachment exceeds the remaining per-message byte limit.",
             }, len(content)
+
+        downloaded_bytes = len(content)
+        if os.path.splitext(str(attachment.get("filename") or ""))[1].lower() == ".eml":
+            nested = extract_nested_email_document(
+                content,
+                max_bytes=min(per_file_limit, max(1, remaining_budget)),
+            )
+            container_filename = str(attachment.get("filename") or "attachment.eml")
+            container_mime_type = str(attachment.get("mime_type") or "message/rfc822")
+            try:
+                container_size = (
+                    int(attachment.get("size"))
+                    if attachment.get("size") is not None
+                    else downloaded_bytes
+                )
+            except (TypeError, ValueError):
+                container_size = downloaded_bytes
+            attachment = {
+                **attachment,
+                "filename": nested["filename"],
+                "mime_type": nested["mime_type"],
+                "size": nested["size"],
+                "container_filename": container_filename,
+                "container_mime_type": container_mime_type,
+                "container_size": container_size,
+                "nested_filename": nested["nested_filename"],
+                "nested_mime_type": nested["nested_mime_type"],
+                "nested_part_path": nested["nested_part_path"],
+            }
+            public = {key: value for key, value in attachment.items() if key != "_inline_data"}
+            content = nested["content"]
 
         upload = SimpleUploadedFile(
             str(attachment.get("filename") or "attachment"),
@@ -1157,7 +1216,7 @@ def _preview_attachment(
                         **public,
                         "candidate": True,
                         "content_fetched": True,
-                        "fetched_bytes": len(content),
+                        "fetched_bytes": downloaded_bytes,
                         "status": "failed",
                         "reason": (
                             f"{deterministic_error} Mailbox AI vision cleanup also failed: {vision_error}"
@@ -1166,7 +1225,7 @@ def _preview_attachment(
                             "rejected" if _is_permanent_vision_rejection(exc) else "retryable"
                         ),
                         "vision_repair_reason": vision_error,
-                    }, len(content)
+                    }, downloaded_bytes
                 preview = {
                     **preview,
                     "warnings": list(
@@ -1190,7 +1249,7 @@ def _preview_attachment(
             **public,
             "candidate": True,
             "content_fetched": True,
-            "fetched_bytes": len(content),
+            "fetched_bytes": downloaded_bytes,
             "status": "parsed",
             "source_sha256": source_sha256,
             "source_file_ref": preview.get("source_file_ref") or "",
@@ -1208,16 +1267,17 @@ def _preview_attachment(
             "auto_approval_eligible": preview.get("auto_approval_eligible", True),
             "vision_repair_status": preview.get("vision_repair_status") or "",
             "vision_repair_reason": preview.get("vision_repair_reason") or "",
-        }, len(content)
+        }, downloaded_bytes
     except Exception as exc:
+        fetched_bytes = downloaded_bytes or len(content)
         return {
             **public,
             "candidate": True,
-            "content_fetched": bool(content),
-            "fetched_bytes": len(content),
+            "content_fetched": bool(fetched_bytes),
+            "fetched_bytes": fetched_bytes,
             "status": "failed",
             "reason": str(exc)[:500],
-        }, len(content)
+        }, fetched_bytes
 
 
 def hydrate_plausible_attachments(
@@ -1243,7 +1303,7 @@ def hydrate_plausible_attachments(
     for index, attachment in enumerate(refs):
         extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
         if (
-            extension in SUPPORTED_ATTACHMENT_EXTENSIONS
+            extension in MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS
             and not _is_overlimit_supported_document_attachment(attachment)
         ):
             candidates.append(index)
@@ -1255,7 +1315,7 @@ def hydrate_plausible_attachments(
     for index, attachment in enumerate(refs):
         public = {key: value for key, value in attachment.items() if key != "_inline_data"}
         extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
-        if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+        if extension not in MAILBOX_PARSEABLE_ATTACHMENT_EXTENSIONS:
             manual_review = _should_surface_unsupported_order_attachment(
                 attachment,
                 message_is_relevant=is_relevant,
@@ -1392,14 +1452,28 @@ def _attachment_identity(attachment):
     part_id = str((attachment or {}).get("part_id") or "")
     if part_id:
         try:
-            size = int((attachment or {}).get("size") or 0)
+            raw_size = (
+                (attachment or {}).get("container_size")
+                if "container_size" in (attachment or {})
+                and (attachment or {}).get("container_size") is not None
+                else (attachment or {}).get("size")
+            )
+            size = int(raw_size) if raw_size is not None else 0
         except (TypeError, ValueError):
             size = 0
         return (
             "part",
             part_id,
-            str((attachment or {}).get("filename") or ""),
-            str((attachment or {}).get("mime_type") or "").lower(),
+            str(
+                (attachment or {}).get("container_filename")
+                or (attachment or {}).get("filename")
+                or ""
+            ),
+            str(
+                (attachment or {}).get("container_mime_type")
+                or (attachment or {}).get("mime_type")
+                or ""
+            ).lower(),
             size,
         )
     attachment_id = str(

@@ -288,6 +288,48 @@ class MailboxQuotationRankingTests(TestCase):
                 self.assertEqual(result.status, UNMATCHED)
                 self.assertEqual(result.candidates, ())
 
+    def test_confidential_information_boilerplate_does_not_reject_purchase_order(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        purchase_order = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+            ),
+            source_kind="attachment",
+            document_filename="PO119106-AL AMEEN-FAWAD.pdf",
+            document_text=(
+                "LOCAL PURCHASE ORDER\n"
+                "PO No: PO119106-AL\n"
+                "Nitrile Gloves\n"
+                "The Supplier will hold Confidential Information only to those of its "
+                "employees who need to know such Information in strict confidence."
+            ),
+        )
+
+        result = rank_message_to_quotations(purchase_order, [quotation])
+
+        self.assertEqual(result.status, AUTOMATIC)
+        self.assertEqual(result.automatic_winner.quote_id, quotation.quote_id)
+
+    def test_standalone_information_only_line_still_rejects_document(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        information_only = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+            ),
+            source_kind="attachment",
+            document_filename="status-copy.pdf",
+            document_text="PURCHASE ORDER\nINFORMATION ONLY\nNitrile Gloves",
+        )
+
+        result = rank_message_to_quotations(information_only, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
     def test_generic_scans_with_non_order_headings_never_rank_exact_commercial_matches(self):
         quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
         exact_match = message(
@@ -408,6 +450,49 @@ class MailboxQuotationRankingTests(TestCase):
         self.assertEqual(result.status, UNMATCHED)
         self.assertEqual(result.candidates, ())
         self.assertIn("quotation", result.reason.lower())
+
+    def test_purchase_order_subject_cannot_override_a_quotation_email_body(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        supplier_quote_body = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+                subject="Purchase Order No: PO-7788",
+            ),
+            source_kind="email_body",
+            body=f"QUOTATION NO: {quotation.quotation_number}\nNitrile Gloves",
+            document_text=f"QUOTATION NO: {quotation.quotation_number}\nNitrile Gloves",
+            document_filename="",
+        )
+
+        result = rank_message_to_quotations(supplier_quote_body, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+        self.assertIn("supplier quotation", result.reason)
+
+    def test_neutral_mixed_po_and_quotation_header_never_becomes_automatic(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        mixed_scan = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+            ),
+            source_kind="attachment",
+            document_filename="scan.pdf",
+            document_text=(
+                "Purchase Order No: PO-7788\n"
+                f"QUOTATION NO: {quotation.quotation_number}\nNitrile Gloves"
+            ),
+        )
+
+        result = rank_message_to_quotations(mixed_scan, [quotation])
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertIsNone(result.automatic_winner)
+        self.assertTrue(any("mixed" in blocker for blocker in result.automatic_blockers))
 
     def test_uppercase_mixed_po_and_quotation_metadata_remains_reviewable(self):
         quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
@@ -1104,6 +1189,187 @@ class MailboxQuotationRankingTests(TestCase):
         self.assertEqual(result.status, UNMATCHED)
         self.assertEqual(result.candidates, ())
 
+    def test_company_acronym_never_uses_an_unlisted_public_suffix(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            company="Business Infrastructure Zone LLC",
+            emails=(),
+        )
+        unrelated = CanonicalMailboxMessage(
+            message_id="gmail-public-suffix-acronym",
+            sender="attacker@anything.biz",
+            subject="Purchase Order PO-7788",
+            body="Please process this purchase order.",
+            received_at=BASE + timedelta(days=2),
+            parsed_rows=(pline(1, "Nitrile Gloves", 10, 5),),
+            lpo_references=("PO-7788",),
+            document_total=D("50"),
+        )
+
+        result = rank_message_to_quotations(unrelated, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
+    def test_company_acronym_never_uses_a_multilabel_public_suffix(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            company="Global Operations Ventures LLC",
+            emails=(),
+        )
+        unrelated = CanonicalMailboxMessage(
+            message_id="gmail-multilabel-public-suffix-acronym",
+            sender="attacker@anything.gov.ae",
+            subject="Purchase Order PO-7788",
+            body="Please process this purchase order.",
+            received_at=BASE + timedelta(days=2),
+            parsed_rows=(pline(1, "Nitrile Gloves", 10, 5),),
+            lpo_references=("PO-7788",),
+            document_total=D("50"),
+        )
+
+        result = rank_message_to_quotations(unrelated, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
+    def test_company_identity_inference_fails_closed_for_unknown_domain_shapes(self):
+        cases = (
+            ("Northern Operations Management", "attacker@anything.nom.ag"),
+            ("Airline", "attacker@anything.airline.aero"),
+            ("Medical", "attacker@medical.mail.xyz"),
+        )
+        for index, (company, sender) in enumerate(cases, start=1):
+            with self.subTest(company=company, sender=sender):
+                quotation = quote(
+                    index,
+                    f"QT-20260701-{index:04d}",
+                    [qline(index, "Nitrile Gloves", 10, 5)],
+                    company=company,
+                    emails=(),
+                )
+                unrelated = CanonicalMailboxMessage(
+                    message_id=f"gmail-unknown-domain-shape-{index}",
+                    sender=sender,
+                    subject="Purchase Order PO-7788",
+                    body="Please process this purchase order.",
+                    received_at=BASE + timedelta(days=2),
+                    parsed_rows=(pline(1, "Nitrile Gloves", 10, 5),),
+                    lpo_references=("PO-7788",),
+                    document_total=D("50"),
+                )
+
+                result = rank_message_to_quotations(unrelated, [quotation])
+
+                self.assertEqual(result.status, UNMATCHED)
+                self.assertEqual(result.candidates, ())
+
+    def test_public_mail_subdomain_cannot_impersonate_a_company_domain(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            company="Medical",
+            emails=(),
+        )
+        unrelated = CanonicalMailboxMessage(
+            message_id="gmail-public-mail-subdomain",
+            sender="attacker@medical.gmail.com",
+            subject="Purchase Order PO-7788",
+            body="Please process this purchase order.",
+            received_at=BASE + timedelta(days=2),
+            parsed_rows=(pline(1, "Nitrile Gloves", 10, 5),),
+            lpo_references=("PO-7788",),
+            document_total=D("50"),
+        )
+
+        result = rank_message_to_quotations(unrelated, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
+    def test_attacker_controlled_subdomain_cannot_impersonate_a_company(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            company="Medical",
+            emails=(),
+        )
+        unrelated = CanonicalMailboxMessage(
+            message_id="gmail-attacker-controlled-subdomain",
+            sender="attacker@medical.attacker.com",
+            subject="Purchase Order PO-7788",
+            body="Please process this purchase order.",
+            received_at=BASE + timedelta(days=2),
+            parsed_rows=(pline(1, "Nitrile Gloves", 10, 5),),
+            lpo_references=("PO-7788",),
+            document_total=D("50"),
+        )
+
+        result = rank_message_to_quotations(unrelated, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
+    def test_inferred_company_domain_cannot_override_known_customer_domain(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "First Aid Kit", 8, 25)],
+            company="Structure Advanced Building Contracting LLC",
+            emails=("buyer@realcustomer.example",),
+        )
+        conflicting_sender = CanonicalMailboxMessage(
+            message_id="gmail-conflicting-company-domain",
+            sender="Nagi <nagi@sabcuae.com>",
+            subject="Purchase Order PO-00139",
+            body="Please process attached purchase order.",
+            received_at=BASE + timedelta(days=2),
+            parsed_rows=(pline(1, "First Aid Kit", 8, 25),),
+            lpo_references=("PO-00139",),
+            document_total=D("200"),
+        )
+
+        result = rank_message_to_quotations(conflicting_sender, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
+    def test_company_text_cannot_override_a_conflicting_known_customer_domain(self):
+        company = "Structure Advanced Building Contracting LLC"
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "First Aid Kit", 8, 25)],
+            company=company,
+            emails=("buyer@realcustomer.example",),
+        )
+        for source_kind in ("email_body", "attachment"):
+            with self.subTest(source_kind=source_kind):
+                conflicting_sender = CanonicalMailboxMessage(
+                    message_id=f"gmail-conflicting-company-text-{source_kind}",
+                    sender="Nagi <nagi@sabcuae.com>",
+                    subject="Purchase Order PO-00139",
+                    body=f"{company} purchase order. Please process it.",
+                    received_at=BASE + timedelta(days=2),
+                    parsed_rows=(pline(1, "First Aid Kit", 8, 25),),
+                    lpo_references=("PO-00139",),
+                    document_total=D("200"),
+                    source_kind=source_kind,
+                    document_filename="PO-00139.pdf" if source_kind == "attachment" else "",
+                    document_text=f"{company}\nPURCHASE ORDER\nPO-00139\nFirst Aid Kit",
+                )
+
+                result = rank_message_to_quotations(conflicting_sender, [quotation])
+
+                self.assertEqual(result.status, UNMATCHED)
+                self.assertEqual(result.candidates, ())
+
     def test_generic_company_word_cannot_match_a_domain_prefix(self):
         quotation = quote(
             1,
@@ -1405,3 +1671,91 @@ class MailboxQuotationRankingTests(TestCase):
 
         self.assertEqual(canonical.parser_warnings, ("OCR confidence is low.",))
         self.assertEqual(canonical.material_warnings, ("Grand total is ambiguous.",))
+
+    def test_proforma_tax_invoice_is_never_ranked_even_when_it_mentions_the_po_and_quote(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        supplier_proforma = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+            ),
+            source_kind="attachment",
+            document_filename="PROFORMA_260609-01_MPO-0015.pdf",
+            document_text=(
+                "AL AMEEN PHARMACY L.L.C\nPROFORMA TAX INVOICE\n"
+                "Purchase Order No: MPO-0015\n"
+                f"Quotation No: {quotation.quotation_number}\nNitrile Gloves"
+            ),
+        )
+
+        result = rank_message_to_quotations(supplier_proforma, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+        self.assertIn("non-order", result.reason)
+
+    def test_approved_datasheet_archive_is_not_purchase_order_evidence(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        datasheets = replace(
+            message([], total=None),
+            source_kind="attachment",
+            document_filename="Approved Datasheets-Al Ameen-PO 294676.rar",
+            document_text="",
+        )
+
+        result = rank_message_to_quotations(datasheets, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+        self.assertIn("filename", result.reason)
+
+    def test_rowless_order_filename_does_not_fan_out_to_customer_quotes(self):
+        quotations = [
+            quote(index, f"QT-20260701-{index:04d}", [qline(index, "First Aid Cream", 1, 10)])
+            for index in range(1, 4)
+        ]
+        unsupported_wrapper = message([], total=None)
+
+        result = rank_message_to_quotations(unsupported_wrapper, quotations)
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+        self.assertIn("no parsed item rows", result.reason)
+
+    def test_large_unrelated_order_matching_only_common_items_stays_unmatched(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(index, f"Common Pharmacy Item {index:02d}", 1, 5) for index in range(1, 13)]
+            + [qline(index, f"Quote Only Item {index:02d}", 1, 5) for index in range(13, 27)],
+            company="Al Futtaim Contracting Company",
+            emails=(),
+        )
+        po_rows = [
+            pline(index, f"Common Pharmacy Item {index:02d}", 1, 5)
+            for index in range(1, 13)
+        ] + [
+            pline(index, f"Unrelated Project Supply {index:02d}", 1, 20)
+            for index in range(13, 51)
+        ]
+        unrelated_order = CanonicalMailboxMessage(
+            message_id="ariba-unrelated-50-lines",
+            sender="Al Futtaim <ordersender-prod@ansmtp.ariba.com>",
+            subject="Al Futtaim sent a new Purchase Order 4518290402",
+            body="SAP Business Network new purchase order",
+            received_at=BASE + timedelta(days=2),
+            parsed_rows=tuple(po_rows),
+            lpo_references=("4518290402",),
+            company_name="Al Futtaim Contracting Company",
+            source_kind="email_body",
+            document_text="SAP Business Network new purchase order",
+        )
+
+        result = rank_message_to_quotations(unrelated_order, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED, result.reason)
+        self.assertEqual(result.candidates, ())
+        self.assertTrue(
+            any("coverage is below" in reason for reason, _count in result.rejection_summary)
+        )

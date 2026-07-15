@@ -8,8 +8,9 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .mailbox_po_matching import AUTOMATIC, UNMATCHED, rank_message_to_quotations
+from .mailbox_po_matching import AMBIGUOUS, AUTOMATIC, UNMATCHED, rank_message_to_quotations
 from .mailbox_po_reconciliation import (
+    ALGORITHM_VERSION,
     _dedupe_and_cap,
     _locked_lineage_message_evidence_queryset,
     _supersede_stale_evidence,
@@ -209,6 +210,228 @@ class MailboxPOReconciliationTests(TestCase):
         )
         self.assertEqual(QuotationLPO.objects.count(), 0)
         self.assertEqual(ProformaInvoice.objects.count(), 0)
+
+    def test_ariba_body_uses_displayed_line_sections_instead_of_thousands_of_layout_rows(self):
+        def ariba_section(index):
+            line_number = index * 10
+            quantity = Decimal(index)
+            unit_price = Decimal("4.00")
+            return "\n".join(
+                [
+                    "Line #",
+                    "No. Schedule Lines",
+                    "Part # / Description",
+                    "Customer Part #",
+                    "Type",
+                    "Return",
+                    "Qty (Unit)",
+                    "Need By",
+                    "Unit Price",
+                    "Subtotal",
+                    "Tax",
+                    str(line_number),
+                    "1",
+                    f"GMEDIC-{index:03d}",
+                    "Material",
+                    f"{quantity:.3f}",
+                    "(EA)",
+                    "2 Aug 2026",
+                    f"{unit_price:.2f} AED",
+                    f"{quantity * unit_price:.2f} AED",
+                    f"Medical Supply Item {index:02d}",
+                    "Control Keys",
+                    "Order Confirmation:",
+                    "not allowed",
+                ]
+            )
+
+        body = "\n".join(
+            [
+                "SAP Business Network",
+                "Al Futtaim sent a new order",
+                "Purchase Order",
+                "4518320480",
+                *(ariba_section(index) for index in range(1, 26)),
+                f"Quote No: {self.quote.quotation_number}",
+                "Est. Grand Total:",
+                "1,300.00",
+                "AED",
+            ]
+        )
+        inventory = self.message(
+            "ariba-25-lines",
+            subject="Al Futtaim sent a new Purchase Order 4518320480",
+            body=body,
+            attachment=False,
+        )
+
+        variants = document_variants(inventory)
+
+        self.assertEqual(len(variants), 1)
+        parsed = variants[0].message
+        self.assertEqual(len(parsed.parsed_rows), 25)
+        self.assertEqual(parsed.parsed_rows[0].name, "Medical Supply Item 01")
+        self.assertEqual(parsed.parsed_rows[0].quantity, Decimal("1.000"))
+        self.assertEqual(parsed.parsed_rows[0].unit_price, Decimal("4.00"))
+        self.assertEqual(parsed.parsed_rows[0].line_total, Decimal("4.00"))
+        self.assertEqual(parsed.parsed_rows[-1].line_total, Decimal("100.00"))
+        self.assertEqual(parsed.document_total, Decimal("1300.00"))
+        self.assertEqual(parsed.quotation_references, (self.quote.quotation_number,))
+
+    @patch("quotations.mailbox_po_reconciliation.parse_text_preview")
+    def test_recognized_but_unparsed_portal_order_never_falls_back_to_generic_rows(
+        self,
+        parse_text_preview,
+    ):
+        body = "\n".join(
+            [
+                "SAP Business Network",
+                "Purchase Order",
+                "4518320480",
+                "Line #",
+                "Malformed Item | 5 | 10.00 | 50.00",
+            ]
+        )
+        inventory = self.message(
+            "ariba-malformed",
+            subject="SAP purchase order",
+            body=body,
+            attachment=False,
+        )
+
+        parsed = document_variants(inventory)[0].message
+
+        parse_text_preview.assert_not_called()
+        self.assertEqual(parsed.parsed_rows, ())
+        self.assertTrue(
+            any("parsed 0 of 1" in warning for warning in parsed.parser_warnings),
+            parsed.parser_warnings,
+        )
+
+    def test_imdaad_partial_table_retains_safe_rows_and_adds_material_warning(self):
+        body = "\n".join(
+            [
+                "Purchase Order",
+                "PO No: PO26IMD32175",
+                "IMDAAD Contact Name",
+                "Buyer",
+                "Description",
+                "UOM",
+                "Qty",
+                "Unit Price",
+                "Discount",
+                "Net Amount",
+                "VAT Amount",
+                "TOTAL",
+                "AMOUNT",
+                "1",
+                "Surgical Scissors",
+                "NOS",
+                "1",
+                "25.00",
+                "0.00",
+                "25.00",
+                "1.25",
+                "26.25",
+                "2",
+                "Calamine Lotion",
+                "NOS",
+                "5",
+            ]
+        )
+        inventory = self.message(
+            "imdaad-partial",
+            subject="Purchase Order PO26IMD32175",
+            body=body,
+            attachment=False,
+        )
+
+        parsed = document_variants(inventory)[0].message
+
+        self.assertEqual(len(parsed.parsed_rows), 1)
+        self.assertEqual(parsed.parsed_rows[0].name, "Surgical Scissors")
+        self.assertTrue(
+            any("incomplete" in warning.lower() for warning in parsed.parser_warnings),
+            parsed.parser_warnings,
+        )
+        self.assertTrue(parsed.material_warnings)
+
+    def test_emrill_repacked_po_parses_commercial_rows_and_remains_reviewable(self):
+        def emrill_row(index, name, quantity, price):
+            amount = Decimal(str(quantity)) * Decimal(str(price))
+            return "\n".join(
+                [
+                    str(index),
+                    f"10115{index:03d}",
+                    "5637144598",
+                    "3102006",
+                    "Variable works",
+                    "EA",
+                    f"{Decimal(str(quantity)):.2f}",
+                    f"{Decimal(str(price)):.2f}",
+                    "0.00",
+                    "5.00%",
+                    "0.50",
+                    f"{amount:.2f} 17/06/2026",
+                    f"Description: {name}",
+                    "WareHouse : 089",
+                ]
+            )
+
+        text = "\n".join(
+            [
+                "Emrill Services LLC",
+                "Purchase Order",
+                "PO183619-1",
+                "Line number",
+                "Item number",
+                "Purchase Requisition",
+                "ProjectID",
+                "Project Name",
+                "Unit",
+                "Quantity",
+                "Unit price",
+                "Discount",
+                "VAT %",
+                "VAT Amount",
+                "Amount Delivery",
+                emrill_row(1, self.line_1.item_name_snapshot, 10, 9),
+                emrill_row(2, self.line_2.item_name_snapshot, 5, 9),
+                "Gross total",
+                "135.00",
+            ]
+        )
+        inventory = self.message("emrill-repacked", body="Please proceed")
+        manifest = inventory.attachment_manifest
+        manifest[0].update(
+            {
+                "filename": "Purchase order PO183619.pdf",
+                "original_text": text,
+                "lines": [
+                    {"raw_name": "Warehouse", "quantity": "89"},
+                    {"raw_name": "Purchase Requisition"},
+                ],
+                "line_count": 2,
+            }
+        )
+        inventory.attachment_manifest = manifest
+        inventory.save(update_fields=["attachment_manifest", "updated_at"])
+
+        attachment = next(
+            variant for variant in document_variants(inventory) if variant.source_kind == "attachment"
+        )
+        result = rank_message_to_quotations(attachment.message, eligible_quotations())
+
+        self.assertEqual(len(attachment.message.parsed_rows), 2)
+        self.assertEqual(
+            [row.name for row in attachment.message.parsed_rows],
+            [self.line_1.item_name_snapshot, self.line_2.item_name_snapshot],
+        )
+        self.assertEqual(attachment.message.parsed_rows[0].quantity, Decimal("10.00"))
+        self.assertEqual(attachment.message.parsed_rows[0].unit_price, Decimal("9.00"))
+        self.assertEqual(attachment.message.parsed_rows[0].line_total, Decimal("90.00"))
+        self.assertEqual(result.status, AMBIGUOUS, result.reason)
+        self.assertEqual(result.candidates[0].item_coverage, 1.0)
 
     def test_mirrored_rows_do_not_hide_body_only_extra_quotation_reference(self):
         other = Quotation.objects.create(
@@ -615,6 +838,69 @@ class MailboxPOReconciliationTests(TestCase):
         self.assertEqual(superseded, [weaker.id])
         self.assertEqual(weaker.status, QuotationPOEvidence.STATUS_SUPERSEDED)
         self.assertIn("exact-reference", weaker.error)
+
+    def test_supplier_code_below_po_heading_does_not_merge_distinct_orders(self):
+        other = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260710-0002",
+            status=Quotation.STATUS_SENT,
+            sent_at=self.sent_at,
+            created_by=self.staff,
+        )
+
+        def attachment_reference(message_id, order_number):
+            inventory = self.message(
+                message_id,
+                rows=[
+                    {
+                        "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                        "quantity": "10",
+                        "unit_price": "10",
+                        "line_total": "100",
+                    }
+                ],
+                body="Please proceed",
+            )
+            manifest = inventory.attachment_manifest
+            manifest[0]["filename"] = f"{order_number.replace('/', '-')}.pdf"
+            manifest[0]["original_text"] = (
+                "Purchase Order\n"
+                "ALAM004\n"
+                "Al Ameen Pharmacy LLC\n"
+                "Order No. :\n"
+                f"{order_number}\n"
+            )
+            inventory.attachment_manifest = manifest
+            inventory.save(update_fields=["attachment_manifest", "updated_at"])
+            attachment = next(
+                variant
+                for variant in document_variants(inventory)
+                if variant.source_kind == "attachment"
+            )
+            self.assertEqual(attachment.lpo_references, (order_number,))
+            return attachment.lpo_references[0]
+
+        weaker = self.evidence(
+            self.quote,
+            "supplier-code-order-a",
+            attachment_reference("supplier-code-a", "HM-201A26002/0029"),
+            score=54,
+        )
+        stronger = self.evidence(
+            other,
+            "supplier-code-order-b",
+            attachment_reference("supplier-code-b", "HM-201HDVOHP/1153"),
+            score=100,
+            exact_reference=True,
+        )
+
+        kept, superseded = _dedupe_and_cap(
+            {weaker.id, stronger.id},
+            max_per_quote=3,
+        )
+
+        self.assertEqual(kept, {weaker.id, stronger.id})
+        self.assertEqual(superseded, [])
 
     def test_near_tied_cross_quote_po_ownership_stays_visible_for_staff(self):
         other = Quotation.objects.create(
@@ -1295,6 +1581,50 @@ class MailboxPOAuditAPITests(TestCase):
         self.assertEqual(response.data["match_run"]["status"], MailboxPOMatchRun.STATUS_COMPLETED)
         self.assertEqual(latest.data["run"]["id"], run.id)
         self.assertTrue(latest.data["done"])
+
+    @patch("quotations.views.mailbox_po_audit_repair_remaining", return_value=4)
+    def test_completed_legacy_match_does_not_stop_current_algorithm_rollover(self, repair_remaining):
+        self.assertNotEqual(ALGORITHM_VERSION, "mailbox_match_v2")
+        run = MailboxPOAuditRun.objects.create(
+            gmail_connection=self.connection,
+            requested_by=self.staff,
+            status=MailboxPOAuditRun.STATUS_COMPLETED,
+            earliest_quote_at=self.quote.created_at,
+            gmail_query="in:anywhere after:1 -from:me",
+            exhausted=True,
+            completed_at=timezone.now(),
+        )
+        legacy = MailboxPOMatchRun.objects.create(
+            audit_run=run,
+            requested_by=self.staff,
+            algorithm_version="mailbox_match_v2",
+            status=MailboxPOMatchRun.STATUS_COMPLETED,
+            completed_at=timezone.now(),
+        )
+
+        awaiting = self.client.post(
+            reverse("quotation-mailbox-po-audit-list"),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(awaiting.status_code, 200)
+        self.assertEqual(awaiting.data["run"]["id"], run.id)
+        self.assertIsNone(awaiting.data["match_run"])
+        self.assertFalse(awaiting.data["done"])
+        self.assertEqual(awaiting.data["repair_remaining"], 0)
+        repair_remaining.assert_not_called()
+
+        reconciled = self.client.post(
+            reverse("quotation-mailbox-po-audit-reconcile", args=[run.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(reconciled.status_code, 200)
+        self.assertTrue(reconciled.data["done"])
+        self.assertEqual(reconciled.data["match_run"]["algorithm_version"], ALGORITHM_VERSION)
+        self.assertNotEqual(reconciled.data["match_run"]["id"], legacy.id)
 
     def test_latest_reports_exhausted_but_incomplete_tombstone_inventory(self):
         run = MailboxPOAuditRun.objects.create(

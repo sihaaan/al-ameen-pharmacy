@@ -1,6 +1,7 @@
 import base64
 from datetime import timedelta
 from decimal import Decimal
+from email.message import EmailMessage
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -12,10 +13,12 @@ from django.utils import timezone
 
 from .import_parsers import parse_file_preview
 from .mailbox_po_audit import (
+    _attachment_identity,
     _preview_attachment,
     build_mailbox_po_query,
     classify_mailbox_message,
     earliest_eligible_quote_boundary,
+    extract_po_references,
     fetch_mailbox_message,
     gmail_list_mailbox_messages,
     hydrate_plausible_attachments,
@@ -472,6 +475,26 @@ class MailboxPOAuditTests(TestCase):
                     )
                 )
 
+    def test_purchase_order_heading_supplier_code_does_not_mask_order_number(self):
+        references = extract_po_references(
+            "Purchase Order\n"
+            "ALAM004\n"
+            "Al Ameen Pharmacy LLC\n"
+            "Order No. :\n"
+            "HM-201A26002/0029\n"
+        )
+
+        self.assertEqual(
+            references,
+            [{"kind": "po", "value": "HM-201A26002/0029"}],
+        )
+
+    def test_mpo_number_label_is_extracted_as_a_purchase_order_reference(self):
+        self.assertEqual(
+            extract_po_references("MPO No: 294676"),
+            [{"kind": "po", "value": "294676"}],
+        )
+
     @patch("quotations.mailbox_po_audit._preview_attachment")
     @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
     def test_generic_supported_attachment_is_inspected_without_po_keywords(self, _token, preview):
@@ -509,6 +532,43 @@ class MailboxPOAuditTests(TestCase):
         unsupported["attachment_manifest"] = [{**attachment, "filename": "123.svg"}]
         self.assertEqual(classify_mailbox_message(oversized)["classification"], MailboxPOMessage.CLASS_OTHER)
         self.assertEqual(classify_mailbox_message(unsupported)["classification"], MailboxPOMessage.CLASS_OTHER)
+
+    @patch("quotations.mailbox_po_audit._preview_attachment")
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    def test_neutral_attached_email_is_inspected_before_exclusion(self, _token, preview):
+        message = self.message(
+            "neutral-attached-email",
+            subject="Forwarded message",
+            body="For your records.",
+        )
+        attachment = {
+            "filename": "forwarded-message.eml",
+            "mime_type": "message/rfc822",
+            "size": 100,
+            "attachment_id": "neutral-eml-1",
+            "part_id": "2",
+        }
+        message["attachment_manifest"] = [attachment]
+        message["_attachment_refs"] = [attachment]
+        preview.return_value = (
+            {**attachment, "candidate": True, "content_fetched": True, "status": "parsed"},
+            100,
+        )
+
+        classification = classify_mailbox_message(message)
+        manifest, candidate_count, fetched_bytes = hydrate_plausible_attachments(
+            self.connection,
+            message,
+            is_relevant=classification["is_relevant"],
+        )
+
+        self.assertEqual(
+            classification["classification"],
+            MailboxPOMessage.CLASS_POSSIBLE_PO,
+        )
+        preview.assert_called_once()
+        self.assertEqual(manifest[0]["status"], "parsed")
+        self.assertEqual((candidate_count, fetched_bytes), (1, 100))
 
     @patch("quotations.mailbox_po_audit.parse_file_preview")
     def test_mailbox_attachment_parse_is_no_store_and_preserves_warnings(self, parse_preview):
@@ -549,6 +609,67 @@ class MailboxPOAuditTests(TestCase):
         self.assertEqual(result["warnings"], ["OCR confidence is low; review the source."])
         self.assertEqual(result["source_file_ref"], "")
         self.assertGreater(byte_count, 0)
+
+    @patch("quotations.mailbox_po_audit.parse_file_preview")
+    def test_attached_email_parses_one_nested_pdf_and_preserves_container_identity(self, parse_preview):
+        nested_pdf = b"%PDF-1.4\nnested purchase order"
+        attached_email = EmailMessage()
+        attached_email["Subject"] = "Implemented purchase order"
+        attached_email.set_content("Please find the implemented PO attached.")
+        attached_email.add_attachment(
+            nested_pdf,
+            maintype="application",
+            subtype="octet-stream",
+            filename="PO_PO26IMD32175_0.pdf",
+        )
+        wrapper_bytes = attached_email.as_bytes()
+        parse_preview.return_value = {
+            "source_sha256": "c" * 64,
+            "source_file_ref": "",
+            "source_mime_type": "application/pdf",
+            "parse_method": "test_nested_pdf",
+            "original_text": "PURCHASE ORDER\nQuotation No: QT-20260623-0010",
+            "meta": {},
+            "totals": {"grand_total": "331.80"},
+            "lines": [{"raw_name": "First Aid Cream", "quantity": "1"}],
+            "warnings": [],
+        }
+        inline_data = base64.urlsafe_b64encode(wrapper_bytes).decode("ascii").rstrip("=")
+        outer = {
+            "filename": "Implemented Purchase Order.eml",
+            "mime_type": "message/rfc822",
+            "size": 0,
+            "part_id": "2",
+            "attachment_id": "gmail-eml-token",
+            "_inline_data": inline_data,
+        }
+
+        result, byte_count = _preview_attachment(
+            self.connection,
+            "gmail-message",
+            outer,
+            "token",
+        )
+
+        uploaded = parse_preview.call_args.args[0]
+        self.assertEqual(uploaded.name, "PO_PO26IMD32175_0.pdf")
+        self.assertEqual(uploaded.read(), nested_pdf)
+        self.assertEqual(result["status"], "parsed")
+        self.assertEqual(result["filename"], "PO_PO26IMD32175_0.pdf")
+        self.assertEqual(result["mime_type"], "application/pdf")
+        self.assertEqual(result["container_filename"], "Implemented Purchase Order.eml")
+        self.assertEqual(result["container_mime_type"], "message/rfc822")
+        self.assertEqual(result["container_size"], 0)
+        self.assertEqual(result["attachment_id"], "gmail-eml-token")
+        self.assertEqual(result["part_id"], "2")
+        self.assertEqual(byte_count, len(wrapper_bytes))
+
+        rotated_fresh_ref = {
+            **outer,
+            "attachment_id": "rotated-gmail-token",
+        }
+        rotated_fresh_ref.pop("_inline_data")
+        self.assertEqual(_attachment_identity(result), _attachment_identity(rotated_fresh_ref))
 
     @patch("quotations.import_parsers.store_import_source")
     @patch("quotations.import_parsers.parse_pdf_preview")

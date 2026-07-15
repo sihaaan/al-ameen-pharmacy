@@ -148,7 +148,7 @@ class ResumableMailboxPOMatchingTests(TestCase):
         match_run = MailboxPOMatchRun.objects.create(
             audit_run=self.audit,
             requested_by=self.staff,
-            algorithm_version="mailbox_match_v2",
+            algorithm_version=mailbox_po_reconciliation.ALGORITHM_VERSION,
             lease_token="another-worker",
             lease_expires_at=timezone.now() + timedelta(seconds=60),
         )

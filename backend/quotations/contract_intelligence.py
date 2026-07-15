@@ -10,6 +10,8 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from email import policy
+from email.parser import BytesParser
 from io import BytesIO
 
 from django.conf import settings
@@ -55,6 +57,22 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 MAX_ANALYSIS_CHARS = 18000
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 SUPPORTED_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".xlsb"}
+MAX_NESTED_EMAIL_PARTS = 100
+MAX_NESTED_EMAIL_DEPTH = 4
+NESTED_ORDER_FILENAME_SIGNAL = re.compile(
+    r"\b(?:local[\s_.-]+purchase[\s_.-]+order|purchase[\s_.-]+order|lpo|mpo)\b|"
+    r"(?:^|[^a-z0-9])po(?:[^a-z0-9]+|$)",
+    re.IGNORECASE,
+)
+NESTED_ORDER_REFERENCE_SIGNAL = re.compile(
+    r"(?:^|[^a-z0-9])(?:lpo|mpo|po)[\s_.-]*(?:po[\s_.-]*)?[a-z0-9_.-]*\d[a-z0-9_.-]*",
+    re.IGNORECASE,
+)
+NESTED_SUPPORTING_FILENAME_SIGNAL = re.compile(
+    r"\b(?:proforma|invoice|quotation|quote|requisition|datasheets?|grn|"
+    r"delivery[\s_.-]+note)\b",
+    re.IGNORECASE,
+)
 DEFAULT_DISCOVERY_BATCH_SIZE = 25
 MAX_DISCOVERY_BATCH_SIZE = 100
 MAX_CONTRACT_MESSAGES = 5000
@@ -732,6 +750,7 @@ def gmail_fetch_attachment_content(
     *,
     attachment_id="",
     part_id="",
+    nested_filename="",
     max_bytes=MAX_ATTACHMENT_BYTES,
 ):
     """Fetch one attachment from a Gmail message without parsing or storing it.
@@ -788,6 +807,19 @@ def gmail_fetch_attachment_content(
 
     if len(content) > int(max_bytes):
         raise ValueError("That attachment is too large to open in evidence review.")
+    if nested_filename:
+        nested = extract_nested_email_document(
+            content,
+            nested_filename=nested_filename,
+            max_bytes=max_bytes,
+        )
+        return {
+            **nested,
+            "attachment_id": selected.get("attachment_id") or "",
+            "part_id": selected.get("part_id") or "",
+            "container_filename": selected.get("filename") or "gmail-attachment.eml",
+            "container_mime_type": selected.get("mime_type") or "message/rfc822",
+        }
     return {
         "filename": selected.get("filename") or "gmail-attachment",
         "mime_type": selected.get("mime_type") or "application/octet-stream",
@@ -796,6 +828,109 @@ def gmail_fetch_attachment_content(
         "part_id": selected.get("part_id") or "",
         "content": content,
     }
+
+
+def _bounded_email_leaf_parts(message):
+    stack = [(message, 0, "1")]
+    visited = 0
+    while stack:
+        part, depth, path = stack.pop()
+        visited += 1
+        if visited > MAX_NESTED_EMAIL_PARTS:
+            raise ValueError("Nested email has too many MIME parts to inspect safely.")
+        if depth > MAX_NESTED_EMAIL_DEPTH:
+            raise ValueError("Nested email MIME depth exceeds the safe review limit.")
+        payload = part.get_payload()
+        if part.is_multipart() and isinstance(payload, list):
+            for index, child in reversed(list(enumerate(payload, start=1))):
+                stack.append((child, depth + 1, f"{path}.{index}"))
+            continue
+        yield part, path
+
+
+def _is_order_like_nested_filename(filename):
+    """Return whether a nested document name independently identifies an order."""
+
+    basename = os.path.basename(str(filename or ""))
+    stem = os.path.splitext(basename)[0]
+    normalized = re.sub(r"[\s_.-]+", " ", stem).strip()
+    if not normalized or NESTED_SUPPORTING_FILENAME_SIGNAL.search(normalized):
+        return False
+    return bool(
+        NESTED_ORDER_FILENAME_SIGNAL.search(stem)
+        or NESTED_ORDER_REFERENCE_SIGNAL.search(stem)
+    )
+
+
+def extract_nested_email_document(content, *, nested_filename="", max_bytes=MAX_ATTACHMENT_BYTES):
+    """Extract exactly one bounded PDF/workbook from an attached RFC822 file.
+
+    MIME transfer decoding and bounded MIME traversal are allowed; archive
+    decompression is deliberately not. Bytes are returned to the caller and
+    never persisted by this helper.
+    """
+
+    raw = bytes(content or b"")
+    limit = max(1, int(max_bytes))
+    if not raw:
+        raise ValueError("Attached email is empty.")
+    if len(raw) > limit:
+        raise ValueError("Attached email is too large to inspect safely.")
+    try:
+        message = BytesParser(policy=policy.default).parsebytes(raw)
+    except Exception as exc:
+        raise ValueError(f"Attached email could not be parsed safely: {str(exc)[:180]}") from exc
+
+    requested = os.path.basename(str(nested_filename or "")).casefold()
+    candidates = []
+    decoded_total = 0
+    for part, path in _bounded_email_leaf_parts(message):
+        filename = os.path.basename(str(part.get_filename() or ""))
+        extension = os.path.splitext(filename)[1].lower()
+        if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+            continue
+        if requested and filename.casefold() != requested:
+            continue
+        payload = part.get_payload(decode=True) or b""
+        decoded_total += len(payload)
+        if decoded_total > limit or len(payload) > limit:
+            raise ValueError("Nested email document exceeds the safe review byte limit.")
+        mime_type = str(part.get_content_type() or "application/octet-stream").lower()
+        if mime_type == "application/octet-stream":
+            mime_type = {
+                ".pdf": "application/pdf",
+                ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".xls": "application/vnd.ms-excel",
+                ".xlsb": "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+            }.get(extension, mime_type)
+        candidates.append(
+            {
+                "filename": filename,
+                "mime_type": mime_type,
+                "size": len(payload),
+                "content": payload,
+                "nested_filename": filename,
+                "nested_mime_type": mime_type,
+                "nested_part_path": path,
+            }
+        )
+
+    if not candidates:
+        detail = f" named {nested_filename}" if nested_filename else ""
+        raise ValueError(f"Attached email has no supported nested document{detail}.")
+    if len(candidates) == 1:
+        return candidates[0]
+    if not requested:
+        order_candidates = [
+            candidate
+            for candidate in candidates
+            if _is_order_like_nested_filename(candidate.get("filename"))
+        ]
+        if len(order_candidates) == 1:
+            return order_candidates[0]
+    if len(candidates) != 1:
+        raise ValueError("Attached email contains multiple supported documents; choose an exact nested source.")
+    return candidates[0]
 
 
 def hydrate_contract_source(source, connection, *, include_attachments=True):

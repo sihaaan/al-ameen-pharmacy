@@ -60,7 +60,8 @@ _NEGATIVE_DOCUMENT_TITLE_RE = re.compile(
     r"|grn|goods\s+receipt(?:\s+note)?|inventory\s+goods\s+receipt(?:\s+note)?"
     r"|material\s+receipt(?:\s+note)?|product\s+receipt"
     r"|(?:material|purchase|store)\s+requisition|purchase\s+request"
-    r"|(?:(?:tax|commercial|proforma|sales|supplier|vendor)\s+)?invoice"
+    r"|proforma(?:\s+(?:tax\s+)?invoice)?"
+    r"|(?:(?:tax|commercial|sales|supplier|vendor)\s+)?invoice"
     r")(?:\s*(?:no\.?|number|#|:|-).*)?$",
     re.IGNORECASE,
 )
@@ -74,8 +75,13 @@ _ORDER_DOCUMENT_TITLE_RE = re.compile(
     r")?$",
     re.IGNORECASE,
 )
+_PO_TABLE_METADATA_NEGATIVE_LINE_RE = re.compile(
+    r"^(?:purchase\s+requisition|purchase\s+request)$",
+    re.IGNORECASE,
+)
 _NEGATIVE_DOCUMENT_FILENAME_RE = re.compile(
     r"(?:^|[\s_.-])(?:(?:do|dn)[\s_.-]+copy|(?:items|materials)[\s_.-]+required|"
+    r"(?:approved[\s_.-]+)?data[\s_.-]*sheets?|proforma|"
     r"delivery[\s_.-]+(?:note|challan|order)|grn|"
     r"goods[\s_.-]+receipt|material[\s_.-]+receipt|product[\s_.-]+receipt|"
     r"(?:material|purchase|store)[\s_.-]+requisition|purchase[\s_.-]+request|"
@@ -121,9 +127,10 @@ _DRAFT_STATUS_FILENAME_RE = re.compile(
     re.IGNORECASE,
 )
 _INFORMATION_ONLY_RE = re.compile(
-    r"\b(?:for\s+(?:your\s+)?information\s+only|information\s+only|"
+    r"\b(?:for\s+(?:your\s+)?information\s+only|"
     r"not\s+(?:a|an)\s+(?:purchase\s+)?order|"
-    r"does\s+not\s+constitute\s+(?:a|an)\s+(?:purchase\s+)?order)\b",
+    r"does\s+not\s+constitute\s+(?:a|an)\s+(?:purchase\s+)?order)\b"
+    r"|(?m:^\s*information\s+only\s*[.!]?\s*$)",
     re.IGNORECASE,
 )
 _CONTRACT_SCHEDULE_RE = re.compile(
@@ -234,18 +241,31 @@ _CORE_NOISE = {
 }
 _PUBLIC_EMAIL_DOMAINS = {
     "aol.com",
+    "fastmail.com",
     "gmail.com",
+    "gmx.com",
+    "gmx.net",
     "googlemail.com",
     "hotmail.com",
     "icloud.com",
+    "inbox.com",
     "live.com",
     "mail.com",
+    "mail.ru",
+    "me.com",
+    "msn.com",
     "outlook.com",
     "proton.me",
     "protonmail.com",
+    "rediffmail.com",
+    "tuta.com",
+    "tutanota.com",
     "yahoo.com",
     "yahoo.co.uk",
+    "yandex.com",
+    "yandex.ru",
     "ymail.com",
+    "zoho.com",
 }
 _COMPANY_NOISE = {
     "company",
@@ -276,7 +296,30 @@ _COMPACT_COMPANY_NOISE = _ACRONYM_NOISE | {
     "private",
     "school",
 }
-_DOMAIN_LABEL_NOISE = {"ae", "co", "com", "mail", "net", "org", "uae", "www"}
+_DOMAIN_LABEL_NOISE = {
+    "ac",
+    "ae",
+    "biz",
+    "co",
+    "com",
+    "edu",
+    "go",
+    "gov",
+    "government",
+    "info",
+    "int",
+    "mail",
+    "mil",
+    "name",
+    "ne",
+    "net",
+    "or",
+    "org",
+    "pro",
+    "sch",
+    "uae",
+    "www",
+}
 
 
 @dataclass(frozen=True)
@@ -1053,6 +1096,29 @@ def _private_domain(domain: str) -> bool:
     )
 
 
+def _domain_identity_label(domain: str) -> str:
+    """Return a conservative identity label for mailbox-observed domain shapes.
+
+    Without a bundled Public Suffix List, arbitrary domains must fail closed.
+    The fallback is intentionally limited to the UAE/``.com`` shapes used by
+    this mailbox; exact sender/domain matching still works for every TLD.
+    """
+
+    labels = [label for label in str(domain or "").casefold().split(".") if label]
+    candidate = ""
+    if len(labels) == 2 and labels[-1] in {"ae", "com"}:
+        candidate = labels[0]
+    elif len(labels) == 3 and labels[0] == "ae" and labels[-1] == "com":
+        candidate = labels[1]
+    elif (
+        len(labels) == 3
+        and labels[-1] == "ae"
+        and labels[-2] in {"co", "com"}
+    ):
+        candidate = labels[0]
+    return candidate if candidate not in _DOMAIN_LABEL_NOISE else ""
+
+
 def _company_strength(company_name: str, message: CanonicalMailboxMessage) -> tuple[float, str]:
     company_tokens = [
         token
@@ -1089,14 +1155,12 @@ def _company_acronym_domain(company_name: str, sender_domains: set[str]) -> str:
     for domain in sender_domains:
         if not _private_domain(domain):
             continue
-        for label in domain.split("."):
-            if label in _DOMAIN_LABEL_NOISE:
-                continue
-            allowed = {acronym, f"{acronym}ae", f"{acronym}uae", f"{acronym}dubai"}
-            if len(acronym) >= 3:
-                allowed.add(f"{acronym}group")
-            if label in allowed:
-                return domain
+        label = _domain_identity_label(domain)
+        allowed = {acronym, f"{acronym}ae", f"{acronym}uae", f"{acronym}dubai"}
+        if len(acronym) >= 3:
+            allowed.add(f"{acronym}group")
+        if label in allowed:
+            return domain
     return ""
 
 
@@ -1137,38 +1201,36 @@ def _compact_company_sender_identity(company_name: str, senders: frozenset[str])
         return ""
     for sender in senders:
         local, _separator, domain = sender.partition("@")
-        domain_labels = [
-            label
-            for label in re.split(r"[^a-z0-9]+", domain)
-            if label and label not in _DOMAIN_LABEL_NOISE
-        ]
-        if domain not in _PUBLIC_EMAIL_DOMAINS:
+        private_domain = _private_domain(domain)
+        identity_label = _domain_identity_label(domain) if private_domain else ""
+        domain_labels = [identity_label] if identity_label else []
+        if private_domain:
             for label in domain_labels:
                 if any(
                     label in {token, f"{token}ae", f"{token}uae", f"{token}group"}
                     for token in short_tokens
                 ):
                     return f"customer company abbreviation matches sender domain {domain}"
-        for label in domain_labels:
-            if len(label) < 7:
-                continue
-            for candidate in candidates:
-                if (
-                    label
-                    in {
-                        candidate,
-                        f"{candidate}ae",
-                        f"{candidate}uae",
-                        f"{candidate}dubai",
-                        f"{candidate}group",
-                    }
-                    or (
-                        min(len(label), len(candidate)) >= 9
-                        and rapidfuzz_ratio(label, candidate) >= 90.0
-                    )
-                ):
-                    return f"customer company name matches sender domain {domain}"
-        if domain in _PUBLIC_EMAIL_DOMAINS:
+            for label in domain_labels:
+                if len(label) < 7:
+                    continue
+                for candidate in candidates:
+                    if (
+                        label
+                        in {
+                            candidate,
+                            f"{candidate}ae",
+                            f"{candidate}uae",
+                            f"{candidate}dubai",
+                            f"{candidate}group",
+                        }
+                        or (
+                            min(len(label), len(candidate)) >= 9
+                            and rapidfuzz_ratio(label, candidate) >= 90.0
+                        )
+                    ):
+                        return f"customer company name matches sender domain {domain}"
+        else:
             compact_local = re.sub(r"[^a-z0-9]+", "", local)
             for candidate in candidates:
                 if len(candidate) >= 7 and candidate in compact_local:
@@ -1187,9 +1249,24 @@ def _customer_component(
         domain for domain in (_domain(address) for address in expected) if _private_domain(domain)
     }
     domain_matches = sender_domains & expected_domains
-    acronym_domain = _company_acronym_domain(quote.company_name, sender_domains)
-    compact_identity = _compact_company_sender_identity(quote.company_name, senders)
+    # When the quote already has a private customer domain, a different
+    # sender domain is conflicting evidence. Do not let a coincidental company
+    # acronym/name on that other domain override the known customer identity.
+    acronym_domain = (
+        _company_acronym_domain(quote.company_name, sender_domains)
+        if not expected_domains
+        else ""
+    )
+    compact_identity = (
+        _compact_company_sender_identity(quote.company_name, senders)
+        if not expected_domains
+        else ""
+    )
     company_score, company_reason = _company_strength(quote.company_name, message)
+    if expected_domains and not exact_sender and not domain_matches:
+        # Textual company names on a forwarded/unrelated message cannot
+        # override the quote's configured private customer domain.
+        company_score, company_reason = 0.0, ""
     score = 0.0
     details = []
     if exact_sender:
@@ -1356,6 +1433,18 @@ def _evaluate(
         return _Evaluation(rejection="no parsed PO item overlaps this quotation")
     if not po_count and not exact_reference and not message.lpo_references:
         return _Evaluation(rejection="no structured PO rows or LPO reference to compare")
+    # A long order that happens to share a handful of common pharmacy items is
+    # not useful quote evidence. Keep genuine combined/repacked orders visible
+    # when they cover nearly all of a quotation, and always preserve an exact
+    # quotation reference, but otherwise require at least half of the PO rows
+    # to belong to the candidate quote before offering it to staff.
+    if (
+        po_count
+        and item_coverage < 0.5
+        and not exact_reference
+        and not (quote_coverage >= 0.8 and matched_count >= 2)
+    ):
+        return _Evaluation(rejection="PO item coverage is below the review threshold")
 
     item_score = item_coverage * 28.0 + average_similarity * 8.0
     if po_count and not matched_count:
@@ -1580,7 +1669,11 @@ def _source_document_text(message: CanonicalMailboxMessage) -> str:
             # newest body. Missing commercial fields remain automatic blockers
             # later, so quantity-only acceptance stays reviewable, never auto.
             return body
-        return "\n".join(filter(None, [subject, body]))
+        # The newest body is the selected evidence. Inspect it before the
+        # conversation subject so a stale "Purchase Order" subject cannot
+        # override a body that is actually a supplier quotation. The subject
+        # remains in the gate so INVOICE/DELIVERY NOTE threads still reject.
+        return "\n".join(filter(None, [body, subject]))
     if message.document_text:
         return message.document_text
     return "\n".join(filter(None, [message.subject, message.body]))
@@ -1661,13 +1754,16 @@ def _document_rejection_reason(message: CanonicalMailboxMessage) -> str:
         message.quotation_references_are_review_only and message.lpo_references
     )
     first_document_heading = ""
-    for line in header_lines:
+    first_document_heading_index = None
+    for index, line in enumerate(header_lines):
         if _NEGATIVE_DOCUMENT_TITLE_RE.fullmatch(line):
             first_document_heading = "non_order"
+            first_document_heading_index = index
             break
         order_heading_match = _ORDER_DOCUMENT_TITLE_RE.fullmatch(line)
         if order_heading_match:
             first_document_heading = "purchase_order"
+            first_document_heading_index = index
             break
     positive_order_title = bool(
         first_document_heading == "purchase_order" or is_ariba_new_order
@@ -1701,8 +1797,19 @@ def _document_rejection_reason(message: CanonicalMailboxMessage) -> str:
 
     leading_text = "\n".join(header_lines)
     quotation_detail_count = len(_QUOTATION_DOCUMENT_DETAIL_RE.findall(leading_text))
-    for line in header_lines:
+    for index, line in enumerate(header_lines):
         if not _NEGATIVE_DOCUMENT_TITLE_RE.fullmatch(line):
+            continue
+        if (
+            positive_order_title
+            and first_document_heading == "purchase_order"
+            and first_document_heading_index is not None
+            and index > first_document_heading_index
+            and _PO_TABLE_METADATA_NEGATIVE_LINE_RE.fullmatch(line)
+        ):
+            # Emrill and similar customer POs include ``Purchase Requisition``
+            # as a line-table column after an independent PURCHASE ORDER title.
+            # It is provenance for each order line, not the document type.
             continue
         quote_heading_match = _QUOTATION_DOCUMENT_TITLE_RE.fullmatch(line)
         quote_title = bool(quote_heading_match)
@@ -1785,9 +1892,15 @@ def _document_review_blockers(message: CanonicalMailboxMessage) -> tuple[str, ..
     quotation_detail_count = len(
         _QUOTATION_DOCUMENT_DETAIL_RE.findall("\n".join(header_lines))
     )
-    if labelled_quote_after_order and quotation_detail_count >= 2:
+    named_order_attachment = bool(
+        str(message.source_kind or "").casefold() == "attachment"
+        and _ORDER_FILENAME_RE.search(str(message.document_filename or ""))
+    )
+    if labelled_quote_after_order and (
+        not named_order_attachment or quotation_detail_count >= 2
+    ):
         return (
-            "purchase-order reference header is mixed with multiple supplier-quotation metadata fields",
+            "purchase-order reference header is mixed with supplier-quotation metadata fields",
         )
     return ()
 
@@ -1931,6 +2044,22 @@ def rank_message_to_quotations(
             rejection_summary=(("message has no PO/LPO/order evidence", len(quotes)),) if quotes else (),
             reason="The message has no explicit LPO/PO reference or order-confirmation wording.",
         )
+    reference_keys = _quotation_reference_keys(canonical_message)
+    if not canonical_message.parsed_rows and not reference_keys:
+        return MailboxMatchResult(
+            status=UNMATCHED,
+            evaluated_count=len(quotes),
+            rejected_count=len(quotes),
+            rejection_summary=(
+                ("source has no parsed item rows or explicit quotation reference", len(quotes)),
+            )
+            if quotes
+            else (),
+            reason=(
+                "The selected source has no parsed item rows and no explicit quotation "
+                "reference, so it cannot be assigned to a quote."
+            ),
+        )
     if canonical_message.received_at is None:
         return MailboxMatchResult(
             status=UNMATCHED,
@@ -1940,7 +2069,6 @@ def rank_message_to_quotations(
             reason="A trustworthy message timestamp is required before comparing quotations.",
         )
 
-    reference_keys = _quotation_reference_keys(canonical_message)
     candidates = []
     rejections: Counter[str] = Counter()
     for quote in quotes:

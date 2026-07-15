@@ -44,7 +44,7 @@ from .models import (
 )
 
 
-ALGORITHM_VERSION = "mailbox_match_v2"
+ALGORITHM_VERSION = "mailbox_match_v3"
 MAX_ACTIVE_EVIDENCE_PER_QUOTE = 3
 MAX_MATCH_ERRORS = 500
 DEFAULT_MATCH_PAGE_SIZE = 5
@@ -63,10 +63,24 @@ BODY_METADATA_ROW_RE = re.compile(
     re.IGNORECASE,
 )
 TOTAL_LINE_RE = re.compile(
-    r"(?im)^\s*(?P<label>grand\s+total|net\s+total|total\s+amount|invoice\s+total|total)"
-    r"\s*(?:\([^\n)]*\))?\s*[:\-]?\s*(?:AED|DHS?|USD|EUR|GBP)?\s*"
-    r"(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d{1,3})?|\d+(?:\.\d{1,3})?)\s*$"
+    r"(?im)^[ \t]*(?P<label>grand[ \t]+total|net[ \t]+total|total[ \t]+amount|"
+    r"invoice[ \t]+total|total)[ \t]*(?:\([^\n)]*\))?[ \t]*[:\-]?[ \t]*"
+    r"(?:AED|DHS?|USD|EUR|GBP)?[ \t]*"
+    r"(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d{1,3})?|\d+(?:\.\d{1,3})?)[ \t]*$"
 )
+ARIBA_MONEY_CELL_RE = re.compile(
+    r"^\s*(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
+    r"(?:AED|DHS?|USD|EUR|GBP)\s*$",
+    re.IGNORECASE,
+)
+ARIBA_UNIT_CELL_RE = re.compile(r"^\((?P<unit>[A-Z0-9_./-]{1,12})\)$", re.IGNORECASE)
+EMRILL_DESCRIPTION_RE = re.compile(r"^description\s*:\s*(?P<name>.+)$", re.IGNORECASE)
+EMRILL_AMOUNT_DATE_RE = re.compile(
+    r"^\s*(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s+"
+    r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+    re.IGNORECASE,
+)
+EMRILL_PERCENT_RE = re.compile(r"^\d+(?:\.\d+)?%$")
 
 
 @dataclass(frozen=True)
@@ -150,6 +164,286 @@ def _body_item_rows(rows):
     ]
 
 
+def _nonblank_cells(text):
+    return [
+        re.sub(r"\s+", " ", raw_line.replace("\u00a0", " ")).strip()
+        for raw_line in str(text or "").splitlines()
+        if re.sub(r"\s+", " ", raw_line.replace("\u00a0", " ")).strip()
+    ]
+
+
+def _portal_unit(value):
+    unit = str(value or "").strip(" ()")
+    return {"EA": "each", "_01": "each"}.get(unit.upper(), unit)
+
+
+def _ariba_order_rows(text, *, source):
+    """Parse SAP Business Network's one-cell-per-line PO notification."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        any("sap business network" in cell or "ariba network" in cell for cell in lowered)
+        and any("purchase order" in cell for cell in lowered)
+    )
+    if not recognized:
+        return False, (), ()
+    if "line #" not in lowered:
+        return True, (), (
+            "SAP Business Network purchase order was recognized, but no displayed line-item sections were found.",
+        )
+
+    starts = [index for index, cell in enumerate(lowered) if cell == "line #"]
+    rows = []
+    for section_index, start in enumerate(starts):
+        end = starts[section_index + 1] if section_index + 1 < len(starts) else len(cells)
+        section = cells[start:end]
+        section_lower = lowered[start:end]
+        required_headers = {
+            "part # / description",
+            "qty (unit)",
+            "unit price",
+            "subtotal",
+            "tax",
+        }
+        if not required_headers.issubset(section_lower):
+            continue
+        try:
+            header_end = section_lower.index("tax") + 1
+            control_index = section_lower.index("control keys", header_end)
+        except ValueError:
+            continue
+        payload = section[header_end:control_index]
+        payload_lower = section_lower[header_end:control_index]
+        type_index = next(
+            (
+                index
+                for index, value in enumerate(payload_lower)
+                if value in {"material", "service"}
+            ),
+            None,
+        )
+        if type_index is None:
+            continue
+        values = payload[type_index + 1 :]
+        quantity_index = next(
+            (
+                index
+                for index, value in enumerate(values)
+                if re.fullmatch(r"\d+(?:\.\d+)?", value)
+            ),
+            None,
+        )
+        if quantity_index is None:
+            continue
+        quantity = _decimal(values[quantity_index])
+        unit = ""
+        if quantity_index + 1 < len(values):
+            unit_match = ARIBA_UNIT_CELL_RE.fullmatch(values[quantity_index + 1])
+            if unit_match:
+                unit = _portal_unit(unit_match.group("unit"))
+        money = [
+            (index, _decimal(match.group("value")))
+            for index, value in enumerate(values)
+            if (match := ARIBA_MONEY_CELL_RE.fullmatch(value))
+        ]
+        if quantity is None or len(money) < 2:
+            continue
+        last_money_index = money[-1][0]
+        description_cells = [
+            value
+            for value in values[last_money_index + 1 :]
+            if re.search(r"[A-Za-z]", value)
+        ]
+        if not description_cells:
+            continue
+        name = " ".join(description_cells)
+        part_number = payload[type_index - 1] if type_index else ""
+        rows.append(
+            MailboxPOLine(
+                line_id=payload[0] if payload else section_index + 1,
+                name=name,
+                description=f"Part # {part_number}" if part_number else "",
+                quantity=quantity,
+                unit_price=money[0][1],
+                line_total=money[1][1],
+                unit=unit,
+                source=source,
+            )
+        )
+
+    warnings = ()
+    if len(rows) != len(starts):
+        warnings = (
+            f"SAP Business Network extraction was incomplete: parsed {len(rows)} of "
+            f"{len(starts)} displayed line-item sections.",
+        )
+    return True, tuple(rows), warnings
+
+
+def _emrill_order_rows(text, *, source):
+    """Parse Emrill's repeated PDF line blocks without treating labels as items."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    emrill_brand = any("emrill" in cell for cell in lowered[:80])
+    recognized = bool(
+        emrill_brand
+        and (
+            any("purchase order" in cell for cell in lowered[:80])
+            or {"line number", "unit price", "amount delivery"}.issubset(lowered)
+        )
+    )
+    if not recognized:
+        return False, (), ()
+    if not {"line number", "unit price", "amount delivery"}.issubset(lowered):
+        return True, (), (
+            "Emrill purchase order was recognized, but its commercial line headers were incomplete.",
+        )
+
+    description_indexes = [
+        index for index, value in enumerate(cells) if EMRILL_DESCRIPTION_RE.match(value)
+    ]
+    rows = []
+    used_units = set()
+    for description_index in description_indexes:
+        description_match = EMRILL_DESCRIPTION_RE.match(cells[description_index])
+        unit_index = None
+        amount = None
+        for candidate in range(description_index - 1, max(-1, description_index - 45), -1):
+            if candidate in used_units or candidate + 6 >= len(cells):
+                continue
+            unit_value = cells[candidate]
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_./-]{0,11}", unit_value, re.IGNORECASE):
+                continue
+            quantity = _decimal(cells[candidate + 1])
+            unit_price = _decimal(cells[candidate + 2])
+            discount = _decimal(cells[candidate + 3])
+            percent = EMRILL_PERCENT_RE.fullmatch(cells[candidate + 4])
+            vat_amount = _decimal(cells[candidate + 5])
+            amount_match = EMRILL_AMOUNT_DATE_RE.match(cells[candidate + 6])
+            if None in {quantity, unit_price, discount, vat_amount} or not percent or not amount_match:
+                continue
+            unit_index = candidate
+            amount = _decimal(amount_match.group("amount"))
+            break
+        if unit_index is None or amount is None:
+            continue
+        used_units.add(unit_index)
+        rows.append(
+            MailboxPOLine(
+                line_id=len(rows) + 1,
+                name=description_match.group("name").strip(),
+                quantity=_decimal(cells[unit_index + 1]),
+                unit_price=_decimal(cells[unit_index + 2]),
+                line_total=amount,
+                unit=_portal_unit(cells[unit_index]),
+                source=source,
+            )
+        )
+
+    warnings = ()
+    if not description_indexes:
+        warnings = (
+            "Emrill purchase order was recognized, but no displayed item descriptions were found.",
+        )
+    elif len(rows) != len(description_indexes):
+        warnings = (
+            f"Emrill purchase-order extraction was incomplete: parsed {len(rows)} of "
+            f"{len(description_indexes)} displayed descriptions.",
+        )
+    return True, tuple(rows), warnings
+
+
+def _imdaad_order_rows(text, *, source):
+    """Parse IMDAAD's split-cell PO table and exclude repeated terms pages."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        "purchase order" in lowered[:20]
+        and any("imdaad contact name" in cell for cell in lowered[:80])
+    )
+    if not recognized:
+        return False, (), ()
+    if not {"description", "uom", "qty"}.issubset(lowered):
+        return True, (), (
+            "IMDAAD purchase order was recognized, but its commercial line headers were incomplete.",
+        )
+    header_end = next(
+        (
+            index + 2
+            for index in range(len(lowered) - 1)
+            if lowered[index] == "total" and lowered[index + 1] == "amount"
+        ),
+        None,
+    )
+    if header_end is None:
+        return True, (), (
+            "IMDAAD purchase order was recognized, but the line-item table boundary was not found.",
+        )
+
+    rows = []
+    warnings = []
+    index = header_end
+    while index < len(cells):
+        current_label = re.sub(r"[^a-z]+", " ", lowered[index]).strip()
+        if current_label in {"total amount", "total amount aed"}:
+            break
+        if index + 8 >= len(cells):
+            warnings.append(
+                f"IMDAAD purchase-order extraction was incomplete after {len(rows)} parsed line(s)."
+            )
+            break
+        serial = cells[index]
+        name = cells[index + 1]
+        unit = cells[index + 2]
+        quantity = _decimal(cells[index + 3])
+        unit_price = _decimal(cells[index + 4])
+        net_amount = _decimal(cells[index + 6])
+        vat_amount = _decimal(cells[index + 7])
+        gross_amount = _decimal(cells[index + 8])
+        if not (
+            re.fullmatch(r"\d{1,4}", serial)
+            and re.search(r"[A-Za-z]", name)
+            and quantity is not None
+            and unit_price is not None
+            and net_amount is not None
+            and vat_amount is not None
+            and gross_amount is not None
+        ):
+            warnings.append(
+                f"IMDAAD purchase-order extraction stopped at an incomplete line after "
+                f"{len(rows)} parsed line(s)."
+            )
+            break
+        rows.append(
+            MailboxPOLine(
+                line_id=serial,
+                name=name,
+                quantity=quantity,
+                unit_price=unit_price,
+                line_total=net_amount,
+                unit=_portal_unit(unit),
+                source=source,
+            )
+        )
+        index += 9
+    if not rows and not warnings:
+        warnings.append(
+            "IMDAAD purchase order was recognized, but no commercial item lines were found."
+        )
+    return True, tuple(rows), tuple(warnings)
+
+
+def _portal_order_rows(text, *, source):
+    for parser in (_ariba_order_rows, _emrill_order_rows, _imdaad_order_rows):
+        recognized, rows, warnings = parser(text, source=source)
+        if recognized:
+            return True, rows, warnings
+    return False, (), ()
+
+
 def _document_total(document, text):
     totals = document.get("totals") or {}
     if isinstance(totals, dict):
@@ -158,17 +452,55 @@ def _document_total(document, text):
             if value is not None:
                 return value
     matches = list(TOTAL_LINE_RE.finditer(str(text or "")))
-    if not matches:
+    if matches:
+        matches.sort(
+            key=lambda match: (
+                "grand" in match.group("label").lower(),
+                "net" in match.group("label").lower(),
+                match.start(),
+            ),
+            reverse=True,
+        )
+        return _decimal(matches[0].group("value"))
+
+    # HTML order notifications often put every table cell on its own line.
+    # Preserve that structure while accepting a labelled total followed by its
+    # amount on the next nonblank line.
+    cells = _nonblank_cells(text)
+    split_totals = []
+    for index, cell in enumerate(cells[:-1]):
+        label = re.sub(r"[^a-z]+", " ", cell.casefold()).strip()
+        if label not in {
+            "est grand total",
+            "grand total",
+            "net total",
+            "total amount",
+            "total amount aed",
+            "invoice total",
+        }:
+            continue
+        values = []
+        for candidate in cells[index + 1 : index + 6]:
+            match = re.fullmatch(
+                r"\(?\s*(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*\)?",
+                candidate,
+            )
+            if not match:
+                break
+            values.append(_decimal(match.group("value")))
+        if values:
+            split_totals.append(
+                (
+                    "grand" in label,
+                    "net" in label,
+                    index,
+                    values[-1],
+                )
+            )
+    if not split_totals:
         return None
-    matches.sort(
-        key=lambda match: (
-            "grand" in match.group("label").lower(),
-            "net" in match.group("label").lower(),
-            match.start(),
-        ),
-        reverse=True,
-    )
-    return _decimal(matches[0].group("value"))
+    split_totals.sort(reverse=True)
+    return split_totals[0][3]
 
 
 def _references(*chunks):
@@ -368,16 +700,21 @@ def document_variants(inventory):
     attachment_reference_keys = set()
     base_body = inventory.newest_body_text or inventory.snippet or ""
     try:
-        body_preview = (
-            parse_text_preview(base_body)
-            if base_body.strip()
-            else {"lines": [], "warnings": []}
-        )
-        body_rows = _canonical_rows(
-            _body_item_rows(body_preview.get("lines") or []),
+        body_portal_recognized, body_rows, body_warnings = _portal_order_rows(
+            base_body,
             source="email_body",
         )
-        body_warnings = _warning_tuple(body_preview.get("warnings") or [])
+        if not body_portal_recognized:
+            body_preview = (
+                parse_text_preview(base_body)
+                if base_body.strip()
+                else {"lines": [], "warnings": []}
+            )
+            body_rows = _canonical_rows(
+                _body_item_rows(body_preview.get("lines") or []),
+                source="email_body",
+            )
+            body_warnings = _warning_tuple(body_preview.get("warnings") or [])
     except Exception:
         body_rows = ()
         body_warnings = ("Email body parsing failed and requires staff review.",)
@@ -400,7 +737,15 @@ def document_variants(inventory):
             continue
         filename = str(attachment.get("filename") or "")
         attachment_text = str(attachment.get("original_text") or "")
-        rows = _canonical_rows(attachment.get("lines") or [], source=filename or "attachment")
+        portal_recognized, rows, portal_warnings = _portal_order_rows(
+            attachment_text,
+            source=filename or "attachment",
+        )
+        if not portal_recognized:
+            rows = _canonical_rows(
+                attachment.get("lines") or [],
+                source=filename or "attachment",
+            )
         local_attachment_po_refs, local_attachment_quote_refs = _references(
             filename,
             attachment_text,
@@ -458,9 +803,15 @@ def document_variants(inventory):
             or ""
         )
         combined_text = "\n".join(filter(None, [base_body, attachment_text, filename]))
-        parser_warnings = _warning_tuple(
+        attachment_warnings = _warning_tuple(
             attachment.get("warnings")
             or ([attachment.get("reason")] if is_manual_attachment else [])
+        )
+        parser_warnings = _warning_tuple(
+            [
+                *attachment_warnings,
+                *portal_warnings,
+            ]
         )
         variants.append(
             DocumentVariant(

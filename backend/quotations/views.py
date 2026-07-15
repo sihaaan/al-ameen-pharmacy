@@ -1866,12 +1866,21 @@ class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewS
         return super().get_queryset().filter(gmail_connection=connection)
 
     def _response(self, run, *, http_status=status.HTTP_200_OK, repair_summary=None):
-        latest_match = run.match_runs.select_related("requested_by").first()
+        # Only the current algorithm can complete the current client workflow.
+        # Returning a historical match here makes a version rollover look done
+        # and prevents the browser from requesting reconciliation with the new
+        # matcher.
+        latest_match = (
+            run.match_runs.filter(algorithm_version=ALGORITHM_VERSION)
+            .select_related("requested_by")
+            .first()
+        )
+        has_any_match = bool(latest_match) or run.match_runs.exists()
         inventory_done = bool(run.status == MailboxPOAuditRun.STATUS_COMPLETED and run.exhausted)
         vision_availability = mailbox_vision_availability()
         repair_remaining = (
             mailbox_po_audit_repair_remaining(run)
-            if inventory_done and not latest_match and vision_availability["available"]
+            if inventory_done and not has_any_match and vision_availability["available"]
             else 0
         )
         return Response(
@@ -2160,12 +2169,18 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
                 part_id = requested_id
         max_bytes = int(getattr(settings, "PO_EVIDENCE_ATTACHMENT_VIEW_MAX_BYTES", 20 * 1024 * 1024))
         try:
+            fetch_kwargs = {
+                "attachment_id": attachment_id,
+                "part_id": part_id,
+                "max_bytes": max_bytes,
+            }
+            nested_filename = str(manifest_entry.get("nested_filename") or "").strip()
+            if nested_filename:
+                fetch_kwargs["nested_filename"] = nested_filename
             source = gmail_fetch_attachment_content(
                 connection,
                 evidence.gmail_message_id,
-                attachment_id=attachment_id,
-                part_id=part_id,
-                max_bytes=max_bytes,
+                **fetch_kwargs,
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

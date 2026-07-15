@@ -2026,6 +2026,12 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             "filename",
             "mime_type",
             "source_mime_type",
+            "container_filename",
+            "container_mime_type",
+            "container_size",
+            "nested_filename",
+            "nested_mime_type",
+            "nested_part_path",
             "size",
             "status",
             "reason",
@@ -2073,7 +2079,18 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
         for index in visible_indexes:
             attachment = attachments[index]
             item = {key: attachment.get(key) for key in allowed if key in attachment}
-            for key in ("filename", "mime_type", "source_mime_type", "status", "reason"):
+            for key in (
+                "filename",
+                "mime_type",
+                "source_mime_type",
+                "container_filename",
+                "container_mime_type",
+                "nested_filename",
+                "nested_mime_type",
+                "nested_part_path",
+                "status",
+                "reason",
+            ):
                 if key in item:
                     item[key] = str(item[key] or "")[:500]
             sanitized.append(item)
