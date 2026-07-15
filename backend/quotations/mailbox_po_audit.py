@@ -988,6 +988,23 @@ def hydrate_plausible_attachments(
 
 
 def _attachment_identity(attachment):
+    # Gmail's opaque attachmentId is a download token, not a durable identity:
+    # the API can return a different token on a later ``messages.get`` for the
+    # same immutable MIME part.  The MIME part id and its public metadata are
+    # stable within one Gmail message, so prefer that tuple for reconciliation.
+    part_id = str((attachment or {}).get("part_id") or "")
+    if part_id:
+        try:
+            size = int((attachment or {}).get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        return (
+            "part",
+            part_id,
+            str((attachment or {}).get("filename") or ""),
+            str((attachment or {}).get("mime_type") or "").lower(),
+            size,
+        )
     attachment_id = str(
         (attachment or {}).get("attachment_id")
         or (attachment or {}).get("source_gmail_attachment_id")
@@ -995,9 +1012,16 @@ def _attachment_identity(attachment):
     )
     if attachment_id:
         return ("attachment_id", attachment_id)
-    part_id = str((attachment or {}).get("part_id") or "")
     filename = str((attachment or {}).get("filename") or "")
-    return ("part", part_id, filename)
+    # Filename alone is not exact source identity. Keep a deterministic key so
+    # a terminal manual annotation can merge back into the stored manifest,
+    # but never use this identity to select newly fetched Gmail bytes.
+    return (
+        "unidentifiable",
+        filename,
+        str((attachment or {}).get("mime_type") or "").lower(),
+        str((attachment or {}).get("size") or ""),
+    )
 
 
 def _is_old_mailbox_size_skip(attachment):
@@ -1057,6 +1081,26 @@ def attachment_needs_mailbox_vision_repair(attachment):
     if not isinstance(attachment, dict) or not _is_pdf_attachment(attachment):
         return False
     repair_status = str(attachment.get("vision_repair_status") or "").lower()
+    # Transient Gmail/provider failures are explicitly bounded by
+    # ``vision_repair_attempts`` and must remain resumable even when a legacy
+    # v1 identity failure had already changed the base status to manual_review.
+    if repair_status == "retryable":
+        return True
+    # Five production rows were terminally marked by the v1 strategy before we
+    # confirmed that Gmail rotates attachmentId download tokens.  Retry only
+    # those legacy rows once when a stable MIME part id exists.  A v2 failure is
+    # stamped below and remains terminal, preventing an infinite repair loop.
+    if repair_status == "manual":
+        reason = str(
+            attachment.get("vision_repair_reason")
+            or attachment.get("reason")
+            or ""
+        ).lower()
+        return bool(
+            attachment.get("part_id")
+            and "exact gmail attachment part" in reason
+            and not attachment.get("vision_identity_strategy")
+        )
     if repair_status in {"completed", "rejected", "manual"}:
         return False
     if (
@@ -1584,6 +1628,8 @@ def _repair_mailbox_po_audit_pdf_vision_with_lease(
         ambiguous_fetched_identities = set()
         for attachment in fetched_message.get("_attachment_refs") or []:
             identity = _attachment_identity(attachment)
+            if identity[0] == "unidentifiable":
+                continue
             if identity in fetched_refs:
                 ambiguous_fetched_identities.add(identity)
             else:
@@ -1614,6 +1660,7 @@ def _repair_mailbox_po_audit_pdf_vision_with_lease(
                     "status": "manual_review",
                     "manual_review_required": True,
                     "vision_repair_status": "manual",
+                    "vision_identity_strategy": "mime_part_v2",
                     "vision_repair_reason": missing_warning,
                     "warnings": list(
                         dict.fromkeys([*(target.get("warnings") or []), missing_warning])
@@ -1661,6 +1708,7 @@ def _repair_mailbox_po_audit_pdf_vision_with_lease(
                 replacements[identity] = {
                     **repaired,
                     "vision_repaired_for_audit_run_id": audit_run.id,
+                    "vision_identity_strategy": "mime_part_v2",
                 }
                 summary["attachments_repaired"] += 1
                 continue
@@ -1688,7 +1736,10 @@ def _repair_mailbox_po_audit_pdf_vision_with_lease(
                     target,
                     retry_reason,
                 )
-                replacements[identity] = replacement
+                replacements[identity] = {
+                    **replacement,
+                    "vision_identity_strategy": "mime_part_v2",
+                }
                 if terminal:
                     summary["attachments_rejected"] += 1
                 else:

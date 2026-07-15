@@ -1075,6 +1075,199 @@ class MailboxPDFRepairTests(TestCase):
     @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
     @patch("quotations.mailbox_po_audit._preview_attachment")
     @patch("quotations.mailbox_po_audit.fetch_mailbox_message")
+    def test_repair_uses_stable_mime_part_when_gmail_attachment_token_rotates(
+        self,
+        fetch,
+        preview,
+        _token,
+    ):
+        message = self.make_message()
+        fetched = self.fetched_message()
+        fetched["_attachment_refs"][0]["attachment_id"] = "rotated-download-token"
+        fetch.return_value = fetched
+        preview.return_value = (
+            {
+                **fetched["_attachment_refs"][0],
+                "status": "parsed",
+                "line_count": 1,
+                "lines": [{"raw_name": "Recovered from rotated token", "quantity": "2"}],
+                "vision_repair_status": "completed",
+                "source_file_ref": "",
+            },
+            100,
+        )
+
+        summary = repair_mailbox_po_audit_pdf_vision(self.run)
+
+        self.assertEqual(summary["attachments_repaired"], 1)
+        preview.assert_called_once()
+        self.assertEqual(
+            preview.call_args.args[2]["attachment_id"],
+            "rotated-download-token",
+        )
+        message.refresh_from_db()
+        repaired = message.attachment_manifest[0]
+        self.assertEqual(repaired["attachment_id"], "rotated-download-token")
+        self.assertEqual(repaired["vision_identity_strategy"], "mime_part_v2")
+
+    def test_only_legacy_v1_identity_failure_is_retryable_once(self):
+        legacy = {
+            **self.manifest()[0],
+            "status": "manual_review",
+            "vision_repair_status": "manual",
+            "vision_repair_reason": (
+                "The exact Gmail attachment part is missing or no longer unique; "
+                "automatic repair stopped."
+            ),
+        }
+        self.assertTrue(attachment_needs_mailbox_vision_repair(legacy))
+        self.assertFalse(
+            attachment_needs_mailbox_vision_repair(
+                {**legacy, "vision_identity_strategy": "mime_part_v2"}
+            )
+        )
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._preview_attachment")
+    @patch("quotations.mailbox_po_audit.fetch_mailbox_message")
+    def test_legacy_v1_manual_identity_failure_repairs_once_with_rotated_token(
+        self,
+        fetch,
+        preview,
+        _token,
+    ):
+        legacy = {
+            **self.manifest()[0],
+            "status": "manual_review",
+            "manual_review_required": True,
+            "vision_repair_status": "manual",
+            "vision_repair_reason": (
+                "The exact Gmail attachment part is missing or no longer unique; "
+                "automatic repair stopped."
+            ),
+        }
+        message = self.make_message(manifest=[legacy])
+        fetched_ref = {
+            **legacy,
+            "attachment_id": "rotated-after-v1-failure",
+            "status": "metadata_only",
+        }
+        fetch.return_value = {"_attachment_refs": [fetched_ref]}
+        preview.return_value = (
+            {
+                **fetched_ref,
+                "status": "parsed",
+                "line_count": 1,
+                "lines": [{"raw_name": "Recovered legacy item", "quantity": "1"}],
+                "vision_repair_status": "completed",
+            },
+            100,
+        )
+
+        first = repair_mailbox_po_audit_pdf_vision(self.run)
+
+        self.assertEqual(first["attachments_repaired"], 1)
+        message.refresh_from_db()
+        repaired = message.attachment_manifest[0]
+        self.assertEqual(repaired["vision_identity_strategy"], "mime_part_v2")
+        self.assertEqual(repaired["vision_repair_status"], "completed")
+
+        fetch.reset_mock()
+        second = repair_mailbox_po_audit_pdf_vision(self.run)
+        self.assertEqual(second["attachments_targeted"], 0)
+        fetch.assert_not_called()
+
+    @patch("quotations.mailbox_po_audit.fetch_mailbox_message")
+    def test_legacy_v1_manual_identity_failure_becomes_terminal_v2_if_still_ambiguous(
+        self,
+        fetch,
+    ):
+        legacy = {
+            **self.manifest()[0],
+            "status": "manual_review",
+            "manual_review_required": True,
+            "vision_repair_status": "manual",
+            "vision_repair_reason": (
+                "The exact Gmail attachment part is missing or no longer unique; "
+                "automatic repair stopped."
+            ),
+        }
+        message = self.make_message(manifest=[legacy])
+        rotated = {**legacy, "attachment_id": "rotated-but-ambiguous"}
+        fetch.return_value = {"_attachment_refs": [rotated, {**rotated}]}
+
+        first = repair_mailbox_po_audit_pdf_vision(self.run)
+
+        self.assertEqual(first["attachments_missing"], 1)
+        message.refresh_from_db()
+        terminal = message.attachment_manifest[0]
+        self.assertEqual(terminal["vision_identity_strategy"], "mime_part_v2")
+        self.assertEqual(terminal["vision_repair_status"], "manual")
+
+        fetch.reset_mock()
+        second = repair_mailbox_po_audit_pdf_vision(self.run)
+        self.assertEqual(second["attachments_targeted"], 0)
+        fetch.assert_not_called()
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._preview_attachment")
+    @patch("quotations.mailbox_po_audit.fetch_mailbox_message")
+    def test_legacy_v1_identity_recovery_keeps_three_transient_provider_attempts(
+        self,
+        fetch,
+        preview,
+        _token,
+    ):
+        legacy = {
+            **self.manifest()[0],
+            "status": "manual_review",
+            "manual_review_required": True,
+            "vision_repair_status": "manual",
+            "vision_repair_reason": (
+                "The exact Gmail attachment part is missing or no longer unique; "
+                "automatic repair stopped."
+            ),
+        }
+        message = self.make_message(manifest=[legacy])
+        rotated = {
+            **legacy,
+            "attachment_id": "rotated-before-provider-failure",
+            "status": "metadata_only",
+        }
+        fetch.return_value = {"_attachment_refs": [rotated]}
+        preview.return_value = (
+            {
+                **rotated,
+                "status": "failed",
+                "reason": "Temporary provider timeout",
+                "vision_repair_status": "retryable",
+                "vision_repair_reason": "Temporary provider timeout",
+            },
+            100,
+        )
+
+        first = repair_mailbox_po_audit_pdf_vision(self.run)
+        second = repair_mailbox_po_audit_pdf_vision(self.run)
+        third = repair_mailbox_po_audit_pdf_vision(self.run)
+
+        self.assertEqual(first["attachments_retryable"], 1)
+        self.assertEqual(second["attachments_retryable"], 1)
+        self.assertEqual(third["attachments_rejected"], 1)
+        self.assertEqual(preview.call_count, 3)
+        message.refresh_from_db()
+        terminal = message.attachment_manifest[0]
+        self.assertEqual(terminal["vision_repair_attempts"], 3)
+        self.assertEqual(terminal["vision_repair_status"], "manual")
+        self.assertEqual(terminal["vision_identity_strategy"], "mime_part_v2")
+
+        fetch.reset_mock()
+        fourth = repair_mailbox_po_audit_pdf_vision(self.run)
+        self.assertEqual(fourth["attachments_targeted"], 0)
+        fetch.assert_not_called()
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._preview_attachment")
+    @patch("quotations.mailbox_po_audit.fetch_mailbox_message")
     def test_terminal_page_rejection_is_annotated_once_without_losing_manifest(self, fetch, preview, _token):
         failed = {
             "filename": "report.pdf",
