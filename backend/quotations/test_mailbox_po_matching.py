@@ -874,6 +874,128 @@ class MailboxQuotationRankingTests(TestCase):
             any("coverage is too weak" in reason for reason, _count in weak_result.rejection_summary)
         )
 
+    def test_bounded_po_header_timestamp_rejects_a_later_same_day_quote(self):
+        older = quote(
+            1,
+            "QT-20260703-0015",
+            [qline(11, "Staircase Evacuation Chair", 2, 1350)],
+            sent_at=BASE + timedelta(days=2),
+            company="Emrill Services LLC",
+            emails=("buyer@emrill.com",),
+        )
+        later_same_day = quote(
+            2,
+            "QT-20260706-0007",
+            [qline(21, "Staircase Evacuation Chair", 2, 1350)],
+            sent_at=datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc),
+            company="Emrill Services LLC",
+            emails=("buyer@emrill.com",),
+        )
+        po = replace(
+            message(
+                [pline(1, "Fire staircase evacuation chair", 2, 1450, unit="LS")],
+                received_at=BASE + timedelta(days=7),
+                refs=(),
+                total=None,
+            ),
+            sender="Emrill Buyer <buyer@emrill.com>",
+            company_name="Emrill Services LLC",
+            source_kind="attachment",
+            document_filename="PO185785.pdf",
+            document_text=(
+                "AL AMEEN PHARMACY L.L.C\n"
+                "PR reference\n192296\nDate\n06/07/2026 00:00:00\n"
+                "Order ID\nPO185785-1\nFire staircase evacuation chair"
+            ),
+        )
+
+        result = rank_message_to_quotations(po, [older, later_same_day])
+
+        self.assertEqual([candidate.quote_id for candidate in result.candidates], [older.quote_id])
+        self.assertEqual(result.candidates[0].document_date_result, "not_before_quote")
+        self.assertTrue(
+            any(
+                "printed PO/order" in reason and count == 1
+                for reason, count in result.rejection_summary
+            )
+        )
+
+    def test_time_valid_quote_dominates_an_equally_covering_predating_candidate(self):
+        older = quote(
+            1,
+            "QT-20260701-0001",
+            [
+                qline(11, "Nitrile Gloves", 10, 5),
+                qline(12, "Hand Sanitizer", 4, 5),
+            ],
+            sent_at=BASE,
+        )
+        newer = quote(
+            2,
+            "QT-20260703-0001",
+            [
+                qline(21, "Nitrile Gloves", 10, 6),
+                qline(22, "Hand Sanitizer", 4, 6),
+            ],
+            sent_at=BASE + timedelta(days=2),
+        )
+        po = replace(
+            message(
+                [
+                    pline(1, "Nitrile Gloves", 10, 6),
+                    pline(2, "Hand Sanitizer", 4, 6),
+                ],
+                received_at=BASE + timedelta(days=4),
+                refs=(),
+                total=84,
+            ),
+            source_kind="attachment",
+            document_filename="PO-7788.pdf",
+            document_text="PURCHASE ORDER\nOrder Date: 02/07/2026\nMedical supplies",
+        )
+
+        result = rank_message_to_quotations(po, [older, newer])
+
+        self.assertEqual([candidate.quote_id for candidate in result.candidates], [older.quote_id])
+        self.assertTrue(
+            any(
+                "equally covering earlier quote" in reason and count == 1
+                for reason, count in result.rejection_summary
+            )
+        )
+
+    def test_predating_portal_template_with_broad_overlap_remains_manual_only(self):
+        quotation = quote(
+            1,
+            "QT-20260703-0003",
+            [qline(index, f"First Aid Component {index}", 1, 5) for index in range(1, 6)],
+            sent_at=BASE + timedelta(days=2),
+        )
+        rows = [
+            pline(index, f"First Aid Component {index}", 3 if index < 5 else 1, 5)
+            for index in range(1, 6)
+        ]
+        portal_po = replace(
+            message(
+                rows,
+                received_at=BASE + timedelta(days=4),
+                refs=(),
+                total=85,
+            ),
+            source_kind="attachment",
+            document_filename="PO119105-AL AMEEN-FARHAD.pdf",
+            document_text=(
+                "LOCAL PURCHASE ORDER\nLPO No:\nDate:\nRequisition No:\n"
+                "PO/119105\n26 Jun 2026\nREQ/119138\nFirst aid components"
+            ),
+        )
+
+        result = rank_message_to_quotations(portal_po, [quotation])
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertEqual(result.candidates[0].document_date_result, "predates_quote")
+        self.assertTrue(any("predates" in blocker for blocker in result.automatic_blockers))
+
     def test_strong_predating_match_stays_reviewable_below_normal_score_floor(self):
         quote_lines = [
             qline(index, f"Medical Supply Item {index:02d}", 1, 5)
@@ -932,6 +1054,26 @@ class MailboxQuotationRankingTests(TestCase):
                 "PURCHASE ORDER\nPO No: 7788\nNitrile Gloves\n"
                 "TERMS AND CONDITIONS\nRevision Date: 30/06/2025\n"
                 "Requested Delivery Date: 30/06/2026"
+            ),
+        )
+
+        result = rank_message_to_quotations(purchase_order, [quotation])
+
+        self.assertEqual(result.status, AUTOMATIC)
+
+    def test_generic_date_near_only_one_order_marker_is_not_treated_as_order_date(self):
+        quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
+        purchase_order = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+            ),
+            source_kind="attachment",
+            document_filename="PO-7788.pdf",
+            document_text=(
+                "PR reference\nABC-100\nDate\n30/06/2025\n"
+                "Terms last revised on this date.\nNitrile Gloves"
             ),
         )
 

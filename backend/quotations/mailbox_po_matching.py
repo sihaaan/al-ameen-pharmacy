@@ -18,11 +18,12 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import getaddresses
 from functools import lru_cache
 from typing import Any, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from rapidfuzz.fuzz import ratio as rapidfuzz_ratio
 
@@ -34,6 +35,7 @@ UNMATCHED = "unmatched"
 MAX_RETURNED_CANDIDATES = 3
 DEFAULT_AUTOMATIC_THRESHOLD = 70.0
 DEFAULT_AUTOMATIC_MARGIN = 12.0
+_BUSINESS_TIME_ZONE = ZoneInfo("Asia/Dubai")
 
 _ORDER_SIGNAL_RE = re.compile(
     r"\b(?:lpo|mpo|local\s+purchase\s+order|purchase\s+order|order\s+confirmation)\b"
@@ -108,6 +110,16 @@ _QUOTATION_FILENAME_RE = re.compile(
 )
 _ORDER_FILENAME_RE = re.compile(
     r"(?:^|[\s_.-])(?:lpo|mpo|po|purchase[\s_.-]+order)(?:[\s_.-]|$)",
+    re.IGNORECASE,
+)
+_NUMBERED_ORDER_FILENAME_RE = re.compile(
+    r"(?:^|[\s_.-])(?:(?:lpo|mpo|po)(?=[\s_.-]*\d)|purchase[\s_.-]+order\b)",
+    re.IGNORECASE,
+)
+_BOUNDED_ORDER_DATE_CONTEXT_RE = re.compile(
+    r"^(?:local\s+purchase\s+order|purchase\s+order|"
+    r"lpo\s+no\.?\s*:|po\s+no\.?\s*:|order\s+id|pr\s+reference|"
+    r"requisition\s+no\.?\s*:)$",
     re.IGNORECASE,
 )
 _QUOTATION_DOCUMENT_DETAIL_RE = re.compile(
@@ -1505,11 +1517,10 @@ def _evaluate(
     if boundary is None or message.received_at <= boundary:
         return _Evaluation(rejection="message is not after the quotation send/finalize timestamp")
     order_dates, supplier_quote_dates = _printed_reference_dates(message)
-    order_date_predates = any(
-        printed_date < boundary.date() for printed_date in order_dates
-    )
-    supplier_quote_date_predates = any(
-        printed_date < boundary.date() for printed_date in supplier_quote_dates
+    order_date_predates = _printed_date_predates_quote(order_dates, boundary)
+    supplier_quote_date_predates = _printed_date_predates_quote(
+        supplier_quote_dates,
+        boundary,
     )
     document_date_result = (
         "predates_quote"
@@ -1596,10 +1607,17 @@ def _evaluate(
     strong_date_corroboration = False
     if document_date_result == "predates_quote":
         strong_date_corroboration = bool(
-            quote_coverage >= 0.8
-            and average_similarity >= 0.8
-            and matched_count >= 2
-            and quantity_exact + quantity_reduced == matched_count
+            (
+                quote_coverage >= 0.8
+                and average_similarity >= 0.8
+                and matched_count >= 2
+                and quantity_exact + quantity_reduced == matched_count
+            )
+            or (
+                item_coverage >= 0.8
+                and average_similarity >= 0.8
+                and matched_count >= 5
+            )
         )
         if not exact_reference and not strong_date_corroboration:
             return _Evaluation(
@@ -1846,26 +1864,120 @@ def _parse_printed_date(value: str):
     return None
 
 
+@dataclass(frozen=True)
+class _PrintedReferenceDate:
+    calendar_date: date
+    timestamp: datetime | None = None
+
+
+def _parse_printed_reference_date(value: str) -> _PrintedReferenceDate | None:
+    candidate = re.sub(
+        r"(?<=\d)(?:st|nd|rd|th)\b",
+        "",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(r"\s+", " ", candidate.replace(",", " ")).strip(" .;:-")
+    for pattern in (
+        "%d/%m/%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%d/%m/%Y %I:%M:%S %p",
+        "%d-%b-%Y %I:%M:%S %p",
+        "%d %b %Y %I:%M:%S %p",
+    ):
+        try:
+            parsed = datetime.strptime(candidate, pattern)
+            return _PrintedReferenceDate(parsed.date(), parsed)
+        except ValueError:
+            continue
+    parsed_date = _parse_printed_date(candidate)
+    if parsed_date is None:
+        return None
+    return _PrintedReferenceDate(parsed_date)
+
+
+def _bounded_attachment_order_dates(
+    message: CanonicalMailboxMessage,
+) -> tuple[_PrintedReferenceDate, ...]:
+    """Read generic ``Date`` labels only inside a recognisable PO layout.
+
+    Customer portal PDFs often render their labels and values in separate
+    columns.  That produces either ``Date`` followed by a timestamp (Emrill),
+    or a label row such as ``LPO No / Date / Requisition No`` followed by the
+    corresponding values (VCM).  A generic Date elsewhere is deliberately not
+    trusted: the attachment filename and nearby order metadata must both prove
+    that this is the purchase-order header.
+    """
+
+    if str(message.source_kind or "").casefold() != "attachment":
+        return ()
+    if not _NUMBERED_ORDER_FILENAME_RE.search(str(message.document_filename or "")):
+        return ()
+
+    lines = tuple(
+        normalized
+        for raw_line in _source_document_text(message).splitlines()
+        if (normalized := re.sub(r"\s+", " ", raw_line).strip(" |\t"))
+    )
+    results: list[_PrintedReferenceDate] = []
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r"date\s*:?", line, flags=re.IGNORECASE):
+            continue
+        context = lines[max(0, index - 4) : min(len(lines), index + 5)]
+        context_markers = {
+            item.casefold()
+            for item in context
+            if _BOUNDED_ORDER_DATE_CONTEXT_RE.fullmatch(item)
+        }
+        if len(context_markers) < 2:
+            continue
+        for candidate in lines[index + 1 : index + 5]:
+            parsed = _parse_printed_reference_date(candidate)
+            if parsed is not None:
+                if parsed not in results:
+                    results.append(parsed)
+                break
+    return tuple(results)
+
+
 def _printed_reference_dates(message: CanonicalMailboxMessage):
     """Return explicitly labelled order/supplier-quote dates from the exact source.
 
-    Generic ``Date`` fields are intentionally ignored: a terms page can carry
-    revision, delivery, or print dates that say nothing about when the customer
-    placed the order.
+    Generic ``Date`` fields are ignored unless the bounded attachment parser
+    proves they belong to a purchase-order header.
     """
 
     text = _source_document_text(message)
     order_dates = tuple(
         parsed
         for match in _EXPLICIT_ORDER_DATE_RE.finditer(text)
-        if (parsed := _parse_printed_date(match.group("date"))) is not None
+        if (parsed := _parse_printed_reference_date(match.group("date"))) is not None
     )
     supplier_quote_dates = tuple(
         parsed
         for match in _SUPPLIER_QUOTATION_DATE_RE.finditer(text)
-        if (parsed := _parse_printed_date(match.group("date"))) is not None
+        if (parsed := _parse_printed_reference_date(match.group("date"))) is not None
     )
-    return order_dates, supplier_quote_dates
+    bounded_dates = _bounded_attachment_order_dates(message)
+    return tuple(dict.fromkeys((*order_dates, *bounded_dates))), supplier_quote_dates
+
+
+def _printed_date_predates_quote(
+    values: Iterable[_PrintedReferenceDate],
+    boundary: datetime,
+) -> bool:
+    local_boundary = boundary.astimezone(_BUSINESS_TIME_ZONE)
+    for value in values:
+        if value.timestamp is not None:
+            local_timestamp = value.timestamp.replace(tzinfo=_BUSINESS_TIME_ZONE)
+            if local_timestamp < local_boundary:
+                return True
+        elif value.calendar_date < local_boundary.date():
+            return True
+    return False
 
 
 def _document_rejection_reason(message: CanonicalMailboxMessage) -> str:
@@ -2211,6 +2323,32 @@ def rank_message_to_quotations(
         ),
         reverse=True,
     )
+    # If the printed order predates one candidate but an already-existing
+    # quotation explains essentially the same PO rows, the later quote is not
+    # a useful alternative.  Keep a sole predating candidate visible for
+    # manual investigation, and retain one only when it explains materially
+    # more of the order than every time-valid candidate.
+    time_valid_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.document_date_result == "not_before_quote"
+    ]
+    if time_valid_candidates:
+        best_time_valid_coverage = max(
+            candidate.item_coverage for candidate in time_valid_candidates
+        )
+        retained_candidates = []
+        for candidate in candidates:
+            if (
+                candidate.document_date_result == "predates_quote"
+                and candidate.item_coverage <= best_time_valid_coverage + 0.05
+            ):
+                rejections[
+                    "printed order predates this candidate while an equally covering earlier quote exists"
+                ] += 1
+                continue
+            retained_candidates.append(candidate)
+        candidates = retained_candidates
     if not candidates:
         if reference_keys:
             reason = "No eligible quotation safely matches the explicit quotation reference and message time."

@@ -44,7 +44,7 @@ from .models import (
 )
 
 
-ALGORITHM_VERSION = "mailbox_match_v4"
+ALGORITHM_VERSION = "mailbox_match_v5"
 MAX_ACTIVE_EVIDENCE_PER_QUOTE = 3
 MAX_MATCH_ERRORS = 500
 DEFAULT_MATCH_PAGE_SIZE = 5
