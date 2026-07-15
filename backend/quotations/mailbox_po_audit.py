@@ -69,7 +69,8 @@ MAX_MESSAGE_FETCH_ATTEMPTS = 3
 SCAN_LEASE_SECONDS = 10 * 60
 
 PURCHASE_ORDER_SIGNAL = re.compile(
-    r"\b(?:local\s+purchase\s+order|purchase\s+order|l\.?\s*p\.?\s*o\.?|p\.?\s*o\.?)\b",
+    r"\b(?:local\s+purchase\s+order|purchase\s+order|l\.?\s*p\.?\s*o\.?)\b|"
+    r"(?<!\w)p\.?\s*o(?!\.?\s*box\b)(?=\W|$)\.?",
     re.IGNORECASE,
 )
 POSSIBLE_ORDER_SIGNAL = re.compile(
@@ -83,12 +84,17 @@ STRONG_ORDER_FILENAME_SIGNAL = re.compile(
 RFQ_REQUEST_SIGNAL = re.compile(
     r"\b(?:rfq|request(?:ing)?\s+(?:for\s+)?(?:a\s+)?(?:quotation|quote)|"
     r"(?:quotation|quote)\s+request|"
-    r"(?:provide|send|share|submit|prepare|issue)(?:\s+us)?\s+(?:with\s+)?(?:(?:a|the)\s+)?(?:quotation|quote)|"
-    r"(?:please|kindly)\s+quote)\b",
+    r"(?:provide|send|share|submit|prepare|issue)(?:\s+(?:us|me))?\s+(?:with\s+)?"
+    r"(?:(?:a|the|your|our)\s+)?"
+    r"(?:(?:revised|updated|amended)\s+)?(?:quotation|quote)|"
+    r"(?:please|kindly)\s+quote|"
+    r"(?:revise|update|amend)\s+(?:the\s+)?(?:quotation|quote))\b",
     re.IGNORECASE,
 )
 EXPLICIT_ORDER_CONTEXT_SIGNAL = re.compile(
-    r"\b(?:order(?:ed)?|award(?:ed)?|approv(?:e|ed|al)|confirm(?:ed|ation)?|proceed|accept(?:ed|ance)?)\b",
+    r"\b(?:order(?:ed)?|award(?:ed)?|proceed|accept(?:ed|ance)?|deliver(?:ed|y)?)\b|"
+    r"\b(?:approv(?:e|ed|al)|confirm(?:ed|ation)?)\s+(?:the\s+)?(?:quotation|quote|order)\b|"
+    r"\b(?:quotation|quote|order)\s+(?:is\s+)?(?:approved|confirmed|accepted)\b",
     re.IGNORECASE,
 )
 GENERIC_INLINE_FILENAME_SIGNAL = re.compile(
@@ -105,6 +111,7 @@ LABELLED_PO_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 PREFIXED_PO_REFERENCE = re.compile(r"\b(?P<value>(?:LPO|MPO|PO)[-_]?[A-Z0-9][A-Z0-9_./-]{3,})\b", re.IGNORECASE)
+PO_BOX_REFERENCE = re.compile(r"^(?:PO)?BOX(?:NO)?[._/-]?\d", re.IGNORECASE)
 REFERENCE_STOP_WORDS = {
     "ATTACHED",
     "CONFIRM",
@@ -301,6 +308,8 @@ def extract_po_references(text):
 
     def add(kind, value):
         value = re.sub(r"\s+", "", str(value or "")).strip(" .,:;#").upper()
+        if kind == "po" and PO_BOX_REFERENCE.match(value):
+            return
         if len(value) < 3 or value in REFERENCE_STOP_WORDS or (kind == "po" and not re.search(r"\d", value)):
             return
         key = (kind, value)
@@ -629,20 +638,44 @@ def _message_order_context_text(message):
     )
 
 
-def _has_explicit_order_context(message):
-    """Require positive order intent in the newest email and reject RFQ wording."""
+def _text_order_intent(text):
+    """Classify one author-controlled text block, with explicit PO taking precedence."""
 
-    context_text = _message_order_context_text(message)
-    context_references = extract_po_references(context_text)
+    text = str(text or "")
+    references = extract_po_references(text)
     has_explicit_po = bool(
-        PURCHASE_ORDER_SIGNAL.search(context_text)
-        or any(reference.get("kind") == "po" for reference in context_references)
+        PURCHASE_ORDER_SIGNAL.search(text)
+        or any(reference.get("kind") == "po" for reference in references)
     )
     if has_explicit_po:
-        return True
-    if RFQ_REQUEST_SIGNAL.search(context_text):
-        return False
-    return bool(EXPLICIT_ORDER_CONTEXT_SIGNAL.search(context_text))
+        return "purchase_order"
+    if RFQ_REQUEST_SIGNAL.search(text):
+        return "rfq"
+    generic_text = re.sub(r"\bin\s+order\s+to\b", " ", text, flags=re.IGNORECASE)
+    if EXPLICIT_ORDER_CONTEXT_SIGNAL.search(generic_text):
+        return "order"
+    return "neutral"
+
+
+def _message_order_intent(message):
+    """Prefer the newest body; use the subject only when that body is neutral."""
+
+    newest_body = str((message or {}).get("newest_body_text") or "").strip()
+    primary_body = newest_body or str((message or {}).get("snippet") or "").strip()
+    if primary_body:
+        body_intent = _text_order_intent(primary_body)
+        if body_intent in {"purchase_order", "rfq"}:
+            return body_intent
+        if body_intent == "order":
+            subject_intent = _text_order_intent((message or {}).get("subject") or "")
+            return "purchase_order" if subject_intent == "purchase_order" else "order"
+    return _text_order_intent((message or {}).get("subject") or "")
+
+
+def _has_explicit_order_context(message):
+    """Return whether the newest email expresses purchase/order intent."""
+
+    return _message_order_intent(message) in {"purchase_order", "order"}
 
 
 def _attachment_filename_parts(attachment):
@@ -652,18 +685,28 @@ def _attachment_filename_parts(attachment):
     return filename, stem, extension.lower(), normalized
 
 
-def _has_strong_order_filename(attachment):
-    """Identify an unsupported file whose own name says it is order evidence."""
-
+def _has_explicit_po_filename(attachment):
     filename, _stem, _extension, normalized = _attachment_filename_parts(attachment)
     if not filename:
         return False
     return bool(
         PURCHASE_ORDER_SIGNAL.search(normalized)
-        or STRONG_ORDER_FILENAME_SIGNAL.search(normalized)
         or any(
             reference.get("kind") == "po"
             for reference in extract_po_references(filename)
+        )
+    )
+
+
+def _has_strong_order_filename(attachment):
+    """Identify a file whose own name credibly says it is order evidence."""
+
+    filename, _stem, _extension, normalized = _attachment_filename_parts(attachment)
+    return bool(
+        filename
+        and (
+            _has_explicit_po_filename(attachment)
+            or STRONG_ORDER_FILENAME_SIGNAL.search(normalized)
         )
     )
 
@@ -742,7 +785,7 @@ def _remove_obsolete_broad_manual_surface(attachment):
         and all(warning in owned_warnings for warning in warning_values)
         and not attachment.get("candidate")
         and not attachment.get("content_fetched")
-        and not attachment.get("manual_review_reason_code")
+        and str(attachment.get("manual_review_reason_code") or "") in {"", "unsupported_order_document"}
         and not attachment.get("vision_repair_status")
         and not attachment.get("vision_repair_reason")
         and not attachment.get("source_sha256")
@@ -781,12 +824,23 @@ def classify_mailbox_message(message):
         ]
     )
     references = extract_po_references(text)
+    message_intent = _message_order_intent(message)
+    has_strong_order_filename = any(
+        _has_strong_order_filename(attachment)
+        for attachment in (message.get("attachment_manifest") or [])
+        if isinstance(attachment, dict)
+    )
+    has_explicit_po_filename = any(
+        _has_explicit_po_filename(attachment)
+        for attachment in (message.get("attachment_manifest") or [])
+        if isinstance(attachment, dict)
+    )
     plausible_documents = [
         attachment
         for attachment in (message.get("attachment_manifest") or [])
         if _is_plausible_document_attachment(attachment)
     ]
-    explicit_order_context = _has_explicit_order_context(message)
+    explicit_order_context = message_intent in {"purchase_order", "order"}
     reviewable_overlimit_supported_documents = [
         attachment
         for attachment in (message.get("attachment_manifest") or [])
@@ -805,7 +859,6 @@ def classify_mailbox_message(message):
             explicit_order_context=explicit_order_context,
         )
     ]
-    has_po_signal = bool(PURCHASE_ORDER_SIGNAL.search(text))
     has_explicit_po_reference = any(
         reference.get("kind") == "po" for reference in references
     )
@@ -815,13 +868,19 @@ def classify_mailbox_message(message):
         str(label).upper() for label in (message.get("label_ids") or [])
     )
 
-    if has_po_signal or has_explicit_po_reference:
+    if message_intent == "purchase_order" or has_explicit_po_filename:
         classification = MailboxPOMessage.CLASS_PURCHASE_ORDER
         reason = (
             "A credible explicit PO/LPO/MPO reference was found in the newest message, subject, or attachment filename."
             if has_explicit_po_reference
             else "PO/LPO language found in the newest message, subject, or attachment filename."
         )
+    elif message_intent == "rfq" and not has_strong_order_filename:
+        classification = MailboxPOMessage.CLASS_OTHER
+        reason = "The newest message requests or revises a quotation and has no credible PO/LPO attachment signal."
+    elif message_intent == "order" or has_strong_order_filename:
+        classification = MailboxPOMessage.CLASS_POSSIBLE_PO
+        reason = "The newest message expresses order, acceptance, proceed, or delivery intent and requires review."
     elif plausible_documents and (has_quote_reference or has_order_context):
         classification = MailboxPOMessage.CLASS_POSSIBLE_PO
         reason = "A supported document accompanies quotation/order context and needs review."

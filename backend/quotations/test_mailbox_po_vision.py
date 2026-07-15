@@ -1877,6 +1877,37 @@ class MailboxPDFRepairTests(TestCase):
         self.assertTrue(message.attachment_manifest[0]["manual_review_required"])
         self.assertEqual(message.attachment_manifest[0]["source_sha256"], "a" * 64)
 
+    def test_inline_cleanup_preserves_non_system_manual_reason_code(self):
+        broad_warning = (
+            "Unsupported or over-limit attachment; manual review of the exact Gmail source is required."
+        )
+        staff_marked = {
+            "filename": "image001.png",
+            "mime_type": "image/png",
+            "attachment_id": "staff-marked-inline",
+            "part_id": "1",
+            "size": 240000,
+            "status": "manual_review",
+            "manual_review_required": True,
+            "reason": broad_warning,
+            "warnings": [broad_warning],
+            "manual_review_reason_code": "staff_manual_review",
+        }
+        message = self.make_message(manifest=[staff_marked])
+        MailboxPOMessage.objects.filter(pk=message.pk).update(
+            subject="Purchase Order attached",
+            newest_body_text="Please find the purchase order attached.",
+        )
+
+        reclassify_mailbox_po_audit_messages(self.run)
+
+        message.refresh_from_db()
+        self.assertEqual(message.attachment_manifest[0]["status"], "manual_review")
+        self.assertEqual(
+            message.attachment_manifest[0]["manual_review_reason_code"],
+            "staff_manual_review",
+        )
+
     def test_generic_order_docx_in_rfq_does_not_become_lpo_evidence(self):
         docx = {
             "filename": "medicine Order June 2026.docx",
@@ -1928,8 +1959,8 @@ class MailboxPDFRepairTests(TestCase):
         reclassify_mailbox_po_audit_messages(self.run)
 
         message.refresh_from_db()
-        self.assertTrue(message.is_relevant)
-        self.assertEqual(message.classification, MailboxPOMessage.CLASS_POSSIBLE_PO)
+        self.assertFalse(message.is_relevant)
+        self.assertEqual(message.classification, MailboxPOMessage.CLASS_OTHER)
         self.assertEqual(message.attachment_manifest[1]["status"], "metadata_only")
         self.assertFalse(message.attachment_manifest[1].get("manual_review_required", False))
 
@@ -1964,6 +1995,7 @@ class MailboxPDFRepairTests(TestCase):
                 "manual_review_required": True,
                 "reason": broad_warning,
                 "warnings": [initial_warning, broad_warning],
+                "manual_review_reason_code": "unsupported_order_document",
             },
             {
                 "filename": "meeting.ics",
@@ -2054,6 +2086,211 @@ class MailboxPDFRepairTests(TestCase):
                     }
                 )
                 self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+
+    def test_supported_revised_quotation_pdf_is_not_a_possible_po(self):
+        bodies = [
+            "Kindly revise the quotation and send the revised quote.",
+            "Please send the revised quotation.",
+            "Kindly share the updated quote.",
+            "Please submit the amended quotation.",
+            "Please provide your revised quotation.",
+            "Kindly submit your updated quote.",
+            "Please send me the amended quotation.",
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                result = classify_mailbox_message(
+                    {
+                        "subject": "Revised quotation request",
+                        "newest_body_text": body,
+                        "snippet": "",
+                        "attachment_manifest": [
+                            {
+                                "filename": "revised quotation.pdf",
+                                "mime_type": "application/pdf",
+                                "size": 20000,
+                                "status": "parsed",
+                                "lines": [{"raw_name": "Gauze", "quantity": "10"}],
+                            }
+                        ],
+                    }
+                )
+
+                self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+                self.assertFalse(result["is_relevant"])
+
+    def test_newest_body_order_acceptance_overrides_stale_rfq_subject(self):
+        result = classify_mailbox_message(
+            {
+                "subject": "RE: Quotation Request for first aid items",
+                "newest_body_text": "The quotation is approved. Please proceed with the order and delivery.",
+                "snippet": "",
+                "attachment_manifest": [],
+            }
+        )
+
+        self.assertEqual(result["classification"], MailboxPOMessage.CLASS_POSSIBLE_PO)
+        self.assertTrue(result["is_relevant"])
+
+    def test_approved_revised_quotation_is_order_acceptance_not_revision_request(self):
+        result = classify_mailbox_message(
+            {
+                "subject": "RE: Quotation Request for first aid items",
+                "newest_body_text": (
+                    "The revised quotation is approved. Please proceed with delivery."
+                ),
+                "snippet": "",
+                "attachment_manifest": [],
+            }
+        )
+
+        self.assertEqual(result["classification"], MailboxPOMessage.CLASS_POSSIBLE_PO)
+        self.assertTrue(result["is_relevant"])
+
+    def test_newest_body_rfq_overrides_stale_po_subject_without_po_attachment(self):
+        generic = classify_mailbox_message(
+            {
+                "subject": "RE: Purchase Order 12345",
+                "newest_body_text": "Please provide a quotation for the additional items attached.",
+                "snippet": "",
+                "attachment_manifest": [
+                    {
+                        "filename": "additional items.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 20000,
+                    }
+                ],
+            }
+        )
+        explicit_attachment = classify_mailbox_message(
+            {
+                "subject": "RE: Purchase Order 12345",
+                "newest_body_text": "Please provide a quotation for the additional items attached.",
+                "snippet": "",
+                "attachment_manifest": [
+                    {
+                        "filename": "PO_67890.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 20000,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(generic["classification"], MailboxPOMessage.CLASS_OTHER)
+        self.assertEqual(
+            explicit_attachment["classification"],
+            MailboxPOMessage.CLASS_PURCHASE_ORDER,
+        )
+
+    def test_po_box_signature_does_not_turn_rfq_photos_into_purchase_order_evidence(self):
+        photos = [
+            {
+                "filename": "1000465129.jpg",
+                "mime_type": "image/jpeg",
+                "attachment_id": "rfq-photo-1",
+                "part_id": "1",
+                "size": 3505947,
+                "status": "metadata_only",
+            },
+            {
+                "filename": "1000456613.jpg",
+                "mime_type": "image/jpeg",
+                "attachment_id": "rfq-photo-2",
+                "part_id": "2",
+                "size": 3333720,
+                "status": "metadata_only",
+            },
+        ]
+        message = self.make_message(manifest=photos)
+        MailboxPOMessage.objects.filter(pk=message.pk).update(
+            subject="Cardiac Science AED machine battery",
+            newest_body_text=(
+                "Dear Suleiman,\nPlease quote for the Cardiac Science AED machine battery.\n"
+                "Sheraton Grand Hotel, Dubai, P.O. Box 123979, Dubai"
+            ),
+        )
+
+        reclassify_mailbox_po_audit_messages(self.run)
+
+        message.refresh_from_db()
+        self.assertFalse(message.is_relevant)
+        self.assertEqual(message.classification, MailboxPOMessage.CLASS_OTHER)
+        self.assertTrue(
+            all(item["status"] == "metadata_only" for item in message.attachment_manifest)
+        )
+
+    def test_in_order_to_idiom_does_not_surface_vendor_admin_document(self):
+        document = {
+            "filename": "JA-Vendor-ESupplier-Basics.doc",
+            "mime_type": "application/msword",
+            "attachment_id": "vendor-admin-doc",
+            "part_id": "1",
+            "size": 407040,
+            "status": "metadata_only",
+        }
+        message = self.make_message(manifest=[document])
+        MailboxPOMessage.objects.filter(pk=message.pk).update(
+            subject="PAYMENT DETAILS REQUIRED",
+            newest_body_text=(
+                "In order to get the auto remittance directly on your preferred email, "
+                "please update your vendor profile. P.O. Box 1000, Dubai."
+            ),
+        )
+
+        reclassify_mailbox_po_audit_messages(self.run)
+
+        message.refresh_from_db()
+        self.assertFalse(message.is_relevant)
+        self.assertEqual(message.attachment_manifest[0]["status"], "metadata_only")
+
+    def test_unrelated_approved_provider_text_does_not_create_order_context(self):
+        document = {
+            "filename": "E-Payment Form.docx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "attachment_id": "e-payment-form",
+            "part_id": "1",
+            "size": 20734,
+            "status": "metadata_only",
+        }
+        message = self.make_message(manifest=[document])
+        MailboxPOMessage.objects.filter(pk=message.pk).update(
+            subject="Submission of Mandatory Data Fields for UAE E-Invoicing Compliance",
+            newest_body_text=(
+                "All invoices must be transmitted through an Accredited Service Provider "
+                "approved by the Ministry of Finance. Please complete the attached vendor form."
+            ),
+        )
+
+        reclassify_mailbox_po_audit_messages(self.run)
+
+        message.refresh_from_db()
+        self.assertFalse(message.is_relevant)
+        self.assertEqual(message.attachment_manifest[0]["status"], "metadata_only")
+
+    def test_revised_quotation_request_is_not_order_confirmation(self):
+        document = {
+            "filename": "first aid list.docx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "attachment_id": "revised-rfq-doc",
+            "part_id": "1",
+            "size": 100000,
+            "status": "metadata_only",
+        }
+        message = self.make_message(manifest=[document])
+        MailboxPOMessage.objects.filter(pk=message.pk).update(
+            subject="Confirmation of first aid box",
+            newest_body_text=(
+                "Kindly revise the quotation by combining the items into one line and send "
+                "the revised quotation in PDF format. P.O. Box 1200, Dubai."
+            ),
+        )
+
+        reclassify_mailbox_po_audit_messages(self.run)
+
+        message.refresh_from_db()
+        self.assertFalse(message.is_relevant)
+        self.assertEqual(message.attachment_manifest[0]["status"], "metadata_only")
 
     def test_normalized_order_filenames_and_large_scan_are_reviewable(self):
         attachments = [
@@ -2208,7 +2445,8 @@ class MailboxPDFRepairTests(TestCase):
         reclassify_mailbox_po_audit_messages(self.run)
 
         message.refresh_from_db()
-        self.assertTrue(message.is_relevant)
+        self.assertFalse(message.is_relevant)
+        self.assertEqual(message.classification, MailboxPOMessage.CLASS_OTHER)
         self.assertEqual(message.attachment_manifest[1]["status"], "metadata_only")
         self.assertFalse(message.attachment_manifest[1].get("manual_review_required", False))
 

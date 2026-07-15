@@ -435,6 +435,43 @@ class MailboxPOAuditTests(TestCase):
             result["extracted_po_references"],
         )
 
+    def test_po_box_punctuation_is_never_extracted_as_purchase_order_reference(self):
+        signatures = [
+            "P.O. Box-123979, Dubai",
+            "P.O. BOX/123979, Dubai",
+            "P.O. BOX.123979, Dubai",
+            "PO Box-123979, Dubai",
+            "POBOX123979, Dubai",
+        ]
+        for signature in signatures:
+            with self.subTest(signature=signature):
+                result = classify_mailbox_message(
+                    self.message("po-box", subject="Contact details", body=signature)
+                )
+                self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+                self.assertFalse(
+                    any(
+                        reference["kind"] == "po"
+                        for reference in result["extracted_po_references"]
+                    )
+                )
+
+        for genuine in ["P.O. 123 attached", "PO-123 attached"]:
+            with self.subTest(genuine=genuine):
+                result = classify_mailbox_message(
+                    self.message("real-po", subject="Order", body=genuine)
+                )
+                self.assertEqual(
+                    result["classification"],
+                    MailboxPOMessage.CLASS_PURCHASE_ORDER,
+                )
+                self.assertTrue(
+                    any(
+                        reference["kind"] == "po"
+                        for reference in result["extracted_po_references"]
+                    )
+                )
+
     @patch("quotations.mailbox_po_audit._preview_attachment")
     @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
     def test_generic_supported_attachment_is_inspected_without_po_keywords(self, _token, preview):
