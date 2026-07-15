@@ -538,6 +538,16 @@ def _locked_message_evidence_queryset(connection, mailbox_email, message_id, *, 
     )
 
 
+def _locked_outcome_import_queryset(evidence):
+    """Return the Gmail import row under the same lock used by outcome apply."""
+
+    return (
+        QuotationOutcomePOImport.objects.select_for_update(of=("self",))
+        .filter(gmail_evidence=evidence)
+        .order_by("-created_at", "-id")
+    )
+
+
 def _eligible_same_customer_quote_ids(quotation, payload):
     if not quotation.company_id:
         return {quotation.id}
@@ -1224,7 +1234,11 @@ def _preview_from_gmail_payload(payload, evidence, *, relevance_reason=""):
             "source_file_ref": selected_attachment.get("source_file_ref") or f"gmail:{payload.get('gmail_message_id', '')}",
             "source_file_size": int(selected_attachment.get("size") or 0),
             "parse_method": selected_attachment.get("parse_method") or "gmail_primary_attachment",
-            "original_text": selected_attachment.get("original_text") or payload.get("body_text") or "",
+            # Keep the selected attachment's text provenance exact. An empty
+            # attachment extraction must never fall back to the wrapper email
+            # body, otherwise the review UI presents body text as attachment
+            # evidence after approval/reparse.
+            "original_text": selected_attachment.get("original_text") or "",
             "lines": rows,
             "warnings": warnings,
             "parsed_attachment_count": 1,
@@ -1285,20 +1299,32 @@ def _extract_gmail_lpo_details(preview):
             break
     if not lpo_number:
         match = re.search(
-            r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#|:|-)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_.-]{2,})",
-            text,
-            re.IGNORECASE,
-        )
-        if match:
-            lpo_number = clean_number(match.group(1))
-    if not lpo_number:
-        match = re.search(
             r"\b(?:PO[_-])?(?P<number>PO\d{3}_\d{5,})(?!\d)",
             text,
             re.IGNORECASE,
         )
         if match:
             lpo_number = clean_number(match.group("number"))
+    if not lpo_number:
+        # Preserve a complete prefixed reference from an attachment filename
+        # (for example LPO-77.pdf) without borrowing the wrapper email body as
+        # attachment text. Intermass-style PO_PO111_123301_0 filenames are
+        # handled first so their established canonical reference is retained.
+        match = re.search(
+            r"\b(?P<number>(?:LPO|MPO|PO)[_-][A-Z0-9][A-Z0-9/_-]{1,})(?:\.(?:PDF|XLSX?|XLSB))?\b",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            lpo_number = clean_number(match.group("number"))
+    if not lpo_number:
+        match = re.search(
+            r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#|:|-)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_.-]{2,})",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            lpo_number = clean_number(match.group(1))
     if not lpo_number:
         match = re.search(
             r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9/_.-]{2,})",
@@ -1338,6 +1364,59 @@ def _extract_gmail_lpo_details(preview):
             "detected_lpo_date": lpo_date.isoformat() if lpo_date else "",
         },
     }
+
+
+def _merge_applied_suggestion_provenance(existing_suggestions, parsed_suggestions):
+    """Keep staff-applied line provenance stable across deterministic reparses."""
+
+    marker_fields = (
+        "outcome_applied",
+        "outcome_applied_at",
+        "outcome_applied_by_id",
+    )
+
+    def line_id(value):
+        if not isinstance(value, dict):
+            return None
+        raw = value.get("quotation_line_id", value.get("quotation_line"))
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    applied_by_line = {
+        line_id(suggestion): suggestion
+        for suggestion in (existing_suggestions or [])
+        if isinstance(suggestion, dict)
+        and suggestion.get("outcome_applied") is True
+        and line_id(suggestion) is not None
+    }
+    merged = []
+    represented_line_ids = set()
+    for raw_suggestion in parsed_suggestions or []:
+        if not isinstance(raw_suggestion, dict):
+            merged.append(raw_suggestion)
+            continue
+        suggestion = dict(raw_suggestion)
+        suggestion_line_id = line_id(suggestion)
+        represented_line_ids.add(suggestion_line_id)
+        previous = applied_by_line.get(suggestion_line_id)
+        if previous:
+            for field in marker_fields:
+                if field in previous:
+                    suggestion[field] = previous[field]
+        merged.append(suggestion)
+
+    for applied_line_id, previous in applied_by_line.items():
+        if applied_line_id in represented_line_ids:
+            continue
+        retained = dict(previous)
+        retained["provenance_only_after_reparse"] = True
+        retained["reason"] = (
+            "Previously applied by staff; the latest parser pass did not remap this line."
+        )
+        merged.append(retained)
+    return merged
 
 
 def _reviewed_message_conflicts(evidence, connection):
@@ -1461,6 +1540,16 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
             relevance_reason=relevance_reason,
         )
         deterministic_preview = preview
+        selected_attachment_text = (
+            str(deterministic_preview.get("original_text") or "")
+            if int(deterministic_preview.get("parsed_attachment_count") or 0) == 1
+            else None
+        )
+        selected_attachment_meta = (
+            dict(deterministic_preview.get("meta") or {})
+            if selected_attachment_text is not None
+            else {}
+        )
         warnings = list(preview.get("warnings") or [])
         if use_ai:
             try:
@@ -1491,11 +1580,11 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
                 payload,
             )
             evidence_mailbox_email = locked_evidence.mailbox_email or connection.email or ""
-            po_import = (
-                QuotationOutcomePOImport.objects.filter(gmail_evidence=locked_evidence)
-                .order_by("-created_at", "-id")
-                .first()
-            )
+            # Serialize reparses with outcome application.  Without locking the
+            # import row here, a reparse can read stale suggestions, wait on its
+            # later UPDATE, and then erase newly committed outcome_applied
+            # provenance markers.
+            po_import = _locked_outcome_import_queryset(locked_evidence).first()
             import_values = {
                 "quotation": locked_evidence.quotation,
                 "source_type": QuotationOutcomePOImport.SOURCE_GMAIL,
@@ -1507,7 +1596,10 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
                 ),
                 "parse_method": preview.get("parse_method", "gmail_evidence"),
                 "parsed_rows": preview.get("lines") or [],
-                "suggestions": suggestions,
+                "suggestions": _merge_applied_suggestion_provenance(
+                    po_import.suggestions if po_import else [],
+                    suggestions,
+                ),
                 "unmatched_po_rows": unmatched,
                 "missing_quote_line_ids": missing_line_ids,
                 "warnings": warnings,
@@ -1571,8 +1663,36 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
             locked_evidence.subject = payload.get("subject", locked_evidence.subject)[:500]
             locked_evidence.sent_at = payload.get("sent_at") or locked_evidence.sent_at
             locked_evidence.snippet = payload.get("snippet", locked_evidence.snippet)
-            locked_evidence.extracted_text = (payload.get("body_text") or "")[:20000]
+            if selected_attachment_text is None:
+                locked_evidence.extracted_text = (payload.get("body_text") or "")[:20000]
+            elif selected_attachment_text:
+                locked_evidence.extracted_text = selected_attachment_text[:120000]
+            # If Gmail reparses a selected attachment without recoverable
+            # text, retain the already-reviewed attachment extraction. Never
+            # replace it with the surrounding email body.
             locked_evidence.attachments = payload.get("attachments") or []
+            if selected_attachment_meta:
+                current_attachment_id = str(
+                    selected_attachment_meta.get("selected_attachment_id") or ""
+                )
+                current_attachment_filename = str(
+                    selected_attachment_meta.get("selected_attachment_filename") or ""
+                )
+                if current_attachment_id:
+                    locked_evidence.selected_attachment_id = current_attachment_id
+                if current_attachment_filename:
+                    locked_evidence.selected_attachment_filename = current_attachment_filename[:255]
+                signals = dict(locked_evidence.match_signals or {})
+                source = dict(signals.get("source") or {})
+                source.update(
+                    {
+                        "kind": "attachment",
+                        "attachment_id": locked_evidence.selected_attachment_id,
+                        "filename": locked_evidence.selected_attachment_filename,
+                    }
+                )
+                signals["source"] = source
+                locked_evidence.match_signals = signals
             locked_evidence.source_sha256 = preview.get("source_sha256", locked_evidence.source_sha256)
             locked_evidence.matching_reason = relevance_reason
             locked_evidence.confidence = confidence
@@ -1595,6 +1715,9 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
                     "snippet",
                     "extracted_text",
                     "attachments",
+                    "selected_attachment_id",
+                    "selected_attachment_filename",
+                    "match_signals",
                     "source_sha256",
                     "matching_reason",
                     "confidence",

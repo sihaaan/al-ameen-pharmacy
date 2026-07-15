@@ -2017,7 +2017,8 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
     def get_attachments(self, obj):
         # Mailbox inventory entries contain extracted document text, rows,
         # totals and parser metadata. List/outcome responses only need enough
-        # metadata to identify and open the exact source lazily.
+        # metadata to identify and open the exact source lazily. Keep the
+        # response bounded, but never trim away the selected source attachment.
         allowed = {
             "attachment_id",
             "source_gmail_attachment_id",
@@ -2031,10 +2032,46 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             "is_selected",
             "line_count",
         }
+        attachments = [attachment for attachment in (obj.attachments or []) if isinstance(attachment, dict)]
+        selected_id = str(obj.selected_attachment_id or "").strip()
+        selected_filename = str(obj.selected_attachment_filename or "").strip()
+
+        selected_index = None
+        if selected_id:
+            for index, attachment in enumerate(attachments):
+                identifiers = {
+                    str(attachment.get("attachment_id") or "").strip(),
+                    str(attachment.get("source_gmail_attachment_id") or "").strip(),
+                    str(attachment.get("part_id") or "").strip(),
+                }
+                if selected_id in identifiers:
+                    selected_index = index
+                    break
+        if selected_index is None:
+            selected_index = next(
+                (index for index, attachment in enumerate(attachments) if attachment.get("is_selected") is True),
+                None,
+            )
+        if selected_index is None and selected_filename:
+            selected_index = next(
+                (
+                    index
+                    for index, attachment in enumerate(attachments)
+                    if str(attachment.get("filename") or "").strip() == selected_filename
+                ),
+                None,
+            )
+
+        visible_indexes = list(range(min(len(attachments), 50)))
+        if selected_index is not None and selected_index not in visible_indexes:
+            if len(visible_indexes) >= 50:
+                visible_indexes[-1] = selected_index
+            else:
+                visible_indexes.append(selected_index)
+
         sanitized = []
-        for attachment in (obj.attachments or [])[:50]:
-            if not isinstance(attachment, dict):
-                continue
+        for index in visible_indexes:
+            attachment = attachments[index]
             item = {key: attachment.get(key) for key in allowed if key in attachment}
             for key in ("filename", "mime_type", "source_mime_type", "status", "reason"):
                 if key in item:
@@ -2066,6 +2103,7 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             "spec_conflict_count",
             "document_total_result",
             "document_total_provided",
+            "document_date_result",
             "commercial_exact_row_count",
             "commercial_row_coverage",
             "commercial_corroboration_result",
@@ -2141,7 +2179,7 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
         if signals.get("timing") is not None:
             return signals.get("timing")
         candidate = signals.get("candidate") or {}
-        return [
+        timing = [
             {
                 "label": "Quote to LPO",
                 "detail": component.get("detail") or "",
@@ -2150,6 +2188,16 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             for component in candidate.get("components") or []
             if component.get("signal") == "time_distance"
         ]
+        document_date_result = str(candidate.get("document_date_result") or "").strip()
+        if document_date_result:
+            timing.append(
+                {
+                    "label": "Printed PO date",
+                    "detail": document_date_result.replace("_", " "),
+                    "matched": document_date_result != "predates_quote",
+                }
+            )
+        return timing
 
 
 class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
@@ -2336,6 +2384,11 @@ class QuotationLPOSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     source_type_display = serializers.CharField(source="get_source_type_display", read_only=True)
     parsed_row_count = serializers.SerializerMethodField()
+    applied_outcome_line_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        write_only=True,
+    )
 
     class Meta:
         model = QuotationLPO
@@ -2357,6 +2410,7 @@ class QuotationLPOSerializer(serializers.ModelSerializer):
             "status",
             "status_display",
             "parsed_meta",
+            "applied_outcome_line_ids",
             "parsed_rows",
             "parsed_row_count",
             "warnings",
@@ -2405,6 +2459,27 @@ class QuotationLPOSerializer(serializers.ModelSerializer):
                 "Correct its reference details while keeping it confirmed."
             )
         return value
+
+    def validate_applied_outcome_line_ids(self, values):
+        if not self.instance:
+            return sorted(set(values))
+        line_ids = set(values)
+        valid_ids = set(
+            self.instance.quotation.lines.filter(id__in=line_ids).values_list("id", flat=True)
+        )
+        if line_ids != valid_ids:
+            raise serializers.ValidationError(
+                "Every ordered line mapping must belong to this LPO's quotation."
+            )
+        return sorted(line_ids)
+
+    def update(self, instance, validated_data):
+        applied_line_ids = validated_data.pop("applied_outcome_line_ids", None)
+        if applied_line_ids is not None:
+            parsed_meta = dict(instance.parsed_meta or {})
+            parsed_meta["applied_outcome_line_ids"] = applied_line_ids
+            instance.parsed_meta = parsed_meta
+        return super().update(instance, validated_data)
 
 
 class CompanyPriceHistorySerializer(serializers.ModelSerializer):

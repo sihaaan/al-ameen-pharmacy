@@ -17,10 +17,11 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
-from django.db.models import F, Prefetch, Q
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 
 from .ai_parsing import AI_SOURCE_VISION
+from .contract_intelligence import gmail_connection_lineage_q
 from .import_parsers import parse_text_preview
 from .mailbox_po_audit import extract_po_references
 from .mailbox_po_matching import (
@@ -203,7 +204,7 @@ def _normalized_row_value(value):
 
 
 def _rows_equivalent(left, right):
-    """Compare one parsed row while tolerating a field missing on one side."""
+    """Check that every body-side field is represented by an attachment row."""
 
     if _normalized_row_value(left.name) != _normalized_row_value(right.name):
         return False
@@ -214,7 +215,9 @@ def _rows_equivalent(left, right):
     for field in ("quantity", "unit_price", "line_total"):
         left_value = getattr(left, field)
         right_value = getattr(right, field)
-        if left_value is not None and right_value is not None and left_value != right_value:
+        if left_value is not None and (
+            right_value is None or left_value != right_value
+        ):
             return False
     return True
 
@@ -222,10 +225,14 @@ def _rows_equivalent(left, right):
 def _body_mirrors_attachment(
     body_rows,
     body_total,
+    body_po_refs,
     body_quote_refs,
+    body_has_order_signal,
     attachment_rows,
     attachment_total,
+    attachment_po_refs,
     attachment_quote_refs,
+    attachment_has_order_signal,
 ):
     """Conservatively identify a body table already represented by a file."""
 
@@ -248,6 +255,22 @@ def _body_mirrors_attachment(
         return False
     if body_total is not None and attachment_total is not None and body_total != attachment_total:
         return False
+    if body_total is not None and attachment_total is None:
+        return False
+    body_po_ref_keys = {
+        re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+        for value in body_po_refs
+        if value
+    }
+    attachment_po_ref_keys = {
+        re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+        for value in attachment_po_refs
+        if value
+    }
+    if body_po_ref_keys and not body_po_ref_keys.issubset(attachment_po_ref_keys):
+        return False
+    if body_has_order_signal and not attachment_has_order_signal:
+        return False
     body_ref_keys = {
         re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
         for value in body_quote_refs
@@ -258,7 +281,7 @@ def _body_mirrors_attachment(
         for value in attachment_quote_refs
         if value
     }
-    if body_ref_keys and attachment_ref_keys and body_ref_keys.isdisjoint(attachment_ref_keys):
+    if body_ref_keys and not body_ref_keys.issubset(attachment_ref_keys):
         return False
     return True
 
@@ -315,6 +338,9 @@ def _variant_message(
     parser_warnings=(),
     material_warnings=(),
     quotation_references_review_only=False,
+    source_kind="",
+    document_text="",
+    document_filename="",
 ):
     return CanonicalMailboxMessage(
         message_id=inventory.gmail_message_id,
@@ -331,6 +357,9 @@ def _variant_message(
         document_total=total,
         parser_warnings=_warning_tuple(parser_warnings),
         material_warnings=_warning_tuple(material_warnings),
+        source_kind=source_kind,
+        document_text=document_text,
+        document_filename=document_filename,
     )
 
 
@@ -354,6 +383,10 @@ def document_variants(inventory):
         body_warnings = ("Email body parsing failed and requires staff review.",)
     body_po_refs, body_quote_refs = _references(inventory.subject, base_body)
     body_total = _document_total({}, base_body)
+    body_has_order_signal = bool(
+        body_po_refs
+        or BODY_ORDER_SIGNAL_RE.search(f"{inventory.subject}\n{base_body}")
+    )
     body_mirrors_file = False
 
     for attachment in inventory.attachment_manifest or []:
@@ -368,6 +401,10 @@ def document_variants(inventory):
         filename = str(attachment.get("filename") or "")
         attachment_text = str(attachment.get("original_text") or "")
         rows = _canonical_rows(attachment.get("lines") or [], source=filename or "attachment")
+        local_attachment_po_refs, local_attachment_quote_refs = _references(
+            filename,
+            attachment_text,
+        )
         po_refs, quote_refs = _attachment_references(
             inventory.subject,
             base_body,
@@ -376,11 +413,18 @@ def document_variants(inventory):
         )
         attachment_reference_keys.update(
             (kind, re.sub(r"[^A-Z0-9]+", "", str(value or "").upper()))
-            for kind, values in (("po", po_refs), ("quote", quote_refs))
+            for kind, values in (
+                ("po", local_attachment_po_refs),
+                ("quote", local_attachment_quote_refs),
+            )
             for value in values
             if value
         )
         attachment_total = _document_total(attachment, attachment_text)
+        attachment_has_order_signal = bool(
+            local_attachment_po_refs
+            or BODY_ORDER_SIGNAL_RE.search(f"{filename}\n{attachment_text}")
+        )
         attachment_meta = attachment.get("meta") or {}
         mailbox_ai_meta = (
             attachment_meta.get("mailbox_ai_vision")
@@ -397,10 +441,14 @@ def document_variants(inventory):
         if _body_mirrors_attachment(
             body_rows,
             body_total,
+            body_po_refs,
             body_quote_refs,
+            body_has_order_signal,
             rows,
             attachment_total,
-            quote_refs,
+            local_attachment_po_refs,
+            local_attachment_quote_refs,
+            attachment_has_order_signal,
         ):
             body_mirrors_file = True
         attachment_id = str(
@@ -429,6 +477,9 @@ def document_variants(inventory):
                         attachment.get("meta") or {},
                     ),
                     quotation_references_review_only=quotation_references_review_only,
+                    source_kind="attachment",
+                    document_text=attachment_text,
+                    document_filename=filename,
                 ),
                 source_kind="attachment",
                 attachment_id=attachment_id,
@@ -445,10 +496,6 @@ def document_variants(inventory):
     # already represented by a parsed attachment. For a row-less body alongside
     # files, require an explicit order plus a reference before retaining it;
     # generic "see attached" prose remains context only.
-    body_has_order_signal = bool(
-        body_po_refs
-        or BODY_ORDER_SIGNAL_RE.search(f"{inventory.subject}\n{base_body}")
-    )
     body_reference_keys = {
         (kind, re.sub(r"[^A-Z0-9]+", "", str(value or "").upper()))
         for kind, values in (("po", body_po_refs), ("quote", body_quote_refs))
@@ -486,6 +533,8 @@ def document_variants(inventory):
                 total=body_total,
                 parser_warnings=body_warnings,
                 material_warnings=_material_warnings(body_warnings),
+                source_kind="email_body",
+                document_text=base_body,
             ),
             source_kind="email_body",
             source_sha256=body_sha,
@@ -738,6 +787,19 @@ def _matching_reason(proposal, decisive):
     return f"{prefix}: score {candidate.score:.1f}. {detail}"[:4000]
 
 
+def _locked_lineage_message_evidence_queryset(connection, message_id):
+    """Lock evidence rows across OAuth rotations without locking a nullable join."""
+
+    return (
+        QuotationPOEvidence.objects.select_for_update(of=("self",))
+        .filter(
+            gmail_connection_lineage_q(connection),
+            gmail_message_id=message_id,
+        )
+        .order_by("id")
+    )
+
+
 def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_count):
     candidate = proposal.candidate
     desired_status = (
@@ -762,9 +824,9 @@ def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_
     )
     with transaction.atomic():
         peers = list(
-            QuotationPOEvidence.objects.select_for_update().filter(
-                gmail_connection=inventory.gmail_connection,
-                gmail_message_id=inventory.gmail_message_id,
+            _locked_lineage_message_evidence_queryset(
+                inventory.gmail_connection,
+                inventory.gmail_message_id,
             )
         )
         source_peers = [
@@ -777,13 +839,18 @@ def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_
                 proposal.variant,
             )
         ]
+        exact_candidates = [
+            peer
+            for peer in source_peers
+            if peer.quotation_id == proposal.quote_id and peer.source_key == source_key
+        ]
         exact_existing = next(
             (
                 peer
-                for peer in source_peers
-                if peer.quotation_id == proposal.quote_id and peer.source_key == source_key
+                for peer in exact_candidates
+                if peer.gmail_connection_id == inventory.gmail_connection_id
             ),
-            None,
+            exact_candidates[0] if exact_candidates else None,
         )
         compatible = [
             peer
@@ -956,14 +1023,27 @@ def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_
             elif existing.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
                 defaults.pop("status", None)
                 defaults.pop("error", None)
-
-        evidence, created = QuotationPOEvidence.objects.update_or_create(
-            quotation_id=proposal.quote_id,
-            gmail_connection=inventory.gmail_connection,
-            gmail_message_id=inventory.gmail_message_id,
-            source_key=source_key,
-            defaults=defaults,
-        )
+            # Keep the credential-row provenance when a same-mailbox OAuth
+            # rotation reuses reviewed evidence. The canonical inventory link
+            # moves forward, while the single reviewed source row remains the
+            # authoritative decision instead of being duplicated.
+            defaults.pop("gmail_connection", None)
+            update_fields = []
+            for field, value in defaults.items():
+                if getattr(existing, field) != value:
+                    setattr(existing, field, value)
+                    update_fields.append(field)
+            if update_fields:
+                existing.save(update_fields=[*update_fields, "updated_at"])
+            evidence, created = existing, False
+        else:
+            evidence, created = QuotationPOEvidence.objects.update_or_create(
+                quotation_id=proposal.quote_id,
+                gmail_connection=inventory.gmail_connection,
+                gmail_message_id=inventory.gmail_message_id,
+                source_key=source_key,
+                defaults=defaults,
+            )
     return evidence, created
 
 
@@ -979,10 +1059,11 @@ def _link_existing_evidence_to_inventory(audit_run):
     }
     linked = 0
     queryset = QuotationPOEvidence.objects.filter(
-        mailbox_message__isnull=True,
-        gmail_connection=audit_run.gmail_connection,
+        gmail_connection_lineage_q(audit_run.gmail_connection),
         gmail_message_id__in=messages.keys(),
-    ).only("id", "gmail_message_id")
+    ).exclude(
+        mailbox_message_id__in=[message.id for message in messages.values()]
+    ).only("id", "gmail_message_id", "mailbox_message_id")
     for evidence in queryset.iterator(chunk_size=200):
         evidence.mailbox_message = messages[evidence.gmail_message_id]
         evidence.save(update_fields=["mailbox_message", "updated_at"])
@@ -990,52 +1071,390 @@ def _link_existing_evidence_to_inventory(audit_run):
     return linked
 
 
-def _dedupe_and_cap(active_ids, *, max_per_quote):
-    superseded = []
-    kept_by_quote = defaultdict(list)
-    queryset = QuotationPOEvidence.objects.filter(id__in=active_ids).order_by(
-        "quotation_id",
-        F("quote_reference_present").desc(nulls_last=True),
-        "-confidence",
-        "-sent_at",
-        "id",
+def _normalized_order_reference(value):
+    rendered = str(value or "").strip().upper()
+    prefix_match = re.match(
+        r"^\s*(?P<prefix>LOCAL\s+PURCHASE\s+ORDER|PURCHASE\s+ORDER|"
+        r"L\.?\s*P\.?\s*O\.?|M\.?\s*P\.?\s*O\.?|P\.?\s*O\.?)"
+        r"\s*(?:NO\.?|NUMBER|#)?\s*[:#-]?\s*",
+        rendered,
     )
-    seen_signatures = defaultdict(set)
-    unreviewed_counts = defaultdict(int)
-    for evidence in queryset:
-        lpo_refs = tuple((evidence.match_signals or {}).get("lpo_references") or [])
-        signature = ""
-        if evidence.source_sha256:
-            signature = f"sha:{evidence.source_sha256}"
-        elif lpo_refs:
-            signature = f"lpo:{'|'.join(sorted(str(ref) for ref in lpo_refs))}"
-        if evidence.status == QuotationPOEvidence.STATUS_PARSED or evidence.link_approved_at:
-            kept_by_quote[evidence.quotation_id].append(evidence.id)
-            if signature:
-                seen_signatures[evidence.quotation_id].add(signature)
-            continue
-        duplicate = bool(signature and signature in seen_signatures[evidence.quotation_id])
-        over_cap = unreviewed_counts[evidence.quotation_id] >= max_per_quote
-        if duplicate or over_cap:
-            superseded.append(evidence.id)
-            continue
-        if signature:
-            seen_signatures[evidence.quotation_id].add(signature)
-        kept_by_quote[evidence.quotation_id].append(evidence.id)
-        unreviewed_counts[evidence.quotation_id] += 1
+    prefix = ""
+    if prefix_match:
+        prefix_letters = re.sub(r"[^A-Z]+", "", prefix_match.group("prefix"))
+        prefix = {
+            "LOCALPURCHASEORDER": "LPO",
+            "PURCHASEORDER": "PO",
+        }.get(prefix_letters, prefix_letters)
+        rendered = rendered[prefix_match.end() :]
+    key = re.sub(r"[^A-Z0-9]+", "", rendered)
+    if prefix and key and (key.isdigit() or len(key) >= 4):
+        return f"{prefix}{key}"
+    return key if len(key) >= 4 else ""
 
-    if superseded:
-        QuotationPOEvidence.objects.filter(id__in=superseded).update(
-            status=QuotationPOEvidence.STATUS_SUPERSEDED,
+
+def _evidence_signatures(evidence):
+    signals = evidence.match_signals if isinstance(evidence.match_signals, dict) else {}
+    lpo_refs = signals.get("lpo_references") or []
+    normalized_refs = sorted(
+        {
+            key
+            for value in lpo_refs
+            if (key := _normalized_order_reference(value))
+        }
+    )
+    company_id = getattr(evidence.quotation, "company_id", None)
+    signatures = [f"po:company:{company_id}:{key}" for key in normalized_refs]
+    source_hash = str(evidence.source_sha256 or "").strip().lower()
+    if source_hash:
+        signatures.append(f"sha:{source_hash}")
+    elif str(evidence.source_key or "").startswith("sha256:"):
+        signatures.append(f"sha:{str(evidence.source_key).split(':', 1)[1].lower()}")
+    return tuple(dict.fromkeys(signatures)), tuple(normalized_refs)
+
+
+def _number(value, default=0.0):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed == parsed else default
+
+
+def _evidence_quality(evidence):
+    signals = evidence.match_signals if isinstance(evidence.match_signals, dict) else {}
+    candidate = signals.get("candidate") if isinstance(signals.get("candidate"), dict) else {}
+    components = candidate.get("components") or signals.get("components") or []
+    customer_score = max(
+        [
+            _number(component.get("score"))
+            for component in components
+            if isinstance(component, dict) and component.get("signal") == "customer_identity"
+        ]
+        or [0.0]
+    )
+    time_score = max(
+        [
+            _number(component.get("score"))
+            for component in components
+            if isinstance(component, dict) and component.get("signal") == "time_distance"
+        ]
+        or [0.0]
+    )
+    matched_count = max(0, int(_number(candidate.get("po_line_count"), 0)))
+    safe_quantities = int(_number(candidate.get("quantity_exact_count"), 0)) + int(
+        _number(candidate.get("quantity_reduced_count"), 0)
+    )
+    quantity_coverage = safe_quantities / matched_count if matched_count else 0.0
+    return {
+        "exact_reference": bool(
+            evidence.quote_reference_present or candidate.get("exact_quote_reference")
+        ),
+        "score": _number(candidate.get("score"), _number(evidence.confidence)),
+        "item_coverage": _number(candidate.get("item_coverage")),
+        "quantity_coverage": quantity_coverage,
+        "commercial_coverage": _number(candidate.get("commercial_row_coverage")),
+        "customer_score": customer_score,
+        "time_score": time_score,
+    }
+
+
+def _evidence_quality_key(evidence):
+    quality = _evidence_quality(evidence)
+    return (
+        _evidence_review_priority(evidence),
+        quality["exact_reference"],
+        quality["score"],
+        quality["item_coverage"],
+        quality["quantity_coverage"],
+        quality["commercial_coverage"],
+        quality["customer_score"],
+        quality["time_score"],
+        evidence.sent_at.timestamp() if evidence.sent_at else 0.0,
+        -evidence.id,
+    )
+
+
+def _cross_quote_near_tie(winner, contender):
+    winner_quality = _evidence_quality(winner)
+    contender_quality = _evidence_quality(contender)
+    return bool(
+        _evidence_review_priority(winner) == _evidence_review_priority(contender)
+        and winner_quality["exact_reference"] == contender_quality["exact_reference"]
+        and winner_quality["score"] - contender_quality["score"] <= 5.0
+        and winner_quality["item_coverage"] - contender_quality["item_coverage"] <= 0.10
+        and winner_quality["quantity_coverage"] - contender_quality["quantity_coverage"] <= 0.10
+    )
+
+
+def _explicit_revision_rank(evidence):
+    signals = evidence.match_signals if isinstance(evidence.match_signals, dict) else {}
+    source = signals.get("source") if isinstance(signals.get("source"), dict) else {}
+    source_kind = str(source.get("kind") or "").casefold()
+    extracted_text = str(evidence.extracted_text or "")
+    if source_kind == "attachment" or (
+        not source_kind and evidence.selected_attachment_filename
+    ):
+        extracted_header = "\n".join(
+            line
+            for line in extracted_text.splitlines()[:20]
+            if line.strip()
+        )[:2000]
+        chunks = [
+            str(evidence.selected_attachment_filename or ""),
+            extracted_header,
+        ]
+    else:
+        chunks = [
+            str(evidence.subject or ""),
+            extracted_text[:4000],
+        ]
+    text = "\n".join(
+        filter(
+            None,
+            chunks,
+        )
+    )
+    numbered = list(
+        re.finditer(
+            r"\b(?:rev(?:ision)?|ver(?:sion)?)\s*[:#._-]?\s*(\d{1,3})\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    marker = bool(
+        numbered
+        or re.search(
+            r"\b(?:revised|amended|amendment|change\s+order)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if not marker:
+        return None
+    revision_number = max((int(match.group(1)) for match in numbered), default=0)
+    sent_at = evidence.sent_at.timestamp() if evidence.sent_at else 0.0
+    return revision_number, sent_at
+
+
+def _resolve_same_quote_revisions(members, surviving, superseded_reasons, ambiguous_ties):
+    members = [evidence for evidence in members if evidence.id in surviving]
+    unreviewed = [evidence for evidence in members if not _evidence_review_priority(evidence)]
+    if len(unreviewed) <= 1:
+        return
+    revision_candidates = [
+        (rank, evidence)
+        for evidence in unreviewed
+        if (rank := _explicit_revision_rank(evidence)) is not None
+    ]
+    if revision_candidates:
+        best_rank = max(rank for rank, _evidence in revision_candidates)
+        best_revisions = [
+            evidence
+            for rank, evidence in revision_candidates
+            if rank == best_rank
+        ]
+        if len(best_revisions) == 1:
+            revision = best_revisions[0]
+            revision_time = revision.sent_at.timestamp() if revision.sent_at else 0.0
+            other_times = [
+                evidence.sent_at.timestamp() if evidence.sent_at else 0.0
+                for evidence in unreviewed
+                if evidence.id != revision.id
+            ]
+            if not other_times or revision_time >= max(other_times):
+                for older in unreviewed:
+                    if older.id == revision.id:
+                        continue
+                    surviving.discard(older.id)
+                    superseded_reasons[older.id] = (
+                        "Superseded by an explicitly revised/amended newer copy of the same PO/LPO."
+                    )
+                return
+    # Different bytes with the same PO number may be amendments. Without an
+    # explicit revision marker, retaining them for staff is safer than silently
+    # discarding a changed order.
+    ambiguous_ties.update(evidence.id for evidence in unreviewed)
+
+
+def _dedupe_and_cap(active_ids, *, max_per_quote):
+    """Choose canonical review evidence across the complete mailbox snapshot.
+
+    A MIME hash identifies an exact source, while a normalized PO/LPO reference
+    joins resends and forwards of that source across Gmail messages. Reviewed
+    decisions are immutable. Distinct PO references on one quotation remain
+    active because they can represent genuine partial/repeat orders.
+    """
+
+    evidence_by_id = {
+        evidence.id: evidence
+        for evidence in QuotationPOEvidence.objects.filter(id__in=active_ids).select_related(
+            "quotation__company"
+        )
+    }
+    surviving = set(evidence_by_id)
+    superseded_reasons = {}
+    ambiguous_ties = set()
+    groups = defaultdict(list)
+    refs_by_id = {}
+    for evidence in evidence_by_id.values():
+        signatures, normalized_refs = _evidence_signatures(evidence)
+        refs_by_id[evidence.id] = normalized_refs
+        for signature in signatures:
+            groups[signature].append(evidence)
+
+    for signature in sorted(
+        groups,
+        key=lambda value: (0 if value.startswith("sha:") else 1, value),
+    ):
+        members = [evidence for evidence in groups[signature] if evidence.id in surviving]
+        if len(members) <= 1:
+            continue
+        by_quote = defaultdict(list)
+        for evidence in members:
+            by_quote[evidence.quotation_id].append(evidence)
+
+        # A SHA is globally unique to exact bytes and can be canonicalized
+        # aggressively. A PO number is only company-scoped and distinct hashes
+        # can be real amendments, so they are resolved below with more care.
+        if signature.startswith("sha:"):
+            reviewed = [evidence for evidence in members if _evidence_review_priority(evidence)]
+            if reviewed:
+                for evidence in members:
+                    if evidence not in reviewed:
+                        surviving.discard(evidence.id)
+                        superseded_reasons[evidence.id] = (
+                            "Superseded because the exact source bytes already have a reviewed assignment."
+                        )
+                members = [evidence for evidence in reviewed if evidence.id in surviving]
+                by_quote = defaultdict(list)
+                for evidence in members:
+                    by_quote[evidence.quotation_id].append(evidence)
+            representatives = []
+            for quote_members in by_quote.values():
+                ranked_members = sorted(
+                    quote_members,
+                    key=_evidence_quality_key,
+                    reverse=True,
+                )
+                representatives.append(ranked_members[0])
+                for duplicate in ranked_members[1:]:
+                    if _evidence_review_priority(duplicate):
+                        continue
+                    surviving.discard(duplicate.id)
+                    superseded_reasons[duplicate.id] = (
+                        "Superseded by a stronger extraction of the exact same source bytes."
+                    )
+        else:
+            representatives = [
+                max(quote_members, key=_evidence_quality_key)
+                for quote_members in by_quote.values()
+            ]
+
+        if len(representatives) <= 1:
+            if not signature.startswith("sha:"):
+                for quote_members in by_quote.values():
+                    _resolve_same_quote_revisions(
+                        quote_members,
+                        surviving,
+                        superseded_reasons,
+                        ambiguous_ties,
+                    )
+            continue
+        ranked = sorted(representatives, key=_evidence_quality_key, reverse=True)
+        winner = ranked[0]
+        near_ties = [
+            evidence for evidence in ranked if _cross_quote_near_tie(winner, evidence)
+        ]
+        if len(near_ties) > 1:
+            retained_quote_ids = {evidence.quotation_id for evidence in near_ties}
+            ambiguous_ties.update(
+                evidence.id
+                for evidence in members
+                if evidence.quotation_id in retained_quote_ids
+                and not _evidence_review_priority(evidence)
+            )
+        else:
+            retained_quote_ids = {winner.quotation_id}
+        for contender in ranked[1:]:
+            if contender in near_ties:
+                continue
+            for losing_evidence in by_quote[contender.quotation_id]:
+                if _evidence_review_priority(losing_evidence):
+                    continue
+                surviving.discard(losing_evidence.id)
+                superseded_reasons[losing_evidence.id] = (
+                    "Superseded by stronger exact-reference, item/quantity, customer, and timing "
+                    "evidence for the same company-scoped PO/LPO."
+                )
+        if not signature.startswith("sha:"):
+            for quote_id in retained_quote_ids:
+                _resolve_same_quote_revisions(
+                    by_quote[quote_id],
+                    surviving,
+                    superseded_reasons,
+                    ambiguous_ties,
+                )
+
+    # Preserve every distinct normalized order reference. The cap controls only
+    # unreferenced/noisy suggestions, not real multiple orders on one quote.
+    unreferenced_counts = defaultdict(int)
+    unreviewed = sorted(
+        (
+            evidence
+            for evidence in evidence_by_id.values()
+            if evidence.id in surviving and not _evidence_review_priority(evidence)
+        ),
+        key=_evidence_quality_key,
+        reverse=True,
+    )
+    for evidence in unreviewed:
+        if refs_by_id.get(evidence.id):
+            continue
+        if unreferenced_counts[evidence.quotation_id] >= max_per_quote:
+            surviving.discard(evidence.id)
+            superseded_reasons[evidence.id] = (
+                "Superseded by stronger mailbox-wide matches; the active cap applies to "
+                "unreferenced review candidates."
+            )
+            continue
+        unreferenced_counts[evidence.quotation_id] += 1
+
+    ambiguous_ties.intersection_update(surviving)
+    if ambiguous_ties:
+        QuotationPOEvidence.objects.filter(
+            id__in=ambiguous_ties,
+            link_approved_at__isnull=True,
+            status__in=[
+                QuotationPOEvidence.STATUS_CANDIDATE,
+                QuotationPOEvidence.STATUS_AMBIGUOUS,
+                QuotationPOEvidence.STATUS_FAILED,
+            ],
+        ).update(
+            status=QuotationPOEvidence.STATUS_AMBIGUOUS,
             error=(
-                "Superseded by a stronger duplicate document."
-                if len(superseded) == 1
-                else "Superseded by stronger mailbox-wide matches; at most three active review candidates are shown."
+                "The same normalized PO/LPO has near-equal quotation matches or distinct "
+                "copies without revision proof; staff must verify the correct assignment/version."
             ),
             updated_at=timezone.now(),
         )
-    kept = {evidence_id for ids in kept_by_quote.values() for evidence_id in ids}
-    return kept, superseded
+
+    for evidence_id, reason in superseded_reasons.items():
+        QuotationPOEvidence.objects.filter(
+            id=evidence_id,
+            link_approved_at__isnull=True,
+        ).exclude(
+            status__in=[
+                QuotationPOEvidence.STATUS_PARSED,
+                QuotationPOEvidence.STATUS_NOT_RELEVANT,
+            ]
+        ).update(
+            status=QuotationPOEvidence.STATUS_SUPERSEDED,
+            error=reason,
+            updated_at=timezone.now(),
+        )
+    superseded = sorted(set(evidence_by_id) - surviving)
+    return surviving, superseded
 
 
 class MailboxPOMatchBusy(RuntimeError):
@@ -1200,6 +1619,29 @@ def _failed_message_ids(errors):
     }
 
 
+def _supersede_stale_evidence(stale_ids):
+    """Conditionally supersede stale rows without racing a staff review."""
+
+    if not stale_ids:
+        return 0
+    return QuotationPOEvidence.objects.filter(
+        id__in=stale_ids,
+        link_approved_at__isnull=True,
+        status__in=[
+            QuotationPOEvidence.STATUS_CANDIDATE,
+            QuotationPOEvidence.STATUS_AMBIGUOUS,
+            QuotationPOEvidence.STATUS_FAILED,
+        ],
+    ).update(
+        status=QuotationPOEvidence.STATUS_SUPERSEDED,
+        error=(
+            "Superseded by the completed mailbox-wide scan because item, quantity, "
+            "commercial value, customer, and timing checks did not keep it active."
+        ),
+        updated_at=timezone.now(),
+    )
+
+
 def _finalize_match_run(match_run, audit_run, summary, errors, *, max_active_per_quote):
     summary["existing_evidence_linked"] = _link_existing_evidence_to_inventory(audit_run)
     active_ids = set(
@@ -1221,10 +1663,13 @@ def _finalize_match_run(match_run, audit_run, summary, errors, *, max_active_per
     )
     summary["evidence_superseded"] += len(deduped)
 
+    snapshot_message_ids = MailboxPOMessage.objects.filter(
+        Q(audit_memberships__audit_run=audit_run) | Q(last_seen_run=audit_run),
+        gmail_connection=audit_run.gmail_connection,
+    ).values_list("gmail_message_id", flat=True)
     stale = QuotationPOEvidence.objects.filter(
-        Q(mailbox_message__audit_memberships__audit_run=audit_run)
-        | Q(mailbox_message__last_seen_run=audit_run),
-        mailbox_message__gmail_connection=audit_run.gmail_connection,
+        gmail_connection_lineage_q(audit_run.gmail_connection),
+        gmail_message_id__in=snapshot_message_ids,
         link_approved_at__isnull=True,
         status__in=[
             QuotationPOEvidence.STATUS_CANDIDATE,
@@ -1238,16 +1683,7 @@ def _finalize_match_run(match_run, audit_run, summary, errors, *, max_active_per
     if active_ids:
         stale = stale.exclude(id__in=active_ids)
     stale_ids = list(stale.values_list("id", flat=True).distinct())
-    if stale_ids:
-        QuotationPOEvidence.objects.filter(id__in=stale_ids).update(
-            status=QuotationPOEvidence.STATUS_SUPERSEDED,
-            error=(
-                "Superseded by the completed mailbox-wide scan because item, quantity, "
-                "commercial value, customer, and timing checks did not keep it active."
-            ),
-            updated_at=timezone.now(),
-        )
-    summary["evidence_superseded"] += len(stale_ids)
+    summary["evidence_superseded"] += _supersede_stale_evidence(stale_ids)
     summary["active_evidence"] = len(active_ids)
 
 

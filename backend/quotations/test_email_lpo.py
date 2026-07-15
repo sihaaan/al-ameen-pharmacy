@@ -26,6 +26,7 @@ from .contract_intelligence import (
 )
 from .models import (
     Company,
+    CompanyPriceHistory,
     ContractIntelligenceItem,
     ContractIntelligenceRun,
     ContractIntelligenceSource,
@@ -43,6 +44,7 @@ from .quote_po_intelligence import (
     _extract_gmail_lpo_details,
     _has_numbered_po_reference,
     _locked_message_evidence_queryset,
+    _locked_outcome_import_queryset,
     _lock_and_resolve_evidence_approval,
     _preview_from_gmail_payload,
     _search_query_with_complete_flag,
@@ -952,6 +954,12 @@ class GmailEvidenceReviewTests(TestCase):
             created_by=self.reviewer,
         )
 
+    def test_reparse_locks_outcome_import_before_merging_applied_provenance(self):
+        queryset = _locked_outcome_import_queryset(self.evidence)
+
+        self.assertTrue(queryset.query.select_for_update)
+        self.assertEqual(queryset.query.select_for_update_of, ("self",))
+
     @patch("quotations.quote_po_intelligence.gmail_fetch_message")
     def test_staff_parse_is_idempotent_creates_one_review_lpo_and_never_applies_outcome(self, fetch):
         fetch.return_value = {
@@ -1002,6 +1010,191 @@ class GmailEvidenceReviewTests(TestCase):
         self.line.refresh_from_db()
         self.assertEqual(self.line.outcome_status, QuotationLine.OUTCOME_PENDING)
         self.assertEqual(fetch.call_args.args[0], self.connection)
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message")
+    def test_attachment_approval_and_reparse_preserve_exact_attachment_text(self, fetch):
+        attachment_text = (
+            "PURCHASE ORDER LPO-77\n"
+            f"Quotation: {self.quotation.quotation_number}\n"
+            "Bandage Pack 2 box 10"
+        )
+        self.evidence.selected_attachment_id = "primary"
+        self.evidence.selected_attachment_filename = "LPO-77.pdf"
+        self.evidence.extracted_text = "mailbox audit attachment extraction"
+        self.evidence.source_sha256 = "a" * 64
+        self.evidence.match_signals = {"source": {"kind": "attachment"}}
+        self.evidence.save(
+            update_fields=[
+                "selected_attachment_id",
+                "selected_attachment_filename",
+                "extracted_text",
+                "source_sha256",
+                "match_signals",
+                "updated_at",
+            ]
+        )
+        payload = {
+            "gmail_message_id": self.evidence.gmail_message_id,
+            "gmail_thread_id": "thread-review-attachment",
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": f"LPO for {self.quotation.quotation_number}",
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "snippet": "Purchase order attached",
+            "body_text": "WRAPPER EMAIL BODY MUST NOT BECOME ATTACHMENT TEXT",
+            "attachments": [
+                {
+                    "filename": "LPO-77.pdf",
+                    "attachment_id": "primary",
+                    "size": 100,
+                    "status": "parsed",
+                    "source_file_ref": "private:lpo-77",
+                    "source_sha256": "a" * 64,
+                    "original_text": attachment_text,
+                    "lines": [
+                        {
+                            "requested_item_name": "Bandage Pack",
+                            "quantity": "2",
+                            "unit_price": "10",
+                        }
+                    ],
+                }
+            ],
+        }
+        reparsed_without_text = {
+            **payload,
+            "attachments": [
+                {
+                    **payload["attachments"][0],
+                    "attachment_id": "unrelated-duplicate-name",
+                    "source_sha256": "b" * 64,
+                    "original_text": "UNRELATED DUPLICATE ATTACHMENT",
+                },
+                {
+                    **payload["attachments"][0],
+                    "attachment_id": "rotated-primary",
+                    "original_text": "",
+                },
+            ],
+        }
+        fetch.side_effect = [payload, reparsed_without_text]
+
+        parse_quote_po_evidence(
+            self.evidence,
+            self.reviewer,
+            use_ai=False,
+            link_approved=True,
+        )
+        self.evidence.refresh_from_db()
+        self.assertEqual(self.evidence.extracted_text, attachment_text)
+
+        parse_quote_po_evidence(
+            self.evidence,
+            self.reviewer,
+            use_ai=False,
+            link_approved=True,
+        )
+        self.evidence.refresh_from_db()
+        self.assertEqual(self.evidence.extracted_text, attachment_text)
+        self.assertNotIn("WRAPPER EMAIL BODY", self.evidence.extracted_text)
+        self.assertEqual(self.evidence.selected_attachment_id, "rotated-primary")
+        self.assertEqual(self.evidence.selected_attachment_filename, "LPO-77.pdf")
+        self.assertEqual(
+            self.evidence.match_signals["source"]["attachment_id"],
+            "rotated-primary",
+        )
+
+    @patch("quotations.quote_po_intelligence.gmail_fetch_message")
+    def test_applied_lpo_provenance_survives_reparse_and_price_context(self, fetch):
+        payload = {
+            "gmail_message_id": self.evidence.gmail_message_id,
+            "gmail_thread_id": "thread-review-provenance",
+            "sender": "buyer@acme.example",
+            "recipients": self.connection.email,
+            "subject": f"LPO for {self.quotation.quotation_number}",
+            "sent_at": self.sent_at + timedelta(minutes=10),
+            "snippet": "Purchase order attached",
+            "body_text": "Purchase Order No: LPO-77\nBandage Pack 2 box 10",
+            "attachments": [
+                {
+                    "filename": "LPO-77.pdf",
+                    "attachment_id": "primary",
+                    "size": 100,
+                    "status": "parsed",
+                    "source_file_ref": "private:lpo-77",
+                    "original_text": "Purchase Order No: LPO-77\nBandage Pack 2 box 10",
+                    "lines": [
+                        {
+                            "requested_item_name": "Bandage Pack",
+                            "quantity": "2",
+                            "unit_price": "10",
+                        }
+                    ],
+                }
+            ],
+        }
+        fetch.return_value = payload
+        CompanyPriceHistory.objects.create(
+            company=self.company,
+            product=self.product,
+            quotation=self.quotation,
+            quotation_line=self.line,
+            unit_price=self.line.unit_price,
+            quantity=self.line.quantity,
+            unit=self.line.unit,
+            created_by=self.reviewer,
+        )
+
+        po_import = parse_quote_po_evidence(
+            self.evidence,
+            self.reviewer,
+            use_ai=False,
+            link_approved=True,
+        )
+        client = APIClient()
+        client.force_authenticate(self.reviewer)
+        outcome = client.patch(
+            reverse("quotation-outcome", args=[self.quotation.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": self.line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ],
+                "po_import_id": po_import.id,
+                "applied_po_line_ids": [self.line.id],
+            },
+            format="json",
+        )
+        self.assertEqual(outcome.status_code, 200)
+        lpo = QuotationLPO.objects.get(gmail_evidence=self.evidence)
+        lpo.status = QuotationLPO.STATUS_CONFIRMED
+        lpo.save(update_fields=["status", "updated_at"])
+
+        reparsed_import = parse_quote_po_evidence(
+            self.evidence,
+            self.reviewer,
+            use_ai=False,
+            link_approved=True,
+        )
+        reparsed_import.refresh_from_db()
+        self.assertTrue(reparsed_import.suggestions[0]["outcome_applied"])
+
+        current_quote = Quotation.objects.create(
+            company=self.company,
+            created_by=self.reviewer,
+        )
+        price_context = client.get(
+            reverse("quotation-product-price", args=[current_quote.id]),
+            {"product": self.product.id},
+        )
+
+        self.assertEqual(price_context.status_code, 200)
+        self.assertEqual(
+            price_context.data["latest_accepted"]["lpo_number"],
+            "LPO-77",
+        )
 
     @patch("quotations.quote_po_intelligence.clean_preview_with_ai")
     @patch("quotations.quote_po_intelligence.gmail_fetch_message")

@@ -42,6 +42,122 @@ _ORDER_SIGNAL_RE = re.compile(
     r"|\b(?:please\s+proceed|go\s+ahead)\b",
     re.IGNORECASE,
 )
+_QUOTATION_TITLE_PATTERN = (
+    r"(?:(?:sales|commercial|price|supplier|vendor)\s+)?"
+    r"(?:quotation|estimate|offer)"
+    r"|request\s+for\s+(?:quotation|quote)"
+    r"|r\.?\s*f\.?\s*q\.?"
+)
+_QUOTATION_DOCUMENT_TITLE_RE = re.compile(
+    rf"^(?:{_QUOTATION_TITLE_PATTERN})"
+    r"(?P<metadata>\s*(?:no\.?|number|#|:|-).*)?$",
+    re.IGNORECASE,
+)
+_NEGATIVE_DOCUMENT_TITLE_RE = re.compile(
+    rf"^(?:{_QUOTATION_TITLE_PATTERN}"
+    r"|delivery\s+(?:note|challan|order)"
+    r"|d\.?\s*[on]\.?\s+copy"
+    r"|grn|goods\s+receipt(?:\s+note)?|inventory\s+goods\s+receipt(?:\s+note)?"
+    r"|material\s+receipt(?:\s+note)?|product\s+receipt"
+    r"|(?:material|purchase|store)\s+requisition|purchase\s+request"
+    r"|(?:(?:tax|commercial|proforma|sales|supplier|vendor)\s+)?invoice"
+    r")(?:\s*(?:no\.?|number|#|:|-).*)?$",
+    re.IGNORECASE,
+)
+_ORDER_DOCUMENT_TITLE_RE = re.compile(
+    r"^(?:local\s+purchase\s+order|purchase\s+order|"
+    r"[lm]?\.?\s*p\.?\s*o\.?)"
+    r"(?P<reference>"
+    r"\s*#\s*[A-Z0-9][A-Z0-9_./-]*"
+    r"|\s*(?:no\.?|number)\s*[:#.-]?\s*[A-Z0-9][A-Z0-9_./-]*"
+    r"|\s*:\s*[A-Z0-9][A-Z0-9_./-]*"
+    r")?$",
+    re.IGNORECASE,
+)
+_NEGATIVE_DOCUMENT_FILENAME_RE = re.compile(
+    r"(?:^|[\s_.-])(?:(?:do|dn)[\s_.-]+copy|(?:items|materials)[\s_.-]+required|"
+    r"delivery[\s_.-]+(?:note|challan|order)|grn|"
+    r"goods[\s_.-]+receipt|material[\s_.-]+receipt|product[\s_.-]+receipt|"
+    r"(?:material|purchase|store)[\s_.-]+requisition|purchase[\s_.-]+request|"
+    r"(?:tax|commercial|proforma|sales|supplier|vendor)[\s_.-]+invoice)"
+    r"(?:[\s_.-]|$)",
+    re.IGNORECASE,
+)
+_REQUISITION_FILENAME_RE = re.compile(
+    r"^\s*(?:mr|mpr)[\s_.-]*\d{2,}(?:\b|[\s_.-])",
+    re.IGNORECASE,
+)
+_EXPLICIT_NON_ORDER_WARNING_RE = re.compile(
+    r"^(?:document\s+(?:appears\s+to\s+be|is|was|classified\s+as)\s+(?:a\s+|an\s+)?"
+    r"(?:delivery\s+(?:note|challan|order)|goods\s+receipt(?:\s+note)?|product\s+receipt|"
+    r"material\s+receipt(?:\s+note)?|(?:material|purchase|store)\s+requisition|"
+    r"supplier\s+quotation)|"
+    r"detailed\s+receipt\s+page\s+(?:shows|lists|contains)\b|"
+    r"(?:this\s+)?document\s+is\s+not\s+(?:a|an)\s+(?:purchase\s+)?order\b)",
+    re.IGNORECASE,
+)
+_QUOTATION_FILENAME_RE = re.compile(
+    r"(?:^|[\s_.-])(?:quotation|quote|estimate|offer)(?:[\s_.-]|$)",
+    re.IGNORECASE,
+)
+_ORDER_FILENAME_RE = re.compile(
+    r"(?:^|[\s_.-])(?:lpo|mpo|po|purchase[\s_.-]+order)(?:[\s_.-]|$)",
+    re.IGNORECASE,
+)
+_QUOTATION_DOCUMENT_DETAIL_RE = re.compile(
+    r"\b(?:quotation\s+(?:date|number|no\.?|ref(?:erence)?)|"
+    r"validity\s+of\s+(?:this\s+)?(?:quotation|offer)|quoted\s+to)\b",
+    re.IGNORECASE,
+)
+_DRAFT_STATUS_LINE_RE = re.compile(
+    r"(?im)^\s*(?:(?:document|approval|order)\s+status\s*[:#-]?\s*)?"
+    r"(?:unapproved(?:\s+lpo)?(?:\s*[-\u2013\u2014:]\s*draft|\s+draft)?|draft|"
+    r"pending\s+approval|approval\s+pending|awaiting\s+approval|"
+    r"not\s+yet\s+approved|for\s+approval\s+only)\s*$",
+)
+_DRAFT_STATUS_FILENAME_RE = re.compile(
+    r"(?:^|[\s_.-])(?:unapproved|draft|pending[\s_.-]+approval|"
+    r"awaiting[\s_.-]+approval)(?:[\s_.-]|$)",
+    re.IGNORECASE,
+)
+_INFORMATION_ONLY_RE = re.compile(
+    r"\b(?:for\s+(?:your\s+)?information\s+only|information\s+only|"
+    r"not\s+(?:a|an)\s+(?:purchase\s+)?order|"
+    r"does\s+not\s+constitute\s+(?:a|an)\s+(?:purchase\s+)?order)\b",
+    re.IGNORECASE,
+)
+_CONTRACT_SCHEDULE_RE = re.compile(
+    r"\b(?:call[\s-]*off|rate\s+contract|blanket\s+(?:purchase\s+)?order|"
+    r"framework\s+(?:agreement|order)|outline\s+agreement)\b",
+    re.IGNORECASE,
+)
+_PENDING_BODY_RE = re.compile(
+    r"\b(?:pending\s+(?:delivery|deliveries)|delivery\s+(?:is\s+)?pending|"
+    r"awaiting\s+delivery|open\s+(?:order\s+)?balance|balance\s+(?:quantity|qty)|"
+    r"outstanding\s+(?:delivery|quantity|qty)|pending\s+(?:quantity|qty)|"
+    r"delivery\s+reminder|order\s+reminder|reminder\s+(?:for|regarding)\s+(?:the\s+)?delivery|"
+    r"follow[\s-]*up\s+(?:on|for|regarding)\s+(?:the\s+)?(?:pending\s+)?delivery|"
+    r"not\s+yet\s+delivered)\b",
+    re.IGNORECASE,
+)
+_SAP_ARIBA_RE = re.compile(r"\b(?:sap\s+ariba|ariba\s+network)\b", re.IGNORECASE)
+_SAP_ARIBA_NEW_ORDER_RE = re.compile(
+    r"\b(?:new\s+(?:purchase\s+)?order|has\s+sent\s+you\s+(?:a\s+)?new\s+order|"
+    r"new\s+order\s+from|purchase\s+order\s+(?:has\s+been\s+)?(?:sent|received))\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_ORDER_DATE_RE = re.compile(
+    r"(?im)^\s*(?:(?:orig(?:inal)?\.?)\s+)?"
+    r"(?:purchase\s+order|p\.?\s*o\.?|order)\s+date[ \t]*"
+    r"(?:(?:[:#-][ \t]*(?:\r?\n[ \t]*)?)|(?:\r?\n[ \t]*))"
+    r"(?P<date>[A-Z0-9][A-Z0-9,./\s-]{5,24}?)\s*$"
+)
+_SUPPLIER_QUOTATION_DATE_RE = re.compile(
+    r"(?im)^\s*(?:supplier|vendor)\s+(?:quotation|quote)"
+    r"(?:\s+(?:reference|ref\.?|no\.?|number)\s*[:#-]?\s*[A-Z0-9_./-]+)?"
+    r"\s+(?:date|dated)\s*[:#-]\s*"
+    r"(?P<date>[A-Z0-9][A-Z0-9,./\s-]{5,24}?)\s*$"
+)
 _AUTO_QUOTE_REFERENCE_RE = re.compile(r"\bQT[-_/][A-Z0-9][A-Z0-9/_.-]*\b", re.IGNORECASE)
 _LABELLED_QUOTE_REFERENCE_RE = re.compile(
     r"\b(?:quotation|quote)\s*(?:(?:no\.?|number|ref(?:erence)?|#)\s*[:#-]?|[:#-])"
@@ -143,6 +259,24 @@ _COMPANY_NOISE = {
     "services",
     "trading",
 }
+_ACRONYM_NOISE = {
+    "general",
+    "group",
+    "holding",
+    "limited",
+    "llc",
+    "ltd",
+    "services",
+    "trading",
+}
+_COMPACT_COMPANY_NOISE = _ACRONYM_NOISE | {
+    "building",
+    "company",
+    "contracting",
+    "private",
+    "school",
+}
+_DOMAIN_LABEL_NOISE = {"ae", "co", "com", "mail", "net", "org", "uae", "www"}
 
 
 @dataclass(frozen=True)
@@ -185,6 +319,14 @@ class CanonicalMailboxMessage:
     # review the ranked candidate.
     parser_warnings: tuple[str, ...] = ()
     material_warnings: tuple[str, ...] = ()
+    # The surrounding email remains useful matching context, but document-type
+    # gates must inspect only the exact evidence source.  Otherwise a genuine
+    # PO wrapper can make an attached supplier quotation or delivery note look
+    # like an order.  Callers without source provenance safely fall back to the
+    # normal subject/body fields.
+    source_kind: str = ""
+    document_text: str = ""
+    document_filename: str = ""
 
 
 @dataclass(frozen=True)
@@ -277,6 +419,7 @@ class RankedQuotationCandidate:
     commercial_corroboration_result: str = "insufficient"
     parser_warnings: tuple[str, ...] = ()
     material_warnings: tuple[str, ...] = ()
+    document_date_result: str = "unknown"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -308,6 +451,7 @@ class RankedQuotationCandidate:
             "commercial_corroboration_result": self.commercial_corroboration_result,
             "parser_warnings": list(self.parser_warnings),
             "material_warnings": list(self.material_warnings),
+            "document_date_result": self.document_date_result,
         }
 
 
@@ -510,6 +654,16 @@ def canonicalize_message(value: CanonicalMailboxMessage | Mapping[str, Any]) -> 
         ),
         material_warnings=_warning_sequence(
             _mapping_value(value, "material_warnings", "blocking_warnings", default=())
+        ),
+        source_kind=str(
+            _mapping_value(value, "source_kind", "evidence_source_kind", default="") or ""
+        ),
+        document_text=str(
+            _mapping_value(value, "document_text", "source_text", default="") or ""
+        ),
+        document_filename=str(
+            _mapping_value(value, "document_filename", "source_filename", "filename", default="")
+            or ""
         ),
     )
 
@@ -907,17 +1061,119 @@ def _company_strength(company_name: str, message: CanonicalMailboxMessage) -> tu
     ]
     if not company_tokens:
         return 0.0, ""
-    haystack = _normalize_text(
-        f"{message.company_name} {message.sender} {message.subject} {message.body[:5000]}"
+    exact_source = (
+        message.document_text
+        if str(message.source_kind or "").casefold() == "attachment" and message.document_text
+        else f"{message.subject} {message.body[:5000]}"
     )
+    haystack = _normalize_text(f"{message.company_name} {exact_source}")
     normalized_company = " ".join(company_tokens)
-    if normalized_company and normalized_company in haystack:
+    if normalized_company and f" {normalized_company} " in f" {haystack} ":
         return 6.0, "customer company name appears in the message"
     haystack_tokens = set(haystack.split())
     overlap = len(set(company_tokens) & haystack_tokens) / len(set(company_tokens))
     if overlap >= 0.6:
         return 4.0, "customer company tokens appear in the message"
     return 0.0, ""
+
+
+def _company_acronym_domain(company_name: str, sender_domains: set[str]) -> str:
+    words = [
+        token
+        for token in _normalize_tokens(company_name)
+        if token not in _ACRONYM_NOISE and token.isalpha()
+    ]
+    acronym = "".join(word[0] for word in words)
+    if len(acronym) < 3:
+        return ""
+    for domain in sender_domains:
+        if not _private_domain(domain):
+            continue
+        for label in domain.split("."):
+            if label in _DOMAIN_LABEL_NOISE:
+                continue
+            allowed = {acronym, f"{acronym}ae", f"{acronym}uae", f"{acronym}dubai"}
+            if len(acronym) >= 3:
+                allowed.add(f"{acronym}group")
+            if label in allowed:
+                return domain
+    return ""
+
+
+def _compact_company_candidates(company_name: str) -> set[str]:
+    words = [
+        token
+        for token in _normalize_tokens(company_name)
+        if token.isalpha() and token not in _COMPACT_COMPANY_NOISE
+    ]
+    candidates = set()
+    for start in range(len(words)):
+        compact = ""
+        for end in range(start, min(len(words), start + 4)):
+            compact += words[end]
+            if len(compact) >= 7 and (end > start or len(words) == 1):
+                candidates.add(compact)
+    if words:
+        full = "".join(words)
+        if len(full) >= 7:
+            candidates.add(full)
+    return candidates
+
+
+def _compact_company_sender_identity(company_name: str, senders: frozenset[str]):
+    candidates = _compact_company_candidates(company_name)
+    significant_tokens = [
+        token
+        for token in _normalize_tokens(company_name)
+        if token.isalpha() and token not in _COMPACT_COMPANY_NOISE
+    ]
+    short_tokens = {
+        significant_tokens[0]
+        if len(significant_tokens) == 1
+        and 3 <= len(significant_tokens[0]) <= 6
+        else ""
+    } - {""}
+    if not candidates and not short_tokens:
+        return ""
+    for sender in senders:
+        local, _separator, domain = sender.partition("@")
+        domain_labels = [
+            label
+            for label in re.split(r"[^a-z0-9]+", domain)
+            if label and label not in _DOMAIN_LABEL_NOISE
+        ]
+        if domain not in _PUBLIC_EMAIL_DOMAINS:
+            for label in domain_labels:
+                if any(
+                    label in {token, f"{token}ae", f"{token}uae", f"{token}group"}
+                    for token in short_tokens
+                ):
+                    return f"customer company abbreviation matches sender domain {domain}"
+        for label in domain_labels:
+            if len(label) < 7:
+                continue
+            for candidate in candidates:
+                if (
+                    label
+                    in {
+                        candidate,
+                        f"{candidate}ae",
+                        f"{candidate}uae",
+                        f"{candidate}dubai",
+                        f"{candidate}group",
+                    }
+                    or (
+                        min(len(label), len(candidate)) >= 9
+                        and rapidfuzz_ratio(label, candidate) >= 90.0
+                    )
+                ):
+                    return f"customer company name matches sender domain {domain}"
+        if domain in _PUBLIC_EMAIL_DOMAINS:
+            compact_local = re.sub(r"[^a-z0-9]+", "", local)
+            for candidate in candidates:
+                if len(candidate) >= 7 and candidate in compact_local:
+                    return "distinctive customer company name appears in public-mail sender"
+    return ""
 
 
 def _customer_component(
@@ -931,6 +1187,8 @@ def _customer_component(
         domain for domain in (_domain(address) for address in expected) if _private_domain(domain)
     }
     domain_matches = sender_domains & expected_domains
+    acronym_domain = _company_acronym_domain(quote.company_name, sender_domains)
+    compact_identity = _compact_company_sender_identity(quote.company_name, senders)
     company_score, company_reason = _company_strength(quote.company_name, message)
     score = 0.0
     details = []
@@ -940,6 +1198,12 @@ def _customer_component(
     elif domain_matches:
         score += 10.0
         details.append(f"customer domain {sorted(domain_matches)[0]}")
+    elif acronym_domain:
+        score += 10.0
+        details.append(f"customer company acronym matches sender domain {acronym_domain}")
+    elif compact_identity:
+        score += 10.0
+        details.append(compact_identity)
     if company_score:
         score += company_score
         details.append(company_reason)
@@ -1049,6 +1313,20 @@ def _evaluate(
     boundary = _datetime(boundary)
     if boundary is None or message.received_at <= boundary:
         return _Evaluation(rejection="message is not after the quotation send/finalize timestamp")
+    order_dates, supplier_quote_dates = _printed_reference_dates(message)
+    order_date_predates = any(
+        printed_date < boundary.date() for printed_date in order_dates
+    )
+    supplier_quote_date_predates = any(
+        printed_date < boundary.date() for printed_date in supplier_quote_dates
+    )
+    document_date_result = (
+        "predates_quote"
+        if order_date_predates or supplier_quote_date_predates
+        else "not_provided"
+        if not order_dates and not supplier_quote_dates
+        else "not_before_quote"
+    )
 
     components = []
     if exact_reference:
@@ -1103,6 +1381,28 @@ def _evaluate(
     quantity_reduced = _count_result(selected, "quantity_result", "reduced")
     quantity_conflicts = _count_result(selected, "quantity_result", "conflict")
     quantity_comparable = quantity_exact + quantity_reduced + quantity_conflicts
+    strong_date_corroboration = False
+    if document_date_result == "predates_quote":
+        strong_date_corroboration = bool(
+            quote_coverage >= 0.8
+            and average_similarity >= 0.8
+            and matched_count >= 2
+            and quantity_exact + quantity_reduced == matched_count
+        )
+        if not exact_reference and not strong_date_corroboration:
+            return _Evaluation(
+                rejection=(
+                    "printed PO/order or supplier-quotation date predates the quotation and "
+                    "item/quantity quote coverage is too weak"
+                )
+            )
+        components.append(
+            ScoreComponent(
+                "document_date",
+                -20.0,
+                "printed PO/order or supplier-quotation date predates the system quotation",
+            )
+        )
     components.append(
         _comparison_component(
             "quantities",
@@ -1180,12 +1480,16 @@ def _evaluate(
         commercial_corroboration_result = "insufficient"
 
     identity_score = customer_component.score
-    if not exact_reference and identity_score <= 0 and (item_coverage < 0.8 or matched_count < 2):
+    if not exact_reference and identity_score <= 0:
         return _Evaluation(rejection="no quotation reference or customer identity signal")
 
     raw_score = sum(component.score for component in components)
     score = round(max(0.0, min(100.0, raw_score)), 3)
-    if score < 20.0:
+    # Strong full-quote item/quantity corroboration must remain visible for
+    # staff review even when a suspicious pre-dating penalty pushes the numeric
+    # score below the ordinary review floor.  It is still blocked from automatic
+    # assignment by the document-date gate.
+    if score < 20.0 and not strong_date_corroboration:
         return _Evaluation(rejection="candidate score is below the review threshold")
 
     matches = tuple(
@@ -1232,6 +1536,7 @@ def _evaluate(
             commercial_corroboration_result=commercial_corroboration_result,
             parser_warnings=tuple(message.parser_warnings),
             material_warnings=tuple(message.material_warnings),
+            document_date_result=document_date_result,
         )
     )
 
@@ -1243,6 +1548,248 @@ def _has_order_signal(message: CanonicalMailboxMessage) -> bool:
     if message.lpo_references:
         return True
     return bool(_ORDER_SIGNAL_RE.search(f"{message.subject}\n{message.body}"))
+
+
+def _source_document_text(message: CanonicalMailboxMessage) -> str:
+    source_kind = str(message.source_kind or "").casefold()
+    if source_kind == "attachment":
+        # An attachment's wrapper subject/body is context for scoring, not part
+        # of the selected document. An empty OCR result must stay empty here.
+        return str(message.document_text or "")
+    if source_kind == "email_body":
+        body = str(message.document_text or message.body or "")
+        subject = str(message.subject or "")
+        normalized_subject = re.sub(r"\s+", " ", subject).strip(" |\t")
+        has_positive_quantity = any(
+            row.quantity is not None and row.quantity > 0
+            for row in message.parsed_rows
+        )
+        has_order_or_quote_reference = bool(
+            message.lpo_references or message.quotation_references
+        )
+        quotation_thread_acceptance = bool(
+            _QUOTATION_DOCUMENT_TITLE_RE.fullmatch(normalized_subject)
+            and _ORDER_SIGNAL_RE.search(body)
+            and message.parsed_rows
+            and has_positive_quantity
+            and has_order_or_quote_reference
+        )
+        if quotation_thread_acceptance:
+            # The subject names the earlier quotation in the conversation;
+            # the selected source is the customer's explicit acceptance in the
+            # newest body. Missing commercial fields remain automatic blockers
+            # later, so quantity-only acceptance stays reviewable, never auto.
+            return body
+        return "\n".join(filter(None, [subject, body]))
+    if message.document_text:
+        return message.document_text
+    return "\n".join(filter(None, [message.subject, message.body]))
+
+
+def _source_header_lines(message: CanonicalMailboxMessage) -> tuple[str, ...]:
+    lines = []
+    for raw_line in _source_document_text(message).splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip(" |\t")
+        if line:
+            lines.append(line)
+        if len(lines) >= 20:
+            break
+    return tuple(lines)
+
+
+def _is_sap_ariba_new_order(message: CanonicalMailboxMessage) -> bool:
+    if str(message.source_kind or "").casefold() not in {"", "email_body"}:
+        return False
+    text = "\n".join(filter(None, [message.subject, _source_document_text(message)]))
+    return bool(_SAP_ARIBA_RE.search(text) and _SAP_ARIBA_NEW_ORDER_RE.search(text))
+
+
+def _parse_printed_date(value: str):
+    candidate = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", str(value or ""), flags=re.IGNORECASE)
+    candidate = re.sub(r"\s+", " ", candidate.replace(",", " ")).strip(" .;:-")
+    for pattern in (
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d.%m.%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%d.%m.%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d %b %Y",
+        "%d-%b-%Y",
+        "%d %B %Y",
+        "%d-%B-%Y",
+        "%b %d %Y",
+        "%B %d %Y",
+    ):
+        try:
+            return datetime.strptime(candidate, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _printed_reference_dates(message: CanonicalMailboxMessage):
+    """Return explicitly labelled order/supplier-quote dates from the exact source.
+
+    Generic ``Date`` fields are intentionally ignored: a terms page can carry
+    revision, delivery, or print dates that say nothing about when the customer
+    placed the order.
+    """
+
+    text = _source_document_text(message)
+    order_dates = tuple(
+        parsed
+        for match in _EXPLICIT_ORDER_DATE_RE.finditer(text)
+        if (parsed := _parse_printed_date(match.group("date"))) is not None
+    )
+    supplier_quote_dates = tuple(
+        parsed
+        for match in _SUPPLIER_QUOTATION_DATE_RE.finditer(text)
+        if (parsed := _parse_printed_date(match.group("date"))) is not None
+    )
+    return order_dates, supplier_quote_dates
+
+
+def _document_rejection_reason(message: CanonicalMailboxMessage) -> str:
+    text = _source_document_text(message)
+    filename = str(message.document_filename or "")
+    header_lines = _source_header_lines(message)
+    is_ariba_new_order = _is_sap_ariba_new_order(message)
+    review_only_quote_metadata = bool(
+        message.quotation_references_are_review_only and message.lpo_references
+    )
+    first_document_heading = ""
+    for line in header_lines:
+        if _NEGATIVE_DOCUMENT_TITLE_RE.fullmatch(line):
+            first_document_heading = "non_order"
+            break
+        order_heading_match = _ORDER_DOCUMENT_TITLE_RE.fullmatch(line)
+        if order_heading_match:
+            first_document_heading = "purchase_order"
+            break
+    positive_order_title = bool(
+        first_document_heading == "purchase_order" or is_ariba_new_order
+    )
+
+    status_name = (
+        filename
+        if str(message.source_kind or "").casefold() == "attachment"
+        else str(message.subject or "")
+    )
+    if _DRAFT_STATUS_LINE_RE.search(text) or _DRAFT_STATUS_FILENAME_RE.search(status_name):
+        return "document is draft, unapproved, or still pending approval"
+
+    # Ariba notifications sometimes carry boilerplate such as "information
+    # only".  A positively identified new-order notification is an order body,
+    # not an account reminder, and must survive those body-only exclusions.
+    if not is_ariba_new_order and _INFORMATION_ONLY_RE.search(text):
+        return "document is explicitly information-only and not an order"
+
+    if any(
+        _EXPLICIT_NON_ORDER_WARNING_RE.search(str(warning or "").strip())
+        for warning in message.parser_warnings
+    ):
+        return "parser explicitly identified the source as a non-order document"
+
+    if (
+        _NEGATIVE_DOCUMENT_FILENAME_RE.search(filename)
+        or _REQUISITION_FILENAME_RE.search(filename)
+    ):
+        return "attachment filename identifies a non-order document"
+
+    leading_text = "\n".join(header_lines)
+    quotation_detail_count = len(_QUOTATION_DOCUMENT_DETAIL_RE.findall(leading_text))
+    for line in header_lines:
+        if not _NEGATIVE_DOCUMENT_TITLE_RE.fullmatch(line):
+            continue
+        quote_heading_match = _QUOTATION_DOCUMENT_TITLE_RE.fullmatch(line)
+        quote_title = bool(quote_heading_match)
+        exact_quote_heading = bool(
+            quote_heading_match and not quote_heading_match.group("metadata")
+        )
+        if quote_title and not exact_quote_heading:
+            if not positive_order_title:
+                return "document title identifies a supplier quotation rather than a purchase order"
+            if review_only_quote_metadata:
+                continue
+            continue
+        # A real PO often has a metadata row such as ``Quotation No: ...``.
+        # Its explicit order title prevents that labelled row from
+        # reclassifying the PO.  A bare ``QUOTATION`` title is different: it
+        # identifies a supplier quotation even when that quotation also lists
+        # a customer's purchase-order number.
+        if quote_title and positive_order_title and not exact_quote_heading:
+            continue
+        return "document title identifies a quotation, invoice, delivery/receipt note, or requisition"
+
+    if (
+        str(message.source_kind or "").casefold() == "attachment"
+        and not positive_order_title
+        and not _ORDER_FILENAME_RE.search(filename)
+        and quotation_detail_count >= 2
+    ):
+        return "attachment has a supplier-quotation header rather than a purchase-order header"
+    if (
+        _QUOTATION_FILENAME_RE.search(filename)
+        and not _ORDER_FILENAME_RE.search(filename)
+        and not positive_order_title
+        and _QUOTATION_DOCUMENT_DETAIL_RE.search(leading_text)
+    ):
+        return "attachment is a supplier quotation rather than a customer order"
+
+    quantities = [row.quantity for row in message.parsed_rows]
+    has_explicit_quantity = any(quantity is not None for quantity in quantities)
+    has_positive_quantity = any(
+        quantity is not None and quantity > 0 for quantity in quantities
+    )
+    non_positive_total = message.document_total is None or message.document_total <= 0
+    if (
+        _CONTRACT_SCHEDULE_RE.search(text)
+        and quantities
+        and has_explicit_quantity
+        and not has_positive_quantity
+        and non_positive_total
+    ):
+        return "call-off/rate-contract document has no positive ordered quantity or total"
+
+    if (
+        str(message.source_kind or "").casefold() in {"", "email_body"}
+        and not is_ariba_new_order
+        and _PENDING_BODY_RE.search(text)
+    ):
+        return "email body is a pending-delivery, reminder, or open-balance statement"
+    return ""
+
+
+def _document_review_blockers(message: CanonicalMailboxMessage) -> tuple[str, ...]:
+    """Return document-shape concerns that require review but not exclusion."""
+
+    header_lines = _source_header_lines(message)
+    order_heading_index = None
+    for index, line in enumerate(header_lines):
+        match = _ORDER_DOCUMENT_TITLE_RE.fullmatch(line)
+        if match and match.group("reference"):
+            order_heading_index = index
+            break
+        if _NEGATIVE_DOCUMENT_TITLE_RE.fullmatch(line):
+            return ()
+    if order_heading_index is None:
+        return ()
+    labelled_quote_after_order = any(
+        (match := _QUOTATION_DOCUMENT_TITLE_RE.fullmatch(line))
+        and match.group("metadata")
+        for line in header_lines[order_heading_index + 1 :]
+    )
+    quotation_detail_count = len(
+        _QUOTATION_DOCUMENT_DETAIL_RE.findall("\n".join(header_lines))
+    )
+    if labelled_quote_after_order and quotation_detail_count >= 2:
+        return (
+            "purchase-order reference header is mixed with multiple supplier-quotation metadata fields",
+        )
+    return ()
 
 
 def _automatic_blockers(
@@ -1280,6 +1827,10 @@ def _automatic_blockers(
     if candidate.material_warnings:
         blockers.append(
             f"document reported {len(candidate.material_warnings)} material warning(s)"
+        )
+    if candidate.document_date_result == "predates_quote":
+        blockers.append(
+            "printed PO/order or supplier-quotation date predates the system quotation"
         )
     if candidate.score < threshold:
         blockers.append(
@@ -1363,6 +1914,15 @@ def rank_message_to_quotations(
 
     canonical_message = canonicalize_message(message)
     quotes = tuple(canonicalize_quotation(quote) for quote in eligible_quotes)
+    document_rejection = _document_rejection_reason(canonical_message)
+    if document_rejection:
+        return MailboxMatchResult(
+            status=UNMATCHED,
+            evaluated_count=len(quotes),
+            rejected_count=len(quotes),
+            rejection_summary=((document_rejection, len(quotes)),) if quotes else (),
+            reason=f"The evidence was excluded because {document_rejection}.",
+        )
     if not _has_order_signal(canonical_message):
         return MailboxMatchResult(
             status=UNMATCHED,
@@ -1418,11 +1978,14 @@ def rank_message_to_quotations(
     margin = round(max(0.0, top.score - runner_up_score), 3)
     returned_limit = max(1, min(MAX_RETURNED_CANDIDATES, int(max_candidates or 1)))
     returned = tuple(candidates[:returned_limit])
-    blockers = _automatic_blockers(
-        top,
-        margin,
-        threshold=float(automatic_threshold),
-        required_margin=float(automatic_margin),
+    blockers = (
+        *_automatic_blockers(
+            top,
+            margin,
+            threshold=float(automatic_threshold),
+            required_margin=float(automatic_margin),
+        ),
+        *_document_review_blockers(canonical_message),
     )
     automatic = not blockers
     if automatic:

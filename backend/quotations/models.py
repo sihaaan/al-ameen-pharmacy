@@ -2122,6 +2122,16 @@ class QuotationLPO(models.Model):
                         or not field_is_written(field)
                     ):
                         continue
+                    if field.name == "parsed_meta":
+                        stored_meta = dict(stored.parsed_meta or {})
+                        current_meta = dict(self.parsed_meta or {})
+                        stored_meta.pop("applied_outcome_line_ids", None)
+                        current_meta.pop("applied_outcome_line_ids", None)
+                        if stored_meta == current_meta:
+                            # Staff may correct the audited line-to-LPO mapping
+                            # without reopening or rewriting the confirmed
+                            # source document and its parsed commercial data.
+                            continue
                     if getattr(stored, field.attname) != getattr(self, field.attname):
                         protected_changes.append(field.name)
                 if protected_changes:

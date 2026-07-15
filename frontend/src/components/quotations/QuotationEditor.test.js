@@ -18,6 +18,7 @@ jest.mock('../../api/quotations', () => ({
     contacts: { list: jest.fn(), create: jest.fn() },
     auditLogs: { list: jest.fn() },
     lines: { createProduct: jest.fn(), rememberAlias: jest.fn() },
+    lpos: { update: jest.fn() },
   },
   describeQuotationError: jest.fn(async (error, action, endpoint) => ({
     action,
@@ -143,6 +144,60 @@ describe('QuotationEditor Product price context', () => {
     await act(async () => first.resolve({ data: priceContext(11, 'Gloves A', 10) }));
     expect(priceInput).toHaveValue(22);
     expect(within(screen.getByRole('dialog', { name: /price history/i })).getByText(/Gloves B/)).toBeInTheDocument();
+  });
+
+  test('reviews and saves exact ordered line mappings when confirming a manual LPO', async () => {
+    const sentQuote = {
+      ...quote,
+      status: 'sent',
+      status_display: 'Sent',
+      lines: [{ ...quote.lines[0], match_status: 'confirmed' }],
+    };
+    const parsedLpo = {
+      id: 91,
+      lpo_number: 'LPO-MANUAL-77',
+      lpo_date: '2026-07-15',
+      notes: '',
+      status: 'parsed',
+      status_display: 'Parsed',
+      source_filename: 'LPO-MANUAL-77.pdf',
+      source_type_display: 'File',
+      parsed_row_count: 1,
+      received_at: '2026-07-15T08:00:00Z',
+      warnings: [],
+      parsed_meta: {
+        outcome_suggestions: [{ quotation_line_id: 31 }],
+      },
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: sentQuote });
+    quotationAPI.quotes.lpos.mockResolvedValueOnce({ data: [parsedLpo] });
+    quotationAPI.lpos.update.mockResolvedValueOnce({
+      data: {
+        ...parsedLpo,
+        status: 'confirmed',
+        status_display: 'Confirmed',
+        parsed_meta: {
+          ...parsedLpo.parsed_meta,
+          applied_outcome_line_ids: [31],
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const mappingPanel = (await screen.findByText('Ordered quotation lines')).closest('.qm-lpo-warning');
+    expect(within(mappingPanel).getByRole('checkbox')).toBeChecked();
+    const detailsCard = screen.getByText('Review detected details').closest('.qm-lpo-card');
+    fireEvent.change(within(detailsCard).getByLabelText('Status'), { target: { value: 'confirmed' } });
+    fireEvent.click(within(detailsCard).getByRole('button', { name: /save lpo details/i }));
+
+    await waitFor(() => expect(quotationAPI.lpos.update).toHaveBeenCalledWith(91, {
+      lpo_number: 'LPO-MANUAL-77',
+      lpo_date: '2026-07-15',
+      notes: '',
+      status: 'confirmed',
+      applied_outcome_line_ids: [31],
+    }));
   });
 
   test('never overwrites a price typed while history is loading', async () => {

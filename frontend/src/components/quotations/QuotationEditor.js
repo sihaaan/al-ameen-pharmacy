@@ -176,12 +176,23 @@ const proformaDownloadFilename = (quote) => {
   return `${companyPart ? `${companyPart}-` : ''}PROFORMA-${quotePart}.pdf`;
 };
 
-const lpoDraftFromRecord = (lpo = null) => ({
-  lpo_number: lpo?.lpo_number || '',
-  lpo_date: lpo?.lpo_date || '',
-  notes: lpo?.notes || '',
-  status: lpo?.status || 'parsed',
-});
+const lpoDraftFromRecord = (lpo = null) => {
+  const parsedMeta = lpo?.parsed_meta || {};
+  const hasAppliedMapping = Object.prototype.hasOwnProperty.call(parsedMeta, 'applied_outcome_line_ids');
+  const suggestedIds = (parsedMeta.outcome_suggestions || [])
+    .map((suggestion) => Number(suggestion?.quotation_line_id))
+    .filter(Number.isInteger);
+  const appliedIds = (parsedMeta.applied_outcome_line_ids || [])
+    .map(Number)
+    .filter(Number.isInteger);
+  return {
+    lpo_number: lpo?.lpo_number || '',
+    lpo_date: lpo?.lpo_date || '',
+    notes: lpo?.notes || '',
+    status: lpo?.status || 'parsed',
+    applied_outcome_line_ids: hasAppliedMapping ? appliedIds : suggestedIds,
+  };
+};
 
 const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [quote, setQuote] = useState(null);
@@ -1200,6 +1211,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         lpo_date: lpoDraft.lpo_date || null,
         notes: lpoDraft.notes,
         status: lpoDraft.status || currentLpo.status,
+        applied_outcome_line_ids: lpoDraft.applied_outcome_line_ids || [],
       });
       syncLpos([response.data, ...lpos.filter((item) => item.id !== response.data.id)]);
       setLpoFeedback({ type: 'success', message: 'LPO details saved.' });
@@ -1376,6 +1388,30 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                       <textarea rows="2" value={lpoDraft.notes} onChange={(event) => setLpoDraft({ ...lpoDraft, notes: event.target.value })} placeholder="Optional internal note" />
                     </label>
                   </div>
+                  {(quote.lines || []).length > 0 && (
+                    <div className="qm-lpo-warning">
+                      <strong>Ordered quotation lines</strong>
+                      <p>Select the exact lines covered by this LPO. Parser suggestions are preselected for review; only saved selections appear as LPO provenance in price history. Corrections to confirmed mappings are audited.</p>
+                      {(quote.lines || []).map((line) => {
+                        const checked = (lpoDraft.applied_outcome_line_ids || []).includes(line.id);
+                        return (
+                          <label className="qm-checkbox" key={`lpo-line-${line.id}`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => setLpoDraft((current) => ({
+                                ...current,
+                                applied_outcome_line_ids: checked
+                                  ? (current.applied_outcome_line_ids || []).filter((id) => id !== line.id)
+                                  : [...(current.applied_outcome_line_ids || []), line.id],
+                              }))}
+                            />
+                            {line.item_name_snapshot || `Line ${line.id}`} ({line.quantity} {line.unit || ''})
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
                   {latestLpo.warnings?.length > 0 && (
                     <div className="qm-lpo-warning">
                       {latestLpo.warnings.slice(0, 3).map((warning) => <p key={warning}>{warning}</p>)}

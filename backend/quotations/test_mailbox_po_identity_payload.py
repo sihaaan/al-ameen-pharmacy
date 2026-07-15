@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -420,6 +420,70 @@ class EvidencePayloadAndSharedMailboxAPITests(TestCase):
         self.assertNotIn("extracted_text_preview", data)
         self.assertNotIn("email_body_preview", data)
 
+    def test_summary_serializer_exposes_printed_po_date_blocker_in_timing(self):
+        evidence = self._evidence(index=603)
+        evidence.match_signals = {
+            "candidate": {
+                "quotation_number": self.quote.quotation_number,
+                "document_date_result": "predates_quote",
+                "components": [
+                    {
+                        "signal": "time_distance",
+                        "score": 2,
+                        "detail": "PO arrived after the quotation was sent",
+                    }
+                ],
+            }
+        }
+        evidence.save(update_fields=["match_signals", "updated_at"])
+
+        data = QuotationPOEvidenceSerializer(evidence).data
+
+        self.assertEqual(
+            data["match_signals"]["candidate"]["document_date_result"],
+            "predates_quote",
+        )
+        self.assertIn(
+            {
+                "label": "Printed PO date",
+                "detail": "predates quote",
+                "matched": False,
+            },
+            data["time_match_signals"],
+        )
+
+    def test_summary_serializer_keeps_selected_attachment_beyond_manifest_limit(self):
+        evidence = self._evidence(index=601)
+        evidence.selected_attachment_id = "stable-part-55"
+        evidence.selected_attachment_filename = "LPO-55.pdf"
+        evidence.attachments = [
+            {
+                "attachment_id": f"gmail-token-{index}",
+                "part_id": f"stable-part-{index}",
+                "filename": f"LPO-{index}.pdf",
+                "mime_type": "application/pdf",
+                "status": "parsed",
+                "original_text": "PRIVATE ORIGINAL TEXT",
+            }
+            for index in range(60)
+        ]
+        evidence.save(
+            update_fields=[
+                "selected_attachment_id",
+                "selected_attachment_filename",
+                "attachments",
+                "updated_at",
+            ]
+        )
+
+        attachments = QuotationPOEvidenceSerializer(evidence).data["attachments"]
+        part_ids = [attachment["part_id"] for attachment in attachments]
+
+        self.assertEqual(len(attachments), 50)
+        self.assertIn("stable-part-55", part_ids)
+        self.assertNotIn("stable-part-49", part_ids)
+        self.assertNotIn("original_text", attachments[-1])
+
     def test_archived_evidence_is_paginated_while_active_is_always_returned(self):
         active = self._evidence(index=100)
         for index in range(25):
@@ -440,6 +504,21 @@ class EvidencePayloadAndSharedMailboxAPITests(TestCase):
 
     def test_source_text_is_lazy_and_authenticated(self):
         evidence = self._evidence()
+        message = MailboxPOMessage.objects.create(
+            gmail_connection=self.connection,
+            gmail_message_id=evidence.gmail_message_id,
+            mailbox_email=self.connection.email,
+            subject="Purchase order attached",
+            sender="Buyer <buyer@example.test>",
+            recipients=self.connection.email,
+            sent_at=timezone.now(),
+            newest_body_text="The email body confirms quantity 10 and total AED 100.",
+            classification=MailboxPOMessage.CLASS_PURCHASE_ORDER,
+            is_relevant=True,
+        )
+        evidence.mailbox_message = message
+        evidence.match_signals = {"source": {"kind": "attachment"}}
+        evidence.save(update_fields=["mailbox_message", "match_signals", "updated_at"])
         url = reverse("quotation-po-evidence-source", args=[evidence.id])
 
         response = self.client.get(url)
@@ -447,9 +526,54 @@ class EvidencePayloadAndSharedMailboxAPITests(TestCase):
         anonymous = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["selected_source_kind"], "attachment")
         self.assertEqual(response.data["extracted_text"], "FULL SELECTED SOURCE TEXT")
+        self.assertFalse(response.data["extracted_text_truncated"])
+        self.assertEqual(
+            response.data["email_body_text"],
+            "The email body confirms quantity 10 and total AED 100.",
+        )
+        self.assertFalse(response.data["email_body_text_truncated"])
         self.assertEqual(response["Cache-Control"], "private, no-store, max-age=0")
         self.assertIn(anonymous.status_code, {401, 403})
+
+    @override_settings(PO_EVIDENCE_SOURCE_VIEW_MAX_CHARS=1000)
+    def test_source_text_reports_backend_truncation_for_attachment_and_body(self):
+        evidence = self._evidence(index=602)
+        message = MailboxPOMessage.objects.create(
+            gmail_connection=self.connection,
+            gmail_message_id=evidence.gmail_message_id,
+            mailbox_email=self.connection.email,
+            subject="Large purchase order",
+            sender="Buyer <buyer@example.test>",
+            recipients=self.connection.email,
+            sent_at=timezone.now(),
+            newest_body_text="B" * 1005,
+            classification=MailboxPOMessage.CLASS_PURCHASE_ORDER,
+            is_relevant=True,
+        )
+        evidence.mailbox_message = message
+        evidence.extracted_text = "A" * 1005
+        evidence.match_signals = {"source": {"kind": "email_body"}}
+        evidence.save(
+            update_fields=[
+                "mailbox_message",
+                "extracted_text",
+                "match_signals",
+                "updated_at",
+            ]
+        )
+
+        response = self.client.get(
+            reverse("quotation-po-evidence-source", args=[evidence.id])
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["selected_source_kind"], "email_body")
+        self.assertEqual(response.data["extracted_text"], "A" * 1000)
+        self.assertTrue(response.data["extracted_text_truncated"])
+        self.assertEqual(response.data["email_body_text"], "B" * 1000)
+        self.assertTrue(response.data["email_body_text_truncated"])
 
     @patch("quotations.views.gmail_fetch_attachment_content")
     def test_same_mailbox_oauth_rotation_preserves_review_and_approval_access(self, mock_fetch):

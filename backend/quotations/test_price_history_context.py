@@ -13,8 +13,11 @@ from .models import (
     Company,
     CompanyPriceHistory,
     Quotation,
+    QuotationAuditLog,
     QuotationLine,
     QuotationLPO,
+    QuotationOutcomePOImport,
+    QuotationPOEvidence,
     QuoteItem,
 )
 from .services import finalize_quotation, update_quotation_outcome
@@ -314,6 +317,426 @@ class ProductPriceContextTests(APITestCase):
             [row["quotation"] for row in response.data["history"]],
             [newer_quote.id, older_quote.id],
         )
+
+    def test_each_accepted_line_uses_its_confirmed_lpo_provenance(self):
+        now = timezone.now()
+        second_product = Product.objects.create(
+            name="Second Ordered Context Product",
+            price=Decimal("2.00"),
+            status="draft",
+        )
+        accepted_quote = Quotation.objects.create(company=self.company, created_by=self.staff)
+        first_line = QuotationLine.objects.create(
+            quotation=accepted_quote,
+            product=self.product,
+            item_name_snapshot=self.product.name,
+            quantity=Decimal("2.000"),
+            unit="box",
+            unit_price=Decimal("8.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        second_line = QuotationLine.objects.create(
+            quotation=accepted_quote,
+            product=second_product,
+            item_name_snapshot=second_product.name,
+            quantity=Decimal("3.000"),
+            unit="box",
+            unit_price=Decimal("12.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+            sort_order=1,
+        )
+        finalize_quotation(accepted_quote, self.staff)
+        update_quotation_outcome(
+            accepted_quote,
+            {
+                "line_updates": [
+                    {
+                        "id": first_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    },
+                    {
+                        "id": second_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    },
+                ]
+            },
+            self.staff,
+        )
+
+        first_evidence = QuotationPOEvidence.objects.create(quotation=accepted_quote)
+        QuotationOutcomePOImport.objects.create(
+            quotation=accepted_quote,
+            gmail_evidence=first_evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            suggestions=[
+                {
+                    "quotation_line_id": first_line.id,
+                    "outcome_applied": True,
+                }
+            ],
+        )
+        QuotationLPO.objects.create(
+            quotation=accepted_quote,
+            gmail_evidence=first_evidence,
+            lpo_number="LPO-FIRST-LINE",
+            status=QuotationLPO.STATUS_CONFIRMED,
+            received_by=self.staff,
+            received_at=now - timedelta(hours=1),
+        )
+        current_quote = self.current_quote()
+        first_with_one_partial_lpo = self.product_price(current_quote, product=self.product)
+        second_with_one_partial_lpo = self.product_price(current_quote, product=second_product)
+
+        self.assertEqual(
+            first_with_one_partial_lpo.data["latest_accepted"]["lpo_number"],
+            "LPO-FIRST-LINE",
+        )
+        self.assertEqual(
+            second_with_one_partial_lpo.data["latest_accepted"]["lpo_number"],
+            "",
+        )
+
+        QuotationLPO.objects.create(
+            quotation=accepted_quote,
+            lpo_number="LPO-SECOND-LINE",
+            status=QuotationLPO.STATUS_CONFIRMED,
+            parsed_meta={
+                "outcome_suggestions": [{"quotation_line_id": second_line.id}],
+                "applied_outcome_line_ids": [second_line.id],
+            },
+            received_by=self.staff,
+            received_at=now,
+        )
+
+        first_response = self.product_price(current_quote, product=self.product)
+        second_response = self.product_price(current_quote, product=second_product)
+        batch_response = self.client.get(
+            reverse("quotation-product-prices", args=[current_quote.id]),
+            {"products": f"{self.product.id},{second_product.id}"},
+        )
+
+        self.assertEqual(first_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(batch_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_response.data["latest_accepted"]["lpo_number"], "LPO-FIRST-LINE")
+        self.assertEqual(second_response.data["latest_accepted"]["lpo_number"], "LPO-SECOND-LINE")
+        self.assertEqual(
+            batch_response.data["results"][str(self.product.id)]["latest_accepted"]["lpo_number"],
+            "LPO-FIRST-LINE",
+        )
+        self.assertEqual(
+            batch_response.data["results"][str(second_product.id)]["latest_accepted"]["lpo_number"],
+            "LPO-SECOND-LINE",
+        )
+
+    def test_parser_suggestions_are_not_treated_as_staff_applied_lpo_provenance(self):
+        now = timezone.now()
+        accepted_quote, accepted_line, _ = self.create_finalized_price(
+            company=self.company,
+            product=self.product,
+            unit_price="10.00",
+            quoted_at=now - timedelta(days=1),
+        )
+        update_quotation_outcome(
+            accepted_quote,
+            {
+                "line_updates": [
+                    {
+                        "id": accepted_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ]
+            },
+            self.staff,
+        )
+        evidence = QuotationPOEvidence.objects.create(quotation=accepted_quote)
+        QuotationOutcomePOImport.objects.create(
+            quotation=accepted_quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            suggestions=[{"quotation_line_id": accepted_line.id}],
+        )
+        QuotationLPO.objects.create(
+            quotation=accepted_quote,
+            gmail_evidence=evidence,
+            lpo_number="LPO-PARSER-ONLY",
+            status=QuotationLPO.STATUS_CONFIRMED,
+            received_by=self.staff,
+        )
+
+        response = self.product_price(self.current_quote())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["latest_accepted"]["lpo_number"], "")
+
+    def test_manual_lpo_upload_confirm_mapping_and_outcome_flow_sets_price_provenance(self):
+        now = timezone.now()
+        accepted_quote, accepted_line, _ = self.create_finalized_price(
+            company=self.company,
+            product=self.product,
+            unit_price="10.00",
+            quoted_at=now - timedelta(days=1),
+        )
+        upload = self.client.post(
+            reverse("quotation-upload-lpo", args=[accepted_quote.id]),
+            {
+                "text": (
+                    "Purchase Order No: LPO-MANUAL-77\n"
+                    "Date: 15/07/2026\n"
+                    "Context Bandage 5 box AED 10.00"
+                ),
+                "use_ai": "false",
+            },
+            format="json",
+        )
+        self.assertEqual(upload.status_code, status.HTTP_201_CREATED)
+        lpo_id = upload.data["lpo"]["id"]
+        self.assertEqual(
+            [row["quotation_line_id"] for row in upload.data["outcome_suggestions"]],
+            [accepted_line.id],
+        )
+
+        confirm = self.client.patch(
+            reverse("quotation-lpo-detail", args=[lpo_id]),
+            {
+                "status": QuotationLPO.STATUS_CONFIRMED,
+                "applied_outcome_line_ids": [accepted_line.id],
+            },
+            format="json",
+        )
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
+        lpo = QuotationLPO.objects.get(pk=lpo_id)
+        self.assertEqual(
+            lpo.parsed_meta["applied_outcome_line_ids"],
+            [accepted_line.id],
+        )
+        correction = self.client.patch(
+            reverse("quotation-lpo-detail", args=[lpo_id]),
+            {"applied_outcome_line_ids": []},
+            format="json",
+        )
+        self.assertEqual(correction.status_code, status.HTTP_200_OK)
+        restore_mapping = self.client.patch(
+            reverse("quotation-lpo-detail", args=[lpo_id]),
+            {"applied_outcome_line_ids": [accepted_line.id]},
+            format="json",
+        )
+        self.assertEqual(restore_mapping.status_code, status.HTTP_200_OK)
+        correction_log = QuotationAuditLog.objects.filter(
+            target_type="QuotationLPO",
+            target_id=lpo_id,
+        ).latest("id")
+        self.assertIn(
+            "applied_outcome_line_ids",
+            correction_log.changes["changed_fields"],
+        )
+
+        outcome = self.client.patch(
+            reverse("quotation-outcome", args=[accepted_quote.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": accepted_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(outcome.status_code, status.HTTP_200_OK)
+
+        response = self.product_price(self.current_quote())
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["latest_accepted"]["lpo_number"],
+            "LPO-MANUAL-77",
+        )
+
+    def test_outcome_api_records_only_selected_po_suggestions_as_provenance(self):
+        now = timezone.now()
+        second_product = Product.objects.create(
+            name="Deselected Ordered Context Product",
+            price=Decimal("2.00"),
+            status="draft",
+        )
+        accepted_quote = Quotation.objects.create(company=self.company, created_by=self.staff)
+        first_line = QuotationLine.objects.create(
+            quotation=accepted_quote,
+            product=self.product,
+            item_name_snapshot=self.product.name,
+            quantity=Decimal("2.000"),
+            unit="box",
+            unit_price=Decimal("8.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        second_line = QuotationLine.objects.create(
+            quotation=accepted_quote,
+            product=second_product,
+            item_name_snapshot=second_product.name,
+            quantity=Decimal("3.000"),
+            unit="box",
+            unit_price=Decimal("12.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+            sort_order=1,
+        )
+        finalize_quotation(accepted_quote, self.staff)
+        evidence = QuotationPOEvidence.objects.create(quotation=accepted_quote)
+        po_import = QuotationOutcomePOImport.objects.create(
+            quotation=accepted_quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            suggestions=[
+                {
+                    "quotation_line_id": first_line.id,
+                    "suggested_outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                },
+                {
+                    "quotation_line_id": second_line.id,
+                    "suggested_outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                },
+            ],
+        )
+        QuotationLPO.objects.create(
+            quotation=accepted_quote,
+            gmail_evidence=evidence,
+            lpo_number="LPO-SELECTED-ONLY",
+            status=QuotationLPO.STATUS_CONFIRMED,
+            received_by=self.staff,
+            received_at=now,
+        )
+
+        apply_response = self.client.patch(
+            reverse("quotation-outcome", args=[accepted_quote.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": first_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ],
+                "po_import_id": po_import.id,
+                "applied_po_line_ids": [first_line.id],
+            },
+            format="json",
+        )
+        self.assertEqual(apply_response.status_code, status.HTTP_200_OK)
+        po_import.refresh_from_db()
+        applied_by_line = {
+            row["quotation_line_id"]: row.get("outcome_applied")
+            for row in po_import.suggestions
+        }
+        self.assertEqual(
+            applied_by_line,
+            {first_line.id: True, second_line.id: False},
+        )
+
+        rejected_provenance_response = self.client.patch(
+            reverse("quotation-outcome", args=[accepted_quote.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": second_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_REJECTED,
+                    }
+                ],
+                "po_import_id": po_import.id,
+                "applied_po_line_ids": [second_line.id],
+            },
+            format="json",
+        )
+        self.assertEqual(rejected_provenance_response.status_code, status.HTTP_400_BAD_REQUEST)
+        second_line.refresh_from_db()
+        self.assertEqual(second_line.outcome_status, QuotationLine.OUTCOME_PENDING)
+
+        update_quotation_outcome(
+            accepted_quote,
+            {
+                "line_updates": [
+                    {
+                        "id": second_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ]
+            },
+            self.staff,
+        )
+        current_quote = self.current_quote()
+        first_response = self.product_price(current_quote, product=self.product)
+        second_response = self.product_price(current_quote, product=second_product)
+
+        self.assertEqual(
+            first_response.data["latest_accepted"]["lpo_number"],
+            "LPO-SELECTED-ONLY",
+        )
+        self.assertEqual(second_response.data["latest_accepted"]["lpo_number"], "")
+
+        second_apply_response = self.client.patch(
+            reverse("quotation-outcome", args=[accepted_quote.id]),
+            {
+                "line_updates": [
+                    {
+                        "id": second_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ],
+                "po_import_id": po_import.id,
+                "applied_po_line_ids": [second_line.id],
+            },
+            format="json",
+        )
+        self.assertEqual(second_apply_response.status_code, status.HTTP_200_OK)
+        po_import.refresh_from_db()
+        self.assertEqual(
+            {
+                row["quotation_line_id"]: row.get("outcome_applied")
+                for row in po_import.suggestions
+            },
+            {first_line.id: True, second_line.id: True},
+        )
+        first_after_second_apply = self.product_price(current_quote, product=self.product)
+        second_after_second_apply = self.product_price(current_quote, product=second_product)
+        self.assertEqual(
+            first_after_second_apply.data["latest_accepted"]["lpo_number"],
+            "LPO-SELECTED-ONLY",
+        )
+        self.assertEqual(
+            second_after_second_apply.data["latest_accepted"]["lpo_number"],
+            "LPO-SELECTED-ONLY",
+        )
+
+    def test_multiple_confirmed_lpos_without_line_provenance_do_not_guess(self):
+        now = timezone.now()
+        accepted_quote, accepted_line, _ = self.create_finalized_price(
+            company=self.company,
+            product=self.product,
+            unit_price="10.00",
+            quoted_at=now - timedelta(days=1),
+        )
+        update_quotation_outcome(
+            accepted_quote,
+            {
+                "line_updates": [
+                    {
+                        "id": accepted_line.id,
+                        "outcome_status": QuotationLine.OUTCOME_ACCEPTED,
+                    }
+                ]
+            },
+            self.staff,
+        )
+        for index in range(2):
+            QuotationLPO.objects.create(
+                quotation=accepted_quote,
+                lpo_number=f"LPO-LEGACY-{index + 1}",
+                status=QuotationLPO.STATUS_CONFIRMED,
+                received_by=self.staff,
+                received_at=now + timedelta(minutes=index),
+            )
+
+        response = self.product_price(self.current_quote())
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["latest_accepted"]["lpo_number"], "")
 
     def test_no_history_payload_is_complete_and_backward_compatible(self):
         current = self.current_quote()

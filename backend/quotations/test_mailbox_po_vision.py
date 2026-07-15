@@ -34,7 +34,7 @@ from .mailbox_po_audit import (
     reclassify_mailbox_po_audit_messages,
     repair_mailbox_po_audit_pdf_vision,
 )
-from .mailbox_po_matching import rank_message_to_quotations
+from .mailbox_po_matching import UNMATCHED, rank_message_to_quotations
 from .mailbox_po_reconciliation import document_variants, reconcile_mailbox_po_audit
 from .models import (
     AIParseCache,
@@ -955,6 +955,67 @@ class MailboxAttachmentVisionTests(TestCase):
 
 
 class MailboxAIVisionMatchingSafetyTests(TestCase):
+    def test_ai_review_only_reference_cannot_hide_a_supplier_quotation_title(self):
+        received_at = timezone.now()
+        inventory = MailboxPOMessage(
+            gmail_message_id="ai-supplier-quotation",
+            sender="Acme Buyer <buyer@acme.example>",
+            subject="Purchase Order attached",
+            newest_body_text="Please see the attached file.",
+            sent_at=received_at,
+            attachment_manifest=[
+                {
+                    "filename": "scan.pdf",
+                    "attachment_id": "ai-supplier-quote-attachment",
+                    "status": "parsed",
+                    "result_source": "ai_vision_cleanup",
+                    "original_text": (
+                        "VENDOR MEDICAL\nQUOTATION NO: Q-123\n"
+                        "Purchase Order No: PO-7788\nNitrile Gloves"
+                    ),
+                    "lines": [
+                        {
+                            "raw_name": "Nitrile Gloves",
+                            "quantity": "10",
+                            "unit_price": "5",
+                            "line_total": "50",
+                            "unit": "box",
+                        }
+                    ],
+                    "totals": {"grand_total": "50"},
+                    "warnings": [MAILBOX_AI_REVIEW_WARNING],
+                    "meta": {"mailbox_ai_vision": {"review_only": True}},
+                }
+            ],
+        )
+        variant = document_variants(inventory)[0]
+        quotation = {
+            "quote_id": 1,
+            "quotation_number": "QT-20260701-0001",
+            "sent_at": received_at - timedelta(days=1),
+            "company_name": "Acme Medical",
+            "customer_emails": ("buyer@acme.example",),
+            "grand_total": "50",
+            "lines": [
+                {
+                    "line_id": 11,
+                    "name": "Nitrile Gloves",
+                    "quantity": "10",
+                    "unit_price": "5",
+                    "line_total": "50",
+                    "unit": "box",
+                }
+            ],
+        }
+
+        self.assertTrue(variant.message.quotation_references_are_review_only)
+        self.assertTrue(variant.lpo_references)
+        result = rank_message_to_quotations(variant.message, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+        self.assertIn("supplier quotation", result.reason)
+
     def test_ai_quote_reference_is_review_only_and_cannot_hide_true_item_match(self):
         received_at = timezone.now()
         inventory = MailboxPOMessage(

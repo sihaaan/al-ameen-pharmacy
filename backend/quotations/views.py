@@ -1186,10 +1186,37 @@ def _price_context_date(value):
 
 
 def _price_context_queryset(quotation):
+    price_context_po_imports = QuotationOutcomePOImport.objects.only(
+        "id",
+        "gmail_evidence_id",
+        "suggestions",
+    ).order_by("-created_at", "-id")
+    price_context_gmail_evidence = QuotationPOEvidence.objects.only("id").prefetch_related(
+        Prefetch(
+            "po_imports",
+            queryset=price_context_po_imports,
+            to_attr="price_context_po_imports",
+        )
+    )
     confirmed_lpos = (
         QuotationLPO.objects.filter(status=QuotationLPO.STATUS_CONFIRMED)
         .exclude(lpo_number="")
-        .only("id", "quotation_id", "lpo_number", "status", "received_at")
+        .only(
+            "id",
+            "quotation_id",
+            "gmail_evidence_id",
+            "lpo_number",
+            "status",
+            "received_at",
+            "parsed_meta",
+        )
+        .prefetch_related(
+            Prefetch(
+                "gmail_evidence",
+                queryset=price_context_gmail_evidence,
+                to_attr="price_context_gmail_evidence",
+            )
+        )
         .order_by("-received_at", "-id")
     )
     return (
@@ -1206,6 +1233,68 @@ def _price_context_queryset(quotation):
     )
 
 
+def _po_suggestion_line_ids(suggestions):
+    line_ids = set()
+    for suggestion in suggestions or []:
+        if not isinstance(suggestion, dict):
+            continue
+        value = suggestion.get("quotation_line_id", suggestion.get("quotation_line"))
+        try:
+            line_ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return line_ids
+
+
+def _applied_po_suggestion_line_ids(suggestions):
+    return {
+        line_id
+        for suggestion in (suggestions or [])
+        if isinstance(suggestion, dict) and suggestion.get("outcome_applied") is True
+        for line_id in [_positive_pk(suggestion.get("quotation_line_id", suggestion.get("quotation_line")))]
+        if line_id
+    }
+
+
+def _applied_lpo_line_ids(parsed_meta):
+    values = (parsed_meta or {}).get("applied_outcome_line_ids") or []
+    return {line_id for value in values for line_id in [_positive_pk(value)] if line_id}
+
+
+def _price_context_lpo_for_line(quotation, line):
+    confirmed_lpos = getattr(quotation, "confirmed_lpos_for_price_context", [])
+    explicit_provenance_found = False
+    parser_hint_found = False
+    for lpo in confirmed_lpos:
+        parsed_meta = lpo.parsed_meta or {}
+        applied_line_ids = _applied_lpo_line_ids(parsed_meta)
+        parser_line_ids = _po_suggestion_line_ids(parsed_meta.get("outcome_suggestions"))
+        evidence = getattr(lpo, "price_context_gmail_evidence", None)
+        po_imports = getattr(evidence, "price_context_po_imports", [])
+        if po_imports:
+            # A Gmail evidence row has one canonical import today, but merge
+            # all prefetched imports defensively. Parser suggestions are only
+            # hints; only staff-applied markers establish positive provenance.
+            for po_import in po_imports:
+                applied_line_ids.update(
+                    _applied_po_suggestion_line_ids(po_import.suggestions)
+                )
+                parser_line_ids.update(_po_suggestion_line_ids(po_import.suggestions))
+        explicit_provenance_found = explicit_provenance_found or bool(applied_line_ids)
+        parser_hint_found = parser_hint_found or bool(parser_line_ids)
+        if line.id in applied_line_ids:
+            # Confirmed LPOs are already newest-first. If the same line was
+            # ordered repeatedly, expose the newest source that actually
+            # contains that line rather than an unrelated quotation-level LPO.
+            return lpo
+    if len(confirmed_lpos) == 1 and not explicit_provenance_found and not parser_hint_found:
+        # Legacy and manually recorded orders may predate line-level source
+        # metadata. A sole confirmed LPO is unambiguous only when it does not
+        # contain parser hints or explicit provenance that need staff review.
+        return confirmed_lpos[0]
+    return None
+
+
 def _price_context_row(entry):
     quotation = entry.quotation
     line = entry.quotation_line
@@ -1214,11 +1303,7 @@ def _price_context_row(entry):
         in {QuotationLine.OUTCOME_ACCEPTED, QuotationLine.OUTCOME_QUANTITY_CHANGED}
         and line.accepted_unit_price is not None
     )
-    confirmed_lpos = (
-        getattr(quotation, "confirmed_lpos_for_price_context", [])
-        if is_accepted
-        else []
-    )
+    confirmed_lpo = _price_context_lpo_for_line(quotation, line) if is_accepted else None
     accepted_at = None
     if is_accepted:
         accepted_at = quotation.outcome_date or quotation.outcome_last_updated_at or line.updated_at
@@ -1234,7 +1319,7 @@ def _price_context_row(entry):
         "accepted_unit_price": format_unit_price_value(line.accepted_unit_price) if is_accepted else None,
         "accepted_quantity": str(line.accepted_quantity) if is_accepted and line.accepted_quantity is not None else None,
         "accepted_at": _price_context_date(accepted_at),
-        "lpo_number": confirmed_lpos[0].lpo_number if confirmed_lpos else "",
+        "lpo_number": confirmed_lpo.lpo_number if confirmed_lpo else "",
     }
 
 
@@ -2765,7 +2850,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 lpo_number=details["lpo_number"],
                 lpo_date=details["lpo_date"],
                 status=lpo_status,
-                parsed_meta=details["parsed_meta"],
+                parsed_meta={
+                    **details["parsed_meta"],
+                    "outcome_suggestions": suggestions,
+                },
                 parsed_rows=parsed_rows,
                 warnings=warnings,
                 received_by=request.user if request.user.is_authenticated else None,
@@ -2897,12 +2985,24 @@ class QuotationLPOViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     @staticmethod
     def _editable_audit_snapshot(lpo):
-        return {
+        snapshot = {
             "lpo_number": lpo.lpo_number,
             "lpo_date": lpo.lpo_date.isoformat() if lpo.lpo_date else "",
             "status": lpo.status,
             "notes": lpo.notes,
         }
+        if "applied_outcome_line_ids" in (lpo.parsed_meta or {}):
+            snapshot["applied_outcome_line_ids"] = sorted(
+                _po_suggestion_line_ids(
+                    [
+                        {"quotation_line_id": value}
+                        for value in (
+                            (lpo.parsed_meta or {}).get("applied_outcome_line_ids") or []
+                        )
+                    ]
+                )
+            )
+        return snapshot
 
     def get_queryset(self):
         queryset = super().get_queryset()

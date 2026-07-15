@@ -322,7 +322,7 @@ class QuotationWorkflowTests(APITestCase):
         quotation = self.create_quote()
         quotation.status = Quotation.STATUS_APPROVED
         quotation.save(update_fields=["status", "updated_at"])
-        self.create_valid_line(quotation)
+        line = self.create_valid_line(quotation)
 
         response = self.client.post(
             reverse("quotation-upload-lpo", args=[quotation.id]),
@@ -338,6 +338,10 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(lpo.lpo_number, "LPO-77")
         self.assertEqual(lpo.lpo_date.isoformat(), "2026-06-17")
         self.assertEqual(lpo.received_by, self.staff)
+        self.assertEqual(
+            [row["quotation_line_id"] for row in lpo.parsed_meta["outcome_suggestions"]],
+            [line.id],
+        )
         quotation.refresh_from_db()
         self.assertEqual(quotation.outcome_status, Quotation.OUTCOME_PENDING)
         self.assertIn("outcome_suggestions", response.data)

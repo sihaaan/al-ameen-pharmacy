@@ -91,25 +91,48 @@ const attachmentTypeLabel = (attachment) => {
   return extension || mimeType || 'File';
 };
 
-const evidenceBodyPreview = (evidence) => {
-  const fields = [
-    ['Selected source text', evidence?.extracted_text, evidence?.extracted_text_truncated],
-    ['Email body', evidence?.email_body_text, evidence?.email_body_text_truncated],
-    ['Email body', evidence?.email_body_preview],
-    ['Email body', evidence?.body_preview],
-    ['Parsed email body', evidence?.extracted_text_preview],
-    ['Email body', evidence?.email_body],
-    ['Email body', evidence?.body_text],
-    ['Gmail snippet', evidence?.snippet],
-  ];
-  const selected = fields.find(([, value]) => value !== undefined && value !== null && String(value).trim());
-  if (!selected) return { label: 'Email preview', text: '', truncated: false };
-  const text = String(selected[1]).trim();
-  return {
-    label: selected[0],
-    text: text.slice(0, 5000),
-    truncated: Boolean(selected[2]) || text.length > 5000,
-  };
+const EVIDENCE_TEXT_PREVIEW_LIMIT = 5000;
+
+const EvidenceTextSection = ({ title, text, backendTruncated = false, emptyMessage }) => {
+  const [expanded, setExpanded] = useState(false);
+  const fullText = String(text || '').trim();
+  const canExpand = fullText.length > EVIDENCE_TEXT_PREVIEW_LIMIT;
+  const visibleText = expanded || !canExpand
+    ? fullText
+    : fullText.slice(0, EVIDENCE_TEXT_PREVIEW_LIMIT);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [title, fullText]);
+
+  return (
+    <div className="qm-evidence-detail-section">
+      <h4>{title}</h4>
+      <pre className="qm-evidence-preview">{visibleText || emptyMessage}</pre>
+      {canExpand && (
+        <div className="qm-action-row">
+          <button
+            type="button"
+            className="qm-secondary small"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {expanded ? `Show less ${title.toLowerCase()}` : `Show full ${title.toLowerCase()}`}
+          </button>
+          {!expanded && (
+            <small className="qm-evidence-preview-note">
+              Showing the first {EVIDENCE_TEXT_PREVIEW_LIMIT.toLocaleString()} of {fullText.length.toLocaleString()} characters.
+            </small>
+          )}
+        </div>
+      )}
+      {backendTruncated && (
+        <small className="qm-evidence-preview-note">
+          The backend returned only part of this text because it exceeded the configured source limit. This section is incomplete.
+        </small>
+      )}
+    </div>
+  );
 };
 
 const quoteReferenceInfo = (evidence) => {
@@ -176,13 +199,66 @@ const selectedAttachmentIdentity = (evidence) => {
 };
 
 const isSelectedAttachment = (evidence, attachment) => {
+  const selected = selectedAttachmentIdentity(evidence);
+  const identifier = attachmentIdentifier(attachment);
+  const hasSelectedId = selected.id !== undefined
+    && selected.id !== null
+    && String(selected.id).trim() !== '';
+  if (hasSelectedId) {
+    return identifier !== undefined && String(selected.id) === String(identifier);
+  }
   if ([attachment?.is_selected, attachment?.selected, attachment?.is_primary, attachment?.selected_source].some((value) => value === true)) {
     return true;
   }
-  const selected = selectedAttachmentIdentity(evidence);
-  const identifier = attachmentIdentifier(attachment);
-  if (selected.id !== undefined && identifier !== undefined && String(selected.id) === String(identifier)) return true;
   return Boolean(selected.filename && attachment?.filename && selected.filename === attachment.filename);
+};
+
+const evidenceSourceKind = (evidence) => {
+  const rawKind = firstDefined(
+    evidence?.selected_source_kind,
+    evidence?.match_signals?.source?.kind,
+    evidence?.selected_source?.kind,
+    evidence?.selected_attachment?.kind
+  );
+  const normalized = String(rawKind || '').trim().toLowerCase();
+  if (['attachment', 'file'].includes(normalized)) return 'attachment';
+  if (['body', 'email', 'email_body', 'message_body'].includes(normalized)) return 'email_body';
+  return selectedAttachmentIdentity(evidence).id !== undefined ? 'attachment' : 'unknown';
+};
+
+const evidenceSourceLabel = (evidence) => {
+  const kind = evidenceSourceKind(evidence);
+  const selected = selectedAttachmentIdentity(evidence);
+  if (kind === 'attachment') {
+    return selected.filename ? `Attachment · ${selected.filename}` : 'Attachment';
+  }
+  if (kind === 'email_body') return 'Email body';
+  return 'Not recorded (legacy evidence)';
+};
+
+const evidenceSourceText = (evidence) => {
+  const kind = evidenceSourceKind(evidence);
+  const extractedText = firstDefined(evidence?.extracted_text, evidence?.extracted_text_preview, '');
+  const directEmailBody = firstDefined(
+    evidence?.email_body_text,
+    evidence?.email_body_preview,
+    evidence?.body_preview,
+    evidence?.email_body,
+    evidence?.body_text,
+    ''
+  );
+  const emailBodyUsesExtractedText = kind === 'email_body' && !directEmailBody && Boolean(extractedText);
+  return {
+    kind,
+    attachmentText: kind === 'attachment' ? extractedText : '',
+    selectedLegacyText: kind === 'unknown' ? extractedText : '',
+    emailBody: emailBodyUsesExtractedText ? extractedText : directEmailBody,
+    attachmentBackendTruncated: kind === 'attachment' && Boolean(evidence?.extracted_text_truncated),
+    selectedLegacyBackendTruncated: kind === 'unknown' && Boolean(evidence?.extracted_text_truncated),
+    emailBodyBackendTruncated: emailBodyUsesExtractedText
+      ? Boolean(evidence?.extracted_text_truncated)
+      : Boolean(evidence?.email_body_text_truncated),
+  };
 };
 
 const signalValueText = (value) => {
@@ -492,8 +568,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       : null,
     [selectedEvidence, selectedEvidenceSource]
   );
-  const selectedEvidencePreview = useMemo(
-    () => evidenceBodyPreview(selectedEvidenceForReview),
+  const selectedEvidenceSourceText = useMemo(
+    () => evidenceSourceText(selectedEvidenceForReview),
     [selectedEvidenceForReview]
   );
   const selectedEvidenceReference = useMemo(
@@ -839,6 +915,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         accepted_unit_price: suggestion.suggested_accepted_unit_price,
         outcome_notes: `PO suggestion applied: ${suggestion.reason}`,
       })),
+      po_import_id: poResult?.id,
+      applied_po_line_ids: suggestions.map((suggestion) => suggestion.quotation_line_id),
     }, 'Selected PO suggestions applied. Review and save final outcome when ready.');
   };
 
@@ -988,6 +1066,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                 <span>Assignment status</span>
                 <strong>{evidenceStatusInfo(selectedEvidence).label}</strong>
               </div>
+              <div>
+                <span>Selected source</span>
+                <strong>{evidenceSourceLabel(selectedEvidenceForReview)}</strong>
+              </div>
               {selectedEvidenceReference && (
                 <div className={`qm-evidence-reference ${selectedEvidenceReference.present ? 'present' : 'missing'}`}>
                   <span>Quotation reference</span>
@@ -1009,17 +1091,41 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               </div>
             </div>
 
-            <div className="qm-evidence-detail-section">
-              <h4>{selectedEvidencePreview.label}</h4>
-              <pre className="qm-evidence-preview">
-                {selectedEvidencePreview.text
-                  || (loadingEvidenceSource
-                    ? 'Loading the selected source text...'
-                    : 'No source text is available for this evidence. You can still inspect its attachment below.')}
-              </pre>
-              {selectedEvidencePreview.truncated && <small className="qm-evidence-preview-note">Preview limited to the first 5,000 characters.</small>}
-              {evidenceSourceError && <div className="qm-notice warning">{evidenceSourceError}</div>}
-            </div>
+            {selectedEvidenceSourceText.kind === 'attachment' && (
+              <EvidenceTextSection
+                title="Extracted attachment text"
+                text={selectedEvidenceSourceText.attachmentText}
+                backendTruncated={selectedEvidenceSourceText.attachmentBackendTruncated}
+                emptyMessage={loadingEvidenceSource
+                  ? 'Loading extracted attachment text...'
+                  : 'No extracted text is available. Open the attachment below to inspect the original file.'}
+              />
+            )}
+            {selectedEvidenceSourceText.kind === 'unknown' && (
+              <EvidenceTextSection
+                title="Selected source text"
+                text={selectedEvidenceSourceText.selectedLegacyText}
+                backendTruncated={selectedEvidenceSourceText.selectedLegacyBackendTruncated}
+                emptyMessage={loadingEvidenceSource
+                  ? 'Loading the selected source text...'
+                  : 'No selected source text is available for this legacy evidence record.'}
+              />
+            )}
+            <EvidenceTextSection
+              title={selectedEvidenceSourceText.kind === 'email_body' ? 'Email body (selected source)' : 'Email body'}
+              text={selectedEvidenceSourceText.emailBody}
+              backendTruncated={selectedEvidenceSourceText.emailBodyBackendTruncated}
+              emptyMessage={loadingEvidenceSource
+                ? 'Loading the newest email body...'
+                : 'No email body text was captured for this evidence.'}
+            />
+            {!selectedEvidenceSourceText.attachmentText
+              && !selectedEvidenceSourceText.selectedLegacyText
+              && !selectedEvidenceSourceText.emailBody
+              && selectedEvidence.snippet && (
+                <EvidenceTextSection title="Gmail snippet" text={selectedEvidence.snippet} emptyMessage="" />
+            )}
+            {evidenceSourceError && <div className="qm-notice warning">{evidenceSourceError}</div>}
 
             {selectedEvidenceSignalSections.map((section) => (
               <EvidenceSignalSection key={section.title} title={section.title} value={section.value} />

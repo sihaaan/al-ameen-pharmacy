@@ -79,6 +79,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
       data: new Blob(['attachment'], { type: 'application/pdf' }),
       headers: { 'content-type': 'application/pdf' },
     });
+    quotationAPI.quotes.updateOutcome.mockResolvedValue({ data: outcomePayload });
     quotationAPI.quotes.parsePOEvidence.mockResolvedValue({
       data: {
         suggestions: [],
@@ -110,6 +111,43 @@ describe('QuotationOutcomeReview Gmail approval', () => {
       use_ai: true,
     }));
     expect(await screen.findByText(/email link approved.*no line outcome was applied/i)).toBeInTheDocument();
+  });
+
+  test('records the PO import and only the suggestions staff selected when applying outcomes', async () => {
+    quotationAPI.quotes.parsePOEvidence.mockResolvedValueOnce({
+      data: {
+        id: 77,
+        suggestions: [{
+          quotation_line_id: 501,
+          requested_item_name: 'Bandage Pack',
+          suggested_outcome_status: 'accepted',
+          suggested_accepted_quantity: '2.000',
+          suggested_accepted_unit_price: '10.00',
+          reason: 'Exact item and quantity match',
+        }],
+        unmatched_po_rows: [],
+        missing_quote_line_ids: [],
+        canonical_lpo: { id: 9, status: 'needs_review' },
+      },
+    });
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
+    fireEvent.click(screen.getByRole('button', { name: /approve this email link & parse/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /apply selected suggestions/i }));
+
+    await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
+      line_updates: [{
+        id: 501,
+        outcome_status: 'accepted',
+        accepted_quantity: '2.000',
+        accepted_unit_price: '10.00',
+        outcome_notes: 'PO suggestion applied: Exact item and quantity match',
+      }],
+      po_import_id: 77,
+      applied_po_line_ids: [501],
+    }));
   });
 
   test('shows enriched evidence signals and opens the selected attachment through the authenticated API', async () => {
@@ -153,7 +191,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
       expect(screen.getByText(/approved customer purchase order/i)).toBeInTheDocument();
       expect(screen.getAllByText('Quote reference present')).toHaveLength(1);
       expect(screen.getByText('Quote reference present · Q-0021')).toBeInTheDocument();
-      expect(screen.getByText('Selected source')).toBeInTheDocument();
+      expect(screen.getAllByText('Selected source')).toHaveLength(2);
       expect(screen.getByText('PDF · application/pdf')).toBeInTheDocument();
       expect(screen.getByText('2.0 KB')).toBeInTheDocument();
       expect(screen.getByText('2 parsed row(s)')).toBeInTheDocument();
@@ -192,6 +230,99 @@ describe('QuotationOutcomeReview Gmail approval', () => {
 
     await waitFor(() => expect(quotationAPI.quotes.poEvidenceSource).toHaveBeenCalledWith(81));
     expect(await screen.findByText('Full selected LPO source loaded on demand.')).toBeInTheDocument();
+  });
+
+  test('labels an attachment source, separates its text from the email body, and expands both previews', async () => {
+    const attachmentText = `${'A'.repeat(5010)} ATTACHMENT-END`;
+    const emailBodyText = `${'B'.repeat(5010)} EMAIL-BODY-END`;
+    const attachmentEvidence = {
+      ...evidence,
+      selected_attachment_id: 'gmail-attachment-1',
+      selected_attachment_filename: 'LPO-7781.pdf',
+      match_signals: { source: { kind: 'attachment', attachment_id: 'gmail-attachment-1' } },
+      attachments: [{
+        attachment_id: 'gmail-attachment-1',
+        filename: 'LPO-7781.pdf',
+        mime_type: 'application/pdf',
+        size: 2048,
+        status: 'parsed',
+        is_selected: true,
+      }, {
+        attachment_id: 'gmail-attachment-duplicate-name',
+        filename: 'LPO-7781.pdf',
+        mime_type: 'application/pdf',
+        size: 1024,
+        status: 'parsed',
+        is_selected: true,
+      }],
+    };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({
+      data: { ...outcomePayload, po_evidence: [attachmentEvidence] },
+    });
+    quotationAPI.quotes.poEvidenceSource.mockResolvedValueOnce({
+      data: {
+        id: 81,
+        selected_source_kind: 'attachment',
+        extracted_text: attachmentText,
+        extracted_text_truncated: true,
+        email_body_text: emailBodyText,
+        email_body_text_truncated: false,
+      },
+    });
+
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
+
+    expect(await screen.findByText('Attachment · LPO-7781.pdf')).toBeInTheDocument();
+    expect(screen.getAllByText('Selected source')).toHaveLength(2);
+    expect(screen.getByText('Extracted attachment text')).toBeInTheDocument();
+    expect(screen.getByText('Email body')).toBeInTheDocument();
+    expect(await screen.findByText(/backend returned only part of this text/i)).toBeInTheDocument();
+    expect(screen.queryByText(/ATTACHMENT-END/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/EMAIL-BODY-END/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Showing the first 5,000/i)).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: /show full extracted attachment text/i }));
+    expect(screen.getByText(/ATTACHMENT-END/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show less extracted attachment text/i })).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: /show full email body/i }));
+    expect(screen.getByText(/EMAIL-BODY-END/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show less email body/i })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  test('clearly identifies the email body when it is the selected source', async () => {
+    const bodyEvidence = {
+      ...evidence,
+      attachment_count: 0,
+      attachments: [],
+      match_signals: { source: { kind: 'email_body' } },
+    };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({
+      data: { ...outcomePayload, po_evidence: [bodyEvidence] },
+    });
+    quotationAPI.quotes.poEvidenceSource.mockResolvedValueOnce({
+      data: {
+        id: 81,
+        selected_source_kind: 'email_body',
+        extracted_text: 'Selected email body copy.',
+        extracted_text_truncated: false,
+        email_body_text: 'Newest email body with the confirmed quantities and total.',
+        email_body_text_truncated: false,
+      },
+    });
+
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
+
+    expect(await screen.findByText('Email body (selected source)')).toBeInTheDocument();
+    expect(screen.getByText('Newest email body with the confirmed quantities and total.')).toBeInTheDocument();
+    expect(screen.queryByText('Extracted attachment text')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Email body')).toHaveLength(1);
   });
 
   test('downloads active attachment types without navigating a same-origin blob', async () => {

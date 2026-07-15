@@ -22,6 +22,7 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationLine,
+    QuotationOutcomePOImport,
 )
 
 
@@ -302,6 +303,101 @@ def ensure_outcome_reviewable(quotation):
         raise ValidationError("Only finalized or sent quotations can have outcomes reviewed.")
 
 
+def _suggestion_quotation_line_id(suggestion):
+    if not isinstance(suggestion, dict):
+        return None
+    value = suggestion.get("quotation_line_id", suggestion.get("quotation_line"))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_applied_po_import_provenance(
+    quotation,
+    data,
+    actor,
+    *,
+    lines_by_id,
+    touched_line_ids,
+):
+    """Persist only the PO suggestions staff actually applied to outcomes."""
+
+    raw_import_id = data.get("po_import_id")
+    if raw_import_id in (None, ""):
+        return None
+    try:
+        import_id = int(raw_import_id)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("Select a valid PO import before applying suggestions.") from exc
+
+    po_import = (
+        QuotationOutcomePOImport.objects.select_for_update()
+        .filter(pk=import_id, quotation=quotation)
+        .first()
+    )
+    if not po_import:
+        raise ValidationError("The selected PO import does not belong to this quotation.")
+
+    raw_line_ids = data.get("applied_po_line_ids")
+    if not isinstance(raw_line_ids, (list, tuple, set)):
+        raise ValidationError("Applied PO line IDs must be provided as a list.")
+    applied_line_ids = set()
+    for value in raw_line_ids:
+        try:
+            applied_line_ids.add(int(value))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("Applied PO line IDs must be valid quotation lines.") from exc
+
+    suggestion_line_ids = {
+        line_id
+        for line_id in (
+            _suggestion_quotation_line_id(suggestion)
+            for suggestion in (po_import.suggestions or [])
+        )
+        if line_id is not None
+    }
+    if not applied_line_ids.issubset(set(lines_by_id)):
+        raise ValidationError("A selected PO suggestion does not belong to this quotation.")
+    if not applied_line_ids.issubset(suggestion_line_ids):
+        raise ValidationError("A selected line was not suggested by this PO import.")
+    if not applied_line_ids.issubset(set(touched_line_ids)):
+        raise ValidationError("Every applied PO suggestion must be saved in the same outcome update.")
+    invalid_outcome_line_ids = {
+        line_id
+        for line_id in applied_line_ids
+        if lines_by_id[line_id].outcome_status
+        not in {QuotationLine.OUTCOME_ACCEPTED, QuotationLine.OUTCOME_QUANTITY_CHANGED}
+    }
+    if invalid_outcome_line_ids:
+        raise ValidationError(
+            "Applied PO provenance can only be recorded for accepted or quantity-changed lines."
+        )
+
+    applied_at = timezone.now().isoformat()
+    applied_by_id = actor.pk if getattr(actor, "is_authenticated", False) else None
+    stamped_suggestions = []
+    for raw_suggestion in po_import.suggestions or []:
+        if not isinstance(raw_suggestion, dict):
+            stamped_suggestions.append(raw_suggestion)
+            continue
+        suggestion = dict(raw_suggestion)
+        line_id = _suggestion_quotation_line_id(suggestion)
+        was_applied = suggestion.get("outcome_applied") is True
+        is_applied = was_applied or line_id in applied_line_ids
+        suggestion["outcome_applied"] = is_applied
+        if line_id in applied_line_ids:
+            suggestion["outcome_applied_at"] = applied_at
+            suggestion["outcome_applied_by_id"] = applied_by_id
+        elif not was_applied:
+            suggestion.pop("outcome_applied_at", None)
+            suggestion.pop("outcome_applied_by_id", None)
+        stamped_suggestions.append(suggestion)
+    po_import.suggestions = stamped_suggestions
+    po_import.save(update_fields=["suggestions", "updated_at"])
+    return po_import.id
+
+
 @transaction.atomic
 def update_quotation_outcome(quotation, data, actor):
     quotation = Quotation.objects.select_for_update().select_related("company").get(pk=quotation.pk)
@@ -372,6 +468,14 @@ def update_quotation_outcome(quotation, data, actor):
         recalculate_line_outcome(line, save=True)
         touched.append(line.id)
 
+    applied_po_import_id = _record_applied_po_import_provenance(
+        quotation,
+        data,
+        actor,
+        lines_by_id=lines_by_id,
+        touched_line_ids=touched,
+    )
+
     followup_changed = False
     for field in ["follow_up_status", "follow_up_notes", "follow_up_contact_method", "next_follow_up_date"]:
         if field in data:
@@ -411,6 +515,7 @@ def update_quotation_outcome(quotation, data, actor):
             "lines": [_line_outcome_snapshot(line) for line in after_lines],
         },
         "touched_line_ids": sorted(set(touched)),
+        "applied_po_import_id": applied_po_import_id,
     }
     audit_log(
         actor,
