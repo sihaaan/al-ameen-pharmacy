@@ -68,9 +68,22 @@ MAX_RUN_ERRORS = 500
 MAX_MESSAGE_FETCH_ATTEMPTS = 3
 SCAN_LEASE_SECONDS = 10 * 60
 
-PURCHASE_ORDER_SIGNAL = re.compile(
-    r"\b(?:local\s+purchase\s+order|purchase\s+order|l\.?\s*p\.?\s*o\.?)\b|"
-    r"(?<!\w)p\.?\s*o(?!\.?\s*box\b)(?=\W|$)\.?",
+PURCHASE_ORDER_PATTERN = (
+    r"(?:\b(?:local\s+purchase\s+order|purchase\s+order|[lm]\.?\s*p\.?\s*o\.?)\b|"
+    r"(?<!\w)p\.?\s*o(?!\.?\s*box\b)(?=\W|$)\.?)"
+)
+PURCHASE_ORDER_SIGNAL = re.compile(PURCHASE_ORDER_PATTERN, re.IGNORECASE)
+PO_ACTION_SEPARATOR = r"\s*[:,;-]?\s*"
+DESCRIPTIVE_PO_SUFFIX_PATTERN = (
+    r"(?:status|processing|automation|software|workflow|guide|report|help|module|platform)"
+)
+ACTIONABLE_PURCHASE_ORDER_PATTERN = (
+    rf"(?:{PURCHASE_ORDER_PATTERN})"
+    rf"(?!\s*[.,:;-]?\s*{DESCRIPTIVE_PO_SUFFIX_PATTERN}\b)"
+)
+DESCRIPTIVE_PO_SIGNAL = re.compile(
+    rf"{PURCHASE_ORDER_PATTERN}\s+"
+    rf"{DESCRIPTIVE_PO_SUFFIX_PATTERN}\b",
     re.IGNORECASE,
 )
 POSSIBLE_ORDER_SIGNAL = re.compile(
@@ -91,11 +104,32 @@ RFQ_REQUEST_SIGNAL = re.compile(
     r"(?:revise|update|amend)\s+(?:the\s+)?(?:quotation|quote))\b",
     re.IGNORECASE,
 )
+NON_ORDER_IDIOM_SIGNAL = re.compile(
+    r"\bin\s+order\s+(?:to|for|that)\b",
+    re.IGNORECASE,
+)
 EXPLICIT_ORDER_CONTEXT_SIGNAL = re.compile(
-    r"\b(?:order(?:ed)?|award(?:ed)?|proceed|accept(?:ed|ance)?|deliver(?:ed|y)?)\b|"
-    r"\b(?:approv(?:e|ed|al)|confirm(?:ed|ation)?)\s+(?:the\s+)?(?:quotation|quote|order)\b|"
+    r"\b(?:order(?:ed)?|award(?:ed)?)\b|"
+    r"\b(?:please|kindly)\s+(?:proceed|deliver)\b|"
+    r"\bproceed\s+with\s+(?:the\s+)?(?:order|delivery|quotation|quote|supply)\b|"
+    r"\bdeliver(?:ed)?\s+(?:the\s+)?(?:attached|items|goods|materials|order)\b|"
+    r"\b(?:approv(?:e|ed|al)|confirm(?:ed|ation)?|accept(?:ed|ance)?)\s+(?:the\s+)?(?:quotation|quote|order)\b|"
     r"\b(?:quotation|quote|order)\s+(?:is\s+)?(?:approved|confirmed|accepted)\b",
     re.IGNORECASE,
+)
+BODY_PO_ACTION_SIGNAL = re.compile(
+    rf"(?:\b(?:please\s+)?(?:find|see)\s+(?:(?:the|our|your|a)\s+)?"
+    rf"(?:attached|enclosed){PO_ACTION_SEPARATOR}(?:(?:the|our|your|a)\s+)?"
+    rf"{ACTIONABLE_PURCHASE_ORDER_PATTERN}|"
+    rf"\b(?:attached|enclosed)(?:\s+herewith)?{PO_ACTION_SEPARATOR}(?:(?:is|are)\s+)?"
+    rf"(?:(?:the|our|your|a)\s+)?{ACTIONABLE_PURCHASE_ORDER_PATTERN}|"
+    rf"{ACTIONABLE_PURCHASE_ORDER_PATTERN}{PO_ACTION_SEPARATOR}"
+    rf"(?:(?:is|was|has|have)\s+(?:been\s+)?)?"
+    rf"(?:attached|enclosed|issued|approved|received|confirmed)\b|"
+    rf"\b(?:issued|approved|received|confirmed){PO_ACTION_SEPARATOR}"
+    rf"(?:(?:the|our|your|a)\s+)?"
+    rf"{ACTIONABLE_PURCHASE_ORDER_PATTERN})",
+    re.IGNORECASE | re.DOTALL,
 )
 GENERIC_INLINE_FILENAME_SIGNAL = re.compile(
     r"\b(?:image\d*|outlook|logo|icon|signature|banner|footer|header|spacer|pixel|social)\b",
@@ -638,20 +672,33 @@ def _message_order_context_text(message):
     )
 
 
-def _text_order_intent(text):
+def _text_order_intent(text, *, is_body=False):
     """Classify one author-controlled text block, with explicit PO taking precedence."""
 
     text = str(text or "")
     references = extract_po_references(text)
+    has_po_reference = any(reference.get("kind") == "po" for reference in references)
+    has_po_language = bool(PURCHASE_ORDER_SIGNAL.search(text))
+    has_descriptive_po_language = bool(DESCRIPTIVE_PO_SIGNAL.search(text))
+    actionable_po_language = bool(BODY_PO_ACTION_SIGNAL.search(text))
     has_explicit_po = bool(
-        PURCHASE_ORDER_SIGNAL.search(text)
-        or any(reference.get("kind") == "po" for reference in references)
+        has_po_reference
+        or (
+            has_po_language
+            and (
+                actionable_po_language
+                if is_body
+                else not has_descriptive_po_language
+            )
+        )
     )
     if has_explicit_po:
         return "purchase_order"
     if RFQ_REQUEST_SIGNAL.search(text):
         return "rfq"
-    generic_text = re.sub(r"\bin\s+order\s+to\b", " ", text, flags=re.IGNORECASE)
+    generic_text = NON_ORDER_IDIOM_SIGNAL.sub(" ", text)
+    if has_po_language and not has_explicit_po:
+        generic_text = PURCHASE_ORDER_SIGNAL.sub(" ", generic_text)
     if EXPLICIT_ORDER_CONTEXT_SIGNAL.search(generic_text):
         return "order"
     return "neutral"
@@ -663,7 +710,7 @@ def _message_order_intent(message):
     newest_body = str((message or {}).get("newest_body_text") or "").strip()
     primary_body = newest_body or str((message or {}).get("snippet") or "").strip()
     if primary_body:
-        body_intent = _text_order_intent(primary_body)
+        body_intent = _text_order_intent(primary_body, is_body=True)
         if body_intent in {"purchase_order", "rfq"}:
             return body_intent
         if body_intent == "order":
@@ -689,11 +736,15 @@ def _has_explicit_po_filename(attachment):
     filename, _stem, _extension, normalized = _attachment_filename_parts(attachment)
     if not filename:
         return False
+    has_reference = any(
+        reference.get("kind") == "po"
+        for reference in extract_po_references(filename)
+    )
     return bool(
-        PURCHASE_ORDER_SIGNAL.search(normalized)
-        or any(
-            reference.get("kind") == "po"
-            for reference in extract_po_references(filename)
+        has_reference
+        or (
+            PURCHASE_ORDER_SIGNAL.search(normalized)
+            and not DESCRIPTIVE_PO_SIGNAL.search(normalized)
         )
     )
 
@@ -835,6 +886,17 @@ def classify_mailbox_message(message):
         for attachment in (message.get("attachment_manifest") or [])
         if isinstance(attachment, dict)
     )
+    has_descriptive_po_context = bool(DESCRIPTIVE_PO_SIGNAL.search(context_text)) or any(
+        DESCRIPTIVE_PO_SIGNAL.search(
+            re.sub(
+                r"[_-]+",
+                " ",
+                os.path.basename(str(attachment.get("filename") or "")),
+            )
+        )
+        for attachment in (message.get("attachment_manifest") or [])
+        if isinstance(attachment, dict)
+    )
     plausible_documents = [
         attachment
         for attachment in (message.get("attachment_manifest") or [])
@@ -863,7 +925,10 @@ def classify_mailbox_message(message):
         reference.get("kind") == "po" for reference in references
     )
     has_quote_reference = any(reference["kind"] == "quotation" for reference in references)
-    has_order_context = bool(POSSIBLE_ORDER_SIGNAL.search(text))
+    has_order_context = message_intent != "neutral" and bool(
+        POSSIBLE_ORDER_SIGNAL.search(text)
+    )
+    has_non_order_idiom = bool(NON_ORDER_IDIOM_SIGNAL.search(context_text))
     restricted_labels = {"SPAM", "TRASH"}.intersection(
         str(label).upper() for label in (message.get("label_ids") or [])
     )
@@ -878,9 +943,24 @@ def classify_mailbox_message(message):
     elif message_intent == "rfq" and not has_strong_order_filename:
         classification = MailboxPOMessage.CLASS_OTHER
         reason = "The newest message requests or revises a quotation and has no credible PO/LPO attachment signal."
+    elif (
+        message_intent == "neutral"
+        and has_descriptive_po_context
+        and not has_strong_order_filename
+    ):
+        classification = MailboxPOMessage.CLASS_OTHER
+        reason = "PO status, software, processing, or report wording is descriptive rather than order evidence."
     elif message_intent == "order" or has_strong_order_filename:
         classification = MailboxPOMessage.CLASS_POSSIBLE_PO
         reason = "The newest message expresses order, acceptance, proceed, or delivery intent and requires review."
+    elif (
+        message_intent == "neutral"
+        and has_non_order_idiom
+        and not has_quote_reference
+        and not has_strong_order_filename
+    ):
+        classification = MailboxPOMessage.CLASS_OTHER
+        reason = "The phrase 'in order to/for/that' is administrative wording, not purchase-order evidence."
     elif plausible_documents and (has_quote_reference or has_order_context):
         classification = MailboxPOMessage.CLASS_POSSIBLE_PO
         reason = "A supported document accompanies quotation/order context and needs review."

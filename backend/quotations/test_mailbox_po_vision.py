@@ -2258,7 +2258,8 @@ class MailboxPDFRepairTests(TestCase):
             subject="Submission of Mandatory Data Fields for UAE E-Invoicing Compliance",
             newest_body_text=(
                 "All invoices must be transmitted through an Accredited Service Provider "
-                "approved by the Ministry of Finance. Please complete the attached vendor form."
+                "approved by the Ministry of Finance. The rollout will proceed as follows. "
+                "Please complete the attached vendor form."
             ),
         )
 
@@ -2267,6 +2268,338 @@ class MailboxPDFRepairTests(TestCase):
         message.refresh_from_db()
         self.assertFalse(message.is_relevant)
         self.assertEqual(message.attachment_manifest[0]["status"], "metadata_only")
+
+    def test_descriptive_po_status_and_purchase_order_processing_are_not_order_evidence(self):
+        cases = [
+            (
+                "Vendor tax update",
+                "For requests asking for Invoice or PO status please check with our virtual assistant.",
+                {
+                    "filename": "Vendor Communication Template.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 93086,
+                },
+            ),
+            (
+                "Pharmacy management software",
+                "Our purchase module provides streamlined purchase order processing and inventory reporting.",
+                {
+                    "filename": "software brochure.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 13 * 1024 * 1024,
+                },
+            ),
+            (
+                "Awareness campaign",
+                "Learn about our digital services and delivery channels this summer.",
+                {
+                    "filename": "DEWA_CAMPAIGN.jpg",
+                    "mime_type": "image/jpeg",
+                    "size": 300 * 1024,
+                },
+            ),
+            (
+                "Software savings",
+                "Find out how our purchase order processing software saves time.",
+                {
+                    "filename": "software.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 13 * 1024 * 1024,
+                },
+            ),
+            (
+                "Automation platform",
+                "See our purchase order automation platform.",
+                {
+                    "filename": "automation.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 20000,
+                },
+            ),
+            (
+                "Status help",
+                "Having an issue with PO status? Contact our virtual assistant.",
+                {
+                    "filename": "help.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 20000,
+                },
+            ),
+            (
+                "Workflow guide",
+                "Learn about purchase order approval workflows.",
+                {
+                    "filename": "workflow.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 20000,
+                },
+            ),
+            (
+                "Attached processing guide",
+                "Please see attached purchase order processing guide.",
+                {
+                    "filename": "guide.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 20000,
+                },
+            ),
+            (
+                "Attached status report",
+                "Attached: PO status report.",
+                {
+                    "filename": "report.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 20000,
+                },
+            ),
+            (
+                "Attached automation workflow",
+                "Please find attached PO automation workflow.",
+                {
+                    "filename": "workflow.docx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "size": 20000,
+                },
+            ),
+        ]
+        for subject, body, attachment in cases:
+            with self.subTest(subject=subject):
+                result = classify_mailbox_message(
+                    {
+                        "subject": subject,
+                        "newest_body_text": body,
+                        "snippet": "",
+                        "attachment_manifest": [attachment],
+                    }
+                )
+                self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+
+    def test_in_order_idioms_do_not_surface_vendor_admin_documents(self):
+        bodies = [
+            "In order for us to review the statement, please send the requested details.",
+            (
+                "In order to make payments, and in order for us to review the "
+                "statement, update the vendor profile."
+            ),
+            "In order that we can reconcile your account, please provide a statement.",
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                result = classify_mailbox_message(
+                    {
+                        "subject": "Statement of account",
+                        "newest_body_text": body,
+                        "snippet": "",
+                        "attachment_manifest": [
+                            {
+                                "filename": "statement.pdf",
+                                "mime_type": "application/pdf",
+                                "size": 20000,
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+
+    def test_actionable_po_and_delivery_phrases_remain_order_evidence(self):
+        purchase_order = classify_mailbox_message(
+            {
+                "subject": "Documents attached",
+                "newest_body_text": "Please find attached the Purchase Order.",
+                "snippet": "",
+                "attachment_manifest": [
+                    {
+                        "filename": "document.docx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "size": 20000,
+                    }
+                ],
+            }
+        )
+        delivery_order = classify_mailbox_message(
+            {
+                "subject": "Project materials",
+                "newest_body_text": "Kindly deliver the attached items to the site.",
+                "snippet": "",
+                "attachment_manifest": [
+                    {
+                        "filename": "items.docx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "size": 20000,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            purchase_order["classification"],
+            MailboxPOMessage.CLASS_PURCHASE_ORDER,
+        )
+        self.assertEqual(
+            delivery_order["classification"],
+            MailboxPOMessage.CLASS_POSSIBLE_PO,
+        )
+
+        punctuated_bodies = [
+            "Please find attached, the Purchase Order.",
+            "Attached: Purchase Order.",
+            "Purchase Order - attached.",
+            "Please see enclosed: PO.",
+            "The PO has been issued.",
+        ]
+        for body in punctuated_bodies:
+            with self.subTest(body=body):
+                result = classify_mailbox_message(
+                    {
+                        "subject": "Documents",
+                        "newest_body_text": body,
+                        "snippet": "",
+                        "attachment_manifest": [],
+                    }
+                )
+                self.assertEqual(
+                    result["classification"],
+                    MailboxPOMessage.CLASS_PURCHASE_ORDER,
+                )
+
+    def test_descriptive_po_subjects_and_filenames_are_not_order_evidence(self):
+        cases = [
+            {
+                "subject": "PO Status Update",
+                "filename": "document.docx",
+            },
+            {
+                "subject": "Purchase Order Processing Software",
+                "filename": "document.docx",
+            },
+            {
+                "subject": "Documents",
+                "filename": "PO Status Report.docx",
+            },
+            {
+                "subject": "Documents",
+                "filename": "Purchase Order Processing Software.pdf",
+            },
+            {
+                "subject": "LPO Status Update",
+                "filename": "document.docx",
+            },
+            {
+                "subject": "MPO Processing Software",
+                "filename": "document.docx",
+            },
+            {
+                "subject": "Documents",
+                "filename": "LPO_status_report.xlsx",
+            },
+            {
+                "subject": "Documents",
+                "filename": "MPO_processing_guide.pdf",
+            },
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                result = classify_mailbox_message(
+                    {
+                        "subject": case["subject"],
+                        "newest_body_text": "Please see the information provided.",
+                        "snippet": "",
+                        "attachment_manifest": [
+                            {
+                                "filename": case["filename"],
+                                "mime_type": "application/octet-stream",
+                                "size": 20000,
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+
+        for body in [
+            "Learn about LPO processing software.",
+            "See the local purchase order status guide.",
+            "Our MPO automation platform streamlines approvals.",
+        ]:
+            with self.subTest(descriptive_body=body):
+                result = classify_mailbox_message(
+                    {
+                        "subject": "Information",
+                        "newest_body_text": body,
+                        "snippet": "",
+                        "attachment_manifest": [
+                            {
+                                "filename": "guide.pdf",
+                                "mime_type": "application/pdf",
+                                "size": 20000,
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(result["classification"], MailboxPOMessage.CLASS_OTHER)
+
+        controls = [
+            {
+                "subject": "Purchase Order",
+                "filename": "document.docx",
+            },
+            {
+                "subject": "PO-12345",
+                "filename": "document.docx",
+            },
+            {
+                "subject": "Documents",
+                "filename": "Purchase Order.pdf",
+            },
+            {
+                "subject": "LPO 12345 attached",
+                "filename": "document.pdf",
+            },
+            {
+                "subject": "Documents",
+                "filename": "MPO-98765.pdf",
+            },
+        ]
+        for case in controls:
+            with self.subTest(control=case):
+                result = classify_mailbox_message(
+                    {
+                        "subject": case["subject"],
+                        "newest_body_text": "Please see attached.",
+                        "snippet": "",
+                        "attachment_manifest": [
+                            {
+                                "filename": case["filename"],
+                                "mime_type": "application/octet-stream",
+                                "size": 20000,
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(
+                    result["classification"],
+                    MailboxPOMessage.CLASS_PURCHASE_ORDER,
+                )
+
+        for filename in ["Call-off award.jpg", "order_confirmation.docx"]:
+            with self.subTest(strong_filename=filename):
+                result = classify_mailbox_message(
+                    {
+                        "subject": "Documents",
+                        "newest_body_text": "Please review the purchase order status report.",
+                        "snippet": "",
+                        "attachment_manifest": [
+                            {
+                                "filename": filename,
+                                "mime_type": "application/octet-stream",
+                                "size": 20000,
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(
+                    result["classification"],
+                    MailboxPOMessage.CLASS_POSSIBLE_PO,
+                )
 
     def test_revised_quotation_request_is_not_order_confirmation(self):
         document = {
