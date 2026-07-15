@@ -1,3 +1,4 @@
+import hashlib
 from decimal import Decimal
 
 from django.conf import settings
@@ -1782,7 +1783,10 @@ class QuotationPOEvidence(models.Model):
         related_name="evidence",
     )
     match_signals = models.JSONField(default=dict, blank=True)
-    selected_attachment_id = models.CharField(max_length=255, blank=True)
+    # Gmail attachment tokens are opaque and can exceed 400 characters. Keep
+    # the complete token so exact-source review can fetch the selected MIME
+    # part instead of falling back to an ambiguous filename.
+    selected_attachment_id = models.TextField(blank=True)
     selected_attachment_filename = models.CharField(max_length=255, blank=True)
     # Stable identity for the independently reviewable source document inside
     # a Gmail message.  A message may contain multiple unrelated LPO files, so
@@ -1859,7 +1863,11 @@ class QuotationPOEvidence(models.Model):
             return f"sha256:{source_hash}"[:255]
         attachment_id = str(selected_attachment_id or "").strip()
         if attachment_id:
-            return f"attachment:{attachment_id}"[:255]
+            source_key = f"attachment:{attachment_id}"
+            if len(source_key) <= 255:
+                return source_key
+            digest = hashlib.sha256(attachment_id.encode("utf-8")).hexdigest()
+            return f"attachment-sha256:{digest}"
         message_id = str(gmail_message_id or "").strip()
         return f"message:{message_id}"[:255] if message_id else ""
 

@@ -404,9 +404,9 @@ def document_variants(inventory):
         ):
             body_mirrors_file = True
         attachment_id = str(
-            attachment.get("attachment_id")
+            attachment.get("part_id")
             or attachment.get("source_gmail_attachment_id")
-            or attachment.get("part_id")
+            or attachment.get("attachment_id")
             or ""
         )
         combined_text = "\n".join(filter(None, [base_body, attachment_text, filename]))
@@ -604,16 +604,15 @@ def _manifest_with_selection(inventory, variant):
     for attachment in inventory.attachment_manifest or []:
         copied = dict(attachment) if isinstance(attachment, dict) else attachment
         if isinstance(copied, dict):
-            identifier = str(
-                copied.get("attachment_id")
-                or copied.get("source_gmail_attachment_id")
-                or copied.get("part_id")
-                or ""
-            )
+            identifiers = {
+                str(copied.get("attachment_id") or ""),
+                str(copied.get("source_gmail_attachment_id") or ""),
+                str(copied.get("part_id") or ""),
+            }
             copied["is_selected"] = bool(
                 variant.source_kind == "attachment"
                 and variant.attachment_id
-                and identifier == variant.attachment_id
+                and variant.attachment_id in identifiers
             )
         manifest.append(copied)
     return manifest
@@ -667,6 +666,67 @@ def _signal_payload(proposal, *, decisive, variant_count):
     }
 
 
+def _attachment_identifiers(attachment):
+    if not isinstance(attachment, dict):
+        return set()
+    return {
+        value
+        for value in (
+            str(attachment.get("attachment_id") or ""),
+            str(attachment.get("source_gmail_attachment_id") or ""),
+            str(attachment.get("part_id") or ""),
+        )
+        if value
+    }
+
+
+def _evidence_matches_attachment_variant(evidence, inventory, variant):
+    """Recognize one source across the old Gmail-token and stable-part schemes."""
+
+    if variant.source_kind != "attachment" or not variant.attachment_id:
+        return False
+    evidence_hash = str(evidence.source_sha256 or "").strip().lower()
+    variant_hash = str(variant.source_sha256 or "").strip().lower()
+    if evidence_hash and variant_hash and evidence_hash == variant_hash:
+        return True
+
+    current_sets = [
+        identifiers
+        for attachment in (inventory.attachment_manifest or [])
+        if variant.attachment_id in (identifiers := _attachment_identifiers(attachment))
+    ]
+    selected_id = str(evidence.selected_attachment_id or "")
+    stored_sets = [
+        identifiers
+        for attachment in (evidence.attachments or [])
+        if (
+            selected_id in (identifiers := _attachment_identifiers(attachment))
+            or (
+                isinstance(attachment, dict)
+                and attachment.get("is_selected") is True
+            )
+        )
+    ]
+    if len(current_sets) != 1 or len(stored_sets) != 1:
+        return bool(selected_id and selected_id == variant.attachment_id)
+    return bool(current_sets[0].intersection(stored_sets[0]))
+
+
+def _evidence_review_priority(evidence):
+    if evidence.link_approved_at or evidence.status == QuotationPOEvidence.STATUS_PARSED:
+        return 3
+    if evidence.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
+        return 2
+    return 0
+
+
+def _superseded_identity_key(evidence):
+    digest = hashlib.sha256(
+        f"{evidence.pk}:{evidence.source_key}".encode("utf-8")
+    ).hexdigest()
+    return f"superseded:{evidence.pk}:{digest}"
+
+
 def _matching_reason(proposal, decisive):
     candidate = proposal.candidate
     components = "; ".join(
@@ -705,26 +765,101 @@ def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_
             QuotationPOEvidence.objects.select_for_update().filter(
                 gmail_connection=inventory.gmail_connection,
                 gmail_message_id=inventory.gmail_message_id,
-            ).filter(Q(source_key=source_key) | Q(source_key=legacy_message_key))
+            )
         )
-        existing = next(
+        source_peers = [
+            peer
+            for peer in peers
+            if peer.source_key in {source_key, legacy_message_key}
+            or _evidence_matches_attachment_variant(
+                peer,
+                inventory,
+                proposal.variant,
+            )
+        ]
+        exact_existing = next(
             (
                 peer
-                for peer in peers
+                for peer in source_peers
                 if peer.quotation_id == proposal.quote_id and peer.source_key == source_key
             ),
             None,
         )
+        compatible = [
+            peer
+            for peer in source_peers
+            if peer.quotation_id == proposal.quote_id
+            and _evidence_matches_attachment_variant(
+                peer,
+                inventory,
+                proposal.variant,
+            )
+        ]
+        reviewed_compatible = [
+            peer for peer in compatible if _evidence_review_priority(peer)
+        ]
+        if reviewed_compatible:
+            existing = max(
+                reviewed_compatible,
+                key=lambda peer: (
+                    _evidence_review_priority(peer),
+                    peer.source_key == source_key,
+                    peer.pk,
+                ),
+            )
+        elif exact_existing is not None:
+            existing = exact_existing
+        elif len(compatible) == 1:
+            existing = compatible[0]
+        else:
+            existing = None
         legacy_existing = next(
             (
                 peer
-                for peer in peers
+                for peer in source_peers
                 if peer.quotation_id == proposal.quote_id
                 and peer.source_key == legacy_message_key
                 and peer.source_key != source_key
             ),
             None,
         )
+        if (
+            existing is not None
+            and exact_existing is not None
+            and existing.pk != exact_existing.pk
+            and _evidence_review_priority(existing)
+            > _evidence_review_priority(exact_existing)
+        ):
+            exact_existing.source_key = _superseded_identity_key(exact_existing)
+            update_fields = ["source_key", "updated_at"]
+            if not _evidence_review_priority(exact_existing):
+                exact_existing.status = QuotationPOEvidence.STATUS_SUPERSEDED
+                exact_existing.error = (
+                    "Superseded while consolidating a rotating Gmail attachment token "
+                    "into the same previously reviewed MIME part."
+                )
+                update_fields.extend(["status", "error"])
+            exact_existing.save(update_fields=update_fields)
+        if (
+            existing is not None
+            and proposal.variant.source_kind == "attachment"
+            and _evidence_matches_attachment_variant(
+                existing,
+                inventory,
+                proposal.variant,
+            )
+            and (
+                existing.source_key != source_key
+                or existing.selected_attachment_id != proposal.variant.attachment_id
+            )
+        ):
+            existing.source_key = source_key
+            existing.selected_attachment_id = proposal.variant.attachment_id
+            update_fields = ["source_key", "selected_attachment_id", "updated_at"]
+            if existing.mailbox_message_id is None:
+                existing.mailbox_message = inventory
+                update_fields.append("mailbox_message")
+            existing.save(update_fields=update_fields)
         if existing is None and legacy_existing is not None:
             if (
                 legacy_existing.status
@@ -753,7 +888,7 @@ def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_
             return existing, False
         reviewed_peers = [
             peer
-            for peer in peers
+            for peer in source_peers
             if peer.quotation_id != proposal.quote_id
             and (peer.status == QuotationPOEvidence.STATUS_PARSED or peer.link_approved_at)
         ]
@@ -763,7 +898,7 @@ def _store_proposal(inventory, proposal, match_run, actor, *, decisive, variant_
         elif decisive:
             peer_ids = [
                 peer.id
-                for peer in peers
+                for peer in source_peers
                 if peer.quotation_id != proposal.quote_id
                 and peer.status
                 in {

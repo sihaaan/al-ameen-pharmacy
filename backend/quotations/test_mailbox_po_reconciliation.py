@@ -130,7 +130,7 @@ class MailboxPOReconciliationTests(TestCase):
         self.assertEqual(evidence.status, QuotationPOEvidence.STATUS_CANDIDATE)
         self.assertEqual(evidence.mailbox_message, message)
         self.assertEqual(evidence.mailbox_match_run, match_run)
-        self.assertEqual(evidence.selected_attachment_id, "att-decisive")
+        self.assertEqual(evidence.selected_attachment_id, "1")
         self.assertEqual(evidence.selected_attachment_filename, "LPO-decisive.pdf")
         self.assertTrue(evidence.attachments[0]["is_selected"])
         self.assertEqual(evidence.match_signals["candidate"]["item_coverage"], 1.0)
@@ -143,6 +143,250 @@ class MailboxPOReconciliationTests(TestCase):
         )
         self.assertEqual(QuotationLPO.objects.count(), 0)
         self.assertEqual(ProformaInvoice.objects.count(), 0)
+
+    def test_long_gmail_attachment_identity_is_stored_losslessly(self):
+        long_attachment_id = "ANGjdJ_" + ("a" * 395) + "terminal-token"
+        message = self.message(
+            "long-attachment-identity",
+            rows=[
+                {
+                    "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                    "quantity": "10",
+                    "unit_price": "10",
+                    "line_total": "100",
+                }
+            ],
+        )
+        manifest = message.attachment_manifest
+        manifest[0]["attachment_id"] = long_attachment_id
+        manifest[0]["part_id"] = ""
+        message.attachment_manifest = manifest
+        message.save(update_fields=["attachment_manifest", "updated_at"])
+
+        reconcile_mailbox_po_audit(self.run, requested_by=self.staff)
+
+        evidence = QuotationPOEvidence.objects.get(
+            quotation=self.quote,
+            gmail_message_id="long-attachment-identity",
+        )
+        self.assertEqual(evidence.selected_attachment_id, long_attachment_id)
+        evidence.full_clean()
+
+        reconcile_mailbox_po_audit(self.run, requested_by=self.staff)
+        self.assertEqual(
+            QuotationPOEvidence.objects.filter(
+                quotation=self.quote,
+                gmail_message_id="long-attachment-identity",
+            ).count(),
+            1,
+        )
+
+    def test_stable_part_id_is_preferred_over_a_long_gmail_download_token(self):
+        long_attachment_id = "ANGjdJ_" + ("b" * 420)
+        message = self.message(
+            "stable-part-identity",
+            rows=[
+                {
+                    "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                    "quantity": "10",
+                    "unit_price": "10",
+                    "line_total": "100",
+                }
+            ],
+        )
+        manifest = message.attachment_manifest
+        manifest[0]["attachment_id"] = long_attachment_id
+        manifest[0]["part_id"] = "2.1"
+        message.attachment_manifest = manifest
+        message.save(update_fields=["attachment_manifest", "updated_at"])
+
+        reconcile_mailbox_po_audit(self.run, requested_by=self.staff)
+
+        evidence = QuotationPOEvidence.objects.get(
+            quotation=self.quote,
+            gmail_message_id="stable-part-identity",
+        )
+        self.assertEqual(evidence.selected_attachment_id, "2.1")
+        self.assertTrue(evidence.attachments[0]["is_selected"])
+
+    def test_pre_upgrade_token_evidence_is_upgraded_without_duplication(self):
+        old_token = "legacy-gmail-download-token"
+        message = self.message(
+            "pre-upgrade-identity",
+            rows=[
+                {
+                    "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                    "quantity": "10",
+                    "unit_price": "10",
+                    "line_total": "100",
+                }
+            ],
+        )
+        manifest = message.attachment_manifest
+        manifest[0]["attachment_id"] = old_token
+        manifest[0]["part_id"] = "3.2"
+        manifest[0]["source_sha256"] = ""
+        message.attachment_manifest = manifest
+        message.save(update_fields=["attachment_manifest", "updated_at"])
+        reviewed_at = timezone.now()
+        evidence = QuotationPOEvidence.objects.create(
+            quotation=self.quote,
+            gmail_connection=self.connection,
+            gmail_message_id=message.gmail_message_id,
+            selected_attachment_id=old_token,
+            selected_attachment_filename=manifest[0]["filename"],
+            source_key=f"attachment:{old_token}",
+            attachments=[{**manifest[0], "is_selected": True}],
+            status=QuotationPOEvidence.STATUS_PARSED,
+            link_approved_by=self.staff,
+            link_approved_at=reviewed_at,
+            created_by=self.staff,
+        )
+
+        reconcile_mailbox_po_audit(self.run, requested_by=self.staff)
+
+        evidence.refresh_from_db()
+        self.assertEqual(
+            QuotationPOEvidence.objects.filter(
+                quotation=self.quote,
+                gmail_message_id=message.gmail_message_id,
+            ).count(),
+            1,
+        )
+        self.assertEqual(evidence.selected_attachment_id, "3.2")
+        self.assertEqual(evidence.source_key, "attachment:3.2")
+        self.assertEqual(evidence.status, QuotationPOEvidence.STATUS_PARSED)
+        self.assertEqual(evidence.link_approved_at, reviewed_at)
+        self.assertEqual(evidence.link_approved_by, self.staff)
+
+    def test_reviewed_legacy_identity_wins_over_unreviewed_part_id_collision(self):
+        old_token = "reviewed-legacy-token"
+        message = self.message(
+            "reviewed-identity-collision",
+            rows=[
+                {
+                    "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                    "quantity": "10",
+                    "unit_price": "10",
+                    "line_total": "100",
+                }
+            ],
+        )
+        manifest = message.attachment_manifest
+        manifest[0]["attachment_id"] = old_token
+        manifest[0]["part_id"] = "5.4"
+        manifest[0]["source_sha256"] = ""
+        message.attachment_manifest = manifest
+        message.save(update_fields=["attachment_manifest", "updated_at"])
+        unreviewed = QuotationPOEvidence.objects.create(
+            quotation=self.quote,
+            gmail_connection=self.connection,
+            gmail_message_id=message.gmail_message_id,
+            selected_attachment_id="5.4",
+            source_key="attachment:5.4",
+            attachments=[{**manifest[0], "is_selected": True}],
+            status=QuotationPOEvidence.STATUS_CANDIDATE,
+            created_by=self.staff,
+        )
+        dismissed = QuotationPOEvidence.objects.create(
+            quotation=self.quote,
+            gmail_connection=self.connection,
+            gmail_message_id=message.gmail_message_id,
+            selected_attachment_id=old_token,
+            source_key=f"attachment:{old_token}",
+            attachments=[{**manifest[0], "is_selected": True}],
+            status=QuotationPOEvidence.STATUS_NOT_RELEVANT,
+            created_by=self.staff,
+        )
+
+        reconcile_mailbox_po_audit(self.run, requested_by=self.staff)
+
+        unreviewed.refresh_from_db()
+        dismissed.refresh_from_db()
+        self.assertEqual(unreviewed.status, QuotationPOEvidence.STATUS_SUPERSEDED)
+        self.assertTrue(unreviewed.source_key.startswith(f"superseded:{unreviewed.pk}:"))
+        self.assertEqual(dismissed.status, QuotationPOEvidence.STATUS_NOT_RELEVANT)
+        self.assertEqual(dismissed.selected_attachment_id, "5.4")
+        self.assertEqual(dismissed.source_key, "attachment:5.4")
+        self.assertFalse(
+            QuotationPOEvidence.objects.filter(
+                quotation=self.quote,
+                gmail_message_id=message.gmail_message_id,
+                status__in=[
+                    QuotationPOEvidence.STATUS_CANDIDATE,
+                    QuotationPOEvidence.STATUS_AMBIGUOUS,
+                ],
+            ).exists()
+        )
+
+    def test_approved_legacy_identity_vacates_lower_priority_reviewed_collision(self):
+        old_token = "approved-legacy-token"
+        message = self.message(
+            "mixed-reviewed-identity-collision",
+            rows=[
+                {
+                    "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                    "quantity": "10",
+                    "unit_price": "10",
+                    "line_total": "100",
+                }
+            ],
+        )
+        manifest = message.attachment_manifest
+        manifest[0]["attachment_id"] = old_token
+        manifest[0]["part_id"] = "6.3"
+        manifest[0]["source_sha256"] = ""
+        message.attachment_manifest = manifest
+        message.save(update_fields=["attachment_manifest", "updated_at"])
+        dismissed = QuotationPOEvidence.objects.create(
+            quotation=self.quote,
+            gmail_connection=self.connection,
+            gmail_message_id=message.gmail_message_id,
+            selected_attachment_id="6.3",
+            source_key="attachment:6.3",
+            attachments=[{**manifest[0], "is_selected": True}],
+            status=QuotationPOEvidence.STATUS_NOT_RELEVANT,
+            created_by=self.staff,
+        )
+        approved = QuotationPOEvidence.objects.create(
+            quotation=self.quote,
+            gmail_connection=self.connection,
+            gmail_message_id=message.gmail_message_id,
+            selected_attachment_id=old_token,
+            source_key=f"attachment:{old_token}",
+            attachments=[{**manifest[0], "is_selected": True}],
+            status=QuotationPOEvidence.STATUS_PARSED,
+            link_approved_by=self.staff,
+            link_approved_at=timezone.now(),
+            created_by=self.staff,
+        )
+
+        reconcile_mailbox_po_audit(self.run, requested_by=self.staff)
+
+        dismissed.refresh_from_db()
+        approved.refresh_from_db()
+        self.assertEqual(dismissed.status, QuotationPOEvidence.STATUS_NOT_RELEVANT)
+        self.assertTrue(dismissed.source_key.startswith(f"superseded:{dismissed.pk}:"))
+        self.assertEqual(approved.status, QuotationPOEvidence.STATUS_PARSED)
+        self.assertEqual(approved.selected_attachment_id, "6.3")
+        self.assertEqual(approved.source_key, "attachment:6.3")
+
+    def test_long_attachment_source_keys_hash_the_complete_identity(self):
+        shared_prefix = "ANGjdJ_" + ("x" * 400)
+        first = QuotationPOEvidence.build_source_key(
+            selected_attachment_id=f"{shared_prefix}-first"
+        )
+        second = QuotationPOEvidence.build_source_key(
+            selected_attachment_id=f"{shared_prefix}-second"
+        )
+
+        self.assertTrue(first.startswith("attachment-sha256:"))
+        self.assertLessEqual(len(first), 255)
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            QuotationPOEvidence.build_source_key(selected_attachment_id="short-id"),
+            "attachment:short-id",
+        )
 
     def test_missing_quantity_or_commercial_value_stays_ambiguous_even_with_exact_quote_reference(self):
         self.message(
