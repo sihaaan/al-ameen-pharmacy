@@ -1,9 +1,11 @@
 import json
 import logging
 import re
+from pathlib import Path
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
@@ -47,6 +49,8 @@ from .contract_intelligence import (
     disconnect_gmail,
     exchange_gmail_code,
     gmail_frontend_redirect_url,
+    gmail_fetch_attachment_content,
+    gmail_connection_lineage_q,
     gmail_oauth_configured,
     parse_gmail_oauth_state,
     resolve_gmail_connection,
@@ -55,6 +59,12 @@ from .contract_intelligence import (
 )
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
+from .mailbox_po_audit import scan_mailbox_po_audit_page, start_mailbox_po_audit
+from .mailbox_po_reconciliation import (
+    ALGORITHM_VERSION,
+    MailboxPOMatchBusy,
+    reconcile_mailbox_po_audit_page,
+)
 from .matching import apply_match_to_preview_line, create_or_reuse_product
 from .models import (
     Company,
@@ -70,6 +80,8 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    MailboxPOAuditRun,
+    MailboxPOMatchRun,
     ProformaInvoice,
     ProformaInvoiceLine,
     Quotation,
@@ -77,6 +89,7 @@ from .models import (
     QuotationLine,
     QuotationLPO,
     QuotationOutcomePOImport,
+    QuotationPOEvidence,
     QuotationSettings,
     UserQuotationProfile,
     ProductAlias,
@@ -103,6 +116,8 @@ from .serializers import (
     ImportedInquiryCreateSerializer,
     InquiryLineSerializer,
     InquirySerializer,
+    MailboxPOAuditRunSerializer,
+    MailboxPOMatchRunSerializer,
     QuotationAuditLogSerializer,
     QuotationLineSerializer,
     QuotationLPOSerializer,
@@ -1690,6 +1705,350 @@ class InquiryLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return Response(ProductAliasSerializer(alias, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
+PO_EVIDENCE_ACTIVE_STATUSES = [
+    QuotationPOEvidence.STATUS_CANDIDATE,
+    QuotationPOEvidence.STATUS_AMBIGUOUS,
+    QuotationPOEvidence.STATUS_PARSED,
+    QuotationPOEvidence.STATUS_FAILED,
+]
+PO_EVIDENCE_ARCHIVE_PAGE_SIZE = 20
+PO_EVIDENCE_ARCHIVE_MAX_PAGE_SIZE = 50
+
+
+def _bounded_int(value, *, default, minimum=0, maximum=50):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _quotation_po_evidence_page(quotation, request):
+    connection = resolve_gmail_connection(request.user, shared_only=True)
+    queryset = quotation.po_evidence.none()
+    if connection:
+        queryset = quotation.po_evidence.filter(
+            gmail_connection_lineage_q(connection)
+        ).select_related(
+            "mailbox_message", "mailbox_match_run"
+        )
+    order = ("-confidence", "-sent_at", "-created_at")
+    active = list(queryset.filter(status__in=PO_EVIDENCE_ACTIVE_STATUSES).order_by(*order))
+    archived_queryset = queryset.exclude(status__in=PO_EVIDENCE_ACTIVE_STATUSES).order_by(*order)
+    archived_total = archived_queryset.count()
+    archived_offset = _bounded_int(
+        request.query_params.get("archived_offset"),
+        default=0,
+        minimum=0,
+        maximum=max(archived_total, 0),
+    )
+    archived_limit = _bounded_int(
+        request.query_params.get("archived_limit"),
+        default=PO_EVIDENCE_ARCHIVE_PAGE_SIZE,
+        minimum=1,
+        maximum=PO_EVIDENCE_ARCHIVE_MAX_PAGE_SIZE,
+    )
+    archived = list(archived_queryset[archived_offset:archived_offset + archived_limit])
+    next_offset = archived_offset + len(archived)
+    return active + archived, {
+        "active_count": len(active),
+        "archived_count": archived_total,
+        "archived_offset": archived_offset,
+        "archived_limit": archived_limit,
+        "archived_returned": len(archived),
+        "archived_has_more": next_offset < archived_total,
+        "archived_next_offset": next_offset if next_offset < archived_total else None,
+    }
+
+
+class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):
+    serializer_class = MailboxPOAuditRunSerializer
+    queryset = MailboxPOAuditRun.objects.select_related("gmail_connection", "requested_by")
+
+    def get_queryset(self):
+        connection = resolve_gmail_connection(self.request.user, shared_only=True)
+        if not connection:
+            return super().get_queryset().none()
+        return super().get_queryset().filter(gmail_connection=connection)
+
+    def _response(self, run, *, http_status=status.HTTP_200_OK):
+        latest_match = run.match_runs.select_related("requested_by").first()
+        return Response(
+            {
+                "run": MailboxPOAuditRunSerializer(run, context={"request": self.request}).data,
+                "match_run": (
+                    MailboxPOMatchRunSerializer(latest_match, context={"request": self.request}).data
+                    if latest_match
+                    else None
+                ),
+                "inventory_done": bool(run.status == MailboxPOAuditRun.STATUS_COMPLETED and run.exhausted),
+                "inventory_complete": bool(
+                    run.status == MailboxPOAuditRun.STATUS_COMPLETED
+                    and run.exhausted
+                    and run.incomplete_messages == 0
+                ),
+                "done": bool(
+                    run.status == MailboxPOAuditRun.STATUS_COMPLETED
+                    and run.exhausted
+                    and latest_match
+                    and latest_match.status == MailboxPOMatchRun.STATUS_COMPLETED
+                ),
+            },
+            status=http_status,
+        )
+
+    def create(self, request, *args, **kwargs):
+        connection = resolve_gmail_connection(request.user, shared_only=True)
+        if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+            return Response(
+                {"detail": "Connect the shared Gmail mailbox before starting a mailbox-wide PO audit."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        restart = str(request.data.get("restart", "false")).lower() in {"1", "true", "yes", "on"}
+        if not restart:
+            resumable = (
+                MailboxPOAuditRun.objects.filter(
+                    gmail_connection=connection,
+                    status__in=[
+                        MailboxPOAuditRun.STATUS_PENDING,
+                        MailboxPOAuditRun.STATUS_RUNNING,
+                        MailboxPOAuditRun.STATUS_FAILED,
+                    ],
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if resumable:
+                return self._response(resumable)
+            # Inventory and reconciliation are deliberately separate phases.
+            # Return a completed snapshot that has not yet been reconciled so
+            # the client continues that job instead of silently starting over.
+            awaiting_reconciliation = (
+                MailboxPOAuditRun.objects.filter(
+                    gmail_connection=connection,
+                    status=MailboxPOAuditRun.STATUS_COMPLETED,
+                    exhausted=True,
+                )
+                .exclude(
+                    match_runs__algorithm_version=ALGORITHM_VERSION,
+                    match_runs__status=MailboxPOMatchRun.STATUS_COMPLETED,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if awaiting_reconciliation:
+                return self._response(awaiting_reconciliation)
+        try:
+            run = start_mailbox_po_audit(connection, requested_by=request.user)
+        except (ValueError, RuntimeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return self._response(run, http_status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def latest(self, request):
+        connection = resolve_gmail_connection(request.user, shared_only=True)
+        run = (
+            self.get_queryset().filter(gmail_connection=connection).first()
+            if connection
+            else None
+        )
+        if not run:
+            return Response(
+                {
+                    "run": None,
+                    "match_run": None,
+                    "inventory_done": False,
+                    "inventory_complete": False,
+                    "done": False,
+                }
+            )
+        return self._response(run)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def scan_page(self, request, pk=None):
+        run = self.get_object()
+        if run.status == MailboxPOAuditRun.STATUS_COMPLETED or run.exhausted:
+            return self._response(run)
+        try:
+            page_size = max(1, min(int(request.data.get("page_size") or 10), 25))
+            run = scan_mailbox_po_audit_page(run, page_size=page_size)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return self._response(run)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def reconcile(self, request, pk=None):
+        run = self.get_object()
+        if run.status != MailboxPOAuditRun.STATUS_COMPLETED or not run.exhausted:
+            return Response(
+                {"detail": "Finish the mailbox inventory before matching quotations."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        force = str(request.data.get("force", "false")).lower() in {"1", "true", "yes", "on"}
+        current = run.match_runs.filter(
+            algorithm_version=ALGORITHM_VERSION,
+            status=MailboxPOMatchRun.STATUS_COMPLETED,
+        ).first()
+        if current and not force:
+            return self._response(run)
+        try:
+            page_size = max(1, min(int(request.data.get("page_size") or 5), 10))
+            reconcile_mailbox_po_audit_page(
+                run,
+                requested_by=request.user,
+                page_size=page_size,
+                force=force,
+            )
+        except MailboxPOMatchBusy as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        except (TypeError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Mailbox PO reconciliation failed for audit %s", run.pk)
+            return Response(
+                {"detail": f"Mailbox inventory completed, but quotation matching failed. {str(exc)[:250]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        run.refresh_from_db()
+        return self._response(run)
+
+
+class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
+    """Narrow evidence-source endpoints used by the manual review screen."""
+
+    serializer_class = QuotationPOEvidenceSerializer
+    queryset = QuotationPOEvidence.objects.select_related("gmail_connection", "quotation", "mailbox_message")
+
+    def get_queryset(self):
+        connection = resolve_gmail_connection(self.request.user, shared_only=True)
+        if not connection:
+            return super().get_queryset().none()
+        return super().get_queryset().filter(gmail_connection_lineage_q(connection))
+
+    @action(detail=True, methods=["get"])
+    def source(self, request, pk=None):
+        evidence = self.get_object()
+        message = evidence.mailbox_message
+        max_chars = _bounded_int(
+            getattr(settings, "PO_EVIDENCE_SOURCE_VIEW_MAX_CHARS", 100000),
+            default=100000,
+            minimum=1000,
+            maximum=250000,
+        )
+        extracted_text = str(evidence.extracted_text or "")
+        email_body = str(getattr(message, "newest_body_text", "") or "")
+        response = Response(
+            {
+                "id": evidence.id,
+                "selected_source_kind": str(((evidence.match_signals or {}).get("source") or {}).get("kind") or ""),
+                "extracted_text": extracted_text[:max_chars],
+                "extracted_text_truncated": len(extracted_text) > max_chars,
+                "email_body_text": email_body[:max_chars],
+                "email_body_text_truncated": len(email_body) > max_chars,
+            }
+        )
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        response["Pragma"] = "no-cache"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @action(detail=True, methods=["get"])
+    def attachment(self, request, pk=None):
+        evidence = self.get_object()
+        requested_id = str(request.query_params.get("attachment_id") or "").strip()
+        if not requested_id:
+            return Response({"detail": "Choose an attachment to view."}, status=status.HTTP_400_BAD_REQUEST)
+
+        manifest_entry = next(
+            (
+                attachment
+                for attachment in (evidence.attachments or [])
+                if isinstance(attachment, dict)
+                and requested_id
+                in {
+                    str(attachment.get("attachment_id") or ""),
+                    str(attachment.get("source_gmail_attachment_id") or ""),
+                    str(attachment.get("part_id") or ""),
+                }
+            ),
+            None,
+        )
+        if not manifest_entry:
+            return Response(
+                {"detail": "That attachment does not belong to this Gmail evidence record."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not evidence.gmail_message_id:
+            return Response(
+                {"detail": "This historical evidence record has no Gmail message to open."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        connection = resolve_gmail_connection(request.user, shared_only=True)
+        if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+            return Response(
+                {"detail": "Reconnect the shared Gmail mailbox before opening source attachments."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        evidence_mailbox = str(
+            evidence.mailbox_email
+            or getattr(getattr(evidence, "gmail_connection", None), "email", "")
+            or ""
+        ).strip().lower()
+        if evidence_mailbox and evidence_mailbox != str(connection.email or "").strip().lower():
+            return Response(
+                {"detail": "This evidence is not from the designated shared Gmail mailbox."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        attachment_id = str(manifest_entry.get("attachment_id") or "")
+        part_id = str(manifest_entry.get("part_id") or "")
+        if not attachment_id and str(manifest_entry.get("source_gmail_attachment_id") or "") == requested_id:
+            # Older evidence stored a Gmail attachment id only under the
+            # source-provenance key; some legacy rows used the MIME part id.
+            attachment_id = requested_id
+            if not part_id:
+                part_id = requested_id
+        max_bytes = int(getattr(settings, "PO_EVIDENCE_ATTACHMENT_VIEW_MAX_BYTES", 20 * 1024 * 1024))
+        try:
+            source = gmail_fetch_attachment_content(
+                connection,
+                evidence.gmail_message_id,
+                attachment_id=attachment_id,
+                part_id=part_id,
+                max_bytes=max_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception("Could not fetch Gmail attachment for PO evidence %s", evidence.pk)
+            return Response(
+                {"detail": f"Could not open the Gmail attachment. {str(exc)[:250]}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        filename = Path(str(source.get("filename") or "gmail-attachment")).name
+        filename = re.sub(r"[\r\n\x00-\x1f\x7f\"\\]+", "_", filename)[:240] or "gmail-attachment"
+        mime_type = str(source.get("mime_type") or "application/octet-stream").split(";", 1)[0].strip().lower()
+        inline_types = {
+            "application/pdf",
+            "image/gif",
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "text/plain",
+        }
+        disposition = "inline" if mime_type in inline_types else "attachment"
+        response = HttpResponse(source["content"], content_type=mime_type)
+        response["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+        response["Content-Length"] = str(source.get("size") or len(source["content"]))
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        response["Pragma"] = "no-cache"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src data: blob:"
+        return response
+
+
 class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationSerializer
     queryset = Quotation.objects.select_related(
@@ -1704,21 +2063,24 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         if self.action == "list":
+            connection = resolve_gmail_connection(self.request.user, shared_only=True)
+            evidence_scope = gmail_connection_lineage_q(connection, prefix="po_evidence")
             queryset = queryset.annotate(
-                po_evidence_count=Count("po_evidence", distinct=True),
+                po_evidence_count=Count("po_evidence", filter=evidence_scope, distinct=True),
                 po_evidence_candidate_count=Count(
                     "po_evidence",
-                    filter=Q(po_evidence__status__in=["candidate", "parsed"]),
+                    filter=evidence_scope
+                    & Q(po_evidence__status__in=["candidate", "parsed"]),
                     distinct=True,
                 ),
                 po_evidence_ambiguous_count=Count(
                     "po_evidence",
-                    filter=Q(po_evidence__status="ambiguous"),
+                    filter=evidence_scope & Q(po_evidence__status="ambiguous"),
                     distinct=True,
                 ),
                 po_evidence_parsed_count=Count(
                     "po_evidence",
-                    filter=Q(po_evidence__status="parsed"),
+                    filter=evidence_scope & Q(po_evidence__status="parsed"),
                     distinct=True,
                 ),
             )
@@ -1770,6 +2132,16 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         quotation = self.get_object()
+        if quotation.lpos.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
+            return Response(
+                {
+                    "detail": (
+                        "This quotation has a confirmed LPO and cannot be deleted because that would "
+                        "remove accepted-price and order history. Correct the quotation or LPO instead."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         try:
             ensure_quotation_editable(quotation)
         except DjangoValidationError as exc:
@@ -1970,25 +2342,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             .get(pk=quotation.pk)
         )
         serializer = self.get_serializer(quotation)
-        evidence_order = ("-confidence", "-sent_at", "-created_at")
-        active_statuses = ["candidate", "ambiguous", "parsed", "failed"]
-        active_evidence = list(
-            quotation.po_evidence.filter(
-                status__in=active_statuses
-            ).order_by(*evidence_order)
-        )
-        # Every active link must be reachable from the outcome review. Only
-        # archived/rejected history is capped to keep the response bounded.
-        archived_evidence = list(
-            quotation.po_evidence.exclude(status__in=active_statuses)
-            .order_by(*evidence_order)[:12]
-        )
-        evidence = active_evidence + archived_evidence
+        evidence, evidence_pagination = _quotation_po_evidence_page(quotation, request)
         return Response(
             {
                 "quotation": serializer.data,
                 "summary": outcome_summary_for_quotation(quotation),
                 "po_evidence": QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request}).data,
+                "po_evidence_pagination": evidence_pagination,
                 "line_outcome_statuses": [
                     {"value": value, "label": label} for value, label in QuotationLine.OUTCOME_STATUS_CHOICES
                 ],
@@ -2083,13 +2443,59 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             ensure_outcome_reviewable(quotation)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
-        evidence = quotation.po_evidence.order_by("-confidence", "-sent_at", "-created_at")
+        evidence, evidence_pagination = _quotation_po_evidence_page(quotation, request)
         serializer = QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request})
-        return Response({"results": serializer.data, "count": len(serializer.data)})
+        return Response(
+            {
+                "results": serializer.data,
+                "count": len(serializer.data),
+                "pagination": evidence_pagination,
+            }
+        )
 
     @action(detail=True, methods=["post"], parser_classes=[JSONParser])
     def find_po_evidence(self, request, pk=None):
         quotation = self.get_object()
+        latest_audit = (
+            MailboxPOAuditRun.objects.filter(
+                gmail_connection=resolve_gmail_connection(request.user, shared_only=True),
+                status=MailboxPOAuditRun.STATUS_COMPLETED,
+                exhausted=True,
+                match_runs__status=MailboxPOMatchRun.STATUS_COMPLETED,
+                match_runs__algorithm_version=ALGORITHM_VERSION,
+            )
+            .distinct()
+            .first()
+        )
+        if latest_audit:
+            # Once the canonical mailbox audit exists, never fall back to the
+            # old capped per-quotation Gmail search: it was the source of the
+            # historical candidate explosion. Return the complete reconciled
+            # evidence trail instead.
+            connection = resolve_gmail_connection(request.user, shared_only=True)
+            evidence_queryset = quotation.po_evidence.filter(
+                gmail_connection_lineage_q(connection)
+            )
+            active_count = evidence_queryset.filter(
+                status__in=[QuotationPOEvidence.STATUS_CANDIDATE, QuotationPOEvidence.STATUS_PARSED]
+            ).count()
+            ambiguous_count = evidence_queryset.filter(status=QuotationPOEvidence.STATUS_AMBIGUOUS).count()
+            evidence, evidence_pagination = _quotation_po_evidence_page(quotation, request)
+            serializer = QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request})
+            return Response(
+                {
+                    "count": active_count,
+                    "ambiguous_count": ambiguous_count,
+                    "evidence_count": len(serializer.data),
+                    "scan_complete": True,
+                    "incomplete_queries": [],
+                    "scan_warning": "",
+                    "queries": [latest_audit.gmail_query],
+                    "results": serializer.data,
+                    "pagination": evidence_pagination,
+                    "mailbox_audit_run": latest_audit.id,
+                }
+            )
         try:
             result = find_quote_po_evidence(
                 quotation,
@@ -2143,7 +2549,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         quotation = self.get_object()
         evidence_id = request.data.get("evidence_id")
         try:
-            evidence = quotation.po_evidence.get(pk=evidence_id)
+            connection = resolve_gmail_connection(request.user, shared_only=True)
+            if not connection:
+                raise quotation.po_evidence.model.DoesNotExist
+            evidence = quotation.po_evidence.get(
+                gmail_connection_lineage_q(connection),
+                pk=evidence_id,
+            )
             po_import = parse_quote_po_evidence(
                 evidence,
                 request.user,
@@ -2173,7 +2585,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 # Serialize this decision against approval/parsing. Without a
                 # row lock, a stale candidate instance could overwrite a
                 # concurrently completed approval back to not_relevant.
-                evidence = quotation.po_evidence.select_for_update().get(pk=evidence_id)
+                connection = resolve_gmail_connection(request.user, shared_only=True)
+                if not connection:
+                    raise quotation.po_evidence.model.DoesNotExist
+                evidence = quotation.po_evidence.select_for_update().get(
+                    gmail_connection_lineage_q(connection),
+                    pk=evidence_id,
+                )
             except quotation.po_evidence.model.DoesNotExist:
                 return Response(
                     {"detail": "Select a valid Gmail evidence candidate."},
@@ -2411,7 +2829,16 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 class QuotationLPOViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationLPOSerializer
     queryset = QuotationLPO.objects.select_related("quotation", "quotation__company", "received_by")
-    http_method_names = ["get", "patch", "delete", "head", "options"]
+    http_method_names = ["get", "put", "patch", "delete", "head", "options"]
+
+    @staticmethod
+    def _editable_audit_snapshot(lpo):
+        return {
+            "lpo_number": lpo.lpo_number,
+            "lpo_date": lpo.lpo_date.isoformat() if lpo.lpo_date else "",
+            "status": lpo.status,
+            "notes": lpo.notes,
+        }
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -2421,17 +2848,33 @@ class QuotationLPOViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return queryset.order_by("-received_at", "-id")
 
     def perform_update(self, serializer):
+        before = self._editable_audit_snapshot(serializer.instance)
         lpo = serializer.save()
+        after = self._editable_audit_snapshot(lpo)
         audit_log(
             self.request.user,
             QuotationAuditLog.ACTION_UPDATED,
             lpo,
             message=f"Updated LPO details for {lpo.quotation.quotation_number}.",
-            changes={"lpo_number": lpo.lpo_number, "lpo_date": lpo.lpo_date.isoformat() if lpo.lpo_date else ""},
+            changes={
+                "before": before,
+                "after": after,
+                "changed_fields": [field for field in before if before[field] != after[field]],
+            },
         )
 
     def destroy(self, request, *args, **kwargs):
         lpo = self.get_object()
+        if lpo.status == QuotationLPO.STATUS_CONFIRMED:
+            return Response(
+                {
+                    "detail": (
+                        "Confirmed LPO records cannot be deleted because they are part of the quotation history. "
+                        "Correct the reference details instead."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         audit_log(
             request.user,
             QuotationAuditLog.ACTION_DELETED,

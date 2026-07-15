@@ -3,6 +3,7 @@ import importlib
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.apps import apps as django_apps
@@ -29,6 +30,7 @@ from .models import (
     ContractIntelligenceRun,
     ContractIntelligenceSource,
     GmailOAuthConnection,
+    MailboxPOAuditRun,
     Quotation,
     QuotationLPO,
     QuotationLine,
@@ -1363,28 +1365,46 @@ class ContractIntelligenceFallbackTests(TestCase):
 
 
 class SharedMailboxCommandTests(TestCase):
-    @patch("quotations.management.commands.scan_shared_mailbox_lpos.scan_quote_po_evidence_batch")
-    def test_scheduled_command_only_runs_review_candidate_discovery(self, scan):
+    @patch("quotations.management.commands.audit_shared_mailbox_lpos.reconcile_mailbox_po_audit")
+    @patch("quotations.management.commands.audit_shared_mailbox_lpos.scan_mailbox_po_audit_page")
+    @patch("quotations.management.commands.audit_shared_mailbox_lpos.start_mailbox_po_audit")
+    def test_legacy_command_runs_the_global_review_only_mailbox_audit(
+        self,
+        start_audit,
+        scan_page,
+        reconcile,
+    ):
         owner = User.objects.create_user("command-owner", is_staff=True)
-        GmailOAuthConnection.objects.create(
+        connection = GmailOAuthConnection.objects.create(
             user=owner,
             email="orders@pharmacy.example",
             is_shared=True,
+            status=GmailOAuthConnection.STATUS_CONNECTED,
         )
-        scan.return_value = {
-            "processed": 2,
-            "candidates_found": 1,
-            "remaining": 0,
-            "done": True,
-            "errors": [],
-            "quotes": [],
-        }
+        run = MailboxPOAuditRun.objects.create(
+            gmail_connection=connection,
+            requested_by=owner,
+            status=MailboxPOAuditRun.STATUS_COMPLETED,
+            earliest_quote_at=timezone.now() - timedelta(days=7),
+            gmail_query="in:anywhere after:1 -from:me",
+            exhausted=True,
+            completed_at=timezone.now(),
+        )
+        start_audit.return_value = run
+        reconcile.return_value = SimpleNamespace(
+            id=17,
+            status="completed",
+            summary={"automatic_messages": 1, "ambiguous_messages": 2},
+            errors=[],
+        )
         stdout = StringIO()
 
         call_command("scan_shared_mailbox_lpos", stdout=stdout)
 
-        self.assertIn("review candidate", stdout.getvalue())
-        self.assertTrue(scan.call_args.kwargs["rescan"])
+        self.assertIn("Mailbox-wide LPO audit completed", stdout.getvalue())
+        start_audit.assert_called_once_with(connection, requested_by=owner)
+        scan_page.assert_not_called()
+        reconcile.assert_called_once_with(run, requested_by=owner)
 
 
 class SharedMailboxOwnershipTests(TestCase):
@@ -1440,6 +1460,28 @@ class SharedMailboxOwnershipTests(TestCase):
         with self.assertRaises(PermissionError):
             exchange_gmail_code(self.other_staff, "oauth-code")
         form_request.assert_not_called()
+
+    @patch("quotations.contract_intelligence._json_request")
+    @patch("quotations.contract_intelligence._form_request")
+    def test_superuser_reauthorizing_same_mailbox_preserves_connection_lineage(
+        self,
+        form_request,
+        json_request,
+    ):
+        form_request.return_value = {
+            "access_token": "replacement-access-token",
+            "refresh_token": "replacement-refresh-token",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/gmail.readonly",
+        }
+        json_request.return_value = {"emailAddress": self.connection.email.upper()}
+
+        refreshed = exchange_gmail_code(self.superuser, "oauth-code")
+
+        self.assertEqual(refreshed.pk, self.connection.pk)
+        self.assertEqual(refreshed.user_id, self.owner.id)
+        self.assertTrue(refreshed.is_shared)
+        self.assertEqual(GmailOAuthConnection.objects.count(), 1)
 
 
 class SharedMailboxInitialSetupTests(TestCase):

@@ -16,6 +16,240 @@ const splitEvidenceReasons = (reason) => String(reason || '')
   .map((part) => part.trim())
   .filter(Boolean);
 
+const firstDefined = (...values) => values.find((value) => value !== undefined && value !== null && value !== '');
+
+const humanizeEvidenceLabel = (value) => String(value || '')
+  .replaceAll('_', ' ')
+  .replace(/\b\w/g, (character) => character.toUpperCase());
+
+const formatFileSize = (value) => {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return 'Size unknown';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
+};
+
+const attachmentIdentifier = (attachment) => firstDefined(
+  attachment?.attachment_id,
+  attachment?.source_gmail_attachment_id,
+  attachment?.part_id,
+  attachment?.id
+);
+
+const SAFE_INLINE_ATTACHMENT_TYPES = new Set([
+  'application/pdf',
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'text/plain',
+]);
+
+const normalizeMimeType = (value) => String(value || '')
+  .split(';', 1)[0]
+  .trim()
+  .toLowerCase();
+
+const attachmentMimeType = (attachment) => normalizeMimeType(firstDefined(
+  attachment?.mime_type,
+  attachment?.source_mime_type,
+  attachment?.content_type
+));
+
+const canInlinePreviewAttachment = (attachment) => SAFE_INLINE_ATTACHMENT_TYPES.has(attachmentMimeType(attachment));
+
+const responseContentType = (response, attachment) => {
+  const headers = response?.headers;
+  const headerValue = typeof headers?.get === 'function'
+    ? headers.get('content-type')
+    : headers?.['content-type'];
+  return normalizeMimeType(firstDefined(headerValue, response?.data?.type, attachmentMimeType(attachment)))
+    || 'application/octet-stream';
+};
+
+const safeAttachmentFilename = (attachment) => Array.from(
+  String(attachment?.filename || 'gmail-attachment')
+).map((character) => {
+  const codePoint = character.codePointAt(0);
+  return character === '\\' || character === '/' || codePoint < 32 || codePoint === 127
+    ? '_'
+    : character;
+}).join('').slice(0, 240) || 'gmail-attachment';
+
+const attachmentTypeLabel = (attachment) => {
+  const mimeType = firstDefined(attachment?.mime_type, attachment?.source_mime_type, attachment?.content_type);
+  const filename = String(attachment?.filename || '');
+  const extension = filename.includes('.') ? filename.split('.').pop().toUpperCase() : '';
+  if (extension && mimeType) return `${extension} · ${mimeType}`;
+  return extension || mimeType || 'File';
+};
+
+const evidenceBodyPreview = (evidence) => {
+  const fields = [
+    ['Selected source text', evidence?.extracted_text, evidence?.extracted_text_truncated],
+    ['Email body', evidence?.email_body_text, evidence?.email_body_text_truncated],
+    ['Email body', evidence?.email_body_preview],
+    ['Email body', evidence?.body_preview],
+    ['Parsed email body', evidence?.extracted_text_preview],
+    ['Email body', evidence?.email_body],
+    ['Email body', evidence?.body_text],
+    ['Gmail snippet', evidence?.snippet],
+  ];
+  const selected = fields.find(([, value]) => value !== undefined && value !== null && String(value).trim());
+  if (!selected) return { label: 'Email preview', text: '', truncated: false };
+  const text = String(selected[1]).trim();
+  return {
+    label: selected[0],
+    text: text.slice(0, 5000),
+    truncated: Boolean(selected[2]) || text.length > 5000,
+  };
+};
+
+const quoteReferenceInfo = (evidence) => {
+  const nested = firstDefined(
+    evidence?.quote_reference,
+    evidence?.match_signals?.quote_reference,
+    evidence?.matching_signals?.quote_reference
+  );
+  const nestedObject = nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : {};
+  const status = firstDefined(evidence?.quote_reference_status, nestedObject.status);
+  const explicitFlag = firstDefined(
+    evidence?.quote_reference_present,
+    evidence?.quote_reference_match,
+    evidence?.has_quote_reference,
+    nestedObject.present,
+    nestedObject.matched,
+    nestedObject.found
+  );
+  const reference = firstDefined(
+    evidence?.matched_quote_reference,
+    evidence?.quote_reference_value,
+    nestedObject.reference,
+    nestedObject.value,
+    nestedObject.label,
+    typeof nested === 'string' && !['present', 'matched', 'missing', 'not_found'].includes(nested.toLowerCase()) ? nested : undefined,
+    Array.isArray(evidence?.quote_references) ? evidence.quote_references.join(', ') : evidence?.quote_references
+  );
+
+  if (explicitFlag === undefined && status === undefined && reference === undefined) return null;
+  const normalizedStatus = String(status || '').toLowerCase();
+  const present = typeof explicitFlag === 'boolean'
+    ? explicitFlag
+    : explicitFlag !== undefined
+      ? !['false', 'missing', 'not_found', 'none', 'no'].includes(String(explicitFlag).toLowerCase())
+      : status !== undefined
+        ? !['missing', 'not_found', 'none', 'no_match', 'false'].includes(normalizedStatus)
+        : Boolean(reference);
+  return {
+    present,
+    label: present ? 'Quote reference present' : 'Quote reference missing',
+    detail: reference || (status ? humanizeEvidenceLabel(status) : ''),
+  };
+};
+
+const selectedAttachmentIdentity = (evidence) => {
+  const selected = firstDefined(evidence?.selected_source, evidence?.selected_attachment);
+  const selectedObject = selected && typeof selected === 'object' ? selected : {};
+  return {
+    id: firstDefined(
+      evidence?.selected_attachment_id,
+      evidence?.selected_source_attachment_id,
+      selectedObject.attachment_id,
+      selectedObject.part_id,
+      selectedObject.id
+    ),
+    filename: firstDefined(
+      evidence?.selected_attachment_filename,
+      evidence?.selected_source_filename,
+      evidence?.source_filename,
+      selectedObject.filename,
+      typeof selected === 'string' ? selected : undefined
+    ),
+  };
+};
+
+const isSelectedAttachment = (evidence, attachment) => {
+  if ([attachment?.is_selected, attachment?.selected, attachment?.is_primary, attachment?.selected_source].some((value) => value === true)) {
+    return true;
+  }
+  const selected = selectedAttachmentIdentity(evidence);
+  const identifier = attachmentIdentifier(attachment);
+  if (selected.id !== undefined && identifier !== undefined && String(selected.id) === String(identifier)) return true;
+  return Boolean(selected.filename && attachment?.filename && selected.filename === attachment.filename);
+};
+
+const signalValueText = (value) => {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value === 'boolean') return value ? 'Matched' : 'Not matched';
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (Array.isArray(value)) return value.map((item) => signalValueText(item)).filter(Boolean).join(', ');
+  const preferred = firstDefined(value.description, value.detail, value.reason, value.value, value.status, value.summary);
+  if (preferred !== undefined) return signalValueText(preferred);
+  return Object.entries(value)
+    .map(([key, item]) => `${humanizeEvidenceLabel(key)}: ${signalValueText(item)}`)
+    .filter((item) => !item.endsWith(': '))
+    .join(' · ');
+};
+
+const normalizeSignalEntries = (value) => {
+  if (value === undefined || value === null || value === '') return [];
+  if (Array.isArray(value)) {
+    return value.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return { label: `Signal ${index + 1}`, value: signalValueText(item), matched: undefined };
+      }
+      return {
+        label: firstDefined(item.label, item.name, item.item_name, item.item, item.type, `Signal ${index + 1}`),
+        value: signalValueText(firstDefined(item.description, item.detail, item.reason, item.value, item.status, item)),
+        matched: firstDefined(item.matched, item.present, item.found),
+      };
+    }).filter((entry) => entry.value || entry.label);
+  }
+  if (typeof value !== 'object') return [{ label: 'Signal', value: signalValueText(value), matched: undefined }];
+  const looksLikeSingleSignal = ['label', 'name', 'description', 'detail', 'reason', 'value', 'status', 'matched']
+    .some((key) => Object.prototype.hasOwnProperty.call(value, key));
+  if (looksLikeSingleSignal) {
+    return [{
+      label: firstDefined(value.label, value.name, 'Signal'),
+      value: signalValueText(firstDefined(value.description, value.detail, value.reason, value.value, value.status, value)),
+      matched: firstDefined(value.matched, value.present, value.found),
+    }];
+  }
+  return Object.entries(value).map(([key, item]) => ({
+    label: humanizeEvidenceLabel(key),
+    value: signalValueText(item),
+    matched: item && typeof item === 'object' ? firstDefined(item.matched, item.present, item.found) : undefined,
+  })).filter((entry) => entry.value);
+};
+
+const EvidenceSignalSection = ({ title, value }) => {
+  const entries = normalizeSignalEntries(value);
+  if (!entries.length) return null;
+  return (
+    <div className="qm-evidence-detail-section">
+      <h4>{title}</h4>
+      <div className="qm-evidence-signal-grid">
+        {entries.map((entry, index) => (
+          <div
+            key={`${entry.label}-${index}`}
+            className={`qm-evidence-signal ${entry.matched === true ? 'matched' : entry.matched === false ? 'not-matched' : ''}`}
+          >
+            <strong>{entry.label}</strong>
+            <span>{entry.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const evidenceConfidenceLabel = (confidence) => {
   const value = Number(confidence || 0);
   if (value >= 75) return 'Strong';
@@ -65,6 +299,8 @@ const GmailEvidenceCard = ({ evidence, markingEvidenceId, onReview, onMarkNotRel
   const archived = isEvidenceArchived(evidence);
   const confidence = Math.round(Number(evidence.confidence || 0));
   const reasons = splitEvidenceReasons(evidence.matching_reason);
+  const referenceInfo = quoteReferenceInfo(evidence);
+  const attachmentCount = firstDefined(evidence.attachment_count, evidence.attachments?.length, 0);
   const showStatusExplanation = ['ambiguous', 'superseded', 'not_relevant'].includes(status);
 
   return (
@@ -73,11 +309,16 @@ const GmailEvidenceCard = ({ evidence, markingEvidenceId, onReview, onMarkNotRel
         <div>
           <h4>{evidence.subject || 'Untitled email'}</h4>
           <p>{evidence.sender || 'Unknown sender'}</p>
-          <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} - {evidence.attachment_count} attachment(s)</small>
+          <small>{evidence.sent_at ? new Date(evidence.sent_at).toLocaleString() : 'No email date'} - {attachmentCount} attachment(s)</small>
         </div>
         <div className="qm-evidence-badges">
           <span className={`qm-badge evidence-${evidenceConfidenceLabel(confidence).toLowerCase()}`}>{confidence}% {evidenceConfidenceLabel(confidence)}</span>
           <span className={`qm-badge status-${status}`}>{statusInfo.label}</span>
+          {referenceInfo && (
+            <span className={`qm-badge evidence-reference-${referenceInfo.present ? 'present' : 'missing'}`}>
+              {referenceInfo.label}
+            </span>
+          )}
         </div>
       </div>
       <div className="qm-evidence-reason-list">
@@ -175,6 +416,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [poUseAi, setPoUseAi] = useState(true);
   const [poResult, setPoResult] = useState(null);
   const [poEvidence, setPoEvidence] = useState([]);
+  const [poEvidencePagination, setPoEvidencePagination] = useState(null);
   const [evidenceUseAi, setEvidenceUseAi] = useState(true);
   const [manualOutcome, setManualOutcome] = useState({ outcome_status: '', outcome_notes: '' });
   const [followupDraft, setFollowupDraft] = useState({
@@ -191,6 +433,11 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [parsingEvidenceId, setParsingEvidenceId] = useState(null);
   const [markingEvidenceId, setMarkingEvidenceId] = useState(null);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState(null);
+  const [selectedEvidenceSource, setSelectedEvidenceSource] = useState(null);
+  const [loadingEvidenceSource, setLoadingEvidenceSource] = useState(false);
+  const [evidenceSourceError, setEvidenceSourceError] = useState(null);
+  const [viewingAttachmentKey, setViewingAttachmentKey] = useState(null);
+  const [attachmentError, setAttachmentError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
 
@@ -198,6 +445,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     setQuote(data.quotation);
     setSummary(data.summary);
     setPoEvidence(data.po_evidence || []);
+    setPoEvidencePagination(data.po_evidence_pagination || null);
     const drafts = Object.fromEntries((data.quotation.lines || []).map((line) => [line.id, draftFromLine(line)]));
     setLineDrafts(drafts);
     setManualOutcome({
@@ -238,6 +486,71 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     () => poEvidence.find((item) => item.id === selectedEvidenceId) || null,
     [poEvidence, selectedEvidenceId]
   );
+  const selectedEvidenceForReview = useMemo(
+    () => selectedEvidence
+      ? { ...selectedEvidence, ...(selectedEvidenceSource?.id === selectedEvidence.id ? selectedEvidenceSource : {}) }
+      : null,
+    [selectedEvidence, selectedEvidenceSource]
+  );
+  const selectedEvidencePreview = useMemo(
+    () => evidenceBodyPreview(selectedEvidenceForReview),
+    [selectedEvidenceForReview]
+  );
+  const selectedEvidenceReference = useMemo(
+    () => quoteReferenceInfo(selectedEvidence),
+    [selectedEvidence]
+  );
+  const selectedEvidenceSignalSections = useMemo(() => {
+    if (!selectedEvidence) return [];
+    const grouped = selectedEvidence.match_signal_sections || selectedEvidence.items_quantity_time || {};
+    return [
+      {
+        title: 'Match signals',
+        value: firstDefined(
+          selectedEvidence.match_signals,
+          selectedEvidence.matching_signals,
+          selectedEvidence.match_signal_summary,
+          selectedEvidence.signals,
+          grouped.match,
+          grouped.general
+        ),
+      },
+      {
+        title: 'Items',
+        value: firstDefined(
+          selectedEvidence.item_match_signals,
+          selectedEvidence.item_signals,
+          selectedEvidence.matched_items,
+          selectedEvidence.item_matches,
+          grouped.items,
+          grouped.item
+        ),
+      },
+      {
+        title: 'Quantity',
+        value: firstDefined(
+          selectedEvidence.quantity_match_signals,
+          selectedEvidence.quantity_signals,
+          selectedEvidence.quantity_comparison,
+          selectedEvidence.quantity_matches,
+          grouped.quantity,
+          grouped.quantities
+        ),
+      },
+      {
+        title: 'Timing',
+        value: firstDefined(
+          selectedEvidence.time_match_signals,
+          selectedEvidence.time_signals,
+          selectedEvidence.time_comparison,
+          selectedEvidence.timeline_signals,
+          grouped.time,
+          grouped.timing,
+          grouped.timeline
+        ),
+      },
+    ].filter((section) => section.value !== undefined && section.value !== null && section.value !== '');
+  }, [selectedEvidence]);
   const activeEvidence = useMemo(
     () => poEvidence.filter((item) => !isEvidenceArchived(item)),
     [poEvidence]
@@ -246,6 +559,35 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     () => poEvidence.filter((item) => isEvidenceArchived(item)),
     [poEvidence]
   );
+
+  useEffect(() => {
+    setAttachmentError(null);
+    setViewingAttachmentKey(null);
+  }, [selectedEvidenceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSelectedEvidenceSource(null);
+    setEvidenceSourceError(null);
+    if (!selectedEvidenceId) {
+      setLoadingEvidenceSource(false);
+      return () => { cancelled = true; };
+    }
+    setLoadingEvidenceSource(true);
+    quotationAPI.quotes.poEvidenceSource(selectedEvidenceId)
+      .then((response) => {
+        if (!cancelled) setSelectedEvidenceSource(response.data || null);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setEvidenceSourceError(error?.response?.data?.detail || error?.message || 'Could not load the source text.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEvidenceSource(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedEvidenceId]);
 
   const updateLineDraft = (lineId, patch) => {
     setLineDrafts((current) => ({
@@ -326,10 +668,20 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
-  const loadPOEvidence = async () => {
+  const loadPOEvidence = async ({ archivedOffset, append = false } = {}) => {
     try {
-      const response = await quotationAPI.quotes.poEvidence(quoteId);
-      setPoEvidence(response.data.results || []);
+      const params = archivedOffset === undefined ? undefined : { archived_offset: archivedOffset };
+      const response = params
+        ? await quotationAPI.quotes.poEvidence(quoteId, params)
+        : await quotationAPI.quotes.poEvidence(quoteId);
+      const incoming = response.data.results || [];
+      setPoEvidence((current) => {
+        if (!append) return incoming;
+        const byId = new Map(current.map((item) => [item.id, item]));
+        incoming.forEach((item) => byId.set(item.id, item));
+        return Array.from(byId.values());
+      });
+      setPoEvidencePagination(response.data.pagination || null);
       return true;
     } catch (error) {
       const details = await describeQuotationError(error, 'Load Gmail PO evidence', `GET /quotations/quotes/${quoteId}/po_evidence/`);
@@ -339,28 +691,28 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
+  const loadMoreArchivedEvidence = async () => {
+    const nextOffset = poEvidencePagination?.archived_next_offset;
+    if (nextOffset === undefined || nextOffset === null) return;
+    setFindingEvidence(true);
+    await loadPOEvidence({ archivedOffset: nextOffset, append: true });
+    setFindingEvidence(false);
+  };
+
   const findPOEvidence = async () => {
     setFindingEvidence(true);
     setNotice(null);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.quotes.findPOEvidence(quoteId, { limit: 25 });
       const historyRefreshed = await loadPOEvidence();
-      const hasAmbiguousCount = Object.prototype.hasOwnProperty.call(response.data || {}, 'ambiguous_count');
-      const matchCount = Number(response.data.count || 0);
-      const ambiguousCount = Number(response.data.ambiguous_count || 0);
-      const ambiguousMessage = hasAmbiguousCount
-        ? ` ${ambiguousCount} ${ambiguousCount === 1 ? 'needs' : 'need'} assignment.`
-        : '';
-      const refreshMessage = historyRefreshed
-        ? ''
-        : ' The full evidence history could not be refreshed, so the existing history was preserved.';
       setNotice({
-        type: 'success',
-        message: `Found ${matchCount} candidate/parsed Gmail ${matchCount === 1 ? 'match' : 'matches'}.${ambiguousMessage} Nothing was saved to the outcome yet.${refreshMessage}`,
+        type: historyRefreshed ? 'success' : 'warning',
+        message: historyRefreshed
+          ? 'Mailbox-wide evidence refreshed. Nothing was saved to the outcome.'
+          : 'The evidence history could not be refreshed, so the existing review list was preserved.',
       });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Find Gmail PO evidence', `POST /quotations/quotes/${quoteId}/find_po_evidence/`);
+      const details = await describeQuotationError(error, 'Refresh Gmail PO evidence', `GET /quotations/quotes/${quoteId}/po_evidence/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -406,6 +758,73 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setMarkingEvidenceId(null);
+    }
+  };
+
+  const viewEvidenceAttachment = async (evidence, attachment, index) => {
+    const attachmentId = attachmentIdentifier(attachment);
+    if (attachmentId === undefined) {
+      setAttachmentError('This attachment does not include an attachment ID, so it cannot be opened from the current API response.');
+      return;
+    }
+
+    const key = `${evidence.id}:${attachmentId || index}`;
+    const endpoint = `GET /quotations/po-evidence/${evidence.id}/attachment/?attachment_id=${encodeURIComponent(attachmentId)}`;
+    let previewWindow = null;
+    if (canInlinePreviewAttachment(attachment)) {
+      try {
+        previewWindow = window.open('about:blank', '_blank');
+        if (previewWindow) previewWindow.opener = null;
+      } catch {
+        previewWindow = null;
+      }
+    }
+
+    setViewingAttachmentKey(key);
+    setAttachmentError(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.poEvidenceAttachment(evidence.id, attachmentId);
+      const responseType = responseContentType(response, attachment);
+      const inlineSafe = SAFE_INLINE_ATTACHMENT_TYPES.has(responseType);
+      // Active formats must never receive an HTML/SVG-capable blob URL in the
+      // application origin. Force them to an inert download MIME type even if
+      // the server or Gmail metadata reports a browser-renderable type.
+      const blob = new Blob([response.data], {
+        type: inlineSafe ? responseType : 'application/octet-stream',
+      });
+      if (!window.URL?.createObjectURL) throw new Error('This browser cannot open downloaded attachment blobs.');
+      const objectUrl = window.URL.createObjectURL(blob);
+
+      if (inlineSafe) {
+        if (previewWindow) {
+          previewWindow.location.href = objectUrl;
+        } else {
+          const link = document.createElement('a');
+          link.href = objectUrl;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.click();
+        }
+      } else {
+        if (previewWindow?.close) previewWindow.close();
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = safeAttachmentFilename(attachment);
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+      window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60000);
+    } catch (error) {
+      if (previewWindow?.close) previewWindow.close();
+      const details = await describeQuotationError(error, 'View Gmail evidence attachment', endpoint);
+      setAttachmentError(details.detail || 'Could not open this attachment.');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setViewingAttachmentKey(null);
     }
   };
 
@@ -465,8 +884,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         <div className="qm-panel-heading">
           <div>
             <span className="qm-step-kicker">Gmail evidence</span>
-            <h3>Find PO/LPO replies for this quotation</h3>
-            <p>Searches the shared Gmail mailbox for this quote, customer, and post-quote PO/LPO signals. A staff member must review and approve each email link before it can be parsed.</p>
+            <h3>Review mailbox-wide PO/LPO evidence</h3>
+            <p>The mailbox audit compares source attachments or the newest email body with quotation items, quantities, prices/totals, customer and timing. A staff member must still inspect and approve each link before parsing.</p>
           </div>
           <div className="qm-evidence-controls">
             <label className="qm-checkbox">
@@ -474,7 +893,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               AI cleanup
             </label>
             <button type="button" className="qm-primary" disabled={findingEvidence} onClick={findPOEvidence}>
-              {findingEvidence ? 'Searching Gmail...' : 'Find Gmail Evidence'}
+              {findingEvidence ? 'Refreshing...' : 'Refresh Evidence'}
             </button>
           </div>
         </div>
@@ -500,12 +919,12 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           <div className="qm-empty subtle">
             {archivedEvidence.length
               ? 'No active Gmail evidence. Archived scan history is available below.'
-              : 'No Gmail evidence candidates yet. Click Find Gmail Evidence to search for related PO/LPO replies.'}
+              : 'No Gmail evidence candidates yet. Run the mailbox-wide audit from the quotations list, then refresh this review.'}
           </div>
         )}
         {archivedEvidence.length > 0 && (
           <details className="qm-evidence-archive">
-            <summary>Archived evidence ({archivedEvidence.length})</summary>
+            <summary>Archived evidence ({poEvidencePagination?.archived_count ?? archivedEvidence.length})</summary>
             <p>Superseded and rejected matches are retained for audit only. They cannot be parsed for this quotation.</p>
             <div className="qm-evidence-grid">
               {archivedEvidence.map((evidence) => (
@@ -518,6 +937,16 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                 />
               ))}
             </div>
+            {poEvidencePagination?.archived_has_more && (
+              <button
+                type="button"
+                className="qm-secondary small"
+                disabled={findingEvidence}
+                onClick={loadMoreArchivedEvidence}
+              >
+                {findingEvidence ? 'Loading archive...' : 'Load more archived evidence'}
+              </button>
+            )}
           </details>
         )}
       </div>
@@ -559,6 +988,15 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                 <span>Assignment status</span>
                 <strong>{evidenceStatusInfo(selectedEvidence).label}</strong>
               </div>
+              {selectedEvidenceReference && (
+                <div className={`qm-evidence-reference ${selectedEvidenceReference.present ? 'present' : 'missing'}`}>
+                  <span>Quotation reference</span>
+                  <strong>
+                    {selectedEvidenceReference.label}
+                    {selectedEvidenceReference.detail ? ` · ${selectedEvidenceReference.detail}` : ''}
+                  </strong>
+                </div>
+              )}
             </div>
 
             <div className="qm-evidence-detail-section">
@@ -572,25 +1010,80 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             </div>
 
             <div className="qm-evidence-detail-section">
-              <h4>Email preview</h4>
-              <pre className="qm-evidence-preview">{selectedEvidence.extracted_text_preview || selectedEvidence.snippet || 'No preview text available yet. Use Parse & Suggest to fetch the full review source when appropriate.'}</pre>
+              <h4>{selectedEvidencePreview.label}</h4>
+              <pre className="qm-evidence-preview">
+                {selectedEvidencePreview.text
+                  || (loadingEvidenceSource
+                    ? 'Loading the selected source text...'
+                    : 'No source text is available for this evidence. You can still inspect its attachment below.')}
+              </pre>
+              {selectedEvidencePreview.truncated && <small className="qm-evidence-preview-note">Preview limited to the first 5,000 characters.</small>}
+              {evidenceSourceError && <div className="qm-notice warning">{evidenceSourceError}</div>}
             </div>
+
+            {selectedEvidenceSignalSections.map((section) => (
+              <EvidenceSignalSection key={section.title} title={section.title} value={section.value} />
+            ))}
 
             <div className="qm-evidence-detail-section">
               <h4>Attachments</h4>
               {selectedEvidence.attachments?.length ? (
                 <div className="qm-evidence-attachments">
-                  {selectedEvidence.attachments.map((attachment, index) => (
-                    <div key={`${attachment.filename || 'attachment'}-${index}`} className="qm-evidence-attachment">
-                      <strong>{attachment.filename || 'Unnamed attachment'}</strong>
-                      <span>{attachment.mime_type || 'file'} - {attachment.size ? `${attachment.size} bytes` : 'size unknown'}</span>
-                      {attachment.status && <span>{attachment.status}{attachment.reason ? ` - ${attachment.reason}` : ''}</span>}
-                    </div>
-                  ))}
+                  {selectedEvidence.attachments.map((attachment, index) => {
+                    const identifier = attachmentIdentifier(attachment);
+                    const attachmentKey = `${selectedEvidence.id}:${identifier || index}`;
+                    const selectedSource = isSelectedAttachment(selectedEvidence, attachment);
+                    const status = attachment.status || 'available';
+                    const size = firstDefined(attachment.size, attachment.source_file_size);
+                    const inlinePreview = canInlinePreviewAttachment(attachment);
+                    return (
+                      <article
+                        key={`${attachment.filename || 'attachment'}-${identifier || index}`}
+                        className={`qm-evidence-attachment ${selectedSource ? 'is-selected' : ''} status-${status}`}
+                      >
+                        <div className="qm-evidence-attachment-heading">
+                          <div>
+                            <strong>{attachment.filename || 'Unnamed attachment'}</strong>
+                            <span>{attachmentTypeLabel(attachment)}</span>
+                          </div>
+                          <div className="qm-evidence-attachment-badges">
+                            {selectedSource && <span className="qm-evidence-source-badge">Selected source</span>}
+                            <span className={`qm-evidence-attachment-status status-${status}`}>{humanizeEvidenceLabel(status)}</span>
+                          </div>
+                        </div>
+                        <div className="qm-evidence-attachment-meta">
+                          <span>{formatFileSize(size)}</span>
+                          {attachment.line_count !== undefined && <span>{attachment.line_count} parsed row(s)</span>}
+                          {identifier !== undefined && <span>Attachment ID recorded</span>}
+                        </div>
+                        {attachment.reason && <p>{attachment.reason}</p>}
+                        <button
+                          type="button"
+                          className="qm-secondary small"
+                          disabled={identifier === undefined || viewingAttachmentKey === attachmentKey}
+                          title={identifier === undefined
+                            ? 'The API response did not include an attachment ID.'
+                            : inlinePreview
+                              ? `Open ${attachment.filename || 'attachment'} in a new tab`
+                              : `Download ${attachment.filename || 'attachment'} without opening active content`}
+                          onClick={() => viewEvidenceAttachment(selectedEvidence, attachment, index)}
+                        >
+                          {viewingAttachmentKey === attachmentKey
+                            ? 'Opening attachment...'
+                            : identifier === undefined
+                              ? 'View unavailable'
+                              : inlinePreview
+                                ? 'View attachment'
+                                : 'Download attachment'}
+                        </button>
+                      </article>
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="qm-empty subtle">No attachments reported on this email.</div>
               )}
+              {attachmentError && <div className="qm-notice warning">{attachmentError}</div>}
             </div>
 
             {selectedEvidence.error && <div className="qm-notice warning">{selectedEvidence.error}</div>}

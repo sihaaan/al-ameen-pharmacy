@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
 
 from .models import (
     Company,
@@ -12,6 +13,10 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    MailboxPOAuditRun,
+    MailboxPOAuditFailure,
+    MailboxPOMatchRun,
+    MailboxPOMessage,
     ProformaInvoice,
     ProformaInvoiceLine,
     Quotation,
@@ -30,6 +35,57 @@ from .models import (
 class CompanyContactInline(admin.TabularInline):
     model = CompanyContact
     extra = 0
+
+
+class ReadOnlyHistoryAdminMixin:
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(MailboxPOAuditRun)
+class MailboxPOAuditRunAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = [
+        "id",
+        "gmail_connection",
+        "status",
+        "messages_scanned",
+        "relevant_messages",
+        "incomplete_messages",
+        "exhausted",
+        "created_at",
+    ]
+    list_filter = ["status", "exhausted", "created_at"]
+    search_fields = ["gmail_connection__email", "gmail_query"]
+    readonly_fields = [field.name for field in MailboxPOAuditRun._meta.fields]
+
+
+@admin.register(MailboxPOAuditFailure)
+class MailboxPOAuditFailureAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["audit_run", "gmail_message_id", "status", "attempts", "last_failed_at"]
+    list_filter = ["status", "last_failed_at"]
+    search_fields = ["gmail_message_id", "last_error", "audit_run__gmail_connection__email"]
+    readonly_fields = [field.name for field in MailboxPOAuditFailure._meta.fields]
+
+
+@admin.register(MailboxPOMatchRun)
+class MailboxPOMatchRunAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["id", "audit_run", "algorithm_version", "status", "completed_at", "created_at"]
+    list_filter = ["status", "algorithm_version", "created_at"]
+    readonly_fields = [field.name for field in MailboxPOMatchRun._meta.fields]
+
+
+@admin.register(MailboxPOMessage)
+class MailboxPOMessageAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["subject", "sender", "sent_at", "classification", "is_relevant", "auto_link_eligible"]
+    list_filter = ["classification", "is_relevant", "auto_link_eligible", "sent_at"]
+    search_fields = ["gmail_message_id", "subject", "sender", "newest_body_text"]
+    readonly_fields = [field.name for field in MailboxPOMessage._meta.fields]
 
 
 @admin.register(Company)
@@ -274,6 +330,21 @@ class QuotationAdmin(admin.ModelAdmin):
     ]
     inlines = [QuotationLineInline]
 
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.lpos.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def delete_model(self, request, obj):
+        if obj.lpos.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
+            raise PermissionDenied(Quotation.CONFIRMED_LPO_DELETE_ERROR)
+        return super().delete_model(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        if queryset.filter(lpos__status=QuotationLPO.STATUS_CONFIRMED).exists():
+            raise PermissionDenied(Quotation.CONFIRMED_LPO_DELETE_ERROR)
+        return super().delete_queryset(request, queryset)
+
 
 @admin.register(QuotationLine)
 class QuotationLineAdmin(admin.ModelAdmin):
@@ -346,6 +417,27 @@ class QuotationLPOAdmin(admin.ModelAdmin):
         "created_at",
         "updated_at",
     ]
+
+    def has_change_permission(self, request, obj=None):
+        # Confirmed reference corrections must use the audited application/API path.
+        if obj is not None and obj.status == QuotationLPO.STATUS_CONFIRMED:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.status == QuotationLPO.STATUS_CONFIRMED:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def delete_model(self, request, obj):
+        if obj.status == QuotationLPO.STATUS_CONFIRMED:
+            raise PermissionDenied(QuotationLPO.DELETE_ERROR)
+        return super().delete_model(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        if queryset.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
+            raise PermissionDenied(QuotationLPO.DELETE_ERROR)
+        return super().delete_queryset(request, queryset)
 
 
 class ProformaInvoiceLineInline(admin.TabularInline):

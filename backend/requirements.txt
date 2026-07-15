@@ -65,6 +65,7 @@ defusedxml==0.7.1
 filetype==1.2.0
 python-calamine==0.6.2
 pyxlsb==1.0.10
+rapidfuzz==3.14.3
 
 # Email Backend
 # django-anymail==13.0.2

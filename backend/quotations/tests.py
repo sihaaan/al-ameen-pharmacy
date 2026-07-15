@@ -662,7 +662,11 @@ class QuotationWorkflowTests(APITestCase):
         quotation.status = Quotation.STATUS_SENT
         quotation.sent_at = timezone.now()
         quotation.save(update_fields=["status", "sent_at", "updated_at"])
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         mock_search.return_value = {"messages": [{"id": "gmail-1"}, {"id": "gmail-1"}]}
         mock_metadata.return_value = {
             "gmail_message_id": "gmail-1",
@@ -698,7 +702,11 @@ class QuotationWorkflowTests(APITestCase):
         quotation.status = Quotation.STATUS_SENT
         quotation.sent_at = timezone.now()
         quotation.save(update_fields=["status", "sent_at", "updated_at"])
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         mock_search.return_value = {"messages": [{"id": "gmail-weak"}]}
         mock_metadata.return_value = {
             "gmail_message_id": "gmail-weak",
@@ -726,7 +734,11 @@ class QuotationWorkflowTests(APITestCase):
         quotation.status = Quotation.STATUS_SENT
         quotation.sent_at = timezone.now()
         quotation.save(update_fields=["status", "sent_at", "updated_at"])
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         mock_search.return_value = {"messages": [{"id": "gmail-lpo"}]}
         mock_metadata.return_value = {
             "gmail_message_id": "gmail-lpo",
@@ -764,6 +776,7 @@ class QuotationWorkflowTests(APITestCase):
         connection = GmailOAuthConnection.objects.create(
             user=self.staff,
             email="pharmacy@example.com",
+            is_shared=True,
             access_token_encrypted="",
             refresh_token_encrypted=encrypt_token("stale-refresh-token"),
             status=GmailOAuthConnection.STATUS_CONNECTED,
@@ -791,7 +804,11 @@ class QuotationWorkflowTests(APITestCase):
         quotation.save(update_fields=["status", "sent_at", "updated_at"])
         draft = self.create_quote()
         self.create_valid_line(draft)
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         mock_search.return_value = {"messages": []}
 
         first = self.client.post(
@@ -836,7 +853,11 @@ class QuotationWorkflowTests(APITestCase):
         second_quote.status = Quotation.STATUS_SENT
         second_quote.sent_at = timezone.now()
         second_quote.save(update_fields=["status", "sent_at", "updated_at"])
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         mock_search.return_value = {"messages": [{"id": "gmail-1"}]}
         mock_metadata.return_value = {
             "gmail_message_id": "gmail-1",
@@ -878,7 +899,11 @@ class QuotationWorkflowTests(APITestCase):
         quotation.sent_at = cutoff - timedelta(days=1)
         quotation.po_evidence_last_scanned_at = cutoff - timedelta(days=1)
         quotation.save(update_fields=["status", "sent_at", "po_evidence_last_scanned_at", "updated_at"])
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         mock_search.return_value = {"messages": []}
 
         first = self.client.post(
@@ -906,9 +931,15 @@ class QuotationWorkflowTests(APITestCase):
         quotation.status = Quotation.STATUS_SENT
         quotation.sent_at = timezone.now()
         quotation.save(update_fields=["status", "sent_at", "updated_at"])
-        GmailOAuthConnection.objects.create(user=self.staff, email="pharmacy@example.com")
+        connection = GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         evidence = QuotationPOEvidence.objects.create(
             quotation=quotation,
+            gmail_connection=connection,
+            mailbox_email=connection.email,
             gmail_message_id="gmail-parse-1",
             gmail_thread_id="thread-parse-1",
             sender="buyer@workflow.example",
@@ -949,8 +980,15 @@ class QuotationWorkflowTests(APITestCase):
         quotation = self.create_quote()
         self.create_valid_line(quotation)
         self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        connection = GmailOAuthConnection.objects.create(
+            user=self.staff,
+            email="pharmacy@example.com",
+            is_shared=True,
+        )
         evidence = QuotationPOEvidence.objects.create(
             quotation=quotation,
+            gmail_connection=connection,
+            mailbox_email=connection.email,
             gmail_message_id="gmail-ignore-1",
             subject="Unrelated message",
             status=QuotationPOEvidence.STATUS_CANDIDATE,

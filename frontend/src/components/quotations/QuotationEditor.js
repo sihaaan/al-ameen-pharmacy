@@ -206,6 +206,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [lineFeedback, setLineFeedback] = useState(null);
   const [linePriceHints, setLinePriceHints] = useState({});
   const [priceContexts, setPriceContexts] = useState({});
+  const [priceContextError, setPriceContextError] = useState(null);
   const [priceHistoryDialog, setPriceHistoryDialog] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
@@ -241,6 +242,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setSavedLineDrafts(drafts);
     setLinePriceHints({});
     setPriceContexts({});
+    setPriceContextError(null);
     setPriceHistoryDialog(null);
     priceContextGenerationRef.current += 1;
     linePriceVersionRef.current = {};
@@ -261,20 +263,13 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const load = useCallback(async () => {
     setLoading(true);
     setErrorInfo(null);
+    setPriceContextError(null);
     try {
       const quoteRes = await quotationAPI.quotes.retrieve(quoteId);
       const productIds = Array.from(new Set(
         (quoteRes.data.lines || []).map((line) => line.product).filter(Boolean).map(String)
       ));
-      const contextRequests = [];
-      for (let index = 0; index < productIds.length; index += 100) {
-        contextRequests.push(quotationAPI.quotes.productPrices(quoteId, {
-          products: productIds.slice(index, index + 100).join(','),
-          history_limit: 10,
-        }));
-      }
-      const priceContextsPromise = contextRequests.length ? Promise.all(contextRequests) : Promise.resolve([]);
-      const [itemsRes, companyItemsRes, companiesRes, contactsRes, lposRes, contextResponses] = await Promise.all([
+      const [itemsRes, companyItemsRes, companiesRes, contactsRes, lposRes] = await Promise.all([
         quotationAPI.items.list({ active: 'true' }),
         quotationAPI.items.list({ active: 'true', company_used: quoteRes.data.company }),
         quotationAPI.companies.list({ active: 'true' }),
@@ -282,24 +277,60 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           ? quotationAPI.contacts.list({ company: quoteRes.data.company, active: 'true' })
           : Promise.resolve({ data: [] }),
         quotationAPI.quotes.lpos(quoteId),
-        priceContextsPromise,
       ]);
-      const nextPriceContexts = Object.assign({}, ...contextResponses.map((response) => response.data?.results || {}));
       setLoadedQuote(quoteRes.data);
       setItems(itemsRes.data);
       setCompanyItems(companyItemsRes.data);
       setCompanies(companiesRes.data);
       setContacts(contactsRes.data);
       syncLpos(lposRes.data);
-      setPriceContexts(nextPriceContexts);
-      setLinePriceHints(Object.fromEntries(
-        (quoteRes.data.lines || [])
-          .filter((line) => line.product && nextPriceContexts[String(line.product)])
-          .map((line) => {
-            const context = nextPriceContexts[String(line.product)];
-            return [line.id, { ...context, mode: context.latest_quoted ? 'history_found' : 'no_history' }];
-          })
-      ));
+
+      // Price history is useful context, but it is not required to edit a quote.
+      // Load it after the core editor data so a transient batch failure cannot
+      // turn an otherwise healthy quotation into a blank/error screen.
+      const requestGeneration = priceContextGenerationRef.current;
+      if (productIds.length) {
+        void (async () => {
+          const contextRequests = [];
+          for (let index = 0; index < productIds.length; index += 100) {
+            contextRequests.push(quotationAPI.quotes.productPrices(quoteId, {
+              products: productIds.slice(index, index + 100).join(','),
+              history_limit: 10,
+            }));
+          }
+          const results = await Promise.allSettled(contextRequests);
+          if (priceContextGenerationRef.current !== requestGeneration) return;
+
+          const successfulResponses = results
+            .filter((result) => result.status === 'fulfilled')
+            .map((result) => result.value);
+          const nextPriceContexts = Object.assign(
+            {},
+            ...successfulResponses.map((response) => response.data?.results || {})
+          );
+          setPriceContexts(nextPriceContexts);
+          setLinePriceHints(Object.fromEntries(
+            (quoteRes.data.lines || [])
+              .filter((line) => line.product && nextPriceContexts[String(line.product)])
+              .map((line) => {
+                const context = nextPriceContexts[String(line.product)];
+                return [line.id, { ...context, mode: context.latest_quoted ? 'history_found' : 'no_history' }];
+              })
+          ));
+
+          const failedResult = results.find((result) => result.status === 'rejected');
+          if (failedResult) {
+            const details = await describeQuotationError(
+              failedResult.reason,
+              'Load price history previews',
+              `GET /quotations/quotes/${quoteId}/product_prices/`
+            );
+            if (priceContextGenerationRef.current !== requestGeneration) return;
+            setPriceContextError(details);
+            console.error(formatQuotationError(details), failedResult.reason);
+          }
+        })();
+      }
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/, GET /quotations/items/`);
       setErrorInfo(details);
@@ -1269,6 +1300,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
       )}
       <div className="qm-helper">PDF is generated from the latest saved quotation data and current quotation settings. Save line changes before downloading or finalizing.</div>
+      {priceContextError && (
+        <div className="qm-feedback warning" role="status">
+          <div>
+            <strong>Price history previews are temporarily unavailable.</strong>
+            <p>
+              The quotation is still available to edit. Use View price history beside an item to retry that Product directly.
+              {priceContextError.detail ? ` ${priceContextError.detail}` : ''}
+            </p>
+          </div>
+          <button type="button" className="qm-secondary small" onClick={() => setPriceContextError(null)}>Dismiss</button>
+        </div>
+      )}
       {canUseLpoWorkflow && (
         <div className="qm-panel qm-lpo-workflow">
           <div className="qm-panel-heading">
@@ -1549,16 +1592,14 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                     </td>
                     <td className="qm-price-cell">
                       <input aria-label={`Unit price for ${lineLabel(line, draft)}`} disabled={!isEditable} type="number" min="0" step="0.001" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
-                      {priceHint && (
-                        <span className={`qm-price-hint ${priceHint.mode}`}>
-                          {priceHintText(priceHint)}
-                          {draft.product && (
-                            <button type="button" onClick={() => setPriceHistoryDialog({
-                              productId: draft.product,
-                              productName: priceHint.product_name || items.find((item) => String(item.id) === String(draft.product))?.name || '',
-                              context: priceContexts[String(draft.product)] || priceHint,
-                            })}>View price history</button>
-                          )}
+                      {draft.product && (
+                        <span className={`qm-price-hint ${priceHint?.mode || 'on-demand'}`}>
+                          {priceHint ? priceHintText(priceHint) : 'Price history available on demand'}
+                          <button type="button" onClick={() => setPriceHistoryDialog({
+                            productId: draft.product,
+                            productName: priceHint?.product_name || items.find((item) => String(item.id) === String(draft.product))?.name || '',
+                            context: priceContexts[String(draft.product)] || priceHint,
+                          })}>View price history</button>
                         </span>
                       )}
                     </td>

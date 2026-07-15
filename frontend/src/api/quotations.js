@@ -198,7 +198,18 @@ const quotationAPI = {
       data,
       isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined
     ),
-    poEvidence: (id) => axiosInstance.get(`/quotations/quotes/${id}/po_evidence/`),
+    poEvidence: (id, params) => axiosInstance.get(
+      `/quotations/quotes/${id}/po_evidence/`,
+      params ? { params } : undefined
+    ),
+    poEvidenceSource: (evidenceId) => axiosInstance.get(`/quotations/po-evidence/${evidenceId}/source/`),
+    poEvidenceAttachment: (evidenceId, attachmentId) => axiosInstance.get(
+      `/quotations/po-evidence/${evidenceId}/attachment/`,
+      {
+        params: { attachment_id: attachmentId },
+        responseType: 'blob',
+      }
+    ),
     findPOEvidence: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/find_po_evidence/`, data),
     scanPOEvidence: (data = {}) => axiosInstance.post('/quotations/quotes/scan_po_evidence/', data),
     parsePOEvidence: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/parse_po_evidence/`, data),
@@ -208,6 +219,12 @@ const quotationAPI = {
     cancel: (id) => axiosInstance.post(`/quotations/quotes/${id}/cancel/`),
     pdf: (id) => axiosInstance.get(`/quotations/quotes/${id}/pdf/`, { responseType: 'blob' }),
     excel: (id) => axiosInstance.get(`/quotations/quotes/${id}/excel/`, { responseType: 'blob' }),
+  },
+  mailboxPOAudits: {
+    latest: () => axiosInstance.get('/quotations/mailbox-po-audits/latest/'),
+    start: (data = {}) => axiosInstance.post('/quotations/mailbox-po-audits/', data),
+    scanPage: (id, data = {}) => axiosInstance.post(`/quotations/mailbox-po-audits/${id}/scan_page/`, data),
+    reconcile: (id, data = {}) => axiosInstance.post(`/quotations/mailbox-po-audits/${id}/reconcile/`, data),
   },
   lpos: {
     list: (params = {}) => axiosInstance.get('/quotations/lpos/', { params }),

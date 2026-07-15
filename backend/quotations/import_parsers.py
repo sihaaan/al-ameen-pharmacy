@@ -225,7 +225,15 @@ def parse_text_preview(raw_text, raw_html=""):
     )
 
 
-def parse_file_preview(uploaded_file):
+def parse_file_preview(uploaded_file, *, store_source=True):
+    """Parse an uploaded document, optionally retaining its source bytes.
+
+    Normal user uploads need a durable private source reference for later OCR
+    and audit. Callers whose canonical source lives elsewhere (for example,
+    Gmail mailbox inventory) can opt out so a scan does not duplicate every
+    attachment on ephemeral application storage.
+    """
+
     data = read_upload_bytes(uploaded_file)
     filename = Path(uploaded_file.name or "").name
     extension, sniffed_mime = _validate_upload_type(data, filename)
@@ -242,8 +250,12 @@ def parse_file_preview(uploaded_file):
     else:
         preview = parse_pdf_preview(data, filename, sniffed_mime, sha256)
 
-    source_file_ref = store_import_source(data, filename=filename, sha256=sha256)
+    source_file_ref = ""
+    if store_source:
+        source_file_ref = store_import_source(data, filename=filename, sha256=sha256)
     preview["source_file_ref"] = source_file_ref
+    if not isinstance(preview.get("meta"), dict):
+        preview["meta"] = {}
     preview["meta"]["source_file_ref"] = source_file_ref
     return preview
 

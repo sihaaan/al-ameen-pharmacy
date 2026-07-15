@@ -17,6 +17,7 @@ from django.core import signing
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from openpyxl import Workbook
@@ -254,7 +255,18 @@ def exchange_gmail_code(user, code, request=None):
         raise RuntimeError("Google OAuth did not return an access token.")
     gmail_profile = _json_request(f"{GMAIL_API_BASE}/profile", token=access_token)
     expires_in = int(token_payload.get("expires_in") or 3600)
-    connection, _ = GmailOAuthConnection.objects.get_or_create(user=user)
+    profile_email = str(gmail_profile.get("emailAddress") or "").strip().lower()
+    # Re-authorising the same physical mailbox must refresh its existing row.
+    # Creating a new owner-scoped row would strand audit/evidence foreign keys
+    # and duplicate the same Gmail messages under a second connection id.
+    if (
+        designated
+        and profile_email
+        and str(designated.email or "").strip().lower() == profile_email
+    ):
+        connection = designated
+    else:
+        connection, _ = GmailOAuthConnection.objects.get_or_create(user=user)
     existing_refresh = decrypt_token(connection.refresh_token_encrypted)
     refresh_token = token_payload.get("refresh_token") or existing_refresh
     connection.email = gmail_profile.get("emailAddress", "") or connection.email
@@ -298,6 +310,40 @@ def resolve_gmail_connection(user=None, *, connected_only=True, shared_only=Fals
     if user is not None and getattr(user, "is_authenticated", False):
         return queryset.filter(user=user).first()
     return None
+
+
+def gmail_connection_lineage_q(connection, *, prefix="", include_unattributed=False):
+    """Scope Gmail-derived rows to one physical shared mailbox.
+
+    Re-authorising the same mailbox under a different staff owner creates a
+    new OAuth connection row. Evidence from the previous row remains valid
+    because Gmail message IDs are stable within that same mailbox. The email
+    address is therefore the lineage key; a differently named mailbox never
+    enters the scope.
+    """
+
+    relation = f"{str(prefix).strip('_')}__" if prefix else ""
+    if connection is None:
+        connection_is_null = f"{relation}gmail_connection__isnull"
+        return Q(**{connection_is_null: True}) & Q(**{connection_is_null: False})
+    scope = Q(**{f"{relation}gmail_connection": connection})
+    mailbox_email = str(getattr(connection, "email", "") or "").strip().lower()
+    if mailbox_email:
+        scope |= Q(**{f"{relation}mailbox_email__iexact": mailbox_email})
+        scope |= Q(
+            **{
+                f"{relation}mailbox_email": "",
+                f"{relation}gmail_connection__email__iexact": mailbox_email,
+            }
+        )
+    if include_unattributed:
+        scope |= Q(
+            **{
+                f"{relation}gmail_connection__isnull": True,
+                f"{relation}mailbox_email": "",
+            }
+        )
+    return scope
 
 
 def can_manage_shared_gmail(user, connection=None):
@@ -677,6 +723,78 @@ def gmail_fetch_message_metadata(connection, message_id):
         "sent_at": _message_datetime(payload),
         "snippet": payload.get("snippet", ""),
         "attachments": attachment_refs,
+    }
+
+
+def gmail_fetch_attachment_content(
+    connection,
+    message_id,
+    *,
+    attachment_id="",
+    part_id="",
+    max_bytes=MAX_ATTACHMENT_BYTES,
+):
+    """Fetch one attachment from a Gmail message without parsing or storing it.
+
+    Evidence review uses this narrow helper so the browser can display the
+    exact source document while Gmail remains read-only.  The caller is still
+    responsible for checking that the requested part belongs to an evidence
+    record the current user may access.
+    """
+
+    attachment_id = str(attachment_id or "").strip()
+    part_id = str(part_id or "").strip()
+    if not attachment_id and not part_id:
+        raise ValueError("Choose an attachment to view.")
+
+    token = get_valid_access_token(connection)
+    payload = _json_request(
+        f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(str(message_id))}?format=full",
+        token=token,
+    )
+    refs = _attachment_refs(
+        payload.get("payload") or {},
+        payload.get("id", message_id),
+        include_inline_data=True,
+    )
+    selected = next(
+        (
+            ref
+            for ref in refs
+            if (attachment_id and str(ref.get("attachment_id") or "") == attachment_id)
+            or (part_id and str(ref.get("part_id") or "") == part_id)
+        ),
+        None,
+    )
+    if not selected:
+        raise ValueError("That attachment is no longer present on the Gmail message.")
+
+    declared_size = int(selected.get("size") or 0)
+    if declared_size > int(max_bytes):
+        raise ValueError("That attachment is too large to open in evidence review.")
+
+    if selected.get("_inline_data"):
+        content = _decode_gmail_data(selected["_inline_data"])
+    else:
+        gmail_attachment_id = str(selected.get("attachment_id") or "")
+        if not gmail_attachment_id:
+            raise ValueError("Gmail did not provide attachment content for this part.")
+        attachment_payload = _json_request(
+            f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(str(message_id))}"
+            f"/attachments/{urllib.parse.quote(gmail_attachment_id)}",
+            token=token,
+        )
+        content = _decode_gmail_data(attachment_payload.get("data", ""))
+
+    if len(content) > int(max_bytes):
+        raise ValueError("That attachment is too large to open in evidence review.")
+    return {
+        "filename": selected.get("filename") or "gmail-attachment",
+        "mime_type": selected.get("mime_type") or "application/octet-stream",
+        "size": len(content),
+        "attachment_id": selected.get("attachment_id") or "",
+        "part_id": selected.get("part_id") or "",
+        "content": content,
     }
 
 

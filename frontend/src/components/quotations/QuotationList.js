@@ -22,6 +22,8 @@ const outcomeLabels = {
   cancelled: 'Cancelled',
 };
 
+export const MAILBOX_AUDIT_REQUEST_BUDGET = 100;
+
 const contactOptionLabel = (contact) => {
   const details = [contact.role, contact.department].filter(Boolean).join(', ');
   return details ? `${contact.name} - ${details}` : contact.name;
@@ -34,6 +36,72 @@ const emptyContactForm = {
   role: '',
   department: '',
   is_primary: false,
+};
+
+const emptyMailboxScan = {
+  running: false,
+  runId: null,
+  processed: 0,
+  relevant: 0,
+  incomplete: 0,
+  pages: 0,
+  estimate: null,
+  found: 0,
+  ambiguous: 0,
+  unmatched: 0,
+  remaining: null,
+  errors: [],
+  done: false,
+  inventoryDone: false,
+  inventoryComplete: false,
+  phase: 'idle',
+  mode: 'scan',
+  pauseReason: null,
+};
+
+const mailboxScanFromResponse = (payload, overrides = {}) => {
+  const run = payload?.run || {};
+  const matchRun = payload?.match_run || {};
+  const summary = matchRun.summary || {};
+  const estimate = run.result_size_estimate === null || run.result_size_estimate === undefined
+    ? null
+    : Number(run.result_size_estimate);
+  const processed = Number(run.messages_scanned || 0);
+  const inventoryDone = Boolean(payload?.inventory_done);
+  const incomplete = Number(run.incomplete_messages || 0);
+  const inventoryComplete = payload?.inventory_complete === undefined
+    ? inventoryDone && incomplete === 0
+    : Boolean(payload.inventory_complete);
+  const phase = payload?.done
+    ? 'complete'
+    : matchRun.status === 'running'
+      ? 'matching'
+      : run.status === 'failed'
+        ? 'failed'
+        : inventoryDone
+          ? 'ready_to_match'
+          : run.id
+            ? 'inventory'
+            : 'idle';
+  return {
+    ...emptyMailboxScan,
+    runId: run.id || null,
+    processed,
+    relevant: Number(run.relevant_messages || 0),
+    incomplete,
+    pages: Number(run.pages_scanned || 0),
+    estimate,
+    found: Number(summary.active_evidence || 0),
+    ambiguous: Number(summary.ambiguous_messages || 0),
+    unmatched: Number(summary.unmatched_messages || 0),
+    remaining: estimate === null ? (inventoryDone ? 0 : null) : Math.max(estimate - processed, 0),
+    errors: [...(run.errors || []), ...(matchRun.errors || [])].slice(-8),
+    done: Boolean(payload?.done),
+    inventoryDone,
+    inventoryComplete,
+    phase,
+    ...overrides,
+  };
 };
 
 const poEvidenceBadges = (quote) => {
@@ -77,31 +145,26 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorInfo, setErrorInfo] = useState(null);
-  const [poScan, setPoScan] = useState({
-    running: false,
-    processed: 0,
-    found: 0,
-    ambiguous: 0,
-    hasAmbiguousCount: false,
-    incomplete: 0,
-    hasIncompleteCount: false,
-    remaining: null,
-    errors: [],
-    lastQuotes: [],
-    done: false,
-  });
+  const [poScan, setPoScan] = useState(emptyMailboxScan);
   const stopPoScanRef = useRef(false);
 
   const load = async () => {
     setLoading(true);
     setErrorInfo(null);
     try {
-      const [quotesRes, companiesRes] = await Promise.all([
+      const [quotesRes, companiesRes, latestAuditRes] = await Promise.all([
         quotationAPI.quotes.list(),
         quotationAPI.companies.list({ active: 'true' }),
+        quotationAPI.mailboxPOAudits.latest().catch(() => null),
       ]);
       setQuotes(quotesRes.data);
       setCompanies(companiesRes.data);
+      if (latestAuditRes?.data?.run) {
+        setPoScan((current) => mailboxScanFromResponse(latestAuditRes.data, {
+          running: current.running,
+          mode: current.mode,
+        }));
+      }
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotations', 'GET /quotations/quotes/ and GET /quotations/companies/');
       setErrorInfo(details);
@@ -171,81 +234,50 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
 
   const runPOEvidenceScan = async ({ rescan = false } = {}) => {
     if (poScan.running) return;
-    const rescanBefore = rescan ? new Date().toISOString() : null;
     stopPoScanRef.current = false;
     setErrorInfo(null);
-    setPoScan({
+    setPoScan((current) => ({
+      ...(rescan ? emptyMailboxScan : current),
       running: true,
-      processed: 0,
-      found: 0,
-      ambiguous: 0,
-      hasAmbiguousCount: false,
-      incomplete: 0,
-      hasIncompleteCount: false,
-      remaining: null,
-      errors: [],
-      lastQuotes: [],
       done: false,
-      mode: rescan ? 'rescan' : 'missing',
-    });
-
-    const totals = {
-      processed: 0,
-      found: 0,
-      ambiguous: 0,
-      hasAmbiguousCount: false,
-      incomplete: 0,
-      hasIncompleteCount: false,
-      errors: [],
-      lastQuotes: [],
-      remaining: null,
-      done: false,
-    };
+      mode: rescan ? 'rescan' : 'scan',
+      phase: 'inventory',
+      pauseReason: null,
+    }));
 
     try {
-      for (let pass = 0; pass < 200; pass += 1) {
-        if (stopPoScanRef.current) break;
-        const response = await quotationAPI.quotes.scanPOEvidence({
-          quote_limit: 20,
-          message_limit: 10,
-          rescan,
-          ...(rescanBefore ? { rescan_before: rescanBefore } : {}),
-        });
+      let response = await quotationAPI.mailboxPOAudits.start({ restart: rescan });
+      let requestsUsed = 1;
+      let pauseReason = null;
+      while (true) {
         const data = response.data || {};
-        totals.processed += Number(data.processed || 0);
-        totals.found += Number(data.candidates_found || 0);
-        if (Object.prototype.hasOwnProperty.call(data, 'ambiguous_found')) {
-          totals.hasAmbiguousCount = true;
-          totals.ambiguous += Number(data.ambiguous_found || 0);
+        const run = data.run || {};
+        setPoScan(mailboxScanFromResponse(data, {
+          running: !data.done && run.status !== 'failed' && !stopPoScanRef.current,
+          mode: rescan ? 'rescan' : 'scan',
+        }));
+        if (data.done || run.status === 'failed' || stopPoScanRef.current) break;
+        if (requestsUsed >= MAILBOX_AUDIT_REQUEST_BUDGET) {
+          pauseReason = 'request_budget';
+          break;
         }
-        if (Object.prototype.hasOwnProperty.call(data, 'incomplete_scans')) {
-          totals.hasIncompleteCount = true;
-          totals.incomplete += Number(data.incomplete_scans || 0);
+        if (data.inventory_done) {
+          response = await quotationAPI.mailboxPOAudits.reconcile(run.id);
+        } else {
+          response = await quotationAPI.mailboxPOAudits.scanPage(run.id, { page_size: 25 });
         }
-        totals.remaining = Number(data.remaining || 0);
-        totals.done = Boolean(data.done);
-        totals.errors = [...totals.errors, ...(data.errors || [])].slice(-8);
-        totals.lastQuotes = data.quotes || [];
-        setPoScan({
-          running: !totals.done,
-          processed: totals.processed,
-          found: totals.found,
-          ambiguous: totals.ambiguous,
-          hasAmbiguousCount: totals.hasAmbiguousCount,
-          incomplete: totals.incomplete,
-          hasIncompleteCount: totals.hasIncompleteCount,
-          remaining: totals.remaining,
-          errors: totals.errors,
-          lastQuotes: totals.lastQuotes,
-          done: totals.done,
-          mode: rescan ? 'rescan' : 'missing',
-        });
-        if (totals.done || Number(data.processed || 0) === 0) break;
+        requestsUsed += 1;
       }
+      if (stopPoScanRef.current) pauseReason = 'stopped';
       await load();
-      setPoScan((current) => ({ ...current, running: false, done: current.remaining === 0, mode: rescan ? 'rescan' : 'missing' }));
+      setPoScan((current) => ({
+        ...current,
+        running: false,
+        mode: rescan ? 'rescan' : 'scan',
+        ...(pauseReason ? { done: false, phase: 'paused', pauseReason } : { pauseReason: null }),
+      }));
     } catch (error) {
-      const details = await describeQuotationError(error, 'Scan quotations for PO/LPO evidence', 'POST /quotations/quotes/scan_po_evidence/');
+      const details = await describeQuotationError(error, 'Audit Gmail for PO/LPO evidence', 'POST /quotations/mailbox-po-audits/');
       setErrorInfo(details);
       setPoScan((current) => ({ ...current, running: false }));
       console.error(formatQuotationError(details), error);
@@ -254,7 +286,13 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
 
   const stopPOEvidenceScan = () => {
     stopPoScanRef.current = true;
-    setPoScan((current) => ({ ...current, running: false }));
+    setPoScan((current) => ({
+      ...current,
+      running: false,
+      done: false,
+      phase: 'paused',
+      pauseReason: 'stopped',
+    }));
   };
 
   const rememberCompany = (company) => {
@@ -312,38 +350,51 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
         </div>
         <div className="qm-po-scan-card">
           <div>
-            <strong>PO/LPO evidence scan</strong>
-            <p>Automatically checks finalized and sent quotations against Gmail, then flags likely PO/LPO replies for outcome review.</p>
-            {(poScan.processed > 0 || poScan.remaining !== null) && (
+            <strong>Mailbox-wide PO/LPO audit</strong>
+            <p>Inventories every incoming Gmail message since the first quotation (including Spam/Trash for completeness), reads the newest email body, and checks likely documents against quotation items, quantities, prices/totals, customer and timing. Matches remain review-only.</p>
+            {(poScan.runId || poScan.processed > 0 || poScan.remaining !== null) && (
               <div className="qm-po-scan-meta">
-                <span>{poScan.processed} quotation(s) checked</span>
-                <span>{poScan.found} candidate/parsed email {poScan.found === 1 ? 'match' : 'matches'}</span>
-                {poScan.hasAmbiguousCount && (
-                  <span>{poScan.ambiguous} {poScan.ambiguous === 1 ? 'needs' : 'need'} assignment</span>
+                <span>{poScan.processed}{poScan.estimate !== null ? ` / ~${poScan.estimate}` : ''} emails inventoried</span>
+                <span>{poScan.relevant} possible PO/LPO emails</span>
+                <span>{poScan.pages} Gmail page{poScan.pages === 1 ? '' : 's'}</span>
+                {poScan.inventoryComplete && <span>Mailbox inventory complete</span>}
+                {poScan.inventoryDone && !poScan.inventoryComplete && (
+                  <span>{poScan.incomplete} email{poScan.incomplete === 1 ? '' : 's'} could not be read after three attempts</span>
                 )}
-                {poScan.hasIncompleteCount && poScan.incomplete > 0 && (
-                  <span>{poScan.incomplete} partial {poScan.incomplete === 1 ? 'scan' : 'scans'} (older evidence preserved)</span>
-                )}
-                <span>{poScan.remaining ?? 0} remaining</span>
+                {poScan.done && <span>{poScan.found} active review {poScan.found === 1 ? 'match' : 'matches'}</span>}
+                {poScan.done && <span>{poScan.ambiguous} {poScan.ambiguous === 1 ? 'email needs' : 'emails need'} assignment</span>}
+                {poScan.done && <span>{poScan.unmatched} possible {poScan.unmatched === 1 ? 'email had' : 'emails had'} no safe quote match</span>}
+                {!poScan.inventoryDone && <span>{poScan.remaining === null ? 'Remaining count loading' : `${poScan.remaining} estimated remaining`}</span>}
                 {poScan.mode === 'rescan' && <span>Rescan mode</span>}
+                {poScan.phase === 'failed' && <span>Paused after a Gmail error; Resume retries the saved page</span>}
+                {poScan.phase === 'paused' && poScan.pauseReason === 'request_budget' && (
+                  <span>Paused after {MAILBOX_AUDIT_REQUEST_BUDGET} audit requests in this browser action; progress is saved. Select Resume Mailbox Audit to continue.</span>
+                )}
+                {poScan.phase === 'paused' && poScan.pauseReason === 'stopped' && (
+                  <span>Paused by staff after the current request; progress is saved.</span>
+                )}
               </div>
             )}
             {poScan.errors.length > 0 && (
               <div className="qm-inline-warning">
-                {poScan.errors.length} scan issue(s). Latest: {poScan.errors[poScan.errors.length - 1].quotation_number}: {poScan.errors[poScan.errors.length - 1].detail}
+                {poScan.errors.length} audit issue(s). Latest: {poScan.errors[poScan.errors.length - 1].gmail_message_id ? `${poScan.errors[poScan.errors.length - 1].gmail_message_id}: ` : ''}{poScan.errors[poScan.errors.length - 1].error || poScan.errors[poScan.errors.length - 1].detail}
               </div>
             )}
           </div>
           <div className="qm-po-scan-actions">
             <button type="button" className="qm-primary" disabled={poScan.running} onClick={() => runPOEvidenceScan({ rescan: false })}>
-              {poScan.running ? 'Scanning...' : poScan.done ? 'Scan Missing Quotes' : 'Scan Sent Quotes'}
+              {poScan.running
+                ? (poScan.inventoryDone ? 'Matching...' : 'Reading Gmail...')
+                : (poScan.phase === 'failed' || poScan.phase === 'paused' || (poScan.runId && !poScan.done))
+                  ? 'Resume Mailbox Audit'
+                  : 'Audit New Mailbox Run'}
             </button>
             <button type="button" className="qm-secondary" disabled={poScan.running} onClick={() => runPOEvidenceScan({ rescan: true })}>
-              Rescan All Sent/Finalized
+              Start Full Rescan
             </button>
             {poScan.running && (
               <button type="button" className="qm-secondary" onClick={stopPOEvidenceScan}>
-                Stop after this quote
+                Stop after this Gmail page
               </button>
             )}
           </div>

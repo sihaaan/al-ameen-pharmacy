@@ -12,6 +12,7 @@ from django.utils.dateparse import parse_date, parse_datetime
 
 from .ai_parsing import AIParseError, clean_preview_with_ai, prefer_safe_ai_preview
 from .contract_intelligence import (
+    gmail_connection_lineage_q,
     gmail_fetch_message,
     gmail_fetch_message_metadata,
     gmail_search_messages,
@@ -452,24 +453,23 @@ def _source_hash(payload):
 
 
 def _get_gmail_connection(user):
-    connection = resolve_gmail_connection(user)
+    connection = resolve_gmail_connection(user, shared_only=True)
     if not connection:
         raise ValidationError("Connect the shared Gmail mailbox before searching for PO evidence.")
     return connection
 
 
 def _get_evidence_gmail_connection(evidence, user):
-    if evidence.gmail_connection_id:
-        origin = evidence.gmail_connection
-        if origin.status == origin.STATUS_CONNECTED:
-            return origin
-        raise ValidationError(
-            f"Reconnect the evidence mailbox ({evidence.mailbox_email or origin.email}) before reviewing this email."
-        )
     connection = _get_gmail_connection(user)
-    if evidence.mailbox_email and connection.email.lower() != evidence.mailbox_email.lower():
+    evidence_mailbox = str(
+        evidence.mailbox_email
+        or getattr(getattr(evidence, "gmail_connection", None), "email", "")
+        or ""
+    ).strip().lower()
+    connected_mailbox = str(connection.email or "").strip().lower()
+    if evidence_mailbox and evidence_mailbox != connected_mailbox:
         raise ValidationError(
-            f"This evidence belongs to {evidence.mailbox_email}, not the currently connected shared mailbox."
+            f"This evidence belongs to {evidence_mailbox}, not the currently connected shared mailbox."
         )
     return connection
 
@@ -495,33 +495,43 @@ def _mark_quote_po_scan(quotation, *, count=0, error=""):
 
 
 def _message_scope_q(connection, mailbox_email):
-    scope = Q(gmail_connection=connection)
-    normalized_mailbox = str(mailbox_email or getattr(connection, "email", "") or "").strip().lower()
+    scope = gmail_connection_lineage_q(connection, include_unattributed=True)
+    normalized_mailbox = str(mailbox_email or "").strip().lower()
     if normalized_mailbox:
-        # OAuth credentials can be replaced while the physical shared mailbox
-        # remains the same. Arbitration is mailbox-wide, not FK-wide.
         scope |= Q(mailbox_email__iexact=normalized_mailbox)
-        scope |= Q(mailbox_email="", gmail_connection__email__iexact=normalized_mailbox)
-    # Evidence created before mailbox provenance was introduced belongs to the
-    # one designated shared mailbox and still needs to participate in safety
-    # arbitration during the migration period.
-    scope |= Q(gmail_connection__isnull=True, mailbox_email="")
     return scope
 
 
-def _message_evidence_queryset(connection, mailbox_email, message_id):
-    return QuotationPOEvidence.objects.filter(
+def _message_evidence_queryset(connection, mailbox_email, message_id, *, source_key=None):
+    queryset = QuotationPOEvidence.objects.filter(
         _message_scope_q(connection, mailbox_email),
         gmail_message_id=message_id,
     )
+    if source_key:
+        # Legacy evidence identified only the Gmail message, not the selected
+        # attachment. Treat that message-level key as a conflict for every
+        # source in the message; otherwise an old approved link could be
+        # silently bypassed after source-scoped matching is deployed.
+        legacy_message_key = QuotationPOEvidence.build_source_key(
+            gmail_message_id=message_id
+        )
+        queryset = queryset.filter(
+            Q(source_key=source_key) | Q(source_key=legacy_message_key)
+        )
+    return queryset
 
 
-def _locked_message_evidence_queryset(connection, mailbox_email, message_id):
+def _locked_message_evidence_queryset(connection, mailbox_email, message_id, *, source_key=None):
     # The mailbox scope joins the nullable Gmail connection so legacy rows can
     # still participate in arbitration. PostgreSQL rejects FOR UPDATE when it
     # also targets that nullable outer join; only evidence rows need locking.
     return (
-        _message_evidence_queryset(connection, mailbox_email, message_id)
+        _message_evidence_queryset(
+            connection,
+            mailbox_email,
+            message_id,
+            source_key=source_key,
+        )
         .select_for_update(of=("self",))
         .select_related("quotation")
         .order_by("id")
@@ -556,7 +566,7 @@ def _unreviewed_evidence_statuses():
     ]
 
 
-def _discovery_defaults(connection, payload, actor, confidence, reason):
+def _discovery_defaults(connection, payload, actor, confidence, reason, *, source_key):
     return {
         "gmail_connection": connection,
         "mailbox_email": connection.email or "",
@@ -568,6 +578,7 @@ def _discovery_defaults(connection, payload, actor, confidence, reason):
         "snippet": payload.get("snippet", ""),
         "attachments": payload.get("attachments") or [],
         "source_sha256": _source_hash(payload),
+        "source_key": source_key,
         "matching_reason": reason,
         "confidence": confidence,
         "error": "",
@@ -577,9 +588,20 @@ def _discovery_defaults(connection, payload, actor, confidence, reason):
 
 def _store_arbitrated_evidence(quotation, connection, payload, actor, confidence, reason):
     message_id = payload.get("gmail_message_id")
+    # The legacy targeted scanner treats the entire fetched message as one
+    # source. The mailbox-wide reconciler supplies attachment/body source keys
+    # directly and therefore supports multiple documents per message.
+    source_key = QuotationPOEvidence.build_source_key(gmail_message_id=message_id)
     exact_reference = _payload_exactly_references_quote(quotation, payload)
     potential_quote_ids = _eligible_same_customer_quote_ids(quotation, payload)
-    defaults = _discovery_defaults(connection, payload, actor, confidence, reason)
+    defaults = _discovery_defaults(
+        connection,
+        payload,
+        actor,
+        confidence,
+        reason,
+        source_key=source_key,
+    )
     arbitration = {"ambiguous_ids": [], "superseded_ids": []}
 
     with transaction.atomic():
@@ -590,6 +612,7 @@ def _store_arbitrated_evidence(quotation, connection, payload, actor, confidence
                 connection,
                 connection.email or "",
                 message_id,
+                source_key=source_key,
             )
         )
         existing = next((row for row in locked_rows if row.quotation_id == quotation.id), None)
@@ -677,14 +700,28 @@ def _store_arbitrated_evidence(quotation, connection, payload, actor, confidence
                 defaults.pop("error", None)
             elif existing.status == QuotationPOEvidence.STATUS_NOT_RELEVANT:
                 # Explicit staff rejection is immutable across rescans.
+                defaults.pop("attachments", None)
+                defaults.pop("source_sha256", None)
                 defaults.pop("status", None)
                 defaults.pop("error", None)
 
-        evidence, _ = QuotationPOEvidence.objects.update_or_create(
-            quotation=quotation,
-            gmail_message_id=message_id,
-            defaults=defaults,
-        )
+        if existing:
+            # ``existing`` came from the mailbox-scoped, locked queryset. Save
+            # that exact row so a legacy null-connection record can acquire
+            # provenance without an unscoped Gmail-id lookup touching a row
+            # from another account.
+            for field, value in defaults.items():
+                setattr(existing, field, value)
+            existing.save(update_fields=[*defaults.keys(), "updated_at"])
+            evidence = existing
+        else:
+            evidence, _ = QuotationPOEvidence.objects.update_or_create(
+                quotation=quotation,
+                gmail_connection=connection,
+                gmail_message_id=message_id,
+                source_key=source_key,
+                defaults=defaults,
+            )
         if evidence.status == QuotationPOEvidence.STATUS_AMBIGUOUS:
             arbitration["ambiguous_ids"].append(evidence.id)
         elif evidence.status == QuotationPOEvidence.STATUS_SUPERSEDED:
@@ -1120,7 +1157,42 @@ def _po_relevance_context(evidence, payload, reason):
 def _preview_from_gmail_payload(payload, evidence, *, relevance_reason=""):
     warnings = []
     rows = []
-    selected_attachment, selection_warnings = _select_primary_po_attachment(payload, evidence.quotation)
+    source_kind = str(((evidence.match_signals or {}).get("source") or {}).get("kind") or "")
+    selected_attachment = None
+    selection_warnings = []
+    if source_kind == "email_body":
+        # The reviewer selected the body source; attachment ranking must not
+        # silently switch the document during approval.
+        selected_attachment = None
+    elif evidence.selected_attachment_id or source_kind == "attachment":
+        attachment_id = str(evidence.selected_attachment_id or "")
+        source_hash = str(evidence.source_sha256 or "").strip().lower()
+        matches = []
+        for attachment in payload.get("attachments") or []:
+            if (attachment or {}).get("status") != "parsed":
+                continue
+            identifiers = {
+                str((attachment or {}).get("attachment_id") or ""),
+                str((attachment or {}).get("source_gmail_attachment_id") or ""),
+                str((attachment or {}).get("part_id") or ""),
+            }
+            attachment_hash = str((attachment or {}).get("source_sha256") or "").strip().lower()
+            if (attachment_id and attachment_id in identifiers) or (
+                source_hash and attachment_hash and source_hash == attachment_hash
+            ):
+                matches.append(attachment)
+        if len(matches) != 1:
+            raise EvidenceLinkConflict(
+                "The selected Gmail attachment could not be identified uniquely. Refresh the mailbox audit before approving it."
+            )
+        selected_attachment = matches[0]
+        selection_warnings = [
+            f"{attachment.get('filename', 'Attachment')}: not merged; the reviewed source attachment was parsed independently."
+            for attachment in payload.get("attachments") or []
+            if attachment is not selected_attachment and (attachment or {}).get("status") == "parsed"
+        ]
+    else:
+        selected_attachment, selection_warnings = _select_primary_po_attachment(payload, evidence.quotation)
     warnings.extend(selection_warnings)
     if not selected_attachment and AMBIGUOUS_PO_ATTACHMENT_WARNING in selection_warnings:
         raise EvidenceLinkConflict(AMBIGUOUS_PO_ATTACHMENT_WARNING)
@@ -1271,7 +1343,12 @@ def _extract_gmail_lpo_details(preview):
 def _reviewed_message_conflicts(evidence, connection):
     mailbox_email = evidence.mailbox_email or connection.email or ""
     return list(
-        _message_evidence_queryset(connection, mailbox_email, evidence.gmail_message_id)
+        _message_evidence_queryset(
+            connection,
+            mailbox_email,
+            evidence.gmail_message_id,
+            source_key=evidence.source_key,
+        )
         .exclude(pk=evidence.pk)
         .filter(Q(status=QuotationPOEvidence.STATUS_PARSED) | Q(link_approved_at__isnull=False))
         .select_related("quotation")
@@ -1293,7 +1370,7 @@ def _preflight_evidence_approval(evidence, connection, payload):
     if conflicts:
         quote_numbers = ", ".join(conflict.quotation.quotation_number for conflict in conflicts[:3])
         raise EvidenceLinkConflict(
-            "This Gmail message is already approved or parsed for another quotation"
+            "This Gmail source document is already approved or parsed for another quotation"
             f" ({quote_numbers}). Contact support or an administrator before approving this one."
         )
 
@@ -1308,6 +1385,7 @@ def _lock_and_resolve_evidence_approval(evidence, connection, payload):
             connection,
             mailbox_email,
             evidence.gmail_message_id,
+            source_key=evidence.source_key,
         )
     )
     locked_by_id = {row.id: row for row in locked_rows}
@@ -1336,7 +1414,7 @@ def _lock_and_resolve_evidence_approval(evidence, connection, payload):
     if reviewed_conflicts:
         quote_numbers = ", ".join(conflict.quotation.quotation_number for conflict in reviewed_conflicts[:3])
         raise EvidenceLinkConflict(
-            "This Gmail message is already approved or parsed for another quotation"
+            "This Gmail source document is already approved or parsed for another quotation"
             f" ({quote_numbers}). Contact support or an administrator before approving this one."
         )
 
@@ -1346,7 +1424,7 @@ def _lock_and_resolve_evidence_approval(evidence, connection, payload):
         QuotationPOEvidence.objects.filter(id__in=peer_ids).update(
             status=QuotationPOEvidence.STATUS_SUPERSEDED,
             error=(
-                f"Superseded by explicit staff approval of this Gmail message for "
+                f"Superseded by explicit staff approval of this Gmail source document for "
                 f"{locked_evidence.quotation.quotation_number}."
             ),
             updated_at=timezone.now(),

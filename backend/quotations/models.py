@@ -1,10 +1,29 @@
 from decimal import Decimal
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
+
+
+CONFIRMED_LPO_STATUS_DOWNGRADE_ERROR = (
+    "A confirmed LPO cannot be moved back to a non-confirmed status. "
+    "Correct its reference details while keeping it confirmed."
+)
+CONFIRMED_LPO_DELETE_ERROR = (
+    "Confirmed LPO records cannot be deleted because they are part of the quotation history. "
+    "Correct the reference details instead."
+)
+CONFIRMED_LPO_PROTECTED_FIELDS_ERROR = (
+    "Confirmed LPO source and commercial history is immutable. Only the LPO number, "
+    "LPO date, and notes may be corrected while the status remains confirmed."
+)
+CONFIRMED_LPO_QUOTATION_DELETE_ERROR = (
+    "This quotation has a confirmed LPO and cannot be deleted because that would remove "
+    "accepted-price and order history. Correct the quotation or LPO instead."
+)
 
 
 def normalize_label(value):
@@ -433,6 +452,284 @@ class GmailOAuthConnection(models.Model):
 
     def __str__(self):
         return self.email or f"Gmail connection for {self.user}"
+
+
+class MailboxPOAuditRun(models.Model):
+    """Resumable ledger for a mailbox-wide, read-only PO inventory pass."""
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.CASCADE,
+        related_name="po_audit_runs",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_mailbox_po_audits",
+    )
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    earliest_quote_at = models.DateTimeField()
+    mailbox_cutoff_at = models.DateTimeField(default=timezone.now)
+    gmail_query = models.TextField()
+    page_token = models.TextField(blank=True)
+    exhausted = models.BooleanField(default=False, db_index=True)
+    result_size_estimate = models.PositiveIntegerField(null=True, blank=True)
+    pages_scanned = models.PositiveIntegerField(default=0)
+    messages_scanned = models.PositiveIntegerField(default=0)
+    messages_created = models.PositiveIntegerField(default=0)
+    relevant_messages = models.PositiveIntegerField(default=0)
+    incomplete_messages = models.PositiveIntegerField(default=0)
+    attachment_candidates = models.PositiveIntegerField(default=0)
+    attachment_bytes_fetched = models.PositiveBigIntegerField(default=0)
+    errors = models.JSONField(default=list, blank=True)
+    scan_lease_token = models.CharField(max_length=64, blank=True)
+    scan_lease_expires_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    last_page_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["gmail_connection", "status"]),
+            models.Index(fields=["exhausted", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Mailbox PO audit #{self.pk or 'new'} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        # A completed run is an audit record, not a reusable job. New scans get
+        # a new run while the canonical message catalogue remains idempotent.
+        if self.pk:
+            stored_status = type(self).objects.filter(pk=self.pk).values_list("status", flat=True).first()
+            if stored_status == self.STATUS_COMPLETED:
+                raise ValidationError("Completed mailbox PO audit runs are immutable.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status == self.STATUS_COMPLETED:
+            raise ValidationError("Completed mailbox PO audit runs are immutable.")
+        return super().delete(*args, **kwargs)
+
+
+class MailboxPOMessage(models.Model):
+    """Canonical Gmail message inventory, independent of quote candidates."""
+
+    CLASS_PURCHASE_ORDER = "purchase_order"
+    CLASS_POSSIBLE_PO = "possible_po"
+    CLASS_OTHER = "other"
+    CLASSIFICATION_CHOICES = [
+        (CLASS_PURCHASE_ORDER, "Purchase order"),
+        (CLASS_POSSIBLE_PO, "Possible purchase order"),
+        (CLASS_OTHER, "Other"),
+    ]
+
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.CASCADE,
+        related_name="po_mailbox_messages",
+    )
+    gmail_message_id = models.CharField(max_length=255)
+    gmail_thread_id = models.CharField(max_length=255, blank=True, db_index=True)
+    mailbox_email = models.EmailField(blank=True)
+    label_ids = models.JSONField(default=list, blank=True)
+    full_headers = models.JSONField(default=list, blank=True)
+    subject = models.CharField(max_length=500, blank=True)
+    sender = models.CharField(max_length=500, blank=True)
+    recipients = models.TextField(blank=True)
+    cc = models.TextField(blank=True)
+    reply_to = models.CharField(max_length=500, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    snippet = models.TextField(blank=True)
+    newest_body_text = models.TextField(blank=True)
+    attachment_manifest = models.JSONField(default=list, blank=True)
+    classification = models.CharField(
+        max_length=30,
+        choices=CLASSIFICATION_CHOICES,
+        default=CLASS_OTHER,
+        db_index=True,
+    )
+    is_relevant = models.BooleanField(default=False, db_index=True)
+    auto_link_eligible = models.BooleanField(default=True)
+    relevance_reason = models.TextField(blank=True)
+    extracted_po_references = models.JSONField(default=list, blank=True)
+    audit_error = models.TextField(blank=True)
+    first_seen_run = models.ForeignKey(
+        MailboxPOAuditRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="first_seen_messages",
+    )
+    last_seen_run = models.ForeignKey(
+        MailboxPOAuditRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="last_seen_messages",
+    )
+    first_seen_at = models.DateTimeField(default=timezone.now)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    full_message_fetched_at = models.DateTimeField(null=True, blank=True)
+    attachments_audited_at = models.DateTimeField(null=True, blank=True)
+    last_audited_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-sent_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["gmail_connection", "sent_at"]),
+            models.Index(fields=["gmail_connection", "is_relevant"]),
+            models.Index(fields=["classification", "sent_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["gmail_connection", "gmail_message_id"],
+                name="unique_mailbox_po_message",
+            ),
+        ]
+
+    def __str__(self):
+        return self.subject or self.gmail_message_id
+
+
+class MailboxPOAuditRunMessage(models.Model):
+    """Immutable membership of a canonical Gmail message in one audit snapshot."""
+
+    audit_run = models.ForeignKey(
+        MailboxPOAuditRun,
+        on_delete=models.CASCADE,
+        related_name="message_memberships",
+    )
+    message = models.ForeignKey(
+        MailboxPOMessage,
+        on_delete=models.CASCADE,
+        related_name="audit_memberships",
+    )
+    seen_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["audit_run_id", "message_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["audit_run", "message"],
+                name="unique_mailbox_po_run_message",
+            )
+        ]
+
+    def __str__(self):
+        return f"Mailbox PO audit #{self.audit_run_id} message #{self.message_id}"
+
+
+class MailboxPOAuditFailure(models.Model):
+    """Retry/tombstone ledger for a Gmail message that could not be inventoried."""
+
+    STATUS_RETRYING = "retrying"
+    STATUS_TOMBSTONED = "tombstoned"
+    STATUS_RESOLVED = "resolved"
+    STATUS_CHOICES = [
+        (STATUS_RETRYING, "Retrying"),
+        (STATUS_TOMBSTONED, "Tombstoned"),
+        (STATUS_RESOLVED, "Resolved"),
+    ]
+
+    audit_run = models.ForeignKey(
+        MailboxPOAuditRun,
+        on_delete=models.CASCADE,
+        related_name="message_failures",
+    )
+    gmail_message_id = models.CharField(max_length=255)
+    page_token = models.TextField(blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_RETRYING,
+        db_index=True,
+    )
+    last_error = models.TextField(blank=True)
+    first_failed_at = models.DateTimeField(default=timezone.now)
+    last_failed_at = models.DateTimeField(default=timezone.now)
+    tombstoned_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["audit_run_id", "gmail_message_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["audit_run", "gmail_message_id"],
+                name="unique_mailbox_po_audit_failure",
+            )
+        ]
+
+    def __str__(self):
+        return f"Mailbox PO audit #{self.audit_run_id}: {self.gmail_message_id} ({self.status})"
+
+
+class MailboxPOMatchRun(models.Model):
+    """Immutable reconciliation record for one completed mailbox inventory."""
+
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    audit_run = models.ForeignKey(
+        MailboxPOAuditRun,
+        on_delete=models.CASCADE,
+        related_name="match_runs",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_mailbox_po_match_runs",
+    )
+    algorithm_version = models.CharField(max_length=50, default="mailbox_match_v2")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_RUNNING, db_index=True)
+    summary = models.JSONField(default=dict, blank=True)
+    errors = models.JSONField(default=list, blank=True)
+    cursor_message_id = models.PositiveBigIntegerField(default=0)
+    lease_token = models.CharField(max_length=64, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["audit_run", "status"],
+                name="quotations__audit_r_62ae93_idx",
+            )
+        ]
+
+    def __str__(self):
+        return f"Mailbox PO match #{self.pk or 'new'} ({self.status})"
 
 
 class ContractIntelligenceRun(models.Model):
@@ -1039,6 +1336,14 @@ class HistoricalImportAISuggestion(models.Model):
         return f"{self.action} for {target}"
 
 
+class QuotationQuerySet(models.QuerySet):
+    def delete(self):
+        with transaction.atomic():
+            if self.select_for_update().filter(lpos__status="confirmed").exists():
+                raise ValidationError(CONFIRMED_LPO_QUOTATION_DELETE_ERROR)
+            return super().delete()
+
+
 class Quotation(models.Model):
     PAYMENT_CREDIT_30 = "credit_30_days"
     PAYMENT_CREDIT_60 = "credit_60_days"
@@ -1115,6 +1420,10 @@ class Quotation(models.Model):
         (CONTACT_VISIT, "Visit"),
         (CONTACT_OTHER, "Other"),
     ]
+
+    CONFIRMED_LPO_DELETE_ERROR = CONFIRMED_LPO_QUOTATION_DELETE_ERROR
+
+    objects = QuotationQuerySet.as_manager()
 
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="quotations")
     contact = models.ForeignKey(
@@ -1254,6 +1563,17 @@ class Quotation(models.Model):
                 except IntegrityError:
                     continue
             raise
+
+    def delete(self, *args, **kwargs):
+        with transaction.atomic():
+            if (
+                self.pk
+                and type(self).objects.select_for_update()
+                .filter(pk=self.pk, lpos__status="confirmed")
+                .exists()
+            ):
+                raise ValidationError(self.CONFIRMED_LPO_DELETE_ERROR)
+            return super().delete(*args, **kwargs)
 
     @classmethod
     def _generate_quotation_number(cls):
@@ -1447,6 +1767,31 @@ class QuotationPOEvidence(models.Model):
     ]
 
     quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="po_evidence")
+    mailbox_message = models.ForeignKey(
+        MailboxPOMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_evidence",
+    )
+    mailbox_match_run = models.ForeignKey(
+        MailboxPOMatchRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="evidence",
+    )
+    match_signals = models.JSONField(default=dict, blank=True)
+    selected_attachment_id = models.CharField(max_length=255, blank=True)
+    selected_attachment_filename = models.CharField(max_length=255, blank=True)
+    # Stable identity for the independently reviewable source document inside
+    # a Gmail message.  A message may contain multiple unrelated LPO files, so
+    # message id alone is intentionally not an evidence identity.
+    source_key = models.CharField(max_length=255, blank=True, db_index=True)
+    # ``None`` means legacy evidence was created before quote-reference
+    # provenance was recorded; it must not be misreported as a checked absence.
+    quote_reference_present = models.BooleanField(null=True, default=None)
+    matched_quote_reference = models.CharField(max_length=100, blank=True)
     gmail_connection = models.ForeignKey(
         GmailOAuthConnection,
         on_delete=models.SET_NULL,
@@ -1497,11 +1842,38 @@ class QuotationPOEvidence(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=["quotation", "gmail_message_id"],
-                condition=~models.Q(gmail_message_id=""),
-                name="unique_quote_po_evidence_message",
+                fields=["quotation", "gmail_connection", "gmail_message_id", "source_key"],
+                condition=(
+                    models.Q(gmail_connection__isnull=False)
+                    & ~models.Q(gmail_message_id="")
+                    & ~models.Q(source_key="")
+                ),
+                name="unique_quote_conn_po_source",
             )
         ]
+
+    @staticmethod
+    def build_source_key(*, source_sha256="", selected_attachment_id="", gmail_message_id=""):
+        source_hash = str(source_sha256 or "").strip().lower()
+        if source_hash:
+            return f"sha256:{source_hash}"[:255]
+        attachment_id = str(selected_attachment_id or "").strip()
+        if attachment_id:
+            return f"attachment:{attachment_id}"[:255]
+        message_id = str(gmail_message_id or "").strip()
+        return f"message:{message_id}"[:255] if message_id else ""
+
+    def save(self, *args, **kwargs):
+        if not self.source_key:
+            self.source_key = self.build_source_key(
+                source_sha256=self.source_sha256,
+                selected_attachment_id=self.selected_attachment_id,
+                gmail_message_id=self.gmail_message_id,
+            )
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {"source_key"}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.subject or f"PO evidence for {self.quotation}"
@@ -1565,6 +1937,78 @@ class QuotationOutcomePOImport(models.Model):
         return f"PO outcome import for {self.quotation}"
 
 
+class QuotationLPOQuerySet(models.QuerySet):
+    CONFIRMED_ALLOWED_UPDATE_FIELDS = {"lpo_number", "lpo_date", "notes", "updated_at"}
+
+    def _clone(self):
+        clone = super()._clone()
+        clone._confirmed_status_bulk_prevalidated = getattr(
+            self,
+            "_confirmed_status_bulk_prevalidated",
+            False,
+        )
+        return clone
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        objs = tuple(objs)
+        fields = tuple(fields)
+        object_pks = [obj.pk for obj in objs if obj.pk]
+        if not object_pks:
+            return super().bulk_update(objs, fields, batch_size=batch_size)
+
+        with transaction.atomic():
+            confirmed_pks = set(
+                self.select_for_update()
+                .filter(pk__in=object_pks, status="confirmed")
+                .values_list("pk", flat=True)
+            )
+            if confirmed_pks:
+                protected_fields = (
+                    set(fields)
+                    - self.CONFIRMED_ALLOWED_UPDATE_FIELDS
+                    - {"status"}
+                )
+                if protected_fields:
+                    raise ValidationError(CONFIRMED_LPO_PROTECTED_FIELDS_ERROR)
+                if "status" in fields and any(
+                    obj.pk in confirmed_pks and obj.status != "confirmed" for obj in objs
+                ):
+                    raise ValidationError({"status": CONFIRMED_LPO_STATUS_DOWNGRADE_ERROR})
+
+            prevalidated = self._chain()
+            prevalidated._confirmed_status_bulk_prevalidated = True
+            return super(QuotationLPOQuerySet, prevalidated).bulk_update(
+                objs,
+                fields,
+                batch_size=batch_size,
+            )
+
+    def update(self, **kwargs):
+        with transaction.atomic():
+            has_confirmed = self.select_for_update().filter(status="confirmed").exists()
+            if has_confirmed:
+                protected_fields = (
+                    set(kwargs)
+                    - self.CONFIRMED_ALLOWED_UPDATE_FIELDS
+                    - {"status"}
+                )
+                if protected_fields:
+                    raise ValidationError(CONFIRMED_LPO_PROTECTED_FIELDS_ERROR)
+                if (
+                    "status" in kwargs
+                    and kwargs["status"] != "confirmed"
+                    and not getattr(self, "_confirmed_status_bulk_prevalidated", False)
+                ):
+                    raise ValidationError({"status": CONFIRMED_LPO_STATUS_DOWNGRADE_ERROR})
+            return super().update(**kwargs)
+
+    def delete(self):
+        with transaction.atomic():
+            if self.select_for_update().filter(status="confirmed").exists():
+                raise ValidationError(CONFIRMED_LPO_DELETE_ERROR)
+            return super().delete()
+
+
 class QuotationLPO(models.Model):
     STATUS_RECEIVED = "received"
     STATUS_PARSED = "parsed"
@@ -1585,6 +2029,13 @@ class QuotationLPO(models.Model):
         (SOURCE_PASTED_TEXT, "Pasted text"),
         (SOURCE_GMAIL, "Gmail evidence"),
     ]
+
+    STATUS_DOWNGRADE_ERROR = CONFIRMED_LPO_STATUS_DOWNGRADE_ERROR
+    DELETE_ERROR = CONFIRMED_LPO_DELETE_ERROR
+    PROTECTED_FIELDS_ERROR = CONFIRMED_LPO_PROTECTED_FIELDS_ERROR
+    CONFIRMED_ALLOWED_UPDATE_FIELDS = QuotationLPOQuerySet.CONFIRMED_ALLOWED_UPDATE_FIELDS
+
+    objects = QuotationLPOQuerySet.as_manager()
 
     quotation = models.ForeignKey(Quotation, on_delete=models.CASCADE, related_name="lpos")
     gmail_evidence = models.OneToOneField(
@@ -1632,6 +2083,61 @@ class QuotationLPO(models.Model):
     def __str__(self):
         label = self.lpo_number or self.source_filename or f"LPO #{self.pk}"
         return f"{label} for {self.quotation}"
+
+    def save(self, *args, **kwargs):
+        if not self.pk:
+            return super().save(*args, **kwargs)
+
+        with transaction.atomic():
+            stored = type(self).objects.select_for_update().filter(pk=self.pk).first()
+            if stored and stored.status == self.STATUS_CONFIRMED:
+                update_fields = kwargs.get("update_fields")
+                fields_to_write = None if update_fields is None else set(update_fields)
+
+                def field_is_written(field):
+                    return (
+                        fields_to_write is None
+                        or field.name in fields_to_write
+                        or field.attname in fields_to_write
+                    )
+
+                status_field = self._meta.get_field("status")
+                if field_is_written(status_field) and self.status != self.STATUS_CONFIRMED:
+                    raise ValidationError({"status": self.STATUS_DOWNGRADE_ERROR})
+
+                protected_changes = []
+                for field in self._meta.concrete_fields:
+                    if (
+                        field.primary_key
+                        or field.name == "status"
+                        or field.name in self.CONFIRMED_ALLOWED_UPDATE_FIELDS
+                        or not field_is_written(field)
+                    ):
+                        continue
+                    if getattr(stored, field.attname) != getattr(self, field.attname):
+                        protected_changes.append(field.name)
+                if protected_changes:
+                    raise ValidationError(
+                        {
+                            field_name: self.PROTECTED_FIELDS_ERROR
+                            for field_name in protected_changes
+                        }
+                    )
+            return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        with transaction.atomic():
+            stored_status = (
+                type(self).objects.select_for_update()
+                .filter(pk=self.pk)
+                .values_list("status", flat=True)
+                .first()
+                if self.pk
+                else None
+            )
+            if self.status == self.STATUS_CONFIRMED or stored_status == self.STATUS_CONFIRMED:
+                raise ValidationError(self.DELETE_ERROR)
+            return super().delete(*args, **kwargs)
 
 
 class ProformaInvoice(models.Model):

@@ -17,6 +17,8 @@ router.register(r"historical-import-batches", views.HistoricalImportBatchViewSet
 router.register(r"historical-imports", views.HistoricalPriceImportViewSet, basename="quotation-historical-import")
 router.register(r"historical-import-lines", views.HistoricalPriceImportLineViewSet, basename="quotation-historical-import-line")
 router.register(r"historical-import-ai-suggestions", views.HistoricalImportAISuggestionViewSet, basename="quotation-historical-import-ai-suggestion")
+router.register(r"mailbox-po-audits", views.MailboxPOAuditRunViewSet, basename="quotation-mailbox-po-audit")
+router.register(r"po-evidence", views.QuotationPOEvidenceViewSet, basename="quotation-po-evidence")
 router.register(r"quotes", views.QuotationViewSet, basename="quotation")
 router.register(r"lpos", views.QuotationLPOViewSet, basename="quotation-lpo")
 router.register(r"proformas", views.ProformaInvoiceViewSet, basename="quotation-standalone-proforma")

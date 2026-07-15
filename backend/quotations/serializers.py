@@ -24,6 +24,9 @@ from .models import (
     HistoricalPriceImportLine,
     Inquiry,
     InquiryLine,
+    MailboxPOAuditRun,
+    MailboxPOMatchRun,
+    MailboxPOMessage,
     ProformaInvoice,
     ProformaInvoiceLine,
     Quotation,
@@ -235,6 +238,124 @@ class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
 
     def get_is_connected(self, obj):
         return obj.status == GmailOAuthConnection.STATUS_CONNECTED
+
+
+class MailboxPOAuditRunSerializer(serializers.ModelSerializer):
+    mailbox_email = serializers.EmailField(source="gmail_connection.email", read_only=True)
+    requested_by_username = serializers.CharField(source="requested_by.username", read_only=True, allow_null=True)
+    error_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MailboxPOAuditRun
+        fields = [
+            "id",
+            "gmail_connection",
+            "mailbox_email",
+            "requested_by",
+            "requested_by_username",
+            "status",
+            "earliest_quote_at",
+            "mailbox_cutoff_at",
+            "gmail_query",
+            "page_token",
+            "exhausted",
+            "result_size_estimate",
+            "pages_scanned",
+            "messages_scanned",
+            "messages_created",
+            "relevant_messages",
+            "incomplete_messages",
+            "attachment_candidates",
+            "attachment_bytes_fetched",
+            "errors",
+            "error_count",
+            "started_at",
+            "last_page_at",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_error_count(self, obj):
+        return len(obj.errors or [])
+
+
+class MailboxPOMessageSerializer(serializers.ModelSerializer):
+    attachment_count = serializers.SerializerMethodField()
+    parsed_attachment_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MailboxPOMessage
+        fields = [
+            "id",
+            "gmail_connection",
+            "gmail_message_id",
+            "gmail_thread_id",
+            "mailbox_email",
+            "label_ids",
+            "full_headers",
+            "subject",
+            "sender",
+            "recipients",
+            "cc",
+            "reply_to",
+            "sent_at",
+            "snippet",
+            "newest_body_text",
+            "attachment_manifest",
+            "attachment_count",
+            "parsed_attachment_count",
+            "classification",
+            "is_relevant",
+            "auto_link_eligible",
+            "relevance_reason",
+            "extracted_po_references",
+            "audit_error",
+            "first_seen_run",
+            "last_seen_run",
+            "first_seen_at",
+            "last_seen_at",
+            "full_message_fetched_at",
+            "attachments_audited_at",
+            "last_audited_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_attachment_count(self, obj):
+        return len(obj.attachment_manifest or [])
+
+    def get_parsed_attachment_count(self, obj):
+        return sum(
+            1
+            for attachment in (obj.attachment_manifest or [])
+            if isinstance(attachment, dict) and attachment.get("status") == "parsed"
+        )
+
+
+class MailboxPOMatchRunSerializer(serializers.ModelSerializer):
+    requested_by_username = serializers.CharField(source="requested_by.username", read_only=True, allow_null=True)
+
+    class Meta:
+        model = MailboxPOMatchRun
+        fields = [
+            "id",
+            "audit_run",
+            "requested_by",
+            "requested_by_username",
+            "algorithm_version",
+            "status",
+            "summary",
+            "errors",
+            "cursor_message_id",
+            "last_heartbeat_at",
+            "started_at",
+            "completed_at",
+            "created_at",
+        ]
+        read_only_fields = fields
 
 
 class ContractIntelligenceItemSerializer(serializers.ModelSerializer):
@@ -1836,13 +1957,24 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
     )
     attachment_count = serializers.SerializerMethodField()
     parsed_attachment_count = serializers.SerializerMethodField()
-    extracted_text_preview = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
+    match_signals = serializers.SerializerMethodField()
+    item_match_signals = serializers.SerializerMethodField()
+    quantity_match_signals = serializers.SerializerMethodField()
+    time_match_signals = serializers.SerializerMethodField()
 
     class Meta:
         model = QuotationPOEvidence
         fields = [
             "id",
             "quotation",
+            "mailbox_message",
+            "mailbox_match_run",
+            "match_signals",
+            "selected_attachment_id",
+            "selected_attachment_filename",
+            "quote_reference_present",
+            "matched_quote_reference",
             "gmail_connection",
             "mailbox_email",
             "gmail_message_id",
@@ -1855,8 +1987,9 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
             "attachments",
             "attachment_count",
             "parsed_attachment_count",
-            "extracted_text_preview",
-            "source_sha256",
+            "item_match_signals",
+            "quantity_match_signals",
+            "time_match_signals",
             "matching_reason",
             "confidence",
             "status",
@@ -1875,13 +2008,148 @@ class QuotationPOEvidenceSerializer(serializers.ModelSerializer):
         return len(obj.attachments or [])
 
     def get_parsed_attachment_count(self, obj):
-        return sum(1 for attachment in obj.attachments or [] if (attachment or {}).get("status") == "parsed")
+        return sum(
+            1
+            for attachment in (obj.attachments or [])
+            if isinstance(attachment, dict) and attachment.get("status") == "parsed"
+        )
 
-    def get_extracted_text_preview(self, obj):
-        text = (obj.extracted_text or "").strip()
-        if not text:
-            return ""
-        return text[:1500]
+    def get_attachments(self, obj):
+        # Mailbox inventory entries contain extracted document text, rows,
+        # totals and parser metadata. List/outcome responses only need enough
+        # metadata to identify and open the exact source lazily.
+        allowed = {
+            "attachment_id",
+            "source_gmail_attachment_id",
+            "part_id",
+            "filename",
+            "mime_type",
+            "source_mime_type",
+            "size",
+            "status",
+            "reason",
+            "is_selected",
+            "line_count",
+        }
+        sanitized = []
+        for attachment in (obj.attachments or [])[:50]:
+            if not isinstance(attachment, dict):
+                continue
+            item = {key: attachment.get(key) for key in allowed if key in attachment}
+            for key in ("filename", "mime_type", "source_mime_type", "status", "reason"):
+                if key in item:
+                    item[key] = str(item[key] or "")[:500]
+            sanitized.append(item)
+        return sanitized
+
+    def get_match_signals(self, obj):
+        signals = obj.match_signals or {}
+        candidate = signals.get("candidate") or {}
+        candidate_fields = {
+            "quote_id",
+            "quotation_number",
+            "score",
+            "item_coverage",
+            "quote_coverage",
+            "average_name_similarity",
+            "exact_quote_reference",
+            "exact_sender",
+            "sender_matches_customer",
+            "quantity_exact_count",
+            "quantity_reduced_count",
+            "quantity_conflict_count",
+            "price_exact_count",
+            "price_conflict_count",
+            "total_exact_count",
+            "total_conflict_count",
+            "unit_conflict_count",
+            "spec_conflict_count",
+            "document_total_result",
+            "document_total_provided",
+            "commercial_exact_row_count",
+            "commercial_row_coverage",
+            "commercial_corroboration_result",
+            "parser_warnings",
+            "material_warnings",
+        }
+        components = []
+        for component in (signals.get("components") or [])[:30]:
+            if not isinstance(component, dict):
+                continue
+            components.append(
+                {
+                    "signal": str(component.get("signal") or "")[:100],
+                    "score": component.get("score"),
+                    "detail": str(component.get("detail") or "")[:500],
+                }
+            )
+        source = signals.get("source") or {}
+        safe_source = {
+            key: str(source.get(key) or "")[:500]
+            for key in ("kind", "attachment_id", "filename")
+            if isinstance(source, dict) and key in source
+        }
+        return {
+            "decision": str(signals.get("decision") or "")[:100],
+            "reason": str(signals.get("reason") or "")[:1000],
+            "automatic_blockers": [
+                str(value)[:500]
+                for value in (signals.get("automatic_blockers") or [])[:30]
+            ],
+            "candidate": {key: candidate.get(key) for key in candidate_fields if key in candidate},
+            "components": components,
+            "source": safe_source,
+            "lpo_references": [str(value)[:100] for value in (signals.get("lpo_references") or [])[:20]],
+            "quotation_references": [
+                str(value)[:100] for value in (signals.get("quotation_references") or [])[:20]
+            ],
+        }
+
+    def get_item_match_signals(self, obj):
+        signals = obj.match_signals or {}
+        if signals.get("items") is not None:
+            return signals.get("items")
+        candidate = signals.get("candidate") or {}
+        return [
+            {
+                "label": match.get("po_name") or f"PO row {index}",
+                "detail": (
+                    f"Matched to {match.get('quote_name') or 'quotation line'} "
+                    f"({round(float(match.get('name_similarity') or 0) * 100)}% item similarity)"
+                ),
+                "matched": True,
+            }
+            for index, match in enumerate((candidate.get("matched_lines") or [])[:50], start=1)
+        ]
+
+    def get_quantity_match_signals(self, obj):
+        signals = obj.match_signals or {}
+        if signals.get("quantities") is not None:
+            return signals.get("quantities")
+        candidate = signals.get("candidate") or {}
+        return [
+            {
+                "label": match.get("po_name") or f"PO row {index}",
+                "value": str(match.get("quantity_result") or "unknown").replace("_", " "),
+                "matched": match.get("quantity_result") in {"exact", "reduced"},
+            }
+            for index, match in enumerate((candidate.get("matched_lines") or [])[:50], start=1)
+        ]
+
+    def get_time_match_signals(self, obj):
+        signals = obj.match_signals or {}
+        if signals.get("timing") is not None:
+            return signals.get("timing")
+        candidate = signals.get("candidate") or {}
+        return [
+            {
+                "label": "Quote to LPO",
+                "detail": component.get("detail") or "",
+                "matched": float(component.get("score") or 0) >= 0,
+            }
+            for component in candidate.get("components") or []
+            if component.get("signal") == "time_distance"
+        ]
 
 
 class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
@@ -2125,6 +2393,18 @@ class QuotationLPOSerializer(serializers.ModelSerializer):
 
     def get_parsed_row_count(self, obj):
         return len(obj.parsed_rows or [])
+
+    def validate_status(self, value):
+        if (
+            self.instance
+            and self.instance.status == QuotationLPO.STATUS_CONFIRMED
+            and value != QuotationLPO.STATUS_CONFIRMED
+        ):
+            raise serializers.ValidationError(
+                "A confirmed LPO cannot be moved back to a non-confirmed status. "
+                "Correct its reference details while keeping it confirmed."
+            )
+        return value
 
 
 class CompanyPriceHistorySerializer(serializers.ModelSerializer):
