@@ -59,7 +59,16 @@ from .contract_intelligence import (
 )
 from .historical_import_parsers import parse_historical_pdf_upload
 from .import_parsers import parse_file_preview, parse_text_preview
-from .mailbox_po_audit import scan_mailbox_po_audit_page, start_mailbox_po_audit
+from .mailbox_po_audit import (
+    assert_mailbox_po_audit_repairable,
+    mailbox_po_audit_repair_remaining,
+    mailbox_vision_availability,
+    mark_unavailable_mailbox_vision_for_manual_review,
+    reclassify_mailbox_po_audit_messages,
+    repair_mailbox_po_audit_pdf_vision,
+    scan_mailbox_po_audit_page,
+    start_mailbox_po_audit,
+)
 from .mailbox_po_reconciliation import (
     ALGORITHM_VERSION,
     MailboxPOMatchBusy,
@@ -1771,8 +1780,15 @@ class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewS
             return super().get_queryset().none()
         return super().get_queryset().filter(gmail_connection=connection)
 
-    def _response(self, run, *, http_status=status.HTTP_200_OK):
+    def _response(self, run, *, http_status=status.HTTP_200_OK, repair_summary=None):
         latest_match = run.match_runs.select_related("requested_by").first()
+        inventory_done = bool(run.status == MailboxPOAuditRun.STATUS_COMPLETED and run.exhausted)
+        vision_availability = mailbox_vision_availability()
+        repair_remaining = (
+            mailbox_po_audit_repair_remaining(run)
+            if inventory_done and not latest_match and vision_availability["available"]
+            else 0
+        )
         return Response(
             {
                 "run": MailboxPOAuditRunSerializer(run, context={"request": self.request}).data,
@@ -1781,12 +1797,17 @@ class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewS
                     if latest_match
                     else None
                 ),
-                "inventory_done": bool(run.status == MailboxPOAuditRun.STATUS_COMPLETED and run.exhausted),
+                "inventory_done": inventory_done,
                 "inventory_complete": bool(
                     run.status == MailboxPOAuditRun.STATUS_COMPLETED
                     and run.exhausted
                     and run.incomplete_messages == 0
                 ),
+                "repair_done": bool(inventory_done and repair_remaining == 0),
+                "repair_remaining": repair_remaining,
+                "repair_summary": repair_summary,
+                "mailbox_vision_available": vision_availability["available"],
+                "mailbox_vision_reason": vision_availability["reason"],
                 "done": bool(
                     run.status == MailboxPOAuditRun.STATUS_COMPLETED
                     and run.exhausted
@@ -1853,12 +1874,18 @@ class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewS
             else None
         )
         if not run:
+            vision_availability = mailbox_vision_availability()
             return Response(
                 {
                     "run": None,
                     "match_run": None,
                     "inventory_done": False,
                     "inventory_complete": False,
+                    "repair_done": False,
+                    "repair_remaining": 0,
+                    "repair_summary": None,
+                    "mailbox_vision_available": vision_availability["available"],
+                    "mailbox_vision_reason": vision_availability["reason"],
                     "done": False,
                 }
             )
@@ -1877,6 +1904,24 @@ class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewS
         return self._response(run)
 
     @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def repair_page(self, request, pk=None):
+        run = self.get_object()
+        try:
+            # Keep API requests comfortably below Gunicorn's timeout. The
+            # management command may use a larger explicit batch off-request.
+            limit = 1
+            summary = repair_mailbox_po_audit_pdf_vision(
+                run,
+                message_ids=request.data.get("message_ids") or [],
+                limit=limit,
+                actor=request.user,
+            )
+        except (AIParseError, RuntimeError, TypeError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+        run.refresh_from_db()
+        return self._response(run, repair_summary=summary)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
     def reconcile(self, request, pk=None):
         run = self.get_object()
         if run.status != MailboxPOAuditRun.STATUS_COMPLETED or not run.exhausted:
@@ -1891,6 +1936,25 @@ class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewS
         ).first()
         if current and not force:
             return self._response(run)
+        if not run.match_runs.exists():
+            try:
+                assert_mailbox_po_audit_repairable(run)
+                reclassify_mailbox_po_audit_messages(run)
+                mark_unavailable_mailbox_vision_for_manual_review(run)
+            except ValueError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
+            repair_remaining = mailbox_po_audit_repair_remaining(run)
+            if repair_remaining:
+                return Response(
+                    {
+                        "detail": (
+                            "Finish the bounded mailbox PDF repair phase before matching quotations."
+                        ),
+                        "repair_done": False,
+                        "repair_remaining": repair_remaining,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
         try:
             page_size = max(1, min(int(request.data.get("page_size") or 5), 10))
             reconcile_mailbox_po_audit_page(

@@ -241,6 +241,10 @@ QUOTATION_AI_PARSE_MAX_RENDERED_PAGES = int(os.environ.get("QUOTATION_AI_PARSE_M
 QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION = int(os.environ.get("QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", "1400"))
 QUOTATION_AI_PARSE_IMAGE_SCALE = float(os.environ.get("QUOTATION_AI_PARSE_IMAGE_SCALE", "1.4"))
 QUOTATION_AI_PARSE_TIMEOUT_SECONDS = int(os.environ.get("QUOTATION_AI_PARSE_TIMEOUT_SECONDS", "60"))
+# Separate privacy consent for sending Gmail attachment page images to the
+# configured cloud vision provider. Generic AI cleanup toggles alone do not
+# enable mailbox vision; production must opt in explicitly.
+QUOTATION_MAILBOX_AI_VISION_ENABLED = env_bool("QUOTATION_MAILBOX_AI_VISION_ENABLED", False)
 
 # ---- Gmail read-only OAuth for quotation contract intelligence ----
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()

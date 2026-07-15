@@ -87,10 +87,10 @@ def _column_ref(index):
     return letters
 
 
-def read_upload_bytes(uploaded_file):
+def read_upload_bytes(uploaded_file, *, max_bytes=None):
     if not uploaded_file:
         raise ValidationError("No file was uploaded.")
-    limit = max_upload_bytes()
+    limit = max_upload_bytes() if max_bytes is None else max(1, int(max_bytes))
     data = bytearray()
     for chunk in uploaded_file.chunks():
         data.extend(chunk)
@@ -225,7 +225,13 @@ def parse_text_preview(raw_text, raw_html=""):
     )
 
 
-def parse_file_preview(uploaded_file, *, store_source=True):
+def parse_file_preview(
+    uploaded_file,
+    *,
+    store_source=True,
+    max_bytes=None,
+    max_pdf_pages_override=None,
+):
     """Parse an uploaded document, optionally retaining its source bytes.
 
     Normal user uploads need a durable private source reference for later OCR
@@ -234,7 +240,7 @@ def parse_file_preview(uploaded_file, *, store_source=True):
     attachment on ephemeral application storage.
     """
 
-    data = read_upload_bytes(uploaded_file)
+    data = read_upload_bytes(uploaded_file, max_bytes=max_bytes)
     filename = Path(uploaded_file.name or "").name
     extension, sniffed_mime = _validate_upload_type(data, filename)
     sha256 = hashlib.sha256(data).hexdigest()
@@ -248,7 +254,13 @@ def parse_file_preview(uploaded_file, *, store_source=True):
             extension=extension,
         )
     else:
-        preview = parse_pdf_preview(data, filename, sniffed_mime, sha256)
+        preview = parse_pdf_preview(
+            data,
+            filename,
+            sniffed_mime,
+            sha256,
+            max_pages=max_pdf_pages_override,
+        )
 
     source_file_ref = ""
     if store_source:
@@ -446,7 +458,7 @@ def parse_excel_preview(data, filename, content_type, sha256, *, extension=".xls
     )
 
 
-def _preflight_pdf(data):
+def _preflight_pdf(data, *, max_pages=None):
     if not data.startswith(b"%PDF-"):
         raise ValidationError("Invalid PDF file. The upload does not look like a PDF.")
     try:
@@ -456,8 +468,11 @@ def _preflight_pdf(data):
     if reader.is_encrypted:
         raise ValidationError("Encrypted PDF files are not supported. Please upload an unlocked PDF.")
     page_count = len(reader.pages)
-    if page_count > max_pdf_pages():
-        raise ValidationError(f"PDF has {page_count} pages. Maximum supported pages: {max_pdf_pages()}.")
+    effective_max_pages = max_pdf_pages() if max_pages is None else max(1, int(max_pages))
+    if page_count > effective_max_pages:
+        raise ValidationError(
+            f"PDF has {page_count} pages. Maximum supported pages: {effective_max_pages}."
+        )
     return page_count
 
 
@@ -733,8 +748,8 @@ def _parse_pdf_word_layout_item_rows(raw_text):
     return parsed_rows
 
 
-def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref=""):
-    page_count = _preflight_pdf(data)
+def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="", max_pages=None):
+    page_count = _preflight_pdf(data, max_pages=max_pages)
     warnings = []
     skipped_count = 0
     pymupdf_text_chunks, pymupdf_word_layout_chunks, pymupdf_page_metadata = _extract_pymupdf_text(data)

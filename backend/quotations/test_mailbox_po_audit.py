@@ -467,7 +467,7 @@ class MailboxPOAuditTests(TestCase):
         self.assertEqual((candidate_count, fetched_bytes), (1, 100))
 
         oversized = self.message("oversized-generic", subject="Please see attached", body="Kind regards")
-        oversized["attachment_manifest"] = [{**attachment, "size": 6 * 1024 * 1024}]
+        oversized["attachment_manifest"] = [{**attachment, "size": 11 * 1024 * 1024}]
         unsupported = self.message("active-generic", subject="Please see attached", body="Kind regards")
         unsupported["attachment_manifest"] = [{**attachment, "filename": "123.svg"}]
         self.assertEqual(classify_mailbox_message(oversized)["classification"], MailboxPOMessage.CLASS_OTHER)
@@ -501,7 +501,14 @@ class MailboxPOAuditTests(TestCase):
             "token",
         )
 
-        self.assertEqual(parse_preview.call_args.kwargs, {"store_source": False})
+        self.assertEqual(
+            parse_preview.call_args.kwargs,
+            {
+                "store_source": False,
+                "max_bytes": 10 * 1024 * 1024,
+                "max_pdf_pages_override": 25,
+            },
+        )
         self.assertEqual(result["warnings"], ["OCR confidence is low; review the source."])
         self.assertEqual(result["source_file_ref"], "")
         self.assertGreater(byte_count, 0)
@@ -600,12 +607,16 @@ class MailboxPOAuditTests(TestCase):
         )
 
         self.assertEqual(candidate_count, 2)
-        self.assertEqual(fetched_bytes, 6)
+        # Gmail omitted both sizes, so the second decoded response crossed the
+        # 10-byte processing budget. The ledger records all 12 bytes actually
+        # downloaded, discards the second parse, and stops fetching.
+        self.assertEqual(fetched_bytes, 12)
         self.assertEqual(parse_preview.call_count, 1)
         self.assertEqual(manifest[0]["status"], "parsed")
         self.assertEqual(manifest[0]["fetched_bytes"], 6)
         self.assertEqual(manifest[1]["status"], "skipped")
-        self.assertFalse(manifest[1]["content_fetched"])
-        self.assertIn("remaining per-message byte limit", manifest[1]["reason"])
+        self.assertTrue(manifest[1]["content_fetched"])
+        self.assertEqual(manifest[1]["fetched_bytes"], 6)
+        self.assertIn("processing byte limit", manifest[1]["reason"])
         self.assertNotIn("original_text", manifest[1])
         self.assertNotIn("lines", manifest[1])

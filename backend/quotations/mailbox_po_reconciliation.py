@@ -20,6 +20,7 @@ from django.db import transaction
 from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 
+from .ai_parsing import AI_SOURCE_VISION
 from .import_parsers import parse_text_preview
 from .mailbox_po_audit import extract_po_references
 from .mailbox_po_matching import (
@@ -284,12 +285,14 @@ def _material_warnings(warnings, meta=None):
         "confidence",
         "failed",
         "fallback",
+        "incomplete",
         "no clear header",
         "no item lines",
         "not enabled",
         "ocr",
         "stopped reading",
         "total",
+        "unsupported",
     )
     material = [
         warning
@@ -311,6 +314,7 @@ def _variant_message(
     total,
     parser_warnings=(),
     material_warnings=(),
+    quotation_references_review_only=False,
 ):
     return CanonicalMailboxMessage(
         message_id=inventory.gmail_message_id,
@@ -323,6 +327,7 @@ def _variant_message(
         lpo_references=po_refs,
         quotation_references=quote_refs,
         quotation_references_are_authoritative=True,
+        quotation_references_are_review_only=quotation_references_review_only,
         document_total=total,
         parser_warnings=_warning_tuple(parser_warnings),
         material_warnings=_warning_tuple(material_warnings),
@@ -352,7 +357,13 @@ def document_variants(inventory):
     body_mirrors_file = False
 
     for attachment in inventory.attachment_manifest or []:
-        if not isinstance(attachment, dict) or attachment.get("status") != "parsed":
+        if not isinstance(attachment, dict):
+            continue
+        is_manual_attachment = bool(
+            attachment.get("manual_review_required")
+            or attachment.get("status") == "manual_review"
+        )
+        if attachment.get("status") != "parsed" and not is_manual_attachment:
             continue
         filename = str(attachment.get("filename") or "")
         attachment_text = str(attachment.get("original_text") or "")
@@ -370,6 +381,19 @@ def document_variants(inventory):
             if value
         )
         attachment_total = _document_total(attachment, attachment_text)
+        attachment_meta = attachment.get("meta") or {}
+        mailbox_ai_meta = (
+            attachment_meta.get("mailbox_ai_vision")
+            if isinstance(attachment_meta, dict)
+            else {}
+        ) or {}
+        quotation_references_review_only = bool(
+            attachment.get("result_source") == AI_SOURCE_VISION
+            or (
+                isinstance(mailbox_ai_meta, dict)
+                and mailbox_ai_meta.get("review_only")
+            )
+        )
         if _body_mirrors_attachment(
             body_rows,
             body_total,
@@ -386,7 +410,10 @@ def document_variants(inventory):
             or ""
         )
         combined_text = "\n".join(filter(None, [base_body, attachment_text, filename]))
-        parser_warnings = _warning_tuple(attachment.get("warnings") or [])
+        parser_warnings = _warning_tuple(
+            attachment.get("warnings")
+            or ([attachment.get("reason")] if is_manual_attachment else [])
+        )
         variants.append(
             DocumentVariant(
                 message=_variant_message(
@@ -401,6 +428,7 @@ def document_variants(inventory):
                         parser_warnings,
                         attachment.get("meta") or {},
                     ),
+                    quotation_references_review_only=quotation_references_review_only,
                 ),
                 source_kind="attachment",
                 attachment_id=attachment_id,

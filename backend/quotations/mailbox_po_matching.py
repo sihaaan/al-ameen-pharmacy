@@ -172,6 +172,10 @@ class CanonicalMailboxMessage:
     # that provenance is available, re-scanning the surrounding email body
     # would re-introduce references belonging to sibling attachments.
     quotation_references_are_authoritative: bool = False
+    # AI-vision references remain useful reviewer provenance, but they must not
+    # hard-filter candidates or receive the exact-reference score unless a
+    # deterministic source independently corroborates them.
+    quotation_references_are_review_only: bool = False
     company_name: str = ""
     document_total: Decimal | None = None
     # Parser warnings must travel with the exact document variant that produced
@@ -482,6 +486,14 @@ def canonicalize_message(value: CanonicalMailboxMessage | Mapping[str, Any]) -> 
                 value,
                 "quotation_references_are_authoritative",
                 "authoritative_quotation_references",
+                default=False,
+            )
+        ),
+        quotation_references_are_review_only=bool(
+            _mapping_value(
+                value,
+                "quotation_references_are_review_only",
+                "review_only_quotation_references",
                 default=False,
             )
         ),
@@ -857,6 +869,8 @@ def _reference_key(value: str) -> str:
 
 
 def _quotation_reference_keys(message: CanonicalMailboxMessage) -> frozenset[str]:
+    if message.quotation_references_are_review_only:
+        return frozenset()
     values = list(message.quotation_references)
     if not message.quotation_references_are_authoritative:
         haystack = f"{message.subject}\n{message.body}"

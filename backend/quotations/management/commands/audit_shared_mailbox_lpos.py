@@ -3,7 +3,14 @@ import json
 from django.core.management.base import BaseCommand, CommandError
 
 from quotations.contract_intelligence import resolve_gmail_connection
-from quotations.mailbox_po_audit import scan_mailbox_po_audit_page, start_mailbox_po_audit
+from quotations.mailbox_po_audit import (
+    assert_mailbox_po_audit_repairable,
+    mailbox_po_audit_repair_remaining,
+    mark_unavailable_mailbox_vision_for_manual_review,
+    reclassify_mailbox_po_audit_messages,
+    scan_mailbox_po_audit_page,
+    start_mailbox_po_audit,
+)
 from quotations.mailbox_po_reconciliation import ALGORITHM_VERSION, reconcile_mailbox_po_audit
 from quotations.models import MailboxPOAuditRun, MailboxPOMatchRun
 
@@ -91,6 +98,33 @@ class Command(BaseCommand):
         if options.get("inventory_only"):
             self.stdout.write(json.dumps(payload, default=str, sort_keys=True))
             return
+
+        if not run.match_runs.exists():
+            try:
+                # Reclassification and manual surfacing update the shared
+                # canonical catalogue. Never let --resume-run mutate an older
+                # completed snapshot after a newer inventory exists.
+                assert_mailbox_po_audit_repairable(run)
+            except ValueError as exc:
+                raise CommandError(str(exc)) from exc
+            reclassify_mailbox_po_audit_messages(run)
+            mark_unavailable_mailbox_vision_for_manual_review(run)
+            repair_remaining = mailbox_po_audit_repair_remaining(run)
+            payload.update(
+                {
+                    "repair_done": repair_remaining == 0,
+                    "repair_remaining": repair_remaining,
+                }
+            )
+            if repair_remaining:
+                self.stdout.write(json.dumps(payload, default=str, sort_keys=True))
+                self.stdout.write(
+                    self.style.WARNING(
+                        "Inventory is complete, but bounded PDF repair is required before reconciliation. "
+                        f"Run repair_mailbox_po_pdf_vision --audit-run {run.id}, then resume this command."
+                    )
+                )
+                return
 
         match_run = run.match_runs.filter(
             algorithm_version=ALGORITHM_VERSION,

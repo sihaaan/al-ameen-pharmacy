@@ -224,6 +224,7 @@ const quotationAPI = {
     latest: () => axiosInstance.get('/quotations/mailbox-po-audits/latest/'),
     start: (data = {}) => axiosInstance.post('/quotations/mailbox-po-audits/', data),
     scanPage: (id, data = {}) => axiosInstance.post(`/quotations/mailbox-po-audits/${id}/scan_page/`, data),
+    repairPage: (id, data = {}) => axiosInstance.post(`/quotations/mailbox-po-audits/${id}/repair_page/`, data),
     reconcile: (id, data = {}) => axiosInstance.post(`/quotations/mailbox-po-audits/${id}/reconcile/`, data),
   },
   lpos: {

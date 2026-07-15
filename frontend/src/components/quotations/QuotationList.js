@@ -54,6 +54,11 @@ const emptyMailboxScan = {
   done: false,
   inventoryDone: false,
   inventoryComplete: false,
+  repairDone: false,
+  repairRemaining: null,
+  repairSummary: null,
+  mailboxVisionAvailable: null,
+  mailboxVisionReason: '',
   phase: 'idle',
   mode: 'scan',
   pauseReason: null,
@@ -68,6 +73,15 @@ const mailboxScanFromResponse = (payload, overrides = {}) => {
     : Number(run.result_size_estimate);
   const processed = Number(run.messages_scanned || 0);
   const inventoryDone = Boolean(payload?.inventory_done);
+  // Older deployments did not expose a separate PDF-repair phase. Treat an
+  // omitted marker as complete so a rolling frontend deploy can still finish
+  // audits against those responses.
+  const repairDone = payload?.repair_done === undefined
+    ? inventoryDone
+    : Boolean(payload.repair_done);
+  const repairRemaining = payload?.repair_remaining === null || payload?.repair_remaining === undefined
+    ? null
+    : Math.max(Number(payload.repair_remaining) || 0, 0);
   const incomplete = Number(run.incomplete_messages || 0);
   const inventoryComplete = payload?.inventory_complete === undefined
     ? inventoryDone && incomplete === 0
@@ -78,7 +92,9 @@ const mailboxScanFromResponse = (payload, overrides = {}) => {
       ? 'matching'
       : run.status === 'failed'
         ? 'failed'
-        : inventoryDone
+        : inventoryDone && !repairDone
+          ? 'repair'
+          : inventoryDone
           ? 'ready_to_match'
           : run.id
             ? 'inventory'
@@ -99,6 +115,13 @@ const mailboxScanFromResponse = (payload, overrides = {}) => {
     done: Boolean(payload?.done),
     inventoryDone,
     inventoryComplete,
+    repairDone,
+    repairRemaining,
+    repairSummary: payload?.repair_summary || null,
+    mailboxVisionAvailable: payload?.mailbox_vision_available === undefined
+      ? null
+      : Boolean(payload.mailbox_vision_available),
+    mailboxVisionReason: payload?.mailbox_vision_reason || '',
     phase,
     ...overrides,
   };
@@ -261,7 +284,12 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
           pauseReason = 'request_budget';
           break;
         }
-        if (data.inventory_done) {
+        const repairDone = data.repair_done === undefined
+          ? Boolean(data.inventory_done)
+          : Boolean(data.repair_done);
+        if (data.inventory_done && !repairDone) {
+          response = await quotationAPI.mailboxPOAudits.repairPage(run.id);
+        } else if (data.inventory_done) {
           response = await quotationAPI.mailboxPOAudits.reconcile(run.id);
         } else {
           response = await quotationAPI.mailboxPOAudits.scanPage(run.id, { page_size: 25 });
@@ -352,6 +380,9 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
           <div>
             <strong>Mailbox-wide PO/LPO audit</strong>
             <p>Inventories every incoming Gmail message since the first quotation (including Spam/Trash for completeness), reads the newest email body, and checks likely documents against quotation items, quantities, prices/totals, customer and timing. Matches remain review-only.</p>
+            <p className="qm-inline-warning">
+              Privacy: when mailbox PDF vision is explicitly enabled, bounded page images from unreadable PDFs are sent to the configured OpenAI vision model with API storage disabled. AI-read or partially rendered documents always require staff to inspect the exact Gmail attachment.
+            </p>
             {(poScan.runId || poScan.processed > 0 || poScan.remaining !== null) && (
               <div className="qm-po-scan-meta">
                 <span>{poScan.processed}{poScan.estimate !== null ? ` / ~${poScan.estimate}` : ''} emails inventoried</span>
@@ -360,6 +391,19 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
                 {poScan.inventoryComplete && <span>Mailbox inventory complete</span>}
                 {poScan.inventoryDone && !poScan.inventoryComplete && (
                   <span>{poScan.incomplete} email{poScan.incomplete === 1 ? '' : 's'} could not be read after three attempts</span>
+                )}
+                {poScan.inventoryDone && !poScan.repairDone && (
+                  <span>
+                    {poScan.repairRemaining === null
+                      ? 'Checking unreadable PDF attachments'
+                      : `${poScan.repairRemaining} PDF attachment${poScan.repairRemaining === 1 ? '' : 's'} remaining for bounded review repair`}
+                  </span>
+                )}
+                {poScan.inventoryDone && poScan.repairDone && poScan.repairSummary && (
+                  <span>Unreadable PDF review repair complete</span>
+                )}
+                {poScan.inventoryDone && poScan.mailboxVisionAvailable === false && poScan.mailboxVisionReason && (
+                  <span>PDF vision unavailable: {poScan.mailboxVisionReason}</span>
                 )}
                 {poScan.done && <span>{poScan.found} active review {poScan.found === 1 ? 'match' : 'matches'}</span>}
                 {poScan.done && <span>{poScan.ambiguous} {poScan.ambiguous === 1 ? 'email needs' : 'emails need'} assignment</span>}
@@ -384,7 +428,11 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
           <div className="qm-po-scan-actions">
             <button type="button" className="qm-primary" disabled={poScan.running} onClick={() => runPOEvidenceScan({ rescan: false })}>
               {poScan.running
-                ? (poScan.inventoryDone ? 'Matching...' : 'Reading Gmail...')
+                ? (poScan.phase === 'repair'
+                  ? 'Reviewing unreadable PDF...'
+                  : poScan.inventoryDone
+                    ? 'Matching...'
+                    : 'Reading Gmail...')
                 : (poScan.phase === 'failed' || poScan.phase === 'paused' || (poScan.runId && !poScan.done))
                   ? 'Resume Mailbox Audit'
                   : 'Audit New Mailbox Run'}

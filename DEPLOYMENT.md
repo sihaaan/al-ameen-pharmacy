@@ -106,6 +106,12 @@ If Gmail OAuth is enabled, replace the placeholder backend domain and register
 the exact `GOOGLE_OAUTH_REDIRECT_URI` in the Google Cloud OAuth client. The
 mailbox integration requests read-only Gmail access.
 
+Mailbox PDF vision has a separate privacy opt-in. Set
+`QUOTATION_MAILBOX_AI_VISION_ENABLED=1` only when staff approve sending bounded
+page images from unreadable Gmail PDFs to the configured OpenAI vision model.
+Those requests use `store=false`; results remain review-only, and partially
+rendered documents must be checked against the exact Gmail attachment.
+
 **Important:** Images uploaded via admin panel will be stored on Cloudinary's CDN, so they persist across Railway deployments!
 
 **Database safety note:** Never use the production Neon `DATABASE_URL` in local

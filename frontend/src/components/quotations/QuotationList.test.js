@@ -15,6 +15,7 @@ jest.mock('../../api/quotations', () => ({
       latest: jest.fn(),
       start: jest.fn(),
       scanPage: jest.fn(),
+      repairPage: jest.fn(),
       reconcile: jest.fn(),
     },
     companies: {
@@ -131,6 +132,102 @@ describe('QuotationList PO/LPO evidence summaries', () => {
 
     expect(await screen.findByText('2 emails could not be read after three attempts')).toBeInTheDocument();
     expect(screen.queryByText('Mailbox inventory complete')).not.toBeInTheDocument();
+  });
+
+  test('repairs one unreadable PDF per request before reconciling the completed inventory', async () => {
+    const inventoryPayload = {
+      run: {
+        id: 12,
+        status: 'completed',
+        exhausted: true,
+        messages_scanned: 200,
+        result_size_estimate: 200,
+        relevant_messages: 7,
+        pages_scanned: 3,
+        errors: [],
+      },
+      match_run: null,
+      inventory_done: true,
+      inventory_complete: true,
+      repair_done: false,
+      repair_remaining: 2,
+      mailbox_vision_available: true,
+      mailbox_vision_reason: '',
+      done: false,
+    };
+    quotationAPI.mailboxPOAudits.start.mockResolvedValue({ data: inventoryPayload });
+    quotationAPI.mailboxPOAudits.repairPage
+      .mockResolvedValueOnce({
+        data: {
+          ...inventoryPayload,
+          repair_remaining: 1,
+          repair_summary: { repaired: 1 },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          ...inventoryPayload,
+          repair_done: true,
+          repair_remaining: 0,
+          repair_summary: { repaired: 1 },
+        },
+      });
+    quotationAPI.mailboxPOAudits.reconcile.mockResolvedValue({
+      data: {
+        ...inventoryPayload,
+        match_run: { status: 'completed', errors: [], summary: { active_evidence: 1 } },
+        repair_done: true,
+        repair_remaining: 0,
+        done: true,
+      },
+    });
+
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
+
+    await waitFor(() => expect(quotationAPI.mailboxPOAudits.reconcile).toHaveBeenCalledWith(12));
+    expect(quotationAPI.mailboxPOAudits.repairPage).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.mailboxPOAudits.repairPage).toHaveBeenNthCalledWith(1, 12);
+    expect(quotationAPI.mailboxPOAudits.repairPage).toHaveBeenNthCalledWith(2, 12);
+    expect(quotationAPI.mailboxPOAudits.reconcile.mock.invocationCallOrder[0]).toBeGreaterThan(
+      quotationAPI.mailboxPOAudits.repairPage.mock.invocationCallOrder[1],
+    );
+    expect(await screen.findByText('1 active review match')).toBeInTheDocument();
+  });
+
+  test('shows why PDF vision is unavailable without blocking reconciliation', async () => {
+    quotationAPI.mailboxPOAudits.start.mockResolvedValue({
+      data: {
+        run: {
+          id: 13,
+          status: 'completed',
+          exhausted: true,
+          messages_scanned: 10,
+          result_size_estimate: 10,
+          relevant_messages: 1,
+          pages_scanned: 1,
+          errors: [],
+        },
+        match_run: { status: 'completed', errors: [], summary: {} },
+        inventory_done: true,
+        inventory_complete: true,
+        repair_done: true,
+        repair_remaining: 0,
+        mailbox_vision_available: false,
+        mailbox_vision_reason: 'Mailbox PDF vision is not enabled.',
+        done: true,
+      },
+    });
+
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
+
+    expect(await screen.findByText('PDF vision unavailable: Mailbox PDF vision is not enabled.')).toBeInTheDocument();
+    expect(quotationAPI.mailboxPOAudits.repairPage).not.toHaveBeenCalled();
   });
 
   test('pauses explicitly at the browser request budget and resumes the saved audit', async () => {

@@ -13,14 +13,22 @@ import secrets
 import urllib.parse
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import transaction
 from django.db.models import Min
 from django.utils import timezone
 
+from .ai_parsing import (
+    AIParseError,
+    AI_SOURCE_VISION,
+    AI_STATUS_AVAILABLE,
+    MAILBOX_PO_VISION_JSON_SCHEMA,
+    clean_pdf_bytes_with_ai,
+    settings_ai_status,
+)
 from .contract_intelligence import (
     GMAIL_API_BASE,
-    MAX_ATTACHMENT_BYTES,
     SUPPORTED_ATTACHMENT_EXTENSIONS,
     _attachment_refs,
     _decode_gmail_data,
@@ -40,13 +48,22 @@ from .models import (
     MailboxPOAuditRunMessage,
     MailboxPOMessage,
     Quotation,
+    QuotationSettings,
 )
 
 
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
-MAX_CANDIDATE_ATTACHMENTS = 10
+# The byte budget is authoritative.  This high secondary ceiling protects
+# against pathological MIME-part floods without dropping legitimate messages
+# that bundle many independent POs (a real mailbox message contained 17).
+MAX_CANDIDATE_ATTACHMENTS = 50
+# Mailbox evidence may legitimately be a little larger than a normal inquiry
+# upload.  Keep this local to the read-only audit and below the existing 20 MiB
+# per-message ceiling; normal uploads retain their 5 MiB limit.
+MAILBOX_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAILBOX_AI_MAX_PDF_PAGES = 25
 MAX_RUN_ERRORS = 500
 MAX_MESSAGE_FETCH_ATTEMPTS = 3
 SCAN_LEASE_SECONDS = 10 * 60
@@ -78,6 +95,19 @@ REFERENCE_STOP_WORDS = {
     "ORDER",
     "PLEASE",
 }
+
+MAILBOX_AI_REVIEW_WARNING = (
+    "OCR rows were extracted with AI vision from a PDF that deterministic parsing could not read. "
+    "Staff must inspect the exact attachment; these rows are review-only and cannot be auto-approved."
+)
+MAILBOX_AI_CLOUD_DISCLOSURE_WARNING = (
+    "For this review-only extraction, bounded PDF page images were sent to the configured cloud AI "
+    "vision provider with provider storage disabled; the Gmail source file was not copied into private media."
+)
+PDF_PAGE_LIMIT_ERROR = re.compile(
+    r"(?:pdf\s+has\s+\d+\s+pages|maximum\s+supported\s+pages|(?:ai\s+cleanup\s+is\s+)?capped\s+at\s+\d+\s+pages)",
+    re.IGNORECASE,
+)
 
 
 def _bounded_errors(existing, additions):
@@ -259,6 +289,278 @@ def extract_po_references(text):
     return references
 
 
+def mailbox_max_attachment_bytes():
+    """Return the mailbox-only per-file cap, never above 10 MiB."""
+
+    configured = int(
+        getattr(
+            settings,
+            "QUOTATION_MAILBOX_AUDIT_MAX_ATTACHMENT_BYTES",
+            MAILBOX_MAX_ATTACHMENT_BYTES,
+        )
+    )
+    return max(1, min(configured, MAILBOX_MAX_ATTACHMENT_BYTES))
+
+
+def mailbox_ai_max_pdf_pages():
+    """Allow ordinary multi-page POs while rejecting report-sized PDFs."""
+
+    configured = int(
+        getattr(settings, "QUOTATION_MAILBOX_AI_MAX_PDF_PAGES", MAILBOX_AI_MAX_PDF_PAGES)
+    )
+    # The in-memory renderer has its own hard cap as a second line of defence.
+    return max(1, min(configured, MAILBOX_AI_MAX_PDF_PAGES))
+
+
+def _is_pdf_attachment(attachment):
+    filename = str((attachment or {}).get("filename") or "").lower()
+    mime_type = str((attachment or {}).get("mime_type") or "").lower()
+    return filename.endswith(".pdf") or mime_type == "application/pdf"
+
+
+def _has_usable_attachment_rows(preview):
+    for row in (preview or {}).get("lines") or []:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("parse_status") or row.get("status") or "").lower()
+        name = str(
+            row.get("requested_item_name")
+            or row.get("raw_name")
+            or row.get("item_name")
+            or ""
+        ).strip()
+        if name and status != "ignored":
+            return True
+    return False
+
+
+def _mailbox_auto_vision_enabled():
+    return mailbox_vision_availability()["available"]
+
+
+def mailbox_vision_availability():
+    settings_obj = QuotationSettings.get_solo()
+    if not bool(getattr(settings, "QUOTATION_MAILBOX_AI_VISION_ENABLED", False)):
+        return {
+            "available": False,
+            "reason": "Cloud mailbox vision is not explicitly enabled by environment.",
+        }
+    if not settings_obj.ai_parsing_enabled or not settings_obj.ai_auto_cleanup_enabled:
+        return {
+            "available": False,
+            "reason": "AI parsing and automatic cleanup are not both enabled in Quotation Settings.",
+        }
+    if not settings_obj.ai_pdf_vision_enabled:
+        return {"available": False, "reason": "PDF vision is disabled in Quotation Settings."}
+    status = settings_ai_status(settings_obj)
+    if status.get("status") != AI_STATUS_AVAILABLE:
+        return {"available": False, "reason": status.get("label") or "AI provider unavailable."}
+    return {"available": True, "reason": ""}
+
+
+def _preview_needs_pdf_vision(preview):
+    if _has_usable_attachment_rows(preview):
+        return False
+    warnings = " ".join(str(value or "") for value in (preview or {}).get("warnings") or [])
+    parse_method = str((preview or {}).get("parse_method") or "")
+    original_text = str((preview or {}).get("original_text") or "").strip()
+    return bool(
+        not original_text
+        or "no selectable text" in warnings.lower()
+        or "ocr_required" in parse_method.lower()
+    )
+
+
+def _is_page_limit_error(error):
+    return bool(PDF_PAGE_LIMIT_ERROR.search(str(error or "")))
+
+
+def _page_count_from_error(error):
+    match = re.search(r"pdf\s+has\s+(\d+)\s+pages", str(error or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _is_permanent_vision_rejection(error):
+    value = str(error or "").lower()
+    return any(
+        marker in value
+        for marker in (
+            "ai cleanup is capped at",
+            "in-memory ai cleanup is capped at",
+            "encrypted pdf",
+            "invalid pdf",
+        )
+    )
+
+
+def _merge_mailbox_vision_preview(deterministic_preview, ai_preview):
+    """Retain deterministic provenance and force every AI row to review."""
+
+    deterministic_preview = deterministic_preview or {}
+    ai_preview = ai_preview or {}
+    rows = []
+    for row in ai_preview.get("lines") or []:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                **row,
+                "parse_status": "needs_review",
+                "status": "needs_review",
+                "result_source": AI_SOURCE_VISION,
+            }
+        )
+    warnings = list(
+        dict.fromkeys(
+            [
+                *(deterministic_preview.get("warnings") or []),
+                *(ai_preview.get("warnings") or []),
+                MAILBOX_AI_REVIEW_WARNING,
+                MAILBOX_AI_CLOUD_DISCLOSURE_WARNING,
+            ]
+        )
+    )
+    document_metadata = ai_preview.get("document_metadata") or (
+        ai_preview.get("meta") or {}
+    ).get("ai_document_metadata") or {}
+    metadata_conflicted = bool(
+        document_metadata.get("quotation_references_conflicted")
+    )
+    match_metadata_allowed = bool(
+        document_metadata.get("document_type")
+        in {"purchase_order", "local_purchase_order", "order_confirmation"}
+        and float(document_metadata.get("confidence") or 0) >= 0.80
+        and not metadata_conflicted
+    )
+    structured_text_lines = []
+    for reference in document_metadata.get("po_references") or []:
+        if (
+            match_metadata_allowed
+            and isinstance(reference, dict)
+            and reference.get("reference")
+            and float(reference.get("confidence") or 0) >= 0.80
+        ):
+            structured_text_lines.append(f"PO: {reference['reference']}")
+    for reference in document_metadata.get("quotation_references") or []:
+        if (
+            match_metadata_allowed
+            and isinstance(reference, dict)
+            and reference.get("reference")
+            and float(reference.get("confidence") or 0) >= 0.80
+        ):
+            structured_text_lines.append(f"Quotation: {reference['reference']}")
+    for label, key in (
+        ("Currency", "currency"),
+        ("Subtotal", "subtotal"),
+        ("VAT total", "vat_total"),
+        ("Grand total", "grand_total"),
+    ):
+        if match_metadata_allowed and document_metadata.get(key):
+            structured_text_lines.append(f"{label}: {document_metadata[key]}")
+    structured_review_text = "\n".join(structured_text_lines)
+    deterministic_totals = deterministic_preview.get("totals") or {}
+    structured_totals = {}
+    if match_metadata_allowed:
+        structured_totals = {
+            key: document_metadata.get(key) or ""
+            for key in ("currency", "subtotal", "vat_total", "grand_total")
+        }
+        structured_totals.update({
+            "page_number": document_metadata.get("totals_page_number") or "",
+            "confidence": document_metadata.get("confidence", 0),
+            "result_source": AI_SOURCE_VISION,
+            "review_only": True,
+        })
+    if metadata_conflicted:
+        warnings.append(
+            "Conflicting AI vision quotation references and totals were kept display-only and excluded "
+            "from quotation matching."
+        )
+    elif document_metadata and not match_metadata_allowed:
+        warnings.append(
+            "AI vision document metadata was kept display-only because its document type or confidence "
+            "was not strong enough for quotation matching."
+        )
+    elif match_metadata_allowed and any(
+        isinstance(reference, dict)
+        and reference.get("reference")
+        and float(reference.get("confidence") or 0) < 0.80
+        for key in ("po_references", "quotation_references")
+        for reference in (document_metadata.get(key) or [])
+    ):
+        warnings.append(
+            "Low-confidence AI vision references were kept display-only and excluded from quotation matching."
+        )
+    return {
+        **deterministic_preview,
+        **ai_preview,
+        "source_file_ref": "",
+        # Only strict structured metadata is reference-extractable. Free-form
+        # AI notes/raw rows remain in provenance fields and can never become an
+        # attachment-authoritative quote/PO reference.
+        "original_text": deterministic_preview.get("original_text") or structured_review_text,
+        "totals": deterministic_totals or structured_totals,
+        "lines": rows,
+        "warnings": warnings,
+        "meta": {
+            **(deterministic_preview.get("meta") or {}),
+            **(ai_preview.get("meta") or {}),
+            "mailbox_ai_vision": {
+                "provider": ai_preview.get("provider") or "",
+                "model": ai_preview.get("model") or "",
+                "cache_hit": bool(ai_preview.get("cache_hit")),
+                "review_only": True,
+                "source_persisted": False,
+                "extracted_text_source": "ai_vision_structured_review" if structured_review_text else "",
+                "document_metadata": document_metadata,
+            },
+        },
+        "result_source": AI_SOURCE_VISION,
+        "ai_status": ai_preview.get("ai_status") or "ai_vision_cleanup_used",
+        "ai_review_required": True,
+        "auto_approval_eligible": False,
+        "vision_repair_status": "completed",
+        "vision_repair_reason": "",
+    }
+
+
+def _run_mailbox_pdf_vision(
+    content,
+    attachment,
+    deterministic_preview,
+    *,
+    actor=None,
+    source_identity=None,
+):
+    return _merge_mailbox_vision_preview(
+        deterministic_preview,
+        clean_pdf_bytes_with_ai(
+            content,
+            {
+                **(deterministic_preview or {}),
+                "source_filename": str(attachment.get("filename") or "attachment.pdf"),
+                "source_mime_type": attachment.get("mime_type") or "application/pdf",
+                "source_sha256": (deterministic_preview or {}).get("source_sha256")
+                or hashlib.sha256(content).hexdigest(),
+                "source_file_ref": "",
+                "source_file_size": len(content),
+                "relevance_context": {
+                    "workflow": "mailbox_po_review",
+                    "review_only": True,
+                    "capture_visible_po_and_quotation_references_in_document_notes": True,
+                    "capture_visible_document_total_in_document_notes": True,
+                },
+                "ai_log_source_identity": _safe_json(source_identity or {}),
+            },
+            actor=actor,
+            max_pages=mailbox_ai_max_pdf_pages(),
+            max_pdf_bytes=mailbox_max_attachment_bytes(),
+            json_schema=MAILBOX_PO_VISION_JSON_SCHEMA,
+            schema_name="mailbox_po_vision_parse",
+        ),
+    )
+
+
 def _is_plausible_document_attachment(attachment):
     if not isinstance(attachment, dict):
         return False
@@ -271,7 +573,7 @@ def _is_plausible_document_attachment(attachment):
         return False
     # A zero size means Gmail did not supply metadata; decoded bytes remain
     # subject to the hard cap in ``_preview_attachment``.
-    return 0 <= declared_size <= MAX_ATTACHMENT_BYTES
+    return 0 <= declared_size <= mailbox_max_attachment_bytes()
 
 
 def classify_mailbox_message(message):
@@ -297,15 +599,22 @@ def classify_mailbox_message(message):
         if _is_plausible_document_attachment(attachment)
     ]
     has_po_signal = bool(PURCHASE_ORDER_SIGNAL.search(text))
+    has_explicit_po_reference = any(
+        reference.get("kind") == "po" for reference in references
+    )
     has_quote_reference = any(reference["kind"] == "quotation" for reference in references)
     has_order_context = bool(POSSIBLE_ORDER_SIGNAL.search(text))
     restricted_labels = {"SPAM", "TRASH"}.intersection(
         str(label).upper() for label in (message.get("label_ids") or [])
     )
 
-    if has_po_signal:
+    if has_po_signal or has_explicit_po_reference:
         classification = MailboxPOMessage.CLASS_PURCHASE_ORDER
-        reason = "PO/LPO language found in the newest message, subject, or attachment filename."
+        reason = (
+            "A credible explicit PO/LPO/MPO reference was found in the newest message, subject, or attachment filename."
+            if has_explicit_po_reference
+            else "PO/LPO language found in the newest message, subject, or attachment filename."
+        )
     elif plausible_documents and (has_quote_reference or has_order_context):
         classification = MailboxPOMessage.CLASS_POSSIBLE_PO
         reason = "A supported document accompanies quotation/order context and needs review."
@@ -326,19 +635,39 @@ def classify_mailbox_message(message):
     }
 
 
-def _preview_attachment(connection, message_id, attachment, token, *, max_bytes=MAX_ATTACHMENT_BYTES):
+def _preview_attachment(
+    connection,
+    message_id,
+    attachment,
+    token,
+    *,
+    max_bytes=None,
+    allow_ai_vision=True,
+    actor=None,
+    vision_source_identity=None,
+):
     public = {key: value for key, value in attachment.items() if key != "_inline_data"}
     declared_size = int(attachment.get("size") or 0)
-    if declared_size > MAX_ATTACHMENT_BYTES:
+    per_file_limit = mailbox_max_attachment_bytes()
+    if declared_size > per_file_limit:
+        warning = (
+            f"Attachment exceeds the {per_file_limit}-byte mailbox per-file audit limit; "
+            "manual review of the exact Gmail source is required."
+        )
         return {
             **public,
             "candidate": True,
             "content_fetched": False,
             "status": "skipped",
-            "reason": "Attachment exceeds the per-file audit limit.",
+            "reason": warning,
+            "warnings": [warning],
+            "manual_review_required": True,
+            "vision_repair_status": "rejected",
+            "vision_repair_reason": warning,
         }, 0
     try:
-        remaining_budget = max(0, min(int(max_bytes), MAX_ATTACHMENT_BYTES))
+        requested_budget = per_file_limit if max_bytes is None else int(max_bytes)
+        remaining_budget = max(0, min(requested_budget, per_file_limit))
     except (TypeError, ValueError):
         remaining_budget = 0
     if declared_size > remaining_budget:
@@ -350,6 +679,7 @@ def _preview_attachment(connection, message_id, attachment, token, *, max_bytes=
             "reason": "Per-message total attachment byte limit reached.",
         }, 0
 
+    content = b""
     try:
         if attachment.get("_inline_data"):
             content = _decode_gmail_data(attachment["_inline_data"])
@@ -363,29 +693,145 @@ def _preview_attachment(connection, message_id, attachment, token, *, max_bytes=
                 token=token,
             )
             content = _decode_gmail_data(payload.get("data") or "")
-        if len(content) > MAX_ATTACHMENT_BYTES:
+        if len(content) > per_file_limit:
+            warning = (
+                f"Decoded attachment exceeds the {per_file_limit}-byte mailbox per-file audit limit; "
+                "manual review of the exact Gmail source is required."
+            )
             return {
                 **public,
                 "candidate": True,
-                "content_fetched": False,
+                "content_fetched": True,
+                "fetched_bytes": len(content),
                 "status": "skipped",
-                "reason": "Decoded attachment exceeds the per-file audit limit.",
-            }, 0
+                "reason": warning,
+                "warnings": [warning],
+                "manual_review_required": True,
+                "vision_repair_status": "rejected",
+                "vision_repair_reason": warning,
+            }, len(content)
         if len(content) > remaining_budget:
             return {
                 **public,
                 "candidate": True,
-                "content_fetched": False,
+                "content_fetched": True,
+                "fetched_bytes": len(content),
                 "status": "skipped",
                 "reason": "Decoded attachment exceeds the remaining per-message byte limit.",
-            }, 0
+            }, len(content)
 
         upload = SimpleUploadedFile(
             str(attachment.get("filename") or "attachment"),
             content,
             content_type=attachment.get("mime_type") or "application/octet-stream",
         )
-        preview = parse_file_preview(upload, store_source=False)
+        deterministic_error = ""
+        try:
+            preview = parse_file_preview(
+                upload,
+                store_source=False,
+                max_bytes=per_file_limit,
+                max_pdf_pages_override=mailbox_ai_max_pdf_pages(),
+            )
+        except Exception as exc:
+            deterministic_error = str(exc)
+            if not (
+                _is_pdf_attachment(attachment)
+                and _is_page_limit_error(exc)
+                and _mailbox_auto_vision_enabled()
+                and allow_ai_vision
+            ):
+                raise
+            preview = {
+                "source_type": "pdf",
+                "source_filename": str(attachment.get("filename") or "attachment.pdf"),
+                "source_mime_type": attachment.get("mime_type") or "application/pdf",
+                "source_sha256": hashlib.sha256(content).hexdigest(),
+                "source_file_ref": "",
+                "source_file_size": len(content),
+                "parse_method": "mailbox_pdf_preflight_fallback_v1",
+                "original_text": "",
+                "meta": {
+                    "deterministic_parse_error": deterministic_error,
+                    "page_count": _page_count_from_error(deterministic_error),
+                },
+                "totals": {},
+                "lines": [],
+                "warnings": [
+                    f"Deterministic PDF parsing stopped before extraction: {deterministic_error}"
+                ],
+            }
+
+        if (
+            _is_pdf_attachment(attachment)
+            and _mailbox_auto_vision_enabled()
+            and _preview_needs_pdf_vision(preview)
+            and not allow_ai_vision
+        ):
+            preview = {
+                **preview,
+                "warnings": list(
+                    dict.fromkeys(
+                        [
+                            *(preview.get("warnings") or []),
+                            "Cloud AI vision was deferred to the explicit bounded mailbox repair phase; staff review is required.",
+                        ]
+                    )
+                ),
+                "vision_repair_status": "pending",
+                "vision_repair_reason": "Deferred from synchronous mailbox inventory.",
+                "ai_review_required": True,
+                "auto_approval_eligible": False,
+            }
+
+        if (
+            _is_pdf_attachment(attachment)
+            and _mailbox_auto_vision_enabled()
+            and allow_ai_vision
+            and (bool(deterministic_error) or _preview_needs_pdf_vision(preview))
+        ):
+            try:
+                preview = _run_mailbox_pdf_vision(
+                    content,
+                    attachment,
+                    preview,
+                    actor=actor,
+                    source_identity=vision_source_identity,
+                )
+            except Exception as exc:
+                vision_error = str(exc)[:500]
+                if deterministic_error:
+                    return {
+                        **public,
+                        "candidate": True,
+                        "content_fetched": True,
+                        "fetched_bytes": len(content),
+                        "status": "failed",
+                        "reason": (
+                            f"{deterministic_error} Mailbox AI vision cleanup also failed: {vision_error}"
+                        )[:500],
+                        "vision_repair_status": (
+                            "rejected" if _is_permanent_vision_rejection(exc) else "retryable"
+                        ),
+                        "vision_repair_reason": vision_error,
+                    }, len(content)
+                preview = {
+                    **preview,
+                    "warnings": list(
+                        dict.fromkeys(
+                            [
+                                *(preview.get("warnings") or []),
+                                f"Mailbox AI vision cleanup failed; deterministic review evidence was kept. Detail: {vision_error}",
+                            ]
+                        )
+                    ),
+                    "vision_repair_status": (
+                        "rejected" if _is_permanent_vision_rejection(exc) else "retryable"
+                    ),
+                    "vision_repair_reason": vision_error,
+                    "ai_review_required": True,
+                    "auto_approval_eligible": False,
+                }
         source_sha256 = preview.get("source_sha256") or hashlib.sha256(content).hexdigest()
         rows = preview.get("lines") or []
         return {
@@ -404,18 +850,33 @@ def _preview_attachment(connection, message_id, attachment, token, *, max_bytes=
             "line_count": len(rows),
             "lines": _safe_json(rows),
             "warnings": _safe_json(preview.get("warnings") or []),
+            "result_source": preview.get("result_source") or "deterministic_parse",
+            "ai_status": preview.get("ai_status") or "",
+            "ai_review_required": bool(preview.get("ai_review_required")),
+            "auto_approval_eligible": preview.get("auto_approval_eligible", True),
+            "vision_repair_status": preview.get("vision_repair_status") or "",
+            "vision_repair_reason": preview.get("vision_repair_reason") or "",
         }, len(content)
     except Exception as exc:
         return {
             **public,
             "candidate": True,
-            "content_fetched": False,
+            "content_fetched": bool(content),
+            "fetched_bytes": len(content),
             "status": "failed",
             "reason": str(exc)[:500],
-        }, 0
+        }, len(content)
 
 
-def hydrate_plausible_attachments(connection, message, *, is_relevant):
+def hydrate_plausible_attachments(
+    connection,
+    message,
+    *,
+    is_relevant,
+    heartbeat=None,
+    allow_ai_vision=False,
+    surface_unsupported=False,
+):
     """Fetch/parse bounded document bytes only for a plausible PO message."""
 
     refs = message.get("_attachment_refs") or message.get("attachment_manifest") or []
@@ -440,13 +901,17 @@ def hydrate_plausible_attachments(connection, message, *, is_relevant):
         public = {key: value for key, value in attachment.items() if key != "_inline_data"}
         extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
         if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+            manual_review = bool(is_relevant and surface_unsupported)
+            warning = "Unsupported attachment type; manual review of the exact Gmail source is required."
             manifest.append(
                 {
                     **public,
                     "candidate": False,
                     "content_fetched": False,
-                    "status": "metadata_only",
-                    "reason": "Unsupported document type for PO parsing.",
+                    "status": "manual_review" if manual_review else "metadata_only",
+                    "reason": warning if manual_review else "Unsupported document type for PO parsing.",
+                    "warnings": [warning] if manual_review else [],
+                    "manual_review_required": manual_review,
                 }
             )
             continue
@@ -474,13 +939,18 @@ def hydrate_plausible_attachments(connection, message, *, is_relevant):
                 }
             )
             continue
+        if heartbeat:
+            heartbeat()
         audited, byte_count = _preview_attachment(
             connection,
             message.get("gmail_message_id"),
             attachment,
             token,
             max_bytes=remaining_budget,
+            allow_ai_vision=allow_ai_vision,
         )
+        if heartbeat:
+            heartbeat()
         try:
             byte_count = max(0, int(byte_count))
         except (TypeError, ValueError):
@@ -488,20 +958,799 @@ def hydrate_plausible_attachments(connection, message, *, is_relevant):
         if byte_count > remaining_budget:
             # The decoded byte count is authoritative when Gmail omitted or
             # understated its size metadata. Never persist parsed fields from
-            # an attachment that crosses the cumulative message budget.
+            # an attachment that crosses the cumulative processing budget.
+            # Gmail has already returned those bytes, so provenance must
+            # report the actual download even though parsing evidence is
+            # discarded.
+            warning = (
+                "Decoded attachment exceeded the remaining per-message processing byte limit; "
+                "the downloaded bytes were excluded and manual review is required."
+            )
             manifest.append(
                 {
                     **public,
                     "candidate": True,
-                    "content_fetched": False,
+                    "content_fetched": bool(byte_count),
+                    "fetched_bytes": byte_count,
                     "status": "skipped",
-                    "reason": "Decoded attachment exceeds the remaining per-message byte limit.",
+                    "reason": warning,
+                    "warnings": [warning],
+                    "manual_review_required": True,
                 }
             )
+            # The oversized response has already crossed this message's byte
+            # budget.  Do not fetch another attachment from the same message.
+            fetched_bytes += byte_count
             continue
         manifest.append(audited)
         fetched_bytes += byte_count
     return manifest, audited_candidates, fetched_bytes
+
+
+def _attachment_identity(attachment):
+    attachment_id = str(
+        (attachment or {}).get("attachment_id")
+        or (attachment or {}).get("source_gmail_attachment_id")
+        or ""
+    )
+    if attachment_id:
+        return ("attachment_id", attachment_id)
+    part_id = str((attachment or {}).get("part_id") or "")
+    filename = str((attachment or {}).get("filename") or "")
+    return ("part", part_id, filename)
+
+
+def _is_old_mailbox_size_skip(attachment):
+    if str((attachment or {}).get("status") or "") != "skipped":
+        return False
+    reason = str((attachment or {}).get("reason") or "").lower()
+    try:
+        size = int((attachment or {}).get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        _is_pdf_attachment(attachment)
+        and 0 < size <= mailbox_max_attachment_bytes()
+        and "per-file audit limit" in reason
+    )
+
+
+def _is_old_candidate_count_skip(attachment):
+    if str((attachment or {}).get("status") or "") != "skipped":
+        return False
+    reason = str((attachment or {}).get("reason") or "").lower()
+    try:
+        size = int((attachment or {}).get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        _is_pdf_attachment(attachment)
+        and 0 <= size <= mailbox_max_attachment_bytes()
+        and "per-message candidate attachment limit reached" in reason
+    )
+
+
+def _is_old_message_budget_skip(attachment):
+    if str((attachment or {}).get("status") or "") != "skipped":
+        return False
+    reason = str((attachment or {}).get("reason") or "").lower()
+    try:
+        size = int((attachment or {}).get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        _is_pdf_attachment(attachment)
+        and 0 <= size <= mailbox_max_attachment_bytes()
+        and any(
+            marker in reason
+            for marker in (
+                "per-message total attachment byte limit reached",
+                "decoded attachment exceeds the remaining per-message byte limit",
+            )
+        )
+    )
+
+
+def attachment_needs_mailbox_vision_repair(attachment):
+    """Identify only a PDF that the old bounded audit could not inspect."""
+
+    if not isinstance(attachment, dict) or not _is_pdf_attachment(attachment):
+        return False
+    repair_status = str(attachment.get("vision_repair_status") or "").lower()
+    if repair_status in {"completed", "rejected", "manual"}:
+        return False
+    if (
+        _is_old_mailbox_size_skip(attachment)
+        or _is_old_candidate_count_skip(attachment)
+        or _is_old_message_budget_skip(attachment)
+    ):
+        return True
+    status = str(attachment.get("status") or "").lower()
+    if status == "metadata_only":
+        try:
+            return int(attachment.get("size") or 0) <= mailbox_max_attachment_bytes()
+        except (TypeError, ValueError):
+            return False
+    if status == "failed" and _is_page_limit_error(attachment.get("reason")):
+        return True
+    if status != "parsed" or _has_usable_attachment_rows(attachment):
+        return False
+    warnings = " ".join(str(value or "") for value in attachment.get("warnings") or [])
+    return bool(
+        not str(attachment.get("original_text") or "").strip()
+        or "no selectable text" in warnings.lower()
+        or "ocr_required" in str(attachment.get("parse_method") or "").lower()
+        or repair_status == "retryable"
+    )
+
+
+def _merge_repair_result(current_manifest, replacements):
+    merged = []
+    changed = False
+    for attachment in current_manifest or []:
+        replacement = replacements.get(_attachment_identity(attachment))
+        if replacement is None or not attachment_needs_mailbox_vision_repair(attachment):
+            merged.append(attachment)
+            continue
+        merged.append(replacement)
+        changed = True
+    return merged, changed
+
+
+def assert_mailbox_po_audit_repairable(audit_run):
+    latest_id = (
+        MailboxPOAuditRun.objects.filter(gmail_connection=audit_run.gmail_connection)
+        .order_by("-created_at", "-id")
+        .values_list("id", flat=True)
+        .first()
+    )
+    if latest_id != audit_run.id:
+        raise ValueError(
+            "Mailbox repair is allowed only for the latest audit run for this mailbox."
+        )
+    if audit_run.status != MailboxPOAuditRun.STATUS_COMPLETED or not audit_run.exhausted:
+        raise ValueError(
+            "Mailbox repair requires a completed, exhausted inventory; active scans cannot be changed."
+        )
+    if audit_run.match_runs.exists():
+        raise ValueError(
+            "Mailbox repair must run before reconciliation; matched evidence snapshots cannot be changed."
+        )
+
+
+def _claim_mailbox_po_repair_lease(audit_run):
+    """Exclusively reserve a completed run before Gmail or AI work.
+
+    Completed scans otherwise have no active use for ``scan_lease_*``. Reusing
+    those existing columns keeps repair mutually exclusive without a schema
+    migration. New audit creation and the final manifest merge lock the same
+    mailbox connection row, so a newly-created run either precedes the final
+    guard (and aborts it) or begins after the repair commit.
+    """
+
+    now = timezone.now()
+    token = f"repair-{secrets.token_hex(24)}"
+    with transaction.atomic():
+        GmailOAuthConnection.objects.select_for_update().get(
+            pk=audit_run.gmail_connection_id
+        )
+        stored = (
+            MailboxPOAuditRun.objects.select_for_update()
+            .select_related("gmail_connection")
+            .get(pk=audit_run.pk)
+        )
+        assert_mailbox_po_audit_repairable(stored)
+        if (
+            stored.scan_lease_token
+            and stored.scan_lease_expires_at
+            and stored.scan_lease_expires_at > now
+        ):
+            raise RuntimeError(
+                "This mailbox audit run is already being repaired. Try again shortly."
+            )
+        expires_at = now + timedelta(seconds=SCAN_LEASE_SECONDS)
+        # Completed runs reject Model.save() by design. This guarded update is
+        # deliberately limited to the two expiring coordination fields.
+        MailboxPOAuditRun.objects.filter(pk=stored.pk).update(
+            scan_lease_token=token,
+            scan_lease_expires_at=expires_at,
+            updated_at=now,
+        )
+        stored.scan_lease_token = token
+        stored.scan_lease_expires_at = expires_at
+        stored.updated_at = now
+    return stored, token
+
+
+def _renew_mailbox_po_repair_lease(audit_run_id, token):
+    updated = MailboxPOAuditRun.objects.filter(
+        pk=audit_run_id,
+        scan_lease_token=token,
+        status=MailboxPOAuditRun.STATUS_COMPLETED,
+        exhausted=True,
+    ).update(
+        scan_lease_expires_at=timezone.now() + timedelta(seconds=SCAN_LEASE_SECONDS)
+    )
+    if not updated:
+        raise RuntimeError(
+            "This mailbox repair lease expired or was claimed by another worker."
+        )
+
+
+def _assert_mailbox_po_repair_lease_current(audit_run_id, token):
+    """Re-check mutability and lease ownership inside the merge transaction."""
+
+    stored = (
+        MailboxPOAuditRun.objects.select_for_update()
+        .select_related("gmail_connection")
+        .get(pk=audit_run_id)
+    )
+    if (
+        stored.scan_lease_token != token
+        or not stored.scan_lease_expires_at
+        or stored.scan_lease_expires_at <= timezone.now()
+    ):
+        raise RuntimeError(
+            "This mailbox repair lease expired or was claimed by another worker."
+        )
+    assert_mailbox_po_audit_repairable(stored)
+    return stored
+
+
+def _release_mailbox_po_repair_lease(audit_run_id, token):
+    MailboxPOAuditRun.objects.filter(
+        pk=audit_run_id,
+        scan_lease_token=token,
+    ).update(
+        scan_lease_token="",
+        scan_lease_expires_at=None,
+        updated_at=timezone.now(),
+    )
+
+
+def _persist_mailbox_po_repair_replacements(
+    audit_run,
+    message,
+    replacements,
+    *,
+    lease_token,
+):
+    """Guard the only canonical evidence mutation against stale repair work."""
+
+    if not replacements:
+        return False
+    with transaction.atomic():
+        # Serialize against ``start_mailbox_po_audit`` before checking which
+        # run is latest. This closes the rescan/repair TOCTOU window.
+        GmailOAuthConnection.objects.select_for_update().get(
+            pk=audit_run.gmail_connection_id
+        )
+        _assert_mailbox_po_repair_lease_current(audit_run.id, lease_token)
+        locked = MailboxPOMessage.objects.select_for_update().get(pk=message.pk)
+        merged, changed = _merge_repair_result(locked.attachment_manifest, replacements)
+        if not changed:
+            return False
+        now = timezone.now()
+        locked.attachment_manifest = _safe_json(merged)
+        locked.audit_error = "; ".join(
+            _database_text(attachment.get("reason"))
+            for attachment in merged
+            if isinstance(attachment, dict)
+            and attachment.get("status") == "failed"
+            and attachment.get("reason")
+        )[:2000]
+        locked.attachments_audited_at = now
+        locked.last_audited_at = now
+        locked.save(
+            update_fields=[
+                "attachment_manifest",
+                "audit_error",
+                "attachments_audited_at",
+                "last_audited_at",
+                "updated_at",
+            ]
+        )
+    return True
+
+
+def _mailbox_po_repair_retry_replacement(target, reason):
+    """Return a persisted retry marker, terminally surfacing attempt three."""
+
+    attempts = int((target or {}).get("vision_repair_attempts") or 0) + 1
+    retry_reason = str(reason or "Mailbox PDF repair did not produce review evidence")[:500]
+    if attempts >= 3:
+        warning = (
+            f"Mailbox PDF repair failed {attempts} times; automatic retries stopped and manual review "
+            f"is required. Last error: {retry_reason}"
+        )
+        return {
+            **target,
+            "status": "manual_review",
+            "manual_review_required": True,
+            "vision_repair_status": "manual",
+            "vision_repair_attempts": attempts,
+            "vision_repair_reason": retry_reason,
+            "warnings": list(dict.fromkeys([*(target.get("warnings") or []), warning])),
+            "reason": warning,
+        }, True
+    return {
+        **target,
+        "vision_repair_status": "retryable",
+        "vision_repair_attempts": attempts,
+        "vision_repair_reason": retry_reason,
+    }, False
+
+
+def reclassify_mailbox_po_audit_messages(
+    audit_run,
+    *,
+    apply=True,
+    repair_lease_token=None,
+):
+    """Recompute stored relevance, optionally under the repair mutation guard."""
+
+    if apply and repair_lease_token:
+        with transaction.atomic():
+            GmailOAuthConnection.objects.select_for_update().get(
+                pk=audit_run.gmail_connection_id
+            )
+            _assert_mailbox_po_repair_lease_current(
+                audit_run.id,
+                repair_lease_token,
+            )
+            return _reclassify_mailbox_po_audit_messages(audit_run, apply=True)
+    return _reclassify_mailbox_po_audit_messages(audit_run, apply=apply)
+
+
+def _reclassify_mailbox_po_audit_messages(audit_run, *, apply=True):
+    """Recompute deterministic relevance from stored data, without Gmail I/O."""
+
+    changed = 0
+    memberships = (
+        MailboxPOAuditRunMessage.objects.filter(audit_run=audit_run)
+        .select_related("message")
+        .order_by("message_id")
+    )
+    for membership in memberships.iterator(chunk_size=200):
+        message = membership.message
+        result = classify_mailbox_message(
+            {
+                "subject": message.subject,
+                "newest_body_text": message.newest_body_text,
+                "snippet": message.snippet,
+                "attachment_manifest": message.attachment_manifest,
+                "label_ids": message.label_ids,
+            }
+        )
+        has_explicit_po_reference = any(
+            reference.get("kind") == "po"
+            for reference in result["extracted_po_references"]
+        )
+        surface_unsupported = bool(
+            has_explicit_po_reference
+            or result["classification"] == MailboxPOMessage.CLASS_PURCHASE_ORDER
+        )
+        surfaced_manifest = []
+        for attachment in message.attachment_manifest or []:
+            if not isinstance(attachment, dict):
+                surfaced_manifest.append(attachment)
+                continue
+            extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
+            try:
+                declared_size = int(attachment.get("size") or 0)
+            except (TypeError, ValueError):
+                declared_size = 0
+            should_surface = bool(
+                surface_unsupported
+                and (
+                    extension not in SUPPORTED_ATTACHMENT_EXTENSIONS
+                    or declared_size > mailbox_max_attachment_bytes()
+                )
+            )
+            if not should_surface:
+                surfaced_manifest.append(attachment)
+                continue
+            warning = (
+                "Unsupported or over-limit attachment; manual review of the exact Gmail source is required."
+            )
+            surfaced_manifest.append(
+                {
+                    **attachment,
+                    "manual_review_required": True,
+                    "warnings": list(
+                        dict.fromkeys([*(attachment.get("warnings") or []), warning])
+                    ),
+                    "reason": warning,
+                    "status": (
+                        attachment.get("status")
+                        if attachment.get("status") == "parsed"
+                        else "manual_review"
+                    ),
+                }
+            )
+        values = {
+            "classification": result["classification"],
+            "is_relevant": result["is_relevant"],
+            "auto_link_eligible": result["auto_link_eligible"],
+            "relevance_reason": result["relevance_reason"],
+            "extracted_po_references": result["extracted_po_references"],
+            "attachment_manifest": _safe_json(surfaced_manifest),
+        }
+        if all(getattr(message, field) == value for field, value in values.items()):
+            continue
+        if apply:
+            MailboxPOMessage.objects.filter(pk=message.pk).update(
+                **values,
+                updated_at=timezone.now(),
+            )
+        changed += 1
+    return changed
+
+
+def mark_unavailable_mailbox_vision_for_manual_review(audit_run):
+    """Terminally surface cloud-only targets when mailbox vision is unavailable."""
+
+    availability = mailbox_vision_availability()
+    if availability["available"]:
+        return 0
+    changed_messages = 0
+    memberships = (
+        MailboxPOAuditRunMessage.objects.filter(
+            audit_run=audit_run,
+            message__is_relevant=True,
+        )
+        .select_related("message")
+        .order_by("message_id")
+    )
+    for membership in memberships.iterator(chunk_size=200):
+        message = membership.message
+        manifest = []
+        changed = False
+        for attachment in message.attachment_manifest or []:
+            if not attachment_needs_mailbox_vision_repair(attachment):
+                manifest.append(attachment)
+                continue
+            warning = (
+                "Cloud AI vision was not used. This attachment requires manual review of the exact Gmail "
+                f"source. Reason: {availability['reason']}"
+            )
+            manifest.append(
+                {
+                    **attachment,
+                    "status": "manual_review",
+                    "manual_review_required": True,
+                    "vision_repair_status": "manual",
+                    "vision_repair_reason": availability["reason"],
+                    "warnings": list(
+                        dict.fromkeys([*(attachment.get("warnings") or []), warning])
+                    ),
+                    "reason": warning,
+                }
+            )
+            changed = True
+        if not changed:
+            continue
+        MailboxPOMessage.objects.filter(pk=message.pk).update(
+            attachment_manifest=_safe_json(manifest),
+            updated_at=timezone.now(),
+        )
+        changed_messages += 1
+    return changed_messages
+
+
+def repair_mailbox_po_audit_pdf_vision(
+    audit_run,
+    *,
+    message_ids=None,
+    limit=None,
+    dry_run=False,
+    actor=None,
+):
+    """Repair a completed inventory under one exclusive, expiring lease."""
+
+    if not isinstance(audit_run, MailboxPOAuditRun):
+        audit_run = MailboxPOAuditRun.objects.select_related("gmail_connection").get(
+            pk=audit_run
+        )
+    assert_mailbox_po_audit_repairable(audit_run)
+    if not _mailbox_auto_vision_enabled():
+        raise AIParseError(
+            "Mailbox PDF repair requires AI parsing, automatic cleanup, PDF vision, and the explicit "
+            "QUOTATION_MAILBOX_AI_VISION_ENABLED cloud-processing opt-in to be enabled."
+        )
+    if audit_run.gmail_connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+        raise RuntimeError("The audit run's Gmail mailbox is not connected.")
+
+    claimed_run, lease_token = _claim_mailbox_po_repair_lease(audit_run)
+    try:
+        return _repair_mailbox_po_audit_pdf_vision_with_lease(
+            claimed_run,
+            message_ids=message_ids,
+            limit=limit,
+            dry_run=dry_run,
+            repair_lease_token=lease_token,
+            actor=actor,
+        )
+    finally:
+        _release_mailbox_po_repair_lease(claimed_run.id, lease_token)
+
+
+def _repair_mailbox_po_audit_pdf_vision_with_lease(
+    audit_run,
+    *,
+    message_ids=None,
+    limit=None,
+    dry_run=False,
+    repair_lease_token,
+    actor=None,
+):
+    """Re-fetch and repair only OCR/page/legacy-size PDF manifests in a run.
+
+    Gmail access remains read-only, network calls happen outside transactions,
+    and only the canonical message's attachment manifest is updated.  No quote,
+    order, evidence outcome or completed audit-run fields are touched.  A
+    successful replacement stops being a target, making repeated invocations
+    idempotent and naturally resumable.
+    """
+
+    connection = audit_run.gmail_connection
+
+    reclassified_count = reclassify_mailbox_po_audit_messages(
+        audit_run,
+        apply=not dry_run,
+        repair_lease_token=repair_lease_token if not dry_run else None,
+    )
+    memberships = (
+        MailboxPOAuditRunMessage.objects.filter(audit_run=audit_run)
+        .select_related("message")
+        .order_by("message_id")
+    )
+    requested_message_ids = [str(value) for value in (message_ids or []) if str(value)]
+    if requested_message_ids:
+        memberships = memberships.filter(message__gmail_message_id__in=requested_message_ids)
+    remaining_limit = None if limit is None else max(0, int(limit))
+    summary = {
+        "audit_run_id": audit_run.id,
+        "messages_considered": 0,
+        "messages_fetched": 0,
+        "attachments_targeted": 0,
+        "attachments_repaired": 0,
+        "attachments_retryable": 0,
+        "attachments_rejected": 0,
+        "attachments_missing": 0,
+        "messages_updated": 0,
+        "messages_reclassified": reclassified_count,
+        "dry_run": bool(dry_run),
+        "errors": [],
+    }
+
+    for membership in memberships.iterator(chunk_size=100):
+        message = membership.message
+        targets = [
+            attachment
+            for attachment in (message.attachment_manifest or [])
+            if message.is_relevant and attachment_needs_mailbox_vision_repair(attachment)
+        ]
+        if not targets:
+            continue
+        if remaining_limit is not None:
+            if remaining_limit <= 0:
+                break
+            targets = targets[:remaining_limit]
+            remaining_limit -= len(targets)
+        summary["messages_considered"] += 1
+        summary["attachments_targeted"] += len(targets)
+        if dry_run:
+            continue
+
+        _renew_mailbox_po_repair_lease(audit_run.id, repair_lease_token)
+        try:
+            fetched_message = fetch_mailbox_message(connection, message.gmail_message_id)
+            _renew_mailbox_po_repair_lease(audit_run.id, repair_lease_token)
+            summary["messages_fetched"] += 1
+        except Exception as exc:
+            # A permanently deleted/forbidden Gmail message must not hold
+            # reconciliation open forever. Persist the same bounded retry
+            # state used for provider failures against every selected target.
+            _renew_mailbox_po_repair_lease(audit_run.id, repair_lease_token)
+            fetch_reason = f"Could not re-fetch Gmail message: {exc}"[:500]
+            replacements = {}
+            for target in targets:
+                replacement, terminal = _mailbox_po_repair_retry_replacement(
+                    target,
+                    fetch_reason,
+                )
+                replacements[_attachment_identity(target)] = replacement
+                if terminal:
+                    summary["attachments_rejected"] += 1
+                else:
+                    summary["attachments_retryable"] += 1
+            summary["errors"].append(
+                {
+                    "gmail_message_id": message.gmail_message_id,
+                    "error": fetch_reason,
+                }
+            )
+            if _persist_mailbox_po_repair_replacements(
+                audit_run,
+                message,
+                replacements,
+                lease_token=repair_lease_token,
+            ):
+                summary["messages_updated"] += 1
+            continue
+
+        fetched_refs = {}
+        ambiguous_fetched_identities = set()
+        for attachment in fetched_message.get("_attachment_refs") or []:
+            identity = _attachment_identity(attachment)
+            if identity in fetched_refs:
+                ambiguous_fetched_identities.add(identity)
+            else:
+                fetched_refs[identity] = attachment
+        target_identity_counts = {}
+        for target in targets:
+            identity = _attachment_identity(target)
+            target_identity_counts[identity] = target_identity_counts.get(identity, 0) + 1
+        token = ""
+        replacements = {}
+        fetched_bytes = 0
+        for target in targets:
+            identity = _attachment_identity(target)
+            source_ref = (
+                fetched_refs.get(identity)
+                if target_identity_counts.get(identity) == 1
+                and identity not in ambiguous_fetched_identities
+                else None
+            )
+            if source_ref is None:
+                summary["attachments_missing"] += 1
+                missing_warning = (
+                    "The exact Gmail attachment part is missing or no longer unique; automatic repair stopped "
+                    "and manual message review is required."
+                )
+                replacements[identity] = {
+                    **target,
+                    "status": "manual_review",
+                    "manual_review_required": True,
+                    "vision_repair_status": "manual",
+                    "vision_repair_reason": missing_warning,
+                    "warnings": list(
+                        dict.fromkeys([*(target.get("warnings") or []), missing_warning])
+                    ),
+                    "reason": missing_warning,
+                }
+                summary["errors"].append(
+                    {
+                        "gmail_message_id": message.gmail_message_id,
+                        "attachment": str(target.get("filename") or identity),
+                        "error": (
+                            "The exact Gmail attachment part was missing or not unique; "
+                            "the stored manifest was preserved."
+                        ),
+                    }
+                )
+                continue
+            remaining_budget = MAX_TOTAL_ATTACHMENT_BYTES - fetched_bytes
+            if remaining_budget <= 0:
+                summary["attachments_retryable"] += 1
+                continue
+            if not token:
+                token = get_valid_access_token(connection)
+            _renew_mailbox_po_repair_lease(audit_run.id, repair_lease_token)
+            repaired, byte_count = _preview_attachment(
+                connection,
+                message.gmail_message_id,
+                source_ref,
+                token,
+                max_bytes=remaining_budget,
+                actor=actor,
+                vision_source_identity={
+                    "audit_run_id": audit_run.id,
+                    "gmail_message_id": message.gmail_message_id,
+                    "attachment_id": source_ref.get("attachment_id") or "",
+                    "part_id": source_ref.get("part_id") or "",
+                },
+            )
+            _renew_mailbox_po_repair_lease(audit_run.id, repair_lease_token)
+            fetched_bytes += max(0, int(byte_count or 0))
+            if repaired.get("status") == "parsed" and (
+                repaired.get("line_count", 0) or repaired.get("original_text")
+                or repaired.get("vision_repair_status") == "completed"
+            ):
+                replacements[identity] = {
+                    **repaired,
+                    "vision_repaired_for_audit_run_id": audit_run.id,
+                }
+                summary["attachments_repaired"] += 1
+                continue
+
+            repair_status = str(repaired.get("vision_repair_status") or "retryable")
+            if repair_status == "rejected":
+                # Preserve the original evidence fields and add only a bounded
+                # terminal annotation so a 446-page report is not retried on
+                # every resumable invocation.
+                replacements[identity] = {
+                    **target,
+                    "vision_repair_status": "rejected",
+                    "vision_repair_reason": str(
+                        repaired.get("vision_repair_reason") or repaired.get("reason") or ""
+                    )[:500],
+                }
+                summary["attachments_rejected"] += 1
+            else:
+                retry_reason = str(
+                    repaired.get("reason")
+                    or repaired.get("vision_repair_reason")
+                    or "PDF repair did not produce review evidence"
+                )[:500]
+                replacement, terminal = _mailbox_po_repair_retry_replacement(
+                    target,
+                    retry_reason,
+                )
+                replacements[identity] = replacement
+                if terminal:
+                    summary["attachments_rejected"] += 1
+                else:
+                    summary["attachments_retryable"] += 1
+                summary["errors"].append(
+                    {
+                        "gmail_message_id": message.gmail_message_id,
+                        "attachment": str(target.get("filename") or identity),
+                        "error": retry_reason,
+                    }
+                )
+
+        if _persist_mailbox_po_repair_replacements(
+            audit_run,
+            message,
+            replacements,
+            lease_token=repair_lease_token,
+        ):
+            summary["messages_updated"] += 1
+    summary["errors"] = summary["errors"][-MAX_RUN_ERRORS:]
+    summary["repair_remaining"] = mailbox_po_audit_repair_remaining(audit_run)
+    summary["repair_done"] = summary["repair_remaining"] == 0
+    return summary
+
+
+def mailbox_po_audit_repair_remaining(audit_run):
+    remaining = 0
+    memberships = (
+        MailboxPOAuditRunMessage.objects.filter(audit_run=audit_run)
+        .select_related("message")
+        .order_by("message_id")
+    )
+    for membership in memberships.iterator(chunk_size=200):
+        message = membership.message
+        classification = classify_mailbox_message(
+            {
+                "subject": message.subject,
+                "newest_body_text": message.newest_body_text,
+                "snippet": message.snippet,
+                "attachment_manifest": message.attachment_manifest,
+                "label_ids": message.label_ids,
+            }
+        )
+        classification_drift = any(
+            getattr(message, field) != classification[field]
+            for field in (
+                "classification",
+                "is_relevant",
+                "auto_link_eligible",
+                "relevance_reason",
+                "extracted_po_references",
+            )
+        )
+        remaining += int(classification_drift)
+        if not classification["is_relevant"]:
+            continue
+        remaining += sum(
+            1
+            for attachment in (message.attachment_manifest or [])
+            if attachment_needs_mailbox_vision_repair(attachment)
+        )
+    return remaining
 
 
 def start_mailbox_po_audit(connection, *, requested_by=None, earliest_quote_at=None):
@@ -517,21 +1766,42 @@ def start_mailbox_po_audit(connection, *, requested_by=None, earliest_quote_at=N
     # Gmail's query grammar is second-granular. Flooring is conservative: mail
     # from the current partial second is picked up by the next immutable run.
     cutoff = timezone.now().replace(microsecond=0)
-    return MailboxPOAuditRun.objects.create(
-        gmail_connection=connection,
-        requested_by=requested_by,
-        earliest_quote_at=boundary,
-        mailbox_cutoff_at=cutoff,
-        gmail_query=build_mailbox_po_query(boundary, cutoff),
-    )
+    with transaction.atomic():
+        # Repair's final canonical merge locks this same row. If a rescan is
+        # started concurrently, either its new run becomes visible before the
+        # repair guard (which aborts the stale merge), or it starts after the
+        # completed repair commit.
+        stored_connection = GmailOAuthConnection.objects.select_for_update().get(
+            pk=connection.pk
+        )
+        if not stored_connection.is_shared:
+            raise ValueError("Mailbox PO audits require the designated shared Gmail connection.")
+        if stored_connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+            raise RuntimeError("The shared Gmail mailbox is not connected.")
+        return MailboxPOAuditRun.objects.create(
+            gmail_connection=stored_connection,
+            requested_by=requested_by,
+            earliest_quote_at=boundary,
+            mailbox_cutoff_at=cutoff,
+            gmail_query=build_mailbox_po_query(boundary, cutoff),
+        )
 
 
-def _persist_inventory_message(run, message):
+def _persist_inventory_message(run, message, *, heartbeat=None):
     classification = classify_mailbox_message(message)
     manifest, candidate_count, fetched_bytes = hydrate_plausible_attachments(
         run.gmail_connection,
         message,
         is_relevant=classification["is_relevant"],
+        heartbeat=heartbeat,
+        allow_ai_vision=False,
+        surface_unsupported=bool(
+            classification["classification"] == MailboxPOMessage.CLASS_PURCHASE_ORDER
+            or any(
+                reference.get("kind") == "po"
+                for reference in classification["extracted_po_references"]
+            )
+        ),
     )
     attachment_errors = [
         _database_text(attachment.get("reason"))
@@ -786,7 +2056,11 @@ def scan_mailbox_po_audit_page(run, *, page_size=DEFAULT_PAGE_SIZE):
             _renew_scan_lease(run.pk, lease_token)
             message = fetch_mailbox_message(run.gmail_connection, message_id)
             _renew_scan_lease(run.pk, lease_token)
-            inventory, _, candidates, fetched_bytes, attachment_errors = _persist_inventory_message(run, message)
+            inventory, _, candidates, fetched_bytes, attachment_errors = _persist_inventory_message(
+                run,
+                message,
+                heartbeat=lambda: _renew_scan_lease(run.pk, lease_token),
+            )
             _renew_scan_lease(run.pk, lease_token)
         except Exception as exc:
             _renew_scan_lease(run.pk, lease_token)

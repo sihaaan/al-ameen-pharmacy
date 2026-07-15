@@ -41,6 +41,16 @@ AI_DETERMINISTIC_GUARD_WARNING = (
     "the deterministic extraction was kept for staff review."
 )
 
+# In-memory vision is used for Gmail attachments that deliberately must not be
+# copied into private import storage.  Keep a hard ceiling in addition to the
+# configurable limits so a caller cannot accidentally turn this helper into an
+# unbounded PDF renderer.
+DEFAULT_IN_MEMORY_PDF_BYTES = 5 * 1024 * 1024
+DEFAULT_HARD_MAX_PDF_BYTES = 10 * 1024 * 1024
+DEFAULT_HARD_MAX_PDF_PAGES = 50
+DEFAULT_HARD_MAX_RENDERED_PAGES = 5
+DEFAULT_HARD_MAX_IMAGE_DIMENSION = 2000
+
 
 AI_PARSE_JSON_SCHEMA = {
     "type": "object",
@@ -96,6 +106,66 @@ AI_PARSE_JSON_SCHEMA = {
 }
 
 
+AI_DOCUMENT_REFERENCE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "reference": {"type": "string"},
+        "page_number": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["reference", "page_number", "confidence"],
+}
+
+
+MAILBOX_PO_VISION_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **AI_PARSE_JSON_SCHEMA["properties"],
+        "document_type": {
+            "type": "string",
+            "enum": [
+                "purchase_order",
+                "local_purchase_order",
+                "order_confirmation",
+                "payment_or_follow_up",
+                "other",
+                "unknown",
+            ],
+        },
+        "po_references": {
+            "type": "array",
+            "maxItems": 20,
+            "items": AI_DOCUMENT_REFERENCE_SCHEMA,
+        },
+        "quotation_references": {
+            "type": "array",
+            "maxItems": 20,
+            "items": AI_DOCUMENT_REFERENCE_SCHEMA,
+        },
+        "currency": {"type": "string"},
+        "subtotal": {"type": "string"},
+        "vat_total": {"type": "string"},
+        "grand_total": {"type": "string"},
+        "totals_page_number": {"type": "string"},
+        "document_confidence": {"type": "number"},
+    },
+    "required": [
+        *AI_PARSE_JSON_SCHEMA["required"],
+        "document_type",
+        "po_references",
+        "quotation_references",
+        "currency",
+        "subtotal",
+        "vat_total",
+        "grand_total",
+        "totals_page_number",
+        "document_confidence",
+    ],
+}
+
+
 class AIParseError(Exception):
     """Raised when an AI cleanup request cannot produce validated rows."""
 
@@ -127,6 +197,9 @@ class OpenAIResponsesParseProvider(AIParseProvider):
 
         payload = {
             "model": model,
+            # Mailbox attachments can contain patient/customer-commercial data.
+            # The Responses API must not retain these requests for later use.
+            "store": False,
             "input": [
                 {"role": "developer", "content": [{"type": "input_text", "text": instructions}]},
                 {"role": "user", "content": user_content},
@@ -424,6 +497,107 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
     )
 
 
+def clean_pdf_bytes_with_ai(
+    pdf_bytes,
+    preview,
+    actor=None,
+    *,
+    max_pages=None,
+    max_pdf_bytes=None,
+    json_schema=None,
+    schema_name="quotation_import_parse",
+):
+    """Vision-clean a PDF held only in memory and return review rows.
+
+    This is the no-store counterpart to ``clean_preview_with_ai``.  It uses the
+    same settings gate, provider, timeout, cache and audit log, but never reads
+    from or writes to private source storage.  ``max_pages`` may relax the
+    normal import cap for a bounded mailbox workflow; it can never exceed the
+    environment hard ceiling.
+    """
+
+    settings_obj = QuotationSettings.get_solo()
+    _assert_ai_allowed(settings_obj)
+    if not settings_obj.ai_pdf_vision_enabled:
+        raise AIProviderUnavailable("AI vision cleanup is disabled in Quotation Settings.")
+    availability = get_ai_parse_availability()
+    if not availability.get("vision_model"):
+        raise AIProviderUnavailable("AI vision cleanup is unavailable because no vision model is configured.")
+
+    data = bytes(pdf_bytes or b"")
+    configured_max_pdf_bytes = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_MAX_PDF_BYTES", DEFAULT_IN_MEMORY_PDF_BYTES)),
+    )
+    hard_max_pdf_bytes = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_HARD_MAX_PDF_BYTES", DEFAULT_HARD_MAX_PDF_BYTES)),
+    )
+    requested_max_pdf_bytes = (
+        configured_max_pdf_bytes
+        if max_pdf_bytes is None
+        else max(1, int(max_pdf_bytes))
+    )
+    effective_max_pdf_bytes = min(requested_max_pdf_bytes, hard_max_pdf_bytes)
+    if not data:
+        raise AIParseError("Source PDF bytes are empty.")
+    if len(data) > effective_max_pdf_bytes:
+        raise AIParseError(
+            f"PDF is {len(data)} bytes. In-memory AI cleanup is capped at {effective_max_pdf_bytes} bytes."
+        )
+
+    prepared_preview = {
+        **(preview or {}),
+        "source_type": Inquiry.SOURCE_TYPE_PDF,
+        "source_mime_type": "application/pdf",
+        "source_sha256": hashlib.sha256(data).hexdigest(),
+        # A Gmail attachment identity is kept by the mailbox inventory.  It is
+        # not a private-storage ref and must never enter a reusable AI cache.
+        "source_file_ref": "",
+        "source_file_size": len(data),
+        "meta": {**((preview or {}).get("meta") or {}), "source_file_ref": ""},
+    }
+    images, rendered_page_count = _render_pdf_bytes_images(data, max_pages=max_pages)
+    if not images:
+        raise AIParseError("AI vision cleanup could not render the source PDF.")
+    page_count = _safe_int((prepared_preview.get("meta") or {}).get("page_count"), default=0)
+    result = _run_ai_cleanup(
+        preview=prepared_preview,
+        actor=actor,
+        mode=AIParseCache.MODE_VISION,
+        context=_build_preview_text_context(prepared_preview),
+        images=images,
+        page_count=page_count or rendered_page_count,
+        output_style="inquiry",
+        json_schema=json_schema,
+        schema_name=schema_name,
+    )
+    source_page_count = page_count or rendered_page_count
+    render_truncated = source_page_count > rendered_page_count
+    render_warning = (
+        f"AI vision rendered only the first {rendered_page_count} of {source_page_count} PDF pages; "
+        "the document extraction is incomplete and requires staff review."
+        if render_truncated
+        else ""
+    )
+    # Cached results produced by an older stored-file path may contain a source
+    # reference.  Never return that reference from the in-memory API.
+    return {
+        **result,
+        "source_file_ref": "",
+        "warnings": list(
+            dict.fromkeys([*(result.get("warnings") or []), *([render_warning] if render_warning else [])])
+        ),
+        "meta": {
+            **(result.get("meta") or {}),
+            "source_file_ref": "",
+            "ai_source_page_count": source_page_count,
+            "ai_rendered_page_count": rendered_page_count,
+            "ai_render_truncated": render_truncated,
+        },
+    }
+
+
 def clean_historical_import_with_ai(historical_import, actor=None, *, requested_mode="auto"):
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
@@ -535,7 +709,18 @@ def _select_mode(preview, *, requested_mode, allow_vision, settings_obj):
     return AIParseCache.MODE_TEXT
 
 
-def _run_ai_cleanup(*, preview, actor, mode, context, images, page_count, output_style):
+def _run_ai_cleanup(
+    *,
+    preview,
+    actor,
+    mode,
+    context,
+    images,
+    page_count,
+    output_style,
+    json_schema=None,
+    schema_name="quotation_import_parse",
+):
     availability = get_ai_parse_availability()
     provider_name = availability["provider"]
     model = availability["vision_model"] if mode == AIParseCache.MODE_VISION else availability["text_model"]
@@ -545,8 +730,9 @@ def _run_ai_cleanup(*, preview, actor, mode, context, images, page_count, output
     image_hashes = [hashlib.sha256(image.encode("utf-8")).hexdigest() for image in images]
     context_hash = hashlib.sha256((context + "".join(image_hashes)).encode("utf-8")).hexdigest()
     source_sha256 = preview.get("source_sha256") or ""
+    schema_cache_scope = "" if schema_name == "quotation_import_parse" else f":{schema_name}"
     cache_key = hashlib.sha256(
-        f"{source_sha256}:{provider_name}:{model}:{mode}:{context_hash}".encode("utf-8")
+        f"{source_sha256}:{provider_name}:{model}:{mode}:{context_hash}{schema_cache_scope}".encode("utf-8")
     ).hexdigest()
     cached = AIParseCache.objects.filter(cache_key=cache_key).first()
     if cached:
@@ -570,9 +756,15 @@ def _run_ai_cleanup(*, preview, actor, mode, context, images, page_count, output
         raw_result, usage = provider.clean_rows(
             mode=mode,
             model=model,
-            instructions=_ai_instructions(output_style=output_style, mode=mode),
+            instructions=_ai_instructions(
+                output_style=output_style,
+                mode=mode,
+                include_mailbox_metadata=schema_name == "mailbox_po_vision_parse",
+            ),
             text_context=context,
             image_data_urls=images,
+            json_schema=json_schema,
+            schema_name=schema_name,
         )
         result = _normalize_ai_result(
             raw_result,
@@ -582,6 +774,7 @@ def _run_ai_cleanup(*, preview, actor, mode, context, images, page_count, output
             model=model,
             output_style=output_style,
             usage=usage,
+            schema_name=schema_name,
         )
         AIParseCache.objects.update_or_create(
             cache_key=cache_key,
@@ -629,7 +822,162 @@ def _run_ai_cleanup(*, preview, actor, mode, context, images, page_count, output
         raise AIParseError(str(exc)) from exc
 
 
-def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_style, usage=None):
+def _normalize_document_money(value, field_name, warnings):
+    text = _clean_text(value)
+    if not text:
+        return ""
+    match = re.fullmatch(r"(?:[A-Z]{3}\s*)?-?\d+(?:,\d{3})*(?:\.\d+)?", text, re.IGNORECASE)
+    if not match:
+        warnings.append(f"AI vision returned an invalid {field_name}; the value was discarded.")
+        return ""
+    number = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?", text)
+    return number.group(0).replace(",", "") if number else ""
+
+
+def _normalize_document_references(values, *, kind, warnings):
+    if not isinstance(values, list):
+        warnings.append(f"AI vision did not return a valid {kind} reference list.")
+        return []
+    normalized = []
+    seen = set()
+    for entry in values[:20]:
+        if not isinstance(entry, dict):
+            warnings.append(f"AI vision returned an invalid {kind} reference entry; it was discarded.")
+            continue
+        reference = _clean_text(entry.get("reference")).upper().replace("_", "-")
+        compact = re.sub(r"\s+", "", reference)
+        if kind == "quotation":
+            valid = bool(re.fullmatch(r"QT-?\d{8}-\d{4}", compact))
+        else:
+            valid = bool(
+                re.fullmatch(r"[A-Z0-9][A-Z0-9./-]{2,}", compact)
+                and re.search(r"\d", compact)
+            )
+        if not valid:
+            warnings.append(
+                f"AI vision returned an invalid {kind} reference; the value was discarded."
+            )
+            continue
+        if compact in seen:
+            continue
+        seen.add(compact)
+        normalized.append(
+            {
+                "reference": compact,
+                "page_number": _clean_text(entry.get("page_number")),
+                "confidence": _normalize_confidence(entry.get("confidence")),
+            }
+        )
+    return normalized
+
+
+def _normalize_mailbox_document_metadata(raw_result, rows, warnings):
+    document_type = _clean_text(raw_result.get("document_type")).lower()
+    valid_document_types = {
+        "purchase_order",
+        "local_purchase_order",
+        "order_confirmation",
+        "payment_or_follow_up",
+        "other",
+        "unknown",
+    }
+    if document_type not in valid_document_types:
+        warnings.append("AI vision returned an invalid document type; it was treated as unknown.")
+        document_type = "unknown"
+    po_references = _normalize_document_references(
+        raw_result.get("po_references"),
+        kind="PO",
+        warnings=warnings,
+    )
+    quotation_references = _normalize_document_references(
+        raw_result.get("quotation_references"),
+        kind="quotation",
+        warnings=warnings,
+    )
+    currency = _clean_text(raw_result.get("currency")).upper()
+    if currency and not re.fullmatch(r"[A-Z]{3}", currency):
+        warnings.append("AI vision returned an invalid currency code; the value was discarded.")
+        currency = ""
+    subtotal = _normalize_document_money(raw_result.get("subtotal"), "subtotal", warnings)
+    vat_total = _normalize_document_money(raw_result.get("vat_total"), "VAT total", warnings)
+    grand_total = _normalize_document_money(raw_result.get("grand_total"), "grand total", warnings)
+    totals_page_number = _clean_text(raw_result.get("totals_page_number"))
+    confidence = _normalize_confidence(raw_result.get("document_confidence"))
+
+    line_totals = [
+        _guard_decimal(row.get("line_total"))
+        for row in rows
+        if _guard_decimal(row.get("line_total")) is not None
+    ]
+    subtotal_decimal = _guard_decimal(subtotal)
+    vat_decimal = _guard_decimal(vat_total)
+    grand_decimal = _guard_decimal(grand_total)
+    tolerance = Decimal("0.02")
+    if line_totals and subtotal_decimal is not None:
+        line_sum = sum(line_totals, Decimal("0"))
+        if abs(line_sum - subtotal_decimal) > tolerance:
+            warnings.append(
+                "AI vision subtotal conflicts with extracted line arithmetic; verify the attachment."
+            )
+    if subtotal_decimal is not None and vat_decimal is not None and grand_decimal is not None:
+        if abs((subtotal_decimal + vat_decimal) - grand_decimal) > tolerance:
+            warnings.append(
+                "AI vision grand total conflicts with subtotal plus VAT arithmetic; verify the attachment."
+            )
+
+    raw_reference_text = "\n".join(
+        [
+            _clean_text(raw_result.get("document_notes")),
+            *(_clean_text(row.get("raw_line")) for row in rows),
+        ]
+    )
+    visible_quote_refs = {
+        re.sub(r"[^A-Z0-9]+", "", match.group(0).upper())
+        for match in re.finditer(r"\bQT[-_\s]?\d{8}[-_]\d{4}\b", raw_reference_text, re.IGNORECASE)
+    }
+    structured_quote_refs = {
+        re.sub(r"[^A-Z0-9]+", "", entry["reference"].upper())
+        for entry in quotation_references
+    }
+    quotation_references_conflicted = bool(
+        visible_quote_refs
+        and structured_quote_refs
+        and visible_quote_refs.isdisjoint(structured_quote_refs)
+    )
+    if quotation_references_conflicted:
+        warnings.append(
+            "AI vision structured quotation references conflict with its extracted text; all links require staff verification."
+        )
+
+    return {
+        "document_type": document_type,
+        "po_references": po_references,
+        "quotation_references": quotation_references,
+        "currency": currency,
+        "subtotal": subtotal,
+        "vat_total": vat_total,
+        "grand_total": grand_total,
+        "totals_page_number": totals_page_number,
+        "confidence": confidence,
+        # This is normalized provenance, not provider-controlled schema data.
+        # Consumers must fail closed instead of promoting a structured quote
+        # reference that contradicts text visible elsewhere in the same AI
+        # extraction.
+        "quotation_references_conflicted": quotation_references_conflicted,
+    }
+
+
+def _normalize_ai_result(
+    raw_result,
+    *,
+    preview,
+    mode,
+    provider,
+    model,
+    output_style,
+    usage=None,
+    schema_name="quotation_import_parse",
+):
     if not isinstance(raw_result, dict):
         raise AIParseError("AI provider returned an object with an unsupported shape.")
     raw_rows = raw_result.get("rows")
@@ -702,8 +1050,25 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
                 }
             )
 
+    document_metadata = {}
+    if schema_name == "mailbox_po_vision_parse":
+        document_metadata = _normalize_mailbox_document_metadata(raw_result, rows, warnings)
     if not rows:
-        raise AIParseError("AI cleanup did not return any item rows for review.")
+        has_reviewable_mailbox_metadata = bool(
+            schema_name == "mailbox_po_vision_parse"
+            and (
+                document_metadata.get("po_references")
+                or document_metadata.get("quotation_references")
+                or document_metadata.get("grand_total")
+                or document_metadata.get("document_type")
+                not in {"", "unknown"}
+            )
+        )
+        if not has_reviewable_mailbox_metadata:
+            raise AIParseError("AI cleanup did not return any item rows for review.")
+        warnings.append(
+            "AI vision found document metadata but no item rows; evidence remains metadata-only and requires staff review."
+        )
 
     result_source = AI_SOURCE_VISION if mode == AIParseCache.MODE_VISION else AI_SOURCE_TEXT
     result = {
@@ -717,6 +1082,7 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
         "original_text": preview.get("original_text", ""),
         "lines": rows,
         "warnings": warnings,
+        "document_metadata": document_metadata,
         "summary": summarize_lines(rows, skipped_count=ignored_count),
         "meta": {
             **(preview.get("meta") or {}),
@@ -724,6 +1090,7 @@ def _normalize_ai_result(raw_result, *, preview, mode, provider, model, output_s
             "ai_model": model,
             "ai_mode": mode,
             "ai_document_notes": _clean_text(raw_result.get("document_notes")),
+            "ai_document_metadata": document_metadata,
             "ai_ignored_count": ignored_count,
             "ai_usage": usage or {},
         },
@@ -854,25 +1221,88 @@ def _render_pdf_images(source_file_ref):
     data = read_private_ref(source_file_ref)
     if not data:
         raise AIParseError("Source PDF is not available in private storage.")
-    max_pages = int(getattr(settings, "QUOTATION_AI_PARSE_MAX_PDF_PAGES", 10))
-    max_rendered_pages = int(getattr(settings, "QUOTATION_AI_PARSE_MAX_RENDERED_PAGES", 3))
-    max_dimension = int(getattr(settings, "QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", 1400))
+    return _render_pdf_bytes_images(data)
+
+
+def _render_pdf_bytes_images(data, *, max_pages=None):
+    """Render a bounded number of PDF pages without persisting the source."""
+
+    if fitz is None:
+        raise AIProviderUnavailable("AI vision cleanup is unavailable because PDF rendering is not installed.")
+    hard_max_pages = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_HARD_MAX_PDF_PAGES", DEFAULT_HARD_MAX_PDF_PAGES)),
+    )
+    configured_max_pages = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_MAX_PDF_PAGES", 10)),
+    )
+    requested_max_pages = configured_max_pages if max_pages is None else max(1, int(max_pages))
+    effective_max_pages = min(requested_max_pages, hard_max_pages)
+    hard_max_rendered_pages = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "QUOTATION_AI_PARSE_HARD_MAX_RENDERED_PAGES",
+                DEFAULT_HARD_MAX_RENDERED_PAGES,
+            )
+        ),
+    )
+    max_rendered_pages = min(
+        max(1, int(getattr(settings, "QUOTATION_AI_PARSE_MAX_RENDERED_PAGES", 3))),
+        hard_max_rendered_pages,
+    )
+    hard_max_dimension = max(
+        1,
+        int(
+            getattr(
+                settings,
+                "QUOTATION_AI_PARSE_HARD_IMAGE_MAX_DIMENSION",
+                DEFAULT_HARD_MAX_IMAGE_DIMENSION,
+            )
+        ),
+    )
+    max_dimension = min(
+        max(1, int(getattr(settings, "QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", 1400))),
+        hard_max_dimension,
+    )
     configured_scale = float(getattr(settings, "QUOTATION_AI_PARSE_IMAGE_SCALE", 1.4))
+    max_rendered_bytes = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_MAX_RENDERED_BYTES", 12 * 1024 * 1024)),
+    )
     images = []
+    rendered_bytes = 0
     with fitz.open(stream=data, filetype="pdf") as document:
-        if len(document) > max_pages:
-            raise AIParseError(f"PDF has {len(document)} pages. AI cleanup is capped at {max_pages} pages.")
+        if len(document) > effective_max_pages:
+            raise AIParseError(
+                f"PDF has {len(document)} pages. AI cleanup is capped at {effective_max_pages} pages."
+            )
         for page_index in range(min(len(document), max_rendered_pages)):
             page = document[page_index]
             page_max_points = max(float(page.rect.width), float(page.rect.height)) or 1
             scale = min(configured_scale, max_dimension / page_max_points)
             pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
             png_bytes = pixmap.tobytes("png")
+            rendered_bytes += len(png_bytes)
+            if rendered_bytes > max_rendered_bytes:
+                raise AIParseError(
+                    "Rendered PDF pages exceed the in-memory AI image byte limit."
+                )
             images.append(f"data:image/png;base64,{base64.b64encode(png_bytes).decode('ascii')}")
     return images, min(len(images), max_rendered_pages)
 
 
-def _ai_instructions(*, output_style, mode):
+def _ai_instructions(*, output_style, mode, include_mailbox_metadata=False):
+    mailbox_instruction = (
+        "For mailbox PO review, populate document_type, every visible PO/LPO reference, every visible "
+        "quotation reference, currency, subtotal, VAT total, grand total, totals page, and document confidence. "
+        "For every reference include the visible page number and extraction confidence. Leave a value blank or "
+        "an array empty when it is not visible; never infer it from filenames or surrounding context. "
+        if include_mailbox_metadata
+        else ""
+    )
     return (
         "You clean messy pharmacy inquiry, LPO, and finalized quotation extraction into JSON rows for human review. "
         "Do not match products, do not create items, do not invent prices or quantities, and do not commit anything. "
@@ -880,10 +1310,12 @@ def _ai_instructions(*, output_style, mode):
         "Preserve VAT percentage/rate in vat_rate and VAT money amount in vat_amount when visible. Do not convert a visible VAT rate such as 5% into a VAT amount. "
         "For structured Excel rows, keep every real item row unless it is clearly a header, footer, subtotal, metadata, or duplicate noise row. "
         "Skip obvious document metadata such as dates, seller/buyer addresses, tender numbers, quotation headings, table headers, totals, footers, contact/signature text, and email addresses by setting parse_status='ignored'. "
+        "When visible, copy PO/LPO numbers, quotation references, and the document grand total into document_notes; never infer or invent them. "
         "If quantity is unclear, leave quantity blank and set parse_status='needs_review'. "
         "If price is clear, extract unit_price. Preserve item-like uncertain rows as needs_review. "
         "Use confidence 0-100 for extraction quality only. Missing product matches are irrelevant and must not reduce confidence. "
         f"Return rows suitable for {'historical finalized quotation price review' if output_style == 'historical' else 'new inquiry review'}. "
+        f"{mailbox_instruction}"
         f"Mode: {mode}."
     )
 
@@ -899,6 +1331,17 @@ def _extract_openai_output_text(response):
 
 
 def _log_ai_parse(*, actor, provider, model, mode, preview, context_hash, cache_hit, text_length, page_count, image_count, usage=None, success=False, error=""):
+    usage_payload = dict(usage or {})
+    source_identity = (preview or {}).get("ai_log_source_identity") or {}
+    if isinstance(source_identity, dict) and source_identity:
+        # AIParseLog has no generic metadata column. Keep only non-content
+        # mailbox identifiers alongside token usage so every cache hit,
+        # success and failure remains attributable without a migration.
+        usage_payload["source_identity"] = {
+            str(key)[:80]: str(value)[:255]
+            for key, value in source_identity.items()
+            if value not in (None, "")
+        }
     AIParseLog.objects.create(
         actor=actor if getattr(actor, "is_authenticated", False) else None,
         provider=provider,
@@ -911,7 +1354,7 @@ def _log_ai_parse(*, actor, provider, model, mode, preview, context_hash, cache_
         text_length=text_length,
         page_count=page_count or 0,
         image_count=image_count,
-        usage=usage or {},
+        usage=usage_payload,
         success=success,
         error=error[:1000],
     )
