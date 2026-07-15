@@ -76,6 +76,28 @@ POSSIBLE_ORDER_SIGNAL = re.compile(
     r"\b(?:order|ordered|award(?:ed)?|approv(?:e|ed|al)|confirm(?:ed|ation)?|proceed|quotation|quote)\b",
     re.IGNORECASE,
 )
+STRONG_ORDER_FILENAME_SIGNAL = re.compile(
+    r"\b(?:call\s*off|award(?:ed)?|order\s+confirmation|accept(?:ed|ance)?)\b",
+    re.IGNORECASE,
+)
+RFQ_REQUEST_SIGNAL = re.compile(
+    r"\b(?:rfq|request(?:ing)?\s+(?:for\s+)?(?:a\s+)?(?:quotation|quote)|"
+    r"(?:quotation|quote)\s+request|"
+    r"(?:provide|send|share|submit|prepare|issue)(?:\s+us)?\s+(?:with\s+)?(?:(?:a|the)\s+)?(?:quotation|quote)|"
+    r"(?:please|kindly)\s+quote)\b",
+    re.IGNORECASE,
+)
+EXPLICIT_ORDER_CONTEXT_SIGNAL = re.compile(
+    r"\b(?:order(?:ed)?|award(?:ed)?|approv(?:e|ed|al)|confirm(?:ed|ation)?|proceed|accept(?:ed|ance)?)\b",
+    re.IGNORECASE,
+)
+GENERIC_INLINE_FILENAME_SIGNAL = re.compile(
+    r"\b(?:image\d*|outlook|logo|icon|signature|banner|footer|header|spacer|pixel|social)\b",
+    re.IGNORECASE,
+)
+UNSUPPORTED_DOCUMENT_EXTENSIONS = {".doc", ".docm", ".docx", ".odt", ".rtf"}
+UNSUPPORTED_IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+LARGE_UNSUPPORTED_IMAGE_BYTES = 256 * 1024
 QUOTATION_REFERENCE = re.compile(r"\bQT[-_\s]?\d{8}[-_]\d{4}\b", re.IGNORECASE)
 LABELLED_PO_REFERENCE = re.compile(
     r"\b(?P<label>L\.?\s*P\.?\s*O\.?|P(?:URCHASE)?\.?\s*O(?:RDER)?\.?)"
@@ -107,6 +129,12 @@ MAILBOX_AI_CLOUD_DISCLOSURE_WARNING = (
 PDF_PAGE_LIMIT_ERROR = re.compile(
     r"(?:pdf\s+has\s+\d+\s+pages|maximum\s+supported\s+pages|(?:ai\s+cleanup\s+is\s+)?capped\s+at\s+\d+\s+pages)",
     re.IGNORECASE,
+)
+UNSUPPORTED_ORDER_REVIEW_WARNING = (
+    "Unsupported or over-limit attachment; manual review of the exact Gmail source is required."
+)
+UNSUPPORTED_ATTACHMENT_TYPE_REVIEW_WARNING = (
+    "Unsupported attachment type; manual review of the exact Gmail source is required."
 )
 
 
@@ -576,9 +604,171 @@ def _is_plausible_document_attachment(attachment):
     return 0 <= declared_size <= mailbox_max_attachment_bytes()
 
 
+def _is_overlimit_supported_document_attachment(attachment):
+    if not isinstance(attachment, dict):
+        return False
+    extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
+    if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+        return False
+    try:
+        return int(attachment.get("size") or 0) > mailbox_max_attachment_bytes()
+    except (TypeError, ValueError):
+        return False
+
+
+def _message_order_context_text(message):
+    """Return only author-controlled message text, excluding attachment names."""
+
+    newest_body = str((message or {}).get("newest_body_text") or "").strip()
+    body_or_snippet = newest_body or str((message or {}).get("snippet") or "")
+    return "\n".join(
+        [
+            str((message or {}).get("subject") or ""),
+            body_or_snippet,
+        ]
+    )
+
+
+def _has_explicit_order_context(message):
+    """Require positive order intent in the newest email and reject RFQ wording."""
+
+    context_text = _message_order_context_text(message)
+    context_references = extract_po_references(context_text)
+    has_explicit_po = bool(
+        PURCHASE_ORDER_SIGNAL.search(context_text)
+        or any(reference.get("kind") == "po" for reference in context_references)
+    )
+    if has_explicit_po:
+        return True
+    if RFQ_REQUEST_SIGNAL.search(context_text):
+        return False
+    return bool(EXPLICIT_ORDER_CONTEXT_SIGNAL.search(context_text))
+
+
+def _attachment_filename_parts(attachment):
+    filename = os.path.basename(str((attachment or {}).get("filename") or ""))
+    stem, extension = os.path.splitext(filename)
+    normalized = re.sub(r"[_-]+", " ", filename)
+    return filename, stem, extension.lower(), normalized
+
+
+def _has_strong_order_filename(attachment):
+    """Identify an unsupported file whose own name says it is order evidence."""
+
+    filename, _stem, _extension, normalized = _attachment_filename_parts(attachment)
+    if not filename:
+        return False
+    return bool(
+        PURCHASE_ORDER_SIGNAL.search(normalized)
+        or STRONG_ORDER_FILENAME_SIGNAL.search(normalized)
+        or any(
+            reference.get("kind") == "po"
+            for reference in extract_po_references(filename)
+        )
+    )
+
+
+def _is_large_non_inline_image(attachment):
+    _filename, stem, extension, _normalized = _attachment_filename_parts(attachment)
+    if extension not in UNSUPPORTED_IMAGE_EXTENSIONS:
+        return False
+    try:
+        declared_size = int((attachment or {}).get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        declared_size >= LARGE_UNSUPPORTED_IMAGE_BYTES
+        and not GENERIC_INLINE_FILENAME_SIGNAL.search(
+            re.sub(r"[_-]+", " ", stem.strip())
+        )
+    )
+
+
+def _attachment_warning_values(attachment):
+    raw = (attachment or {}).get("warnings") or []
+    if isinstance(raw, (list, tuple)):
+        return [str(value) for value in raw]
+    return [str(raw)]
+
+
+def _should_surface_unsupported_order_attachment(
+    attachment,
+    *,
+    message_is_relevant,
+    explicit_order_context,
+):
+    if not message_is_relevant or not isinstance(attachment, dict):
+        return False
+    _filename, _stem, extension, _normalized = _attachment_filename_parts(attachment)
+    if extension in SUPPORTED_ATTACHMENT_EXTENSIONS:
+        return bool(
+            _is_overlimit_supported_document_attachment(attachment)
+            and (explicit_order_context or _has_strong_order_filename(attachment))
+        )
+    if _has_strong_order_filename(attachment):
+        return True
+    if not explicit_order_context:
+        return False
+    # Office documents and substantial raster scans are evidence only
+    # when the newest message itself expresses order intent. This prevents a
+    # supported RFQ PDF from lending relevance to an unrelated Order.docx or
+    # inline logo in the same email.
+    return bool(
+        extension in UNSUPPORTED_DOCUMENT_EXTENSIONS
+        or _is_large_non_inline_image(attachment)
+    )
+
+
+def _remove_obsolete_broad_manual_surface(attachment):
+    """Undo only untouched rows created by the former broad surfacing rule."""
+
+    if not isinstance(attachment, dict):
+        return attachment
+    warning_values = _attachment_warning_values(attachment)
+    owned_warnings = {
+        UNSUPPORTED_ORDER_REVIEW_WARNING,
+        UNSUPPORTED_ATTACHMENT_TYPE_REVIEW_WARNING,
+    }
+    warnings = [
+        warning
+        for warning in warning_values
+        if warning not in owned_warnings
+    ]
+    was_our_generic_surface = bool(
+        attachment.get("status") == "manual_review"
+        and attachment.get("manual_review_required")
+        and str(attachment.get("reason") or "") in owned_warnings
+        and any(warning in owned_warnings for warning in warning_values)
+        and all(warning in owned_warnings for warning in warning_values)
+        and not attachment.get("candidate")
+        and not attachment.get("content_fetched")
+        and not attachment.get("manual_review_reason_code")
+        and not attachment.get("vision_repair_status")
+        and not attachment.get("vision_repair_reason")
+        and not attachment.get("source_sha256")
+        and not attachment.get("result_source")
+        and not attachment.get("lines")
+        and not attachment.get("line_count")
+        and not attachment.get("ai_status")
+        and not attachment.get("ai_review_required")
+    )
+    if not was_our_generic_surface:
+        return attachment
+    cleaned = {
+        **attachment,
+        "status": "metadata_only",
+        "manual_review_required": False,
+        "reason": "Unsupported document type for PO parsing.",
+        "warnings": warnings,
+    }
+    cleaned.pop("manual_review_reason_code", None)
+    return cleaned
+
+
 def classify_mailbox_message(message):
     """Classify broadly enough for review without claiming a quote match."""
 
+    context_text = _message_order_context_text(message)
     filenames = " ".join(
         str(attachment.get("filename") or "")
         for attachment in (message.get("attachment_manifest") or [])
@@ -586,9 +776,7 @@ def classify_mailbox_message(message):
     )
     text = "\n".join(
         [
-            str(message.get("subject") or ""),
-            str(message.get("newest_body_text") or ""),
-            str(message.get("snippet") or ""),
+            context_text,
             filenames,
         ]
     )
@@ -597,6 +785,25 @@ def classify_mailbox_message(message):
         attachment
         for attachment in (message.get("attachment_manifest") or [])
         if _is_plausible_document_attachment(attachment)
+    ]
+    explicit_order_context = _has_explicit_order_context(message)
+    reviewable_overlimit_supported_documents = [
+        attachment
+        for attachment in (message.get("attachment_manifest") or [])
+        if _is_overlimit_supported_document_attachment(attachment)
+        and (explicit_order_context or _has_strong_order_filename(attachment))
+    ]
+    reviewable_unsupported_order_documents = [
+        attachment
+        for attachment in (message.get("attachment_manifest") or [])
+        if isinstance(attachment, dict)
+        and os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
+        not in SUPPORTED_ATTACHMENT_EXTENSIONS
+        and _should_surface_unsupported_order_attachment(
+            attachment,
+            message_is_relevant=True,
+            explicit_order_context=explicit_order_context,
+        )
     ]
     has_po_signal = bool(PURCHASE_ORDER_SIGNAL.search(text))
     has_explicit_po_reference = any(
@@ -621,6 +828,12 @@ def classify_mailbox_message(message):
     elif plausible_documents:
         classification = MailboxPOMessage.CLASS_POSSIBLE_PO
         reason = "A size-bounded supported document has no PO keyword and must be inspected before exclusion."
+    elif reviewable_overlimit_supported_documents:
+        classification = MailboxPOMessage.CLASS_POSSIBLE_PO
+        reason = "A supported document exceeds the safe parsing limit and requires exact-source review."
+    elif reviewable_unsupported_order_documents:
+        classification = MailboxPOMessage.CLASS_POSSIBLE_PO
+        reason = "An unsupported attachment and the newest order context require exact-source review."
     else:
         classification = MailboxPOMessage.CLASS_OTHER
         reason = "No PO/LPO signal or safely inspectable supported document was found."
@@ -875,7 +1088,7 @@ def hydrate_plausible_attachments(
     is_relevant,
     heartbeat=None,
     allow_ai_vision=False,
-    surface_unsupported=False,
+    explicit_order_context=False,
 ):
     """Fetch/parse bounded document bytes only for a plausible PO message."""
 
@@ -890,7 +1103,10 @@ def hydrate_plausible_attachments(
     candidates = []
     for index, attachment in enumerate(refs):
         extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
-        if extension in SUPPORTED_ATTACHMENT_EXTENSIONS:
+        if (
+            extension in SUPPORTED_ATTACHMENT_EXTENSIONS
+            and not _is_overlimit_supported_document_attachment(attachment)
+        ):
             candidates.append(index)
     candidate_indexes = set(candidates[:MAX_CANDIDATE_ATTACHMENTS])
     token = get_valid_access_token(connection) if candidate_indexes else ""
@@ -901,8 +1117,12 @@ def hydrate_plausible_attachments(
         public = {key: value for key, value in attachment.items() if key != "_inline_data"}
         extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
         if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
-            manual_review = bool(is_relevant and surface_unsupported)
-            warning = "Unsupported attachment type; manual review of the exact Gmail source is required."
+            manual_review = _should_surface_unsupported_order_attachment(
+                attachment,
+                message_is_relevant=is_relevant,
+                explicit_order_context=explicit_order_context,
+            )
+            warning = UNSUPPORTED_ATTACHMENT_TYPE_REVIEW_WARNING
             manifest.append(
                 {
                     **public,
@@ -912,8 +1132,46 @@ def hydrate_plausible_attachments(
                     "reason": warning if manual_review else "Unsupported document type for PO parsing.",
                     "warnings": [warning] if manual_review else [],
                     "manual_review_required": manual_review,
+                    **(
+                        {"manual_review_reason_code": "unsupported_order_document"}
+                        if manual_review
+                        else {}
+                    ),
                 }
             )
+            continue
+        if _is_overlimit_supported_document_attachment(attachment):
+            manual_review = _should_surface_unsupported_order_attachment(
+                attachment,
+                message_is_relevant=is_relevant,
+                explicit_order_context=explicit_order_context,
+            )
+            if not manual_review:
+                manifest.append(
+                    {
+                        **public,
+                        "candidate": False,
+                        "content_fetched": False,
+                        "status": "metadata_only",
+                        "reason": "Supported document exceeds the parsing limit without order evidence.",
+                        "warnings": [],
+                        "manual_review_required": False,
+                    }
+                )
+                continue
+            audited_candidates += 1
+            if heartbeat:
+                heartbeat()
+            audited, _byte_count = _preview_attachment(
+                connection,
+                message.get("gmail_message_id"),
+                attachment,
+                "",
+                allow_ai_vision=allow_ai_vision,
+            )
+            if heartbeat:
+                heartbeat()
+            manifest.append(audited)
             continue
         if index not in candidate_indexes:
             manifest.append(
@@ -1357,54 +1615,44 @@ def _reclassify_mailbox_po_audit_messages(audit_run, *, apply=True):
     )
     for membership in memberships.iterator(chunk_size=200):
         message = membership.message
-        result = classify_mailbox_message(
-            {
-                "subject": message.subject,
-                "newest_body_text": message.newest_body_text,
-                "snippet": message.snippet,
-                "attachment_manifest": message.attachment_manifest,
-                "label_ids": message.label_ids,
-            }
-        )
-        has_explicit_po_reference = any(
-            reference.get("kind") == "po"
-            for reference in result["extracted_po_references"]
-        )
-        surface_unsupported = bool(
-            has_explicit_po_reference
-            or result["classification"] == MailboxPOMessage.CLASS_PURCHASE_ORDER
-        )
+        message_payload = {
+            "subject": message.subject,
+            "newest_body_text": message.newest_body_text,
+            "snippet": message.snippet,
+            "attachment_manifest": message.attachment_manifest,
+            "label_ids": message.label_ids,
+        }
+        result = classify_mailbox_message(message_payload)
+        explicit_order_context = _has_explicit_order_context(message_payload)
         surfaced_manifest = []
         for attachment in message.attachment_manifest or []:
             if not isinstance(attachment, dict):
                 surfaced_manifest.append(attachment)
                 continue
-            extension = os.path.splitext(str(attachment.get("filename") or ""))[1].lower()
-            try:
-                declared_size = int(attachment.get("size") or 0)
-            except (TypeError, ValueError):
-                declared_size = 0
-            should_surface = bool(
-                surface_unsupported
-                and (
-                    extension not in SUPPORTED_ATTACHMENT_EXTENSIONS
-                    or declared_size > mailbox_max_attachment_bytes()
-                )
+            should_surface = _should_surface_unsupported_order_attachment(
+                attachment,
+                message_is_relevant=result["is_relevant"],
+                explicit_order_context=explicit_order_context,
             )
             if not should_surface:
-                surfaced_manifest.append(attachment)
+                surfaced_manifest.append(
+                    _remove_obsolete_broad_manual_surface(attachment)
+                )
                 continue
-            warning = (
-                "Unsupported or over-limit attachment; manual review of the exact Gmail source is required."
-            )
             surfaced_manifest.append(
                 {
                     **attachment,
                     "manual_review_required": True,
                     "warnings": list(
-                        dict.fromkeys([*(attachment.get("warnings") or []), warning])
+                        dict.fromkeys(
+                            [
+                                *_attachment_warning_values(attachment),
+                                UNSUPPORTED_ORDER_REVIEW_WARNING,
+                            ]
+                        )
                     ),
-                    "reason": warning,
+                    "reason": UNSUPPORTED_ORDER_REVIEW_WARNING,
+                    "manual_review_reason_code": "unsupported_order_document",
                     "status": (
                         attachment.get("status")
                         if attachment.get("status") == "parsed"
@@ -1846,13 +2094,7 @@ def _persist_inventory_message(run, message, *, heartbeat=None):
         is_relevant=classification["is_relevant"],
         heartbeat=heartbeat,
         allow_ai_vision=False,
-        surface_unsupported=bool(
-            classification["classification"] == MailboxPOMessage.CLASS_PURCHASE_ORDER
-            or any(
-                reference.get("kind") == "po"
-                for reference in classification["extracted_po_references"]
-            )
-        ),
+        explicit_order_context=_has_explicit_order_context(message),
     )
     attachment_errors = [
         _database_text(attachment.get("reason"))
