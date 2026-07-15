@@ -170,6 +170,15 @@ DATABASES = {
     )
 }
 if DATABASES["default"].get("ENGINE", "").endswith("postgresql"):
+    # Railway/Neon expose PostgreSQL through a transaction-pooling proxy.
+    # Django's QuerySet.iterator() otherwise opens a named server-side cursor
+    # that the next pooled transaction cannot see (InvalidCursorName).  Keep
+    # iterator chunking client-side so mailbox audit/reconciliation commands
+    # remain resumable under the production pooler.
+    DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = env_bool(
+        "DATABASE_DISABLE_SERVER_SIDE_CURSORS",
+        True,
+    )
     DATABASES["default"].setdefault("OPTIONS", {})
     DATABASES["default"]["OPTIONS"].setdefault(
         "connect_timeout",
