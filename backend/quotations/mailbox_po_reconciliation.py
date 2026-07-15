@@ -44,7 +44,7 @@ from .models import (
 )
 
 
-ALGORITHM_VERSION = "mailbox_match_v3"
+ALGORITHM_VERSION = "mailbox_match_v4"
 MAX_ACTIVE_EVIDENCE_PER_QUOTE = 3
 MAX_MATCH_ERRORS = 500
 DEFAULT_MATCH_PAGE_SIZE = 5
@@ -63,7 +63,8 @@ BODY_METADATA_ROW_RE = re.compile(
     re.IGNORECASE,
 )
 TOTAL_LINE_RE = re.compile(
-    r"(?im)^[ \t]*(?P<label>grand[ \t]+total|net[ \t]+total|total[ \t]+amount|"
+    r"(?im)^[ \t]*(?P<label>grand[ \t]+total|net[ \t]+total|net[ \t]+amount|"
+    r"total[ \t]+amount[ \t]+due|total[ \t]+amount|"
     r"invoice[ \t]+total|total)[ \t]*(?:\([^\n)]*\))?[ \t]*[:\-]?[ \t]*"
     r"(?:AED|DHS?|USD|EUR|GBP)?[ \t]*"
     r"(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d{1,3})?|\d+(?:\.\d{1,3})?)[ \t]*$"
@@ -175,6 +176,564 @@ def _nonblank_cells(text):
 def _portal_unit(value):
     unit = str(value or "").strip(" ()")
     return {"EA": "each", "_01": "each"}.get(unit.upper(), unit)
+
+
+PORTAL_NUMBER_CELL_RE = re.compile(
+    r"^(?:AED|DHS?)?\s*(?P<value>-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?|-?\.\d+)\s*$",
+    re.IGNORECASE,
+)
+PORTAL_UNIT_CELL_RE = re.compile(r"^[A-Z][A-Z0-9._/-]{0,15}$", re.IGNORECASE)
+
+
+def _portal_number(value):
+    match = PORTAL_NUMBER_CELL_RE.fullmatch(str(value or "").strip())
+    return _decimal(match.group("value")) if match else None
+
+
+def _layout_row_warnings(layout, rows, expected_rows):
+    if not rows:
+        return (
+            f"{layout} purchase order was recognized, but no commercial item rows were parsed.",
+        )
+    if expected_rows > len(rows):
+        return (
+            f"{layout} purchase-order extraction was incomplete: parsed {len(rows)} of "
+            f"{expected_rows} detected line-item rows.",
+        )
+    return ()
+
+
+def _hotel_expected_line_number(cells, index, end):
+    """Identify a hotel line marker without counting integer money/qty cells."""
+
+    match = re.fullmatch(r"(?P<line>\d{1,3})(?:\s+(?P<suffix>.+))?", cells[index])
+    if not match:
+        return None
+    suffix = str(match.group("suffix") or "").strip(" ()")
+    if suffix:
+        # A quantity cell such as ``2 EA`` is not item line 2.
+        if suffix.upper() in {
+            "BTL",
+            "BOX",
+            "CTN",
+            "EA",
+            "EACH",
+            "NO",
+            "NOS",
+            "PACK",
+            "PACKET",
+            "PC",
+            "PCS",
+            "PKT",
+            "SET",
+        }:
+            return None
+        return int(match.group("line"))
+    # Bare serials are followed by a SKU/description. Integer prices are
+    # followed by more numeric cells or by the next genuine serial marker.
+    for candidate in range(index + 1, min(end, index + 4)):
+        if re.fullmatch(r"\d{1,3}(?:\s+.+)?", cells[candidate]):
+            return None
+        if re.search(r"[A-Za-z]", cells[candidate]):
+            return int(match.group("line"))
+    return None
+
+
+def _hotel_procurement_order_rows(text, *, source):
+    """Parse the vertical-cell hotel PO used by Bvlgari and Marriott."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    required = {"# item", "product desc.", "qty unit", "unit price", "extension"}
+    recognized = bool(
+        any(cell == "purchase order" for cell in lowered[:12])
+        and required.issubset(lowered)
+        and any(cell.startswith("department:") for cell in lowered)
+    )
+    if not recognized:
+        return False, (), ()
+
+    header = lowered.index("# item")
+    start = next(
+        (
+            index + 1
+            for index in range(header, min(len(cells), header + 20))
+            if lowered[index].startswith("department:")
+        ),
+        header + 1,
+    )
+    end = next(
+        (
+            index
+            for index in range(start, len(cells))
+            if lowered[index].startswith("* - non catalog item")
+            or lowered[index] in {"sub total:", "subtotal:"}
+        ),
+        len(cells),
+    )
+    expected_rows = len(
+        {
+            line_number
+            for candidate in range(start, end)
+            if (line_number := _hotel_expected_line_number(cells, candidate, end))
+            is not None
+        }
+    )
+    rows = []
+    index = start
+    while index < end:
+        line_match = re.fullmatch(r"(?P<line>\d{1,3})(?:\s+(?P<sku>.+))?", cells[index])
+        if not line_match:
+            index += 1
+            continue
+        quantity_index = next(
+            (
+                candidate
+                for candidate in range(index + 1, min(end, index + 10))
+                if re.fullmatch(
+                    r"\d+(?:\.\d+)?\s+[A-Z][A-Z0-9._/-]{0,15}",
+                    cells[candidate],
+                    re.IGNORECASE,
+                )
+            ),
+            None,
+        )
+        if quantity_index is None:
+            index += 1
+            continue
+        quantity_match = re.fullmatch(
+            r"(?P<quantity>\d+(?:\.\d+)?)\s+(?P<unit>[A-Z][A-Z0-9._/-]{0,15})",
+            cells[quantity_index],
+            re.IGNORECASE,
+        )
+        money = [
+            _portal_number(cells[candidate])
+            for candidate in range(
+                quantity_index + 1,
+                min(end, quantity_index + 6),
+            )
+        ]
+        if len(money) < 2 or money[0] is None or money[1] is None:
+            index += 1
+            continue
+
+        name_cells = []
+        if line_match.group("sku"):
+            name_cells.append(line_match.group("sku"))
+        name_cells.extend(cells[index + 1 : quantity_index])
+        star_indexes = [
+            offset for offset, value in enumerate(name_cells) if "*" in value
+        ]
+        if star_indexes:
+            name_cells = name_cells[star_indexes[-1] + 1 :]
+        name = " ".join(
+            value.strip(" *")
+            for value in name_cells
+            if value.strip(" *") and re.search(r"[A-Za-z]", value)
+        )
+        if not name:
+            index += 1
+            continue
+        rows.append(
+            MailboxPOLine(
+                line_id=line_match.group("line"),
+                name=name,
+                quantity=_decimal(quantity_match.group("quantity")),
+                unit_price=money[0],
+                line_total=money[1],
+                unit=_portal_unit(quantity_match.group("unit")),
+                source=source,
+            )
+        )
+        # Only quantity, unit price and extension are required/consumed. Scan
+        # through optional tax/amount cells so a compact two-column layout does
+        # not skip the next line item.
+        index = quantity_index + 3
+
+    warnings = _layout_row_warnings("Hotel", rows, expected_rows)
+    return True, tuple(rows), warnings
+
+
+def _raq_order_rows(text, *, source):
+    """Parse RAQ/Sanisoft POs whose visual columns extract in reading order."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    required = {"unit price", "description", "#", "unit", "quantity", "total price"}
+    recognized = bool(
+        "purchase order" in lowered[:12]
+        and required.issubset(lowered)
+        and any("sanisoft" in cell for cell in lowered)
+    )
+    if not recognized:
+        return False, (), ()
+    start = lowered.index("total price") + 1
+    end = next(
+        (
+            index
+            for index in range(start, len(cells))
+            if "powered by sanisoft" in lowered[index]
+        ),
+        len(cells),
+    )
+
+    def row_shape(index):
+        return bool(
+            index + 5 < end
+            and re.fullmatch(r"\d{1,3}", cells[index])
+            and _portal_number(cells[index + 1]) is not None
+            and re.search(r"[A-Za-z]", cells[index + 2])
+            and PORTAL_UNIT_CELL_RE.fullmatch(cells[index + 3])
+            and _portal_number(cells[index + 4]) is not None
+            and _portal_number(cells[index + 5]) is not None
+        )
+
+    expected_rows = sum(
+        1
+        for candidate in range(start, max(start, end - 2))
+        if (
+            re.fullmatch(r"\d{1,3}", cells[candidate])
+            and _portal_number(cells[candidate + 1]) is not None
+            and re.search(r"[A-Za-z]", cells[candidate + 2])
+        )
+    )
+    rows = []
+    index = start
+    while index < end:
+        if not row_shape(index):
+            index += 1
+            continue
+        next_index = next(
+            (candidate for candidate in range(index + 6, end) if row_shape(candidate)),
+            end,
+        )
+        primary = cells[index + 2]
+        details = [
+            value
+            for value in cells[index + 6 : next_index]
+            if re.search(r"[A-Za-z]", value)
+        ]
+        if primary.casefold().startswith("first aid items") and details:
+            name = " ".join(details)
+        else:
+            name = " ".join(dict.fromkeys([primary, *details]))
+        rows.append(
+            MailboxPOLine(
+                line_id=cells[index],
+                name=name,
+                quantity=_portal_number(cells[index + 4]),
+                unit_price=_portal_number(cells[index + 5]),
+                line_total=_portal_number(cells[index + 1]),
+                unit=_portal_unit(cells[index + 3]),
+                source=source,
+            )
+        )
+        index = next_index
+
+    warnings = _layout_row_warnings("RAQ", rows, expected_rows)
+    return True, tuple(rows), warnings
+
+
+def _khansaheb_order_rows(text, *, source):
+    """Parse Khansaheb's split-cell commodity table."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        any("khansaheb civil engineering" in cell for cell in lowered[:40])
+        and "purchase order" in lowered[:12]
+        and {"commodity code", "description", "quantity", "uom", "unit price", "disc%"}.issubset(lowered)
+    )
+    if not recognized:
+        return False, (), ()
+    header = lowered.index("commodity code")
+    start = next(
+        (index + 1 for index in range(header, len(cells)) if lowered[index] == "total"),
+        header + 1,
+    )
+    end = next(
+        (
+            index
+            for index in range(start, len(cells))
+            if lowered[index].startswith("delivery contact")
+            or lowered[index].startswith("the above rates")
+        ),
+        len(cells),
+    )
+    expected_rows = sum(
+        1
+        for candidate in range(start, max(start, end - 2))
+        if (
+            re.fullmatch(r"\d{1,3}", cells[candidate])
+            and re.fullmatch(r"[A-Z0-9][A-Z0-9./_-]{4,}", cells[candidate + 1], re.IGNORECASE)
+            and re.search(r"[A-Za-z]", cells[candidate + 2])
+        )
+    )
+    rows = []
+    index = start
+    while index < end:
+        if not re.fullmatch(r"\d{1,3}", cells[index]) or index + 6 >= end:
+            index += 1
+            continue
+        quantity_index = next(
+            (
+                candidate
+                for candidate in range(index + 2, min(end, index + 8))
+                if (
+                    _portal_number(cells[candidate]) is not None
+                    and candidate + 4 < end
+                    and PORTAL_UNIT_CELL_RE.fullmatch(cells[candidate + 1])
+                    and all(
+                        _portal_number(cells[offset]) is not None
+                        for offset in range(candidate + 2, candidate + 5)
+                    )
+                )
+            ),
+            None,
+        )
+        if quantity_index is None:
+            index += 1
+            continue
+        name = " ".join(
+            value
+            for value in cells[index + 2 : quantity_index]
+            if re.search(r"[A-Za-z]", value)
+        )
+        if not name:
+            index += 1
+            continue
+        rows.append(
+            MailboxPOLine(
+                line_id=cells[index],
+                name=name,
+                description=f"Commodity code: {cells[index + 1]}",
+                quantity=_portal_number(cells[quantity_index]),
+                unit_price=_portal_number(cells[quantity_index + 2]),
+                line_total=_portal_number(cells[quantity_index + 4]),
+                unit=_portal_unit(cells[quantity_index + 1]),
+                source=source,
+            )
+        )
+        index = quantity_index + 5
+
+    warnings = _layout_row_warnings("Khansaheb", rows, expected_rows)
+    return True, tuple(rows), warnings
+
+
+def _dubai_holding_order_rows(text, *, source):
+    """Parse Madinat Jumeirah/Dubai Holding's schedule-of-details table."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        any(cell.startswith("purchase order:") for cell in lowered[:12])
+        and "schedule of details" in lowered
+        and {"item description", "uom", "qty"}.issubset(lowered)
+    )
+    if not recognized:
+        return False, (), ()
+    start = lowered.index("schedule of details") + 1
+    end = next(
+        (index for index in range(start, len(cells)) if lowered[index] == "attachments:"),
+        len(cells),
+    )
+    expected_rows = sum(
+        1
+        for candidate in range(start, max(start, end - 1))
+        if (
+            re.fullmatch(r"\d{1,3}", cells[candidate])
+            and re.search(r"[A-Za-z]", cells[candidate + 1])
+        )
+    )
+    rows = []
+    index = start
+    while index < end:
+        if not re.fullmatch(r"\d{1,3}", cells[index]):
+            index += 1
+            continue
+        unit_index = next(
+            (
+                candidate
+                for candidate in range(index + 2, min(end, index + 20))
+                if (
+                    PORTAL_UNIT_CELL_RE.fullmatch(cells[candidate])
+                    and candidate + 5 < end
+                    and all(
+                        _portal_number(cells[offset]) is not None
+                        for offset in range(candidate + 1, candidate + 6)
+                    )
+                )
+            ),
+            None,
+        )
+        if unit_index is None:
+            index += 1
+            continue
+        name_cells = []
+        for value in cells[index + 1 : unit_index]:
+            lowered_value = value.casefold()
+            if lowered_value.startswith(("product code:", "bpa:", "note from requester:")):
+                break
+            if re.search(r"[A-Za-z]", value):
+                name_cells.append(value)
+        name = " ".join(name_cells)
+        if not name:
+            index += 1
+            continue
+        rows.append(
+            MailboxPOLine(
+                line_id=cells[index],
+                name=name,
+                quantity=_portal_number(cells[unit_index + 1]),
+                unit_price=_portal_number(cells[unit_index + 2]),
+                # ``Amount`` is the pre-tax commercial extension; ``Line
+                # Total`` includes VAT and is compared separately as the
+                # document total for full-quote matches.
+                line_total=_portal_number(cells[unit_index + 3]),
+                unit=_portal_unit(cells[unit_index]),
+                source=source,
+            )
+        )
+        index = unit_index + 6
+
+    warnings = _layout_row_warnings("Dubai Holding", rows, expected_rows)
+    return True, tuple(rows), warnings
+
+
+def _ecc_order_rows(text, *, source):
+    """Parse ECC's reordered single-page PO table cells."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        any("engineering contracting co." in cell for cell in lowered[:40])
+        and "purchase order" in lowered[:30]
+        and {"resource name/description", "quantity"}.issubset(lowered)
+        and any(cell.startswith("unit price") for cell in lowered)
+    )
+    if not recognized:
+        return False, (), ()
+    expected_rows = sum(
+        1
+        for candidate in range(len(cells))
+        if (
+            re.fullmatch(r"\d{10,14}", cells[candidate])
+            and candidate + 1 < len(cells)
+            and re.search(r"[A-Za-z]", cells[candidate + 1])
+            and any(
+                PORTAL_UNIT_CELL_RE.fullmatch(value)
+                for value in cells[candidate + 2 : candidate + 6]
+            )
+        )
+    )
+    rows = []
+    index = 0
+    while index + 7 < len(cells):
+        shaped = bool(
+            _portal_number(cells[index]) is not None
+            and _portal_number(cells[index + 1]) is not None
+            and re.fullmatch(r"\d{1,3}", cells[index + 2])
+            and _portal_number(cells[index + 3]) is not None
+            and _portal_number(cells[index + 4]) is not None
+            and re.fullmatch(r"\d{8,}", cells[index + 5])
+            and re.search(r"[A-Za-z]", cells[index + 6])
+            and PORTAL_UNIT_CELL_RE.fullmatch(cells[index + 7])
+        )
+        if not shaped:
+            index += 1
+            continue
+        rows.append(
+            MailboxPOLine(
+                line_id=cells[index + 2],
+                name=cells[index + 6],
+                description=f"Resource code: {cells[index + 5]}",
+                quantity=_portal_number(cells[index + 4]),
+                unit_price=_portal_number(cells[index]),
+                line_total=_portal_number(cells[index + 1]),
+                unit=_portal_unit(cells[index + 7]),
+                source=source,
+            )
+        )
+        index += 8
+
+    warnings = _layout_row_warnings("ECC", rows, expected_rows)
+    return True, tuple(rows), warnings
+
+
+def _al_sahel_order_rows(text, *, source):
+    """Parse Al Sahel's local-purchase-order table."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        "local purchase order" in lowered[:100]
+        and any("al sahel" in cell for cell in lowered[:100])
+        and {"item code", "qty.", "unit"}.issubset(lowered)
+    )
+    if not recognized:
+        return False, (), ()
+    start = lowered.index("local purchase order") + 1
+    end = next(
+        (
+            index
+            for index in range(start, len(cells))
+            if "****end****" in lowered[index]
+        ),
+        len(cells),
+    )
+    expected_rows = sum(
+        1
+        for candidate in range(start, max(start, end - 1))
+        if (
+            re.fullmatch(r"0*\d{1,3}", cells[candidate])
+            and re.fullmatch(r"\d{5,}", cells[candidate + 1])
+        )
+    )
+    rows = []
+    index = start
+    while index < end:
+        if (
+            not re.fullmatch(r"0*\d{1,3}", cells[index])
+            or index + 6 >= end
+            or not re.fullmatch(r"\d{5,}", cells[index + 1])
+        ):
+            index += 1
+            continue
+        unit_index = next(
+            (
+                candidate
+                for candidate in range(index + 3, min(end, index + 10))
+                if (
+                    PORTAL_UNIT_CELL_RE.fullmatch(cells[candidate])
+                    and candidate + 3 < end
+                    and all(
+                        _portal_number(cells[offset]) is not None
+                        for offset in range(candidate + 1, candidate + 4)
+                    )
+                )
+            ),
+            None,
+        )
+        if unit_index is None:
+            index += 1
+            continue
+        name = " ".join(cells[index + 2 : unit_index])
+        rows.append(
+            MailboxPOLine(
+                line_id=cells[index],
+                name=name,
+                description=f"Item code: {cells[index + 1]}",
+                quantity=_portal_number(cells[unit_index + 1]),
+                unit_price=_portal_number(cells[unit_index + 3]),
+                line_total=_portal_number(cells[unit_index + 2]),
+                unit=_portal_unit(cells[unit_index]),
+                source=source,
+            )
+        )
+        index = unit_index + 4
+
+    warnings = _layout_row_warnings("Al Sahel", rows, expected_rows)
+    return True, tuple(rows), warnings
 
 
 def _ariba_order_rows(text, *, source):
@@ -308,6 +867,28 @@ def _emrill_order_rows(text, *, source):
     used_units = set()
     for description_index in description_indexes:
         description_match = EMRILL_DESCRIPTION_RE.match(cells[description_index])
+        description_parts = [description_match.group("name").strip()]
+        for candidate in cells[description_index + 1 : description_index + 6]:
+            normalized = re.sub(r"[^a-z]+", " ", candidate.casefold()).strip()
+            if normalized.startswith(
+                ("quantity", "amount", "warehouse", "gross total", "total discount")
+            ):
+                break
+            if re.search(r"[A-Za-z]", candidate):
+                description_parts.append(candidate)
+        reference_only_description = bool(
+            re.fullmatch(
+                r"(?:qtn|quotation|quote)\s*(?:no|number|ref(?:erence)?)?\s*[:#._/-]*\s*[A-Z0-9._/-]+",
+                description_parts[0],
+                re.IGNORECASE,
+            )
+        )
+        if reference_only_description and len(description_parts) > 1:
+            name = " ".join(description_parts[1:])
+            description = description_parts[0]
+        else:
+            name = " ".join(description_parts)
+            description = ""
         unit_index = None
         amount = None
         for candidate in range(description_index - 1, max(-1, description_index - 45), -1):
@@ -333,7 +914,8 @@ def _emrill_order_rows(text, *, source):
         rows.append(
             MailboxPOLine(
                 line_id=len(rows) + 1,
-                name=description_match.group("name").strip(),
+                name=name,
+                description=description,
                 quantity=_decimal(cells[unit_index + 1]),
                 unit_price=_decimal(cells[unit_index + 2]),
                 line_total=amount,
@@ -437,14 +1019,90 @@ def _imdaad_order_rows(text, *, source):
 
 
 def _portal_order_rows(text, *, source):
-    for parser in (_ariba_order_rows, _emrill_order_rows, _imdaad_order_rows):
+    for parser in (
+        _ariba_order_rows,
+        _hotel_procurement_order_rows,
+        _raq_order_rows,
+        _khansaheb_order_rows,
+        _dubai_holding_order_rows,
+        _ecc_order_rows,
+        _al_sahel_order_rows,
+        _emrill_order_rows,
+        _imdaad_order_rows,
+    ):
         recognized, rows, warnings = parser(text, source=source)
         if recognized:
             return True, rows, warnings
     return False, (), ()
 
 
+def _ecc_document_total(text):
+    """Return ECC's grand total only when its reordered summary reconciles."""
+
+    cells = _nonblank_cells(text)
+    lowered = [cell.casefold() for cell in cells]
+    recognized = bool(
+        any("engineering contracting co" in cell for cell in lowered[:80])
+        and "purchase order" in lowered[:80]
+        and {"gross total", "discount", "net total", "vat"}.issubset(lowered)
+    )
+    if not recognized:
+        return False, None
+    for index, cell in enumerate(lowered):
+        if cell != "gross total" or index < 2 or index + 6 >= len(cells):
+            continue
+        if lowered[index + 1 : index + 3] != ["discount", "net total"]:
+            continue
+        if lowered[index + 5] != "vat":
+            continue
+        grand_before = _portal_number(cells[index - 2])
+        net_total = _portal_number(cells[index - 1])
+        discount = _portal_number(cells[index + 3])
+        vat = _portal_number(cells[index + 4])
+        grand_after = _portal_number(cells[index + 6])
+        if None in {grand_before, net_total, discount, vat, grand_after}:
+            continue
+        if (
+            grand_before == grand_after
+            and net_total - discount + vat == grand_after
+        ):
+            return True, grand_after
+    # The document is ECC-shaped, but the commercial summary did not validate.
+    # Do not let the generic split-label heuristic guess a VAT/discount value.
+    return True, None
+
+
+def _raq_document_total(text):
+    """Read Sanisoft's value-before-label net amount conservatively."""
+
+    cells = _nonblank_cells(text)
+    lowered = [re.sub(r"[^a-z]+", " ", cell.casefold()).strip() for cell in cells]
+    recognized = bool(
+        "purchase order" in lowered[:12]
+        and any("powered by sanisoft" in cell for cell in lowered)
+    )
+    if not recognized:
+        return False, None
+    for index, label in enumerate(lowered):
+        if label != "net amount aed" or index == 0:
+            continue
+        value = _portal_number(cells[index - 1])
+        has_words_label = any(
+            candidate.startswith("total in words")
+            for candidate in lowered[index + 1 : index + 4]
+        )
+        if value is not None and has_words_label:
+            return True, value
+    return True, None
+
+
 def _document_total(document, text):
+    ecc_recognized, ecc_total = _ecc_document_total(text)
+    if ecc_recognized:
+        return ecc_total
+    raq_recognized, raq_total = _raq_document_total(text)
+    if raq_recognized:
+        return raq_total
     totals = document.get("totals") or {}
     if isinstance(totals, dict):
         for key in ("grand_total", "net_total", "total", "total_amount"):
@@ -473,22 +1131,35 @@ def _document_total(document, text):
         if label not in {
             "est grand total",
             "grand total",
+            "grand total aed",
             "net total",
+            "net total aed",
+            "net amount",
+            "net amount aed",
+            "total aed",
             "total amount",
             "total amount aed",
+            "total amount due",
+            "total amount due aed",
             "invoice total",
         }:
             continue
         values = []
         for candidate in cells[index + 1 : index + 6]:
             match = re.fullmatch(
-                r"\(?\s*(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*\)?",
+                r"\(?\s*(?:AED|DHS?|USD|EUR|GBP)?\s*"
+                r"(?P<value>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"
+                r"\s*(?:AED|DHS?|USD|EUR|GBP)?\s*\)?",
                 candidate,
+                re.IGNORECASE,
             )
             if not match:
                 break
             values.append(_decimal(match.group("value")))
-        if values:
+        # Multiple adjacent numerics are usually a visually reordered summary
+        # (net, discount, VAT, grand total). Picking either endpoint can turn a
+        # tax value into the PO total, so ambiguous layouts fail closed.
+        if len(values) == 1:
             split_totals.append(
                 (
                     "grand" in label,
@@ -932,6 +1603,7 @@ def eligible_quotations():
                 quantity=line.quantity,
                 unit_price=line.unit_price,
                 line_total=line.line_subtotal,
+                gross_line_total=line.line_total,
                 unit=line.unit,
             )
             for line in quote.lines.all()
@@ -946,7 +1618,8 @@ def eligible_quotations():
                 company_name=quote.company.name,
                 customer_emails=tuple(sorted(email for email in emails if email)),
                 lines=lines,
-                grand_total=quote.subtotal,
+                grand_total=(quote.subtotal or Decimal("0"))
+                + (quote.vat_total or Decimal("0")),
             )
         )
     return tuple(canonical)

@@ -165,8 +165,14 @@ class MailboxQuotationRankingTests(TestCase):
 
         self.assertEqual(reduced.status, AUTOMATIC)
         self.assertEqual(reduced.automatic_winner.quantity_reduced_count, 1)
-        self.assertEqual(increased.status, AMBIGUOUS)
-        self.assertEqual(increased.candidates[0].quantity_conflict_count, 1)
+        self.assertEqual(increased.status, UNMATCHED)
+        self.assertEqual(increased.candidates, ())
+        self.assertTrue(
+            any(
+                "every comparable matched PO quantity conflicts" in reason
+                for reason, _count in increased.rejection_summary
+            )
+        )
 
     def test_identical_items_are_disambiguated_by_quantity(self):
         ten = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
@@ -180,8 +186,10 @@ class MailboxQuotationRankingTests(TestCase):
         self.assertEqual(result.status, AUTOMATIC)
         self.assertEqual(result.automatic_winner.quote_id, twenty.quote_id)
         self.assertGreaterEqual(result.ambiguity_margin, 12)
-        wrong = next(candidate for candidate in result.candidates if candidate.quote_id == ten.quote_id)
-        self.assertEqual(wrong.quantity_conflict_count, 1)
+        self.assertEqual(
+            [candidate.quote_id for candidate in result.candidates],
+            [twenty.quote_id],
+        )
 
     def test_message_without_lpo_or_order_evidence_is_unmatched(self):
         quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
@@ -1340,7 +1348,7 @@ class MailboxQuotationRankingTests(TestCase):
         self.assertEqual(result.status, UNMATCHED)
         self.assertEqual(result.candidates, ())
 
-    def test_company_text_cannot_override_a_conflicting_known_customer_domain(self):
+    def test_only_selected_attachment_company_can_override_a_conflicting_domain(self):
         company = "Structure Advanced Building Contracting LLC"
         quotation = quote(
             1,
@@ -1367,8 +1375,12 @@ class MailboxQuotationRankingTests(TestCase):
 
                 result = rank_message_to_quotations(conflicting_sender, [quotation])
 
-                self.assertEqual(result.status, UNMATCHED)
-                self.assertEqual(result.candidates, ())
+                if source_kind == "attachment":
+                    self.assertEqual(result.status, AUTOMATIC)
+                    self.assertEqual(result.automatic_winner.quote_id, quotation.quote_id)
+                else:
+                    self.assertEqual(result.status, UNMATCHED)
+                    self.assertEqual(result.candidates, ())
 
     def test_generic_company_word_cannot_match_a_domain_prefix(self):
         quotation = quote(
@@ -1534,6 +1546,41 @@ class MailboxQuotationRankingTests(TestCase):
         self.assertEqual(winner.commercial_row_coverage, 0)
         self.assertEqual(winner.document_total_result, "exact")
         self.assertEqual(winner.commercial_corroboration_result, "document_total_exact")
+
+    def test_document_total_may_match_the_vat_inclusive_quote_total(self):
+        quotation = replace(
+            quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 10)]),
+            grand_total=D("105.00"),
+        )
+        result = rank_message_to_quotations(
+            message([pline(1, "Nitrile Gloves", 10, 10)], total=105),
+            [quotation],
+        )
+
+        self.assertEqual(result.status, AUTOMATIC)
+        self.assertEqual(result.automatic_winner.document_total_result, "exact")
+
+    def test_partial_po_total_may_match_selected_vat_inclusive_quote_lines(self):
+        selected = replace(
+            qline(11, "Nitrile Gloves", 10, 10),
+            gross_line_total=D("105.00"),
+        )
+        omitted = replace(
+            qline(12, "Sterile Gauze", 5, 20),
+            gross_line_total=D("105.00"),
+        )
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [selected, omitted],
+        )
+        result = rank_message_to_quotations(
+            message([pline(1, "Nitrile Gloves", 10, 10)], total=105),
+            [quotation],
+        )
+
+        self.assertEqual(result.status, AUTOMATIC)
+        self.assertEqual(result.automatic_winner.document_total_result, "exact")
 
     def test_provided_document_total_mismatch_blocks_even_when_every_row_price_is_exact(self):
         quotation = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 10)])

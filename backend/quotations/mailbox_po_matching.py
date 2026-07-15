@@ -172,6 +172,11 @@ _LABELLED_QUOTE_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _TOKEN_RE = re.compile(r"[a-z]+\d+[a-z0-9]*|\d+(?:\.\d+)?|[a-z]+|%")
+_AED_DEVICE_PHRASE_RE = re.compile(
+    r"\b(?:aed[\s-]*(?:machines?|devices?|defibrillators?)|"
+    r"(?:machines?|devices?)\s+aed)\b",
+    re.IGNORECASE,
+)
 _MEASUREMENT_RE = re.compile(
     r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*"
     r"(mcg|ug|mg|gm|g|kg|ml|ltr|lt|litres?|liters?|l|mm|cm|metres?|meters?|m|"
@@ -380,6 +385,7 @@ class EligibleQuoteLine:
     quantity: Decimal | None = None
     unit_price: Decimal | None = None
     line_total: Decimal | None = None
+    gross_line_total: Decimal | None = None
     unit: str = ""
 
 
@@ -723,6 +729,14 @@ def canonicalize_quote_line(
         quantity=_decimal(_mapping_value(value, "quantity", "quoted_quantity", "qty")),
         unit_price=_decimal(_mapping_value(value, "unit_price", "quoted_unit_price", "price", "rate")),
         line_total=_decimal(_mapping_value(value, "line_total", "quoted_total", "total", "amount")),
+        gross_line_total=_decimal(
+            _mapping_value(
+                value,
+                "gross_line_total",
+                "line_total_with_tax",
+                "total_with_tax",
+            )
+        ),
         unit=str(_mapping_value(value, "unit", "uom", default="") or ""),
     )
 
@@ -775,6 +789,19 @@ def _normalize_text(value: str, *, drop_noise: bool = False) -> str:
     return " ".join(_normalize_tokens(value, drop_noise=drop_noise))
 
 
+def _normalize_item_phrases(value: str) -> str:
+    """Expand device-only abbreviations without changing currency text.
+
+    ``AED`` is both the UAE currency code and the common abbreviation for an
+    automated external defibrillator.  Only a phrase with an explicit device
+    cue is expanded, so a bare amount such as ``AED 3,400`` remains currency.
+    """
+
+    return _AED_DEVICE_PHRASE_RE.sub(
+        "automated external defibrillator", str(value or "")
+    )
+
+
 def _canonical_number(value: str | Decimal) -> str:
     try:
         number = Decimal(str(value))
@@ -812,8 +839,9 @@ def _measurement_key(number: str, unit: str) -> str:
 
 @lru_cache(maxsize=50_000)
 def _line_identity(name: str, description: str = "") -> _TextIdentity:
-    name = str(name or "")
-    combined = " ".join(part for part in [name, str(description or "")] if part)
+    name = _normalize_item_phrases(str(name or ""))
+    description = _normalize_item_phrases(str(description or ""))
+    combined = " ".join(part for part in [name, description] if part)
     ascii_combined = _ascii_text(combined)
     measurements = frozenset(
         _measurement_key(number, unit)
@@ -978,6 +1006,21 @@ def _expected_line_total(po_line: MailboxPOLine, quote_line: EligibleQuoteLine) 
     return None
 
 
+def _expected_gross_line_total(
+    po_line: MailboxPOLine, quote_line: EligibleQuoteLine
+) -> Decimal | None:
+    if quote_line.gross_line_total is None:
+        return None
+    if (
+        po_line.quantity is not None
+        and quote_line.quantity not in {None, Decimal("0")}
+    ):
+        return po_line.quantity * quote_line.gross_line_total / quote_line.quantity
+    if _compare_quantity(po_line.quantity, quote_line.quantity) == "exact":
+        return quote_line.gross_line_total
+    return None
+
+
 def _edge(
     po_index: int,
     quote_index: int,
@@ -1135,12 +1178,45 @@ def _company_strength(company_name: str, message: CanonicalMailboxMessage) -> tu
     haystack = _normalize_text(f"{message.company_name} {exact_source}")
     normalized_company = " ".join(company_tokens)
     if normalized_company and f" {normalized_company} " in f" {haystack} ":
-        return 6.0, "customer company name appears in the message"
+        location = (
+            "selected attachment"
+            if str(message.source_kind or "").casefold() == "attachment"
+            else "message"
+        )
+        return 6.0, f"customer company name appears in the {location}"
     haystack_tokens = set(haystack.split())
     overlap = len(set(company_tokens) & haystack_tokens) / len(set(company_tokens))
     if overlap >= 0.6:
         return 4.0, "customer company tokens appear in the message"
     return 0.0, ""
+
+
+def _attachment_has_distinctive_exact_company_name(
+    company_name: str, message: CanonicalMailboxMessage
+) -> bool:
+    """Trust an exact company phrase only when it is in the selected PO file."""
+
+    if (
+        str(message.source_kind or "").casefold() != "attachment"
+        or not message.document_text
+    ):
+        return False
+    company_tokens = [
+        token
+        for token in _normalize_tokens(company_name)
+        if len(token) >= 3 and token not in _COMPANY_NOISE
+    ]
+    # One surviving legal-name token (for example ``engineering`` after
+    # removing ``contracting co llc``) is too easy to encounter in an
+    # unrelated portal attachment. Require a real multi-token identity phrase.
+    if len(company_tokens) < 2 or len("".join(company_tokens)) < 7:
+        return False
+    normalized_company = " ".join(company_tokens)
+    document = _normalize_text(message.document_text)
+    return bool(
+        normalized_company
+        and f" {normalized_company} " in f" {document} "
+    )
 
 
 def _company_acronym_domain(company_name: str, sender_domains: set[str]) -> str:
@@ -1263,7 +1339,15 @@ def _customer_component(
         else ""
     )
     company_score, company_reason = _company_strength(quote.company_name, message)
-    if expected_domains and not exact_sender and not domain_matches:
+    attachment_company_identity = _attachment_has_distinctive_exact_company_name(
+        quote.company_name, message
+    )
+    if (
+        expected_domains
+        and not exact_sender
+        and not domain_matches
+        and not attachment_company_identity
+    ):
         # Textual company names on a forwarded/unrelated message cannot
         # override the quote's configured private customer domain.
         company_score, company_reason = 0.0, ""
@@ -1350,23 +1434,53 @@ def _document_total_component(
     if message.document_total is None or not message.parsed_rows or len(selected) != len(message.parsed_rows):
         return None, "unknown"
     expected_values = []
+    expected_gross_values = []
+    subtotal_complete = True
+    gross_total_complete = True
     for edge in selected:
-        expected = _expected_line_total(
-            message.parsed_rows[edge.po_index], quote.lines[edge.quote_index]
-        )
+        po_line = message.parsed_rows[edge.po_index]
+        quote_line = quote.lines[edge.quote_index]
+        expected = _expected_line_total(po_line, quote_line)
         if expected is None:
-            expected_values = []
-            break
-        expected_values.append(expected)
-    expected_total = sum(expected_values, Decimal("0")) if expected_values else None
-    if expected_total is None and len(selected) == len(quote.lines):
-        expected_total = quote.grand_total
-    result = _compare_money(message.document_total, expected_total)
+            subtotal_complete = False
+        else:
+            expected_values.append(expected)
+        expected_gross = _expected_gross_line_total(po_line, quote_line)
+        if expected_gross is None:
+            gross_total_complete = False
+        else:
+            expected_gross_values.append(expected_gross)
+    expected_totals: list[tuple[str, Decimal]] = []
+    if subtotal_complete:
+        expected_totals.append(("matched quote subtotal", sum(expected_values, Decimal("0"))))
+    if gross_total_complete:
+        expected_totals.append(
+            ("VAT-inclusive matched quote lines", sum(expected_gross_values, Decimal("0")))
+        )
+    if len(selected) == len(quote.lines) and quote.grand_total is not None:
+        expected_totals.append(("VAT-inclusive quote total", quote.grand_total))
+
+    comparisons = [
+        (label, _compare_money(message.document_total, expected))
+        for label, expected in expected_totals
+    ]
+    exact_label = next(
+        (label for label, comparison in comparisons if comparison == "exact"),
+        "",
+    )
+    if exact_label:
+        result = "exact"
+    elif any(comparison == "conflict" for _label, comparison in comparisons):
+        result = "conflict"
+    else:
+        result = "unknown"
     score = {"exact": 5.0, "conflict": -10.0}.get(result, 0.0)
     if result == "unknown":
         detail = "document total could not be compared"
+    elif result == "exact":
+        detail = f"document total is exact against the {exact_label}"
     else:
-        detail = f"document total is {result} against the matched quote subtotal"
+        detail = "document total conflicts with the matched quote subtotal and quote total"
     return ScoreComponent("document_total", score, detail), result
 
 
@@ -1470,6 +1584,15 @@ def _evaluate(
     quantity_reduced = _count_result(selected, "quantity_result", "reduced")
     quantity_conflicts = _count_result(selected, "quantity_result", "conflict")
     quantity_comparable = quantity_exact + quantity_reduced + quantity_conflicts
+    if (
+        not exact_reference
+        and matched_count > 0
+        and quantity_comparable == matched_count
+        and quantity_conflicts == matched_count
+    ):
+        return _Evaluation(
+            rejection="every comparable matched PO quantity conflicts with this quotation"
+        )
     strong_date_corroboration = False
     if document_date_result == "predates_quote":
         strong_date_corroboration = bool(
@@ -2102,10 +2225,27 @@ def rank_message_to_quotations(
         )
 
     top = candidates[0]
-    runner_up_score = candidates[1].score if len(candidates) > 1 else 0.0
+    # A runner that explains materially fewer PO rows is not a genuine
+    # quotation ambiguity. This particularly prevents a complete two-line PO
+    # from also being offered against a one-line quote sharing one generic item.
+    review_coverage_floor = max(0.0, top.item_coverage - 0.05)
+    credible_runners = [
+        candidate
+        for candidate in candidates[1:]
+        if candidate.item_coverage >= review_coverage_floor
+    ]
+    runner_up_score = credible_runners[0].score if credible_runners else 0.0
     margin = round(max(0.0, top.score - runner_up_score), 3)
     returned_limit = max(1, min(MAX_RETURNED_CANDIDATES, int(max_candidates or 1)))
-    returned = tuple(candidates[:returned_limit])
+    review_margin = max(0.0, float(automatic_margin))
+    nearby_review_candidates = tuple(
+        [top]
+        + [
+            candidate
+            for candidate in credible_runners
+            if top.score - candidate.score < review_margin
+        ][: returned_limit - 1]
+    )
     blockers = (
         *_automatic_blockers(
             top,
@@ -2117,6 +2257,9 @@ def rank_message_to_quotations(
     )
     automatic = not blockers
     if automatic:
+        # Automatic callers may still use the bounded ranking for diagnostics;
+        # these alternatives are not exposed as staff review choices.
+        returned = tuple(candidates[:returned_limit])
         status = AUTOMATIC
         if top.document_total_result == "exact":
             commercial_reason = "an exact document total"
@@ -2132,6 +2275,11 @@ def rank_message_to_quotations(
         )
         winner = top
     else:
+        # Alternatives are useful to staff only when they explain the actual
+        # ambiguity. A materially weaker candidate creates review noise and
+        # duplicate evidence, so keep only runners inside the same margin that
+        # blocked the automatic decision. The top result is always returned.
+        returned = nearby_review_candidates
         status = AMBIGUOUS
         winner = None
         reason = (
