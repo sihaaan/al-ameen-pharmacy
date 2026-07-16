@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import QuotationOutcomeReview from './QuotationOutcomeReview';
 import quotationAPI from '../../api/quotations';
 
@@ -120,6 +120,8 @@ describe('QuotationOutcomeReview Gmail approval', () => {
         suggestions: [{
           quotation_line_id: 501,
           requested_item_name: 'Bandage Pack',
+          po_quantity: '2.000',
+          po_unit_price: '10.00',
           suggested_outcome_status: 'accepted',
           suggested_accepted_quantity: '2.000',
           suggested_accepted_unit_price: '10.00',
@@ -135,7 +137,8 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
     fireEvent.click(screen.getByRole('button', { name: /approve this email link & parse/i }));
-    fireEvent.click(await screen.findByRole('button', { name: /apply selected suggestions/i }));
+    const dialog = screen.getByRole('dialog');
+    fireEvent.click(await within(dialog).findByRole('button', { name: /apply selected line decisions/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
@@ -230,6 +233,331 @@ describe('QuotationOutcomeReview Gmail approval', () => {
 
     await waitFor(() => expect(quotationAPI.quotes.poEvidenceSource).toHaveBeenCalledWith(81));
     expect(await screen.findByText('Full selected LPO source loaded on demand.')).toBeInTheDocument();
+  });
+
+  test('makes evidence review self-contained with company, document totals, and every commercial line decision', async () => {
+    const quoteLines = [
+      { id: 501, item_name_snapshot: 'Bandage Pack', quantity: '10', unit: 'pack', unit_price: '10.00', line_total: '105.00' },
+      { id: 502, item_name_snapshot: 'Surgical Mask', quantity: '5', unit: 'box', unit_price: '4.00', line_total: '21.00' },
+      { id: 503, item_name_snapshot: 'Gauze Roll', quantity: '8', unit: 'roll', unit_price: '2.00', line_total: '16.80' },
+      { id: 504, item_name_snapshot: 'Examination Gloves', quantity: '1', unit: 'box', unit_price: '20.00', line_total: '21.00' },
+    ];
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({
+      data: {
+        ...outcomePayload,
+        quotation: { ...outcomePayload.quotation, lines: quoteLines },
+        summary: { ...outcomePayload.summary, quoted_value: '163.80', pending_lines: 4 },
+      },
+    });
+    quotationAPI.quotes.poEvidenceSource.mockResolvedValueOnce({
+      data: {
+        id: 81,
+        selected_source_kind: 'attachment',
+        commercial_comparison: {
+          company_name: 'Customer A',
+          quotation_number: 'Q-0021',
+          currency: 'AED',
+          quotation_subtotal: '156.00',
+          quotation_vat_total: '7.80',
+          quotation_total: '163.80',
+          lpo_number: 'PO-7781',
+          lpo_total: '156.00',
+          total_result: 'exact',
+          total_basis: 'quotation_subtotal_ex_vat',
+          complete_for_missing_lines: true,
+          lines: [
+            {
+              quotation_line_id: 501,
+              quote_item_name: 'Bandage Pack',
+              lpo_item_name: 'Bandages',
+              quoted_quantity: '10',
+              accepted_quantity: '10',
+              quoted_unit: 'pack',
+              accepted_unit: 'pack',
+              quoted_unit_price: '10.00',
+              accepted_unit_price: '10.00',
+              quoted_line_total: '105.00',
+              accepted_line_total: '100.00',
+              status: 'accepted',
+              confidence: 98,
+              reason: 'Exact item, quantity, and unit price.',
+            },
+            {
+              quotation_line_id: 502,
+              quote_item_name: 'Surgical Mask',
+              lpo_item_name: 'Masks',
+              quoted_quantity: '5',
+              accepted_quantity: '5',
+              quoted_unit: 'box',
+              accepted_unit: 'box',
+              quoted_unit_price: '4.00',
+              accepted_unit_price: null,
+              quoted_line_total: '21.00',
+              accepted_line_total: null,
+              status: 'accepted_price_not_stated',
+              review_required: true,
+              reason: 'The customer document did not state a unit price.',
+            },
+            {
+              quotation_line_id: 503,
+              quote_item_name: 'Gauze Roll',
+              lpo_item_name: 'Gauze',
+              quoted_quantity: '8',
+              accepted_quantity: '4',
+              quoted_unit_price: '2.00',
+              accepted_unit_price: '2.00',
+              quoted_line_total: '16.80',
+              accepted_line_total: '8.00',
+              status: 'reduced',
+              reason: 'Customer ordered a lower quantity.',
+            },
+            {
+              quotation_line_id: 504,
+              quote_item_name: 'Examination Gloves',
+              quoted_quantity: '1',
+              quoted_unit_price: '20.00',
+              quoted_line_total: '21.00',
+              status: 'not_ordered',
+              reason: 'Not present on this LPO; no explicit rejection statement was found.',
+            },
+          ],
+          unmatched_lpo_rows: [{
+            row_number: 5,
+            item_name: 'Aspirin 100 mg',
+            quantity: '2',
+            unit: 'box',
+            unit_price: '7.50',
+            line_total: '15.00',
+            reason: 'No confident quotation-line match.',
+          }],
+        },
+      },
+    });
+
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
+    const dialog = screen.getByRole('dialog');
+
+    expect(await within(dialog).findByText('Customer A')).toBeInTheDocument();
+    expect(within(dialog).getByText('Q-0021')).toBeInTheDocument();
+    expect(within(dialog).getByText('PO-7781')).toBeInTheDocument();
+    expect(within(dialog).getByText('AED 163.80')).toBeInTheDocument();
+    expect(within(dialog).getByText('Matches quote subtotal before VAT')).toBeInTheDocument();
+    expect(within(dialog).getByRole('columnheader', { name: 'Total incl. VAT' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('columnheader', { name: 'LPO line total' })).toBeInTheDocument();
+    expect(within(dialog).getByText('Accepted as quoted')).toBeInTheDocument();
+    expect(within(dialog).getByText('Accepted - price not stated')).toBeInTheDocument();
+    expect(within(dialog).getByText('Reduced quantity')).toBeInTheDocument();
+    expect(within(dialog).getByText('Not ordered / omitted')).toBeInTheDocument();
+    expect(within(dialog).getByText('Unmatched LPO item')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('Not stated').length).toBeGreaterThanOrEqual(2);
+    expect(within(dialog).getByText('Review required')).toBeInTheDocument();
+  });
+
+  test('keeps parsed decisions in the modal and applies an omitted line only after staff explicitly checks it', async () => {
+    const quoteLines = [
+      { id: 501, item_name_snapshot: 'Bandage Pack', quantity: '2', unit: 'pack', unit_price: '10.00', line_total: '21.00' },
+      { id: 502, item_name_snapshot: 'Surgical Mask', quantity: '3', unit: 'box', unit_price: '20.00', line_total: '63.00' },
+      { id: 503, item_name_snapshot: 'Gauze Roll', quantity: '4', unit: 'roll', unit_price: '5.00', line_total: '21.00' },
+      { id: 504, item_name_snapshot: 'Examination Gloves', quantity: '1', unit: 'box', unit_price: '30.00', line_total: '31.50' },
+    ];
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({
+      data: {
+        ...outcomePayload,
+        quotation: { ...outcomePayload.quotation, lines: quoteLines },
+        summary: { ...outcomePayload.summary, quoted_value: '136.50', pending_lines: 4 },
+      },
+    });
+    quotationAPI.quotes.parsePOEvidence.mockResolvedValueOnce({
+      data: {
+        id: 77,
+        suggestions: [{
+          quotation_line_id: 501,
+          po_row_index: 1,
+          po_item_name: 'Bandages ordered',
+          po_quantity: '2',
+          po_unit_price: '9.50',
+          suggested_outcome_status: 'accepted',
+          suggested_accepted_quantity: '2',
+          suggested_accepted_unit_price: '9.50',
+          reason: 'Exact item and quantity match',
+        }, {
+          quotation_line_id: 502,
+          po_row_index: 2,
+          po_item_name: 'Masks ordered',
+          po_quantity: '3',
+          po_unit_price: '',
+          suggested_outcome_status: 'accepted',
+          suggested_accepted_quantity: '3',
+          suggested_accepted_unit_price: '20.00',
+          reason: 'Item and quantity matched; price was not stated',
+        }],
+        unmatched_po_rows: [{ po_row_number: 5, po_item_name: 'Aspirin 100 mg', quantity: '2' }],
+        missing_quote_line_ids: [503, 504],
+        commercial_comparison: {
+          company_name: 'Customer A',
+          quotation_number: 'Q-0021',
+          currency: 'AED',
+          quotation_total: '136.50',
+          lpo_number: 'PO-7781',
+          lines: [{
+            quotation_line_id: 501,
+            quote_item_name: 'Bandage Pack',
+            lpo_item_name: 'Bandages ordered',
+            quoted_quantity: '2',
+            accepted_quantity: '2',
+            quoted_unit_price: '10.00',
+            accepted_unit_price: '9.50',
+            quoted_line_total: '21.00',
+            accepted_line_total: '19.00',
+            status: 'repriced',
+            confidence: 97,
+            reason: 'Customer accepted a different unit price.',
+          }, {
+            quotation_line_id: 502,
+            quote_item_name: 'Surgical Mask',
+            lpo_item_name: 'Masks ordered',
+            quoted_quantity: '3',
+            accepted_quantity: '3',
+            quoted_unit_price: '20.00',
+            accepted_unit_price: null,
+            quoted_line_total: '63.00',
+            accepted_line_total: null,
+            status: 'accepted_price_not_stated',
+            review_required: true,
+            reason: 'LPO price was not stated.',
+          }, {
+            quotation_line_id: 503,
+            quote_item_name: 'Gauze Roll',
+            quoted_quantity: '4',
+            quoted_unit_price: '5.00',
+            quoted_line_total: '21.00',
+            status: 'not_ordered',
+            reason: 'Not present on this complete LPO parse.',
+          }, {
+            quotation_line_id: 504,
+            quote_item_name: 'Examination Gloves',
+            quoted_quantity: '1',
+            quoted_unit_price: '30.00',
+            quoted_line_total: '31.50',
+            status: 'uncertain',
+            review_required: true,
+            reason: 'An unmatched row may belong to this quotation line.',
+          }],
+          unmatched_lpo_rows: [{ item_name: 'Aspirin 100 mg', quantity: '2', reason: 'No confident quotation-line match.' }],
+        },
+      },
+    });
+
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
+    fireEvent.click(screen.getByRole('button', { name: /approve this email link & parse/i }));
+
+    const dialog = screen.getByRole('dialog');
+    expect(await within(dialog).findByText('Confirmed link - parsed line decisions')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /reparse approved email/i })).toBeInTheDocument();
+
+    const acceptedCheckbox = within(dialog).getByRole('checkbox', { name: /apply decision for bandage pack/i });
+    const unstatedPriceCheckbox = within(dialog).queryByRole('checkbox', { name: /apply decision for surgical mask/i });
+    const omittedCheckbox = within(dialog).getByRole('checkbox', { name: /apply decision for gauze roll/i });
+    expect(acceptedCheckbox).toBeChecked();
+    expect(unstatedPriceCheckbox).not.toBeInTheDocument();
+    expect(omittedCheckbox).not.toBeChecked();
+    expect(within(dialog).queryByRole('checkbox', { name: /apply decision for examination gloves/i })).not.toBeInTheDocument();
+
+    const maskRow = within(dialog).getAllByText('Masks ordered')[0].closest('tr');
+    expect(within(maskRow).getAllByText('Not stated').length).toBeGreaterThanOrEqual(2);
+    expect(within(maskRow).getByText('Accepted - price not stated')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('AED 9.50').length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).getByText('PO-7781')).toBeInTheDocument();
+
+    fireEvent.click(omittedCheckbox);
+    fireEvent.click(within(dialog).getByRole('button', { name: /apply selected line decisions/i }));
+
+    await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
+      line_updates: [{
+        id: 501,
+        outcome_status: 'accepted',
+        accepted_quantity: '2',
+        accepted_unit_price: '9.50',
+        outcome_notes: 'PO suggestion applied: Exact item and quantity match',
+      }, {
+        id: 503,
+        outcome_status: 'rejected',
+        outcome_notes: 'PO suggestion applied: this quoted line was not ordered on the reviewed LPO.',
+      }],
+      po_import_id: 77,
+      applied_po_line_ids: [501],
+    }));
+    expect(await within(dialog).findByText(/selected po line decisions applied/i)).toBeInTheDocument();
+    await waitFor(() => expect(
+      within(dialog).getByRole('button', { name: /apply selected line decisions/i })
+    ).toBeDisabled());
+  });
+
+  test('does not apply quotation fallback values when a legacy parsed row omitted the customer price', async () => {
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({
+      data: {
+        ...outcomePayload,
+        quotation: {
+          ...outcomePayload.quotation,
+          lines: [{
+            id: 501,
+            item_name_snapshot: 'Bandage Pack',
+            quantity: '2',
+            unit: 'pack',
+            unit_price: '10.00',
+            line_total: '21.00',
+          }],
+        },
+      },
+    });
+    quotationAPI.quotes.parsePOEvidence.mockResolvedValueOnce({
+      data: {
+        id: 88,
+        suggestions: [{
+          quotation_line_id: 501,
+          po_item_name: 'Bandage Pack',
+          po_quantity: '2',
+          po_unit_price: '',
+          suggested_outcome_status: 'accepted',
+          suggested_accepted_quantity: '2',
+          suggested_accepted_unit_price: '10.00',
+          reason: 'Legacy suggestion used the quotation fallback.',
+        }],
+        unmatched_po_rows: [],
+        missing_quote_line_ids: [],
+      },
+    });
+
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
+    fireEvent.click(screen.getByRole('button', { name: /approve this email link & parse/i }));
+
+    const dialog = screen.getByRole('dialog');
+    expect((await within(dialog).findAllByText('Accepted - price not stated')).length).toBeGreaterThanOrEqual(1);
+    expect(within(dialog).queryByRole('checkbox', { name: /apply decision for bandage pack/i })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /apply selected line decisions/i })).toBeDisabled();
+    expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
+  });
+
+  test('names the evidence dialog, closes it with Escape, and restores review-button focus', async () => {
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+    const reviewButton = await screen.findByRole('button', { name: /review evidence/i });
+    reviewButton.focus();
+    fireEvent.click(reviewButton);
+
+    const dialog = screen.getByRole('dialog', { name: /customer a - lpo for q-0021/i });
+    expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(dialog).not.toBeInTheDocument();
+    expect(reviewButton).toHaveFocus();
   });
 
   test('labels an attachment source, separates its text from the email body, and expands both previews', async () => {

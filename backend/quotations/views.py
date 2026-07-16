@@ -108,6 +108,10 @@ from .excel import build_quotation_excel
 from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_pdf, build_quotation_pdf
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
+from .po_evidence_comparison import (
+    safe_build_po_evidence_commercial_comparison,
+    unavailable_po_evidence_commercial_comparison,
+)
 from .quote_po_intelligence import find_quote_po_evidence, parse_quote_po_evidence, scan_quote_po_evidence_batch
 from .serializers import (
     CompanyContactSerializer,
@@ -2075,7 +2079,20 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
     """Narrow evidence-source endpoints used by the manual review screen."""
 
     serializer_class = QuotationPOEvidenceSerializer
-    queryset = QuotationPOEvidence.objects.select_related("gmail_connection", "quotation", "mailbox_message")
+    queryset = (
+        QuotationPOEvidence.objects.select_related(
+            "gmail_connection",
+            "quotation__company",
+            "mailbox_message",
+            "canonical_lpo",
+        )
+        .prefetch_related(
+            "quotation__lines",
+            "quotation__lines__product",
+            "quotation__lines__quote_item",
+            "po_imports",
+        )
+    )
 
     def get_queryset(self):
         connection = resolve_gmail_connection(self.request.user, shared_only=True)
@@ -2095,6 +2112,17 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
         )
         extracted_text = str(evidence.extracted_text or "")
         email_body = str(getattr(message, "newest_body_text", "") or "")
+        try:
+            commercial_comparison = safe_build_po_evidence_commercial_comparison(evidence)
+        except Exception:
+            # Source text and attachments remain primary review evidence. A
+            # malformed legacy parser row must not make that evidence
+            # unviewable merely because the convenience comparison failed.
+            logger.exception(
+                "Commercial comparison failed while viewing PO evidence %s",
+                evidence.pk,
+            )
+            commercial_comparison = unavailable_po_evidence_commercial_comparison(evidence)
         response = Response(
             {
                 "id": evidence.id,
@@ -2103,6 +2131,7 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
                 "extracted_text_truncated": len(extracted_text) > max_chars,
                 "email_body_text": email_body[:max_chars],
                 "email_body_text_truncated": len(email_body) > max_chars,
+                "commercial_comparison": commercial_comparison,
             }
         )
         response["Cache-Control"] = "private, no-store, max-age=0"

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
@@ -326,6 +326,429 @@ const EvidenceSignalSection = ({ title, value }) => {
   );
 };
 
+const optionalMoney = (value, currency = 'AED', missingLabel = '-') => {
+  if (value === undefined || value === null || value === '') return missingLabel;
+  const number = Number(value);
+  return Number.isFinite(number) ? money(number, currency) : missingLabel;
+};
+
+const optionalUnitMoney = (value, currency = 'AED', missingLabel = '-') => {
+  if (value === undefined || value === null || value === '') return missingLabel;
+  const number = Number(value);
+  return Number.isFinite(number) ? unitMoney(number, currency) : missingLabel;
+};
+
+const optionalQuantity = (value, unit, missingLabel = '-') => {
+  if (value === undefined || value === null || value === '') return missingLabel;
+  const normalizedUnit = String(unit || '').trim();
+  return `${value}${normalizedUnit ? ` ${normalizedUnit}` : ''}`;
+};
+
+const sameLineId = (left, right) => (
+  left !== undefined
+  && left !== null
+  && right !== undefined
+  && right !== null
+  && String(left) === String(right)
+);
+
+const hasLineId = (values, id) => values.some((value) => sameLineId(value, id));
+
+const uniqueLineIds = (values) => values.reduce((result, value) => {
+  if (value !== undefined && value !== null && !hasLineId(result, value)) result.push(value);
+  return result;
+}, []);
+
+const numberOrNull = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+const derivedLineTotal = (quantity, price) => {
+  const normalizedQuantity = numberOrNull(quantity);
+  const normalizedPrice = numberOrNull(price);
+  if (normalizedQuantity === null || normalizedPrice === null) return undefined;
+  return normalizedQuantity * normalizedPrice;
+};
+
+const comparisonStatusDetails = {
+  accepted: { label: 'Accepted as quoted', className: 'accepted' },
+  accepted_price_not_stated: { label: 'Accepted - price not stated', className: 'accepted-not-stated' },
+  repriced: { label: 'Accepted at changed price', className: 'repriced' },
+  reduced: { label: 'Reduced quantity', className: 'reduced' },
+  reduced_price_not_stated: { label: 'Reduced - price not stated', className: 'reduced-not-stated' },
+  reduced_repriced: { label: 'Reduced and repriced', className: 'reduced-repriced' },
+  not_ordered: { label: 'Not ordered / omitted', className: 'not-ordered' },
+  unmatched: { label: 'Unmatched LPO item', className: 'unmatched' },
+  uncertain: { label: 'Needs review', className: 'uncertain' },
+};
+
+const normalizeComparisonStatus = (row) => {
+  const rawStatus = String(firstDefined(
+    row?.status,
+    row?.decision,
+    row?.match_status,
+    row?.suggested_outcome_status,
+    ''
+  )).trim().toLowerCase().replaceAll(' ', '_').replaceAll('-', '_');
+  if (row?.unmatched_lpo || row?.unmatched_po || row?.po_only) return 'unmatched';
+  if (['not_ordered', 'rejected', 'missing', 'missing_from_po', 'omitted', 'unavailable_missing'].includes(rawStatus)) {
+    return 'not_ordered';
+  }
+  if (['unmatched', 'unmatched_lpo', 'unmatched_po', 'po_only'].includes(rawStatus)) return 'unmatched';
+  if (['uncertain', 'needs_review', 'conflict', 'ambiguous', 'unmatched_quote'].includes(rawStatus)) return 'uncertain';
+  if (['accepted_price_not_stated', 'accepted_no_price', 'price_not_stated'].includes(rawStatus)) {
+    return 'accepted_price_not_stated';
+  }
+  if (['reduced_price_not_stated', 'reduced_no_price'].includes(rawStatus)) return 'reduced_price_not_stated';
+  if (['reduced_repriced', 'quantity_and_price_changed'].includes(rawStatus)) return 'reduced_repriced';
+  if (['repriced', 'price_changed', 'price_conflict'].includes(rawStatus)) return 'repriced';
+  if (['reduced', 'quantity_reduced', 'partial'].includes(rawStatus)) return 'reduced';
+  if (row?.review_required || row?.requires_review) return 'uncertain';
+
+  const quotedQuantity = numberOrNull(firstDefined(row?.quoted_quantity, row?.quote_quantity));
+  const acceptedQuantity = numberOrNull(firstDefined(row?.accepted_quantity, row?.po_quantity, row?.lpo_quantity));
+  const quotedPrice = numberOrNull(firstDefined(row?.quoted_unit_price, row?.quote_unit_price));
+  const acceptedPrice = numberOrNull(firstDefined(row?.accepted_unit_price, row?.po_unit_price, row?.lpo_unit_price));
+  const reduced = quotedQuantity !== null && acceptedQuantity !== null && acceptedQuantity < quotedQuantity;
+  const repriced = quotedPrice !== null && acceptedPrice !== null && Math.abs(acceptedPrice - quotedPrice) > 0.0005;
+  const acceptedLike = ['accepted', 'exact', 'matched', 'accepted_exact', 'quantity_changed'].includes(rawStatus);
+  if (acceptedLike && acceptedQuantity === null) return 'uncertain';
+  if (acceptedLike && acceptedPrice === null) {
+    return reduced ? 'reduced_price_not_stated' : 'accepted_price_not_stated';
+  }
+  if (reduced && repriced) return 'reduced_repriced';
+  if (reduced) return 'reduced';
+  if (repriced) return 'repriced';
+  if (acceptedLike) return 'accepted';
+  return 'uncertain';
+};
+
+const normalizeComparisonLine = (row, quoteLines = []) => {
+  const quotationLineId = firstDefined(row?.quotation_line_id, row?.quote_line_id, row?.line_id);
+  const quoteLine = quoteLines.find((line) => sameLineId(line.id, quotationLineId));
+  const quotedQuantity = firstDefined(row?.quoted_quantity, row?.quote_quantity, quoteLine?.quantity);
+  const acceptedQuantity = firstDefined(
+    row?.accepted_quantity,
+    row?.po_quantity,
+    row?.lpo_quantity,
+    row?.ordered_quantity,
+    row?.po_row?.quantity
+  );
+  const quotedUnitPrice = firstDefined(row?.quoted_unit_price, row?.quote_unit_price, quoteLine?.unit_price);
+  const acceptedUnitPrice = firstDefined(
+    row?.accepted_unit_price,
+    row?.po_unit_price,
+    row?.lpo_unit_price,
+    row?.po_row?.unit_price
+  );
+  const quotedLineTotal = firstDefined(
+    row?.quoted_line_total,
+    row?.quote_line_total,
+    quoteLine?.line_total,
+    derivedLineTotal(quotedQuantity, quotedUnitPrice)
+  );
+  const acceptedLineTotal = firstDefined(
+    row?.accepted_line_total,
+    row?.po_line_total,
+    row?.lpo_line_total,
+    row?.po_row?.line_total,
+    derivedLineTotal(acceptedQuantity, acceptedUnitPrice)
+  );
+  const normalized = {
+    ...row,
+    quotationLineId,
+    quoteItemName: firstDefined(
+      row?.quote_item_name,
+      row?.quote_name,
+      row?.quotation_item_name,
+      quoteLine?.item_name_snapshot,
+      quoteLine?.product_name,
+      quotationLineId ? `Quotation line ${quotationLineId}` : '-'
+    ),
+    lpoItemName: firstDefined(
+      row?.lpo_item_name,
+      row?.po_item_name,
+      row?.po_name,
+      row?.accepted_item_name,
+      row?.po_row?.item_name,
+      '-'
+    ),
+    quotedQuantity,
+    acceptedQuantity,
+    quotedUnit: firstDefined(row?.quoted_unit, row?.quote_unit, quoteLine?.unit),
+    acceptedUnit: firstDefined(row?.accepted_unit, row?.po_unit, row?.lpo_unit, row?.po_row?.unit),
+    quotedUnitPrice,
+    acceptedUnitPrice,
+    quotedLineTotal,
+    acceptedLineTotal,
+    confidence: firstDefined(row?.confidence, row?.match_confidence),
+    reason: firstDefined(row?.reason, row?.matching_reason, row?.detail, ''),
+  };
+  normalized.status = normalizeComparisonStatus({ ...row, ...normalized });
+  return normalized;
+};
+
+const normalizeUnmatchedLPORow = (row, index) => normalizeComparisonLine({
+  ...row,
+  unmatched_lpo: true,
+  lpo_item_name: firstDefined(row?.lpo_item_name, row?.po_item_name, row?.item_name, row?.name, `LPO row ${index + 1}`),
+  accepted_quantity: firstDefined(row?.accepted_quantity, row?.po_quantity, row?.quantity),
+  accepted_unit: firstDefined(row?.accepted_unit, row?.po_unit, row?.unit),
+  accepted_unit_price: firstDefined(row?.accepted_unit_price, row?.po_unit_price, row?.unit_price),
+  accepted_line_total: firstDefined(row?.accepted_line_total, row?.po_line_total, row?.line_total, row?.total),
+  reason: firstDefined(row?.reason, 'No confident quotation-line match was found.'),
+  status: 'unmatched',
+}, []);
+
+const normalizeCommercialComparison = (rawComparison, quote, summary) => {
+  const comparison = rawComparison && typeof rawComparison === 'object' ? rawComparison : {};
+  const quoteLines = quote?.lines || [];
+  const rawLines = Array.isArray(comparison.lines)
+    ? comparison.lines
+    : Array.isArray(comparison.line_comparisons)
+      ? comparison.line_comparisons
+      : [];
+  const lines = rawLines.map((line) => normalizeComparisonLine(line, quoteLines));
+  const unmatchedRows = firstDefined(comparison.unmatched_lpo_rows, comparison.unmatched_po_rows, []);
+  const normalizedUnmatchedRows = Array.isArray(unmatchedRows)
+    ? unmatchedRows.map(normalizeUnmatchedLPORow)
+    : [];
+  return {
+    companyName: firstDefined(comparison.company_name, quote?.company_name, '-'),
+    quotationNumber: firstDefined(comparison.quotation_number, quote?.quotation_number, '-'),
+    lpoNumber: firstDefined(
+      comparison.lpo_number,
+      comparison.po_number,
+      comparison.purchase_order_number,
+      'Not found in source'
+    ),
+    currency: firstDefined(comparison.currency, quote?.currency, 'AED'),
+    quotationSubtotal: firstDefined(comparison.quotation_subtotal, quote?.subtotal),
+    quotationVatTotal: firstDefined(comparison.quotation_vat_total, quote?.vat_total),
+    quotationTotal: firstDefined(
+      comparison.quotation_total,
+      comparison.quote_total,
+      quote?.grand_total,
+      quote?.total,
+      summary?.quoted_value
+    ),
+    lpoTotal: firstDefined(comparison.lpo_total, comparison.po_total, comparison.document_total),
+    totalResult: firstDefined(comparison.total_result, comparison.document_total_result, 'unknown'),
+    totalBasis: firstDefined(comparison.total_basis, comparison.document_total_basis, ''),
+    totalDetail: firstDefined(comparison.total_detail, comparison.document_total_detail, ''),
+    sourceKind: firstDefined(comparison.source_kind, ''),
+    sourceFilename: firstDefined(comparison.source_filename, ''),
+    parseSource: firstDefined(comparison.parse_source, ''),
+    reviewOnly: comparison.review_only !== false,
+    completeForMissingLines: comparison.complete_for_missing_lines === true,
+    warnings: Array.isArray(comparison.warnings) ? comparison.warnings : [],
+    summary: comparison.summary && typeof comparison.summary === 'object' ? comparison.summary : {},
+    lines: [...lines, ...normalizedUnmatchedRows],
+  };
+};
+
+const comparisonFromPOResult = (result, quote, summary) => {
+  if (!result) return normalizeCommercialComparison({}, quote, summary);
+  if (result.commercial_comparison) {
+    return normalizeCommercialComparison(result.commercial_comparison, quote, summary);
+  }
+  const quoteLines = quote?.lines || [];
+  const suggestions = Array.isArray(result.suggestions) ? result.suggestions : [];
+  const matchedLines = suggestions.map((suggestion) => normalizeComparisonLine({
+    ...suggestion,
+    quotation_line_id: suggestion.quotation_line_id,
+    quote_item_name: firstDefined(suggestion.quotation_line_label, suggestion.requested_item_name),
+    lpo_item_name: firstDefined(suggestion.po_item_name, suggestion.po_row?.item_name, suggestion.requested_item_name),
+    // The PO-facing columns must only show values actually parsed from the
+    // customer's document. Suggested values can fall back to our quotation.
+    accepted_quantity: firstDefined(suggestion.po_quantity, suggestion.po_row?.quantity),
+    accepted_unit: firstDefined(suggestion.po_unit, suggestion.po_row?.unit),
+    accepted_unit_price: firstDefined(suggestion.po_unit_price, suggestion.po_row?.unit_price),
+    accepted_line_total: firstDefined(suggestion.po_line_total, suggestion.po_row?.line_total),
+    status: suggestion.comparison_status || suggestion.suggested_outcome_status,
+  }, quoteLines));
+  const matchedIds = matchedLines.map((line) => line.quotationLineId);
+  const missingIds = Array.isArray(result.missing_quote_line_ids) ? result.missing_quote_line_ids : [];
+  const resultWarnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const hasIncompleteWarning = resultWarnings.some((warning) => (
+    /aggregate|incomplete|unmatched|could not|failed|manual(?:ly)? review|missing source/i.test(String(warning || ''))
+  ));
+  const missingLinesAreComplete = result.complete_for_missing_lines === true
+    || (
+      result.complete_for_missing_lines !== false
+      && !(result.unmatched_po_rows || []).length
+      && !hasIncompleteWarning
+    );
+  const missingLines = missingIds
+    .filter((lineId) => !hasLineId(matchedIds, lineId))
+    .map((lineId) => normalizeComparisonLine({
+      quotation_line_id: lineId,
+      status: missingLinesAreComplete ? 'not_ordered' : 'uncertain',
+      review_required: !missingLinesAreComplete,
+      reason: missingLinesAreComplete
+        ? 'This quoted line was not found on the parsed LPO.'
+        : 'This line was not matched, but the parse was incomplete or had unmatched LPO rows.',
+    }, quoteLines));
+  const unmatchedRows = Array.isArray(result.unmatched_po_rows)
+    ? result.unmatched_po_rows.map(normalizeUnmatchedLPORow)
+    : [];
+  const comparison = normalizeCommercialComparison({
+    company_name: quote?.company_name,
+    quotation_number: quote?.quotation_number,
+    lpo_number: firstDefined(result.lpo_number, result.po_number, result.document_number),
+    lpo_total: firstDefined(result.lpo_total, result.po_total, result.document_total),
+    total_result: firstDefined(result.total_result, result.document_total_result),
+    warnings: result.warnings,
+  }, quote, summary);
+  return { ...comparison, lines: [...matchedLines, ...missingLines, ...unmatchedRows] };
+};
+
+const totalResultText = (value, basis, detail) => {
+  if (detail) return String(detail);
+  const normalized = String(value || 'unknown').trim().toLowerCase();
+  const normalizedBasis = String(basis || '').trim().toLowerCase();
+  if (['exact', 'match', 'matched'].includes(normalized)) {
+    if (/subtotal|before_vat|net/.test(normalizedBasis)) return 'Matches quote subtotal before VAT';
+    if (/total|gross|vat/.test(normalizedBasis)) return 'Matches quote total incl. VAT';
+    return 'Totals match (basis not recorded)';
+  }
+  if (['conflict', 'mismatch', 'different'].includes(normalized)) return 'Totals differ - review';
+  if (['partial', 'selected_lines'].includes(normalized)) return 'Partial LPO total';
+  return 'Not enough data to compare';
+};
+
+const CommercialComparisonTable = ({ comparison, selectedLineIds, actionableLineIds, onToggleLine }) => {
+  const rows = comparison?.lines || [];
+  const currency = comparison?.currency || 'AED';
+  const selectable = typeof onToggleLine === 'function';
+  if (!rows.length) {
+    return (
+      <div className="qm-empty subtle">
+        No line-level comparison is available yet. Confirm and parse this evidence to build it from the selected LPO source.
+      </div>
+    );
+  }
+  return (
+    <div className="qm-table-wrap qm-commercial-comparison-wrap">
+      <table className="qm-table qm-commercial-comparison-table">
+        <thead>
+          <tr>
+            {selectable && <th rowSpan="2">Apply</th>}
+            <th rowSpan="2">Our quoted item</th>
+            <th rowSpan="2">Customer LPO item</th>
+            <th colSpan="3">Our quotation</th>
+            <th colSpan="3">Customer accepted</th>
+            <th rowSpan="2">Decision</th>
+          </tr>
+          <tr>
+            <th>Qty</th>
+            <th>Unit price</th>
+            <th>Total incl. VAT</th>
+            <th>Qty</th>
+            <th>Unit price</th>
+            <th>LPO line total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((line, index) => {
+            const statusInfo = comparisonStatusDetails[line.status] || comparisonStatusDetails.uncertain;
+            const canApply = selectable
+              && line.quotationLineId !== undefined
+              && line.quotationLineId !== null
+              && hasLineId(actionableLineIds || [], line.quotationLineId);
+            const checked = canApply && hasLineId(selectedLineIds || [], line.quotationLineId);
+            const acceptedMissingLabel = line.status === 'not_ordered' ? 'Not ordered' : 'Not stated';
+            return (
+              <tr key={`${line.quotationLineId ?? 'lpo'}-${line.po_row_index ?? line.row_index ?? index}`} className={`qm-commercial-row status-${statusInfo.className} ${line.review_required ? 'review-required' : ''}`}>
+                {selectable && (
+                  <td>
+                    {canApply ? (
+                      <input
+                        type="checkbox"
+                        aria-label={`Apply decision for ${line.quoteItemName}`}
+                        checked={checked}
+                        onChange={() => onToggleLine(line.quotationLineId)}
+                      />
+                    ) : <span title="An unmatched LPO row cannot be applied until it is linked to a quotation line.">-</span>}
+                  </td>
+                )}
+                <td><strong>{line.quoteItemName}</strong></td>
+                <td><strong>{line.lpoItemName}</strong></td>
+                <td>{optionalQuantity(line.quotedQuantity, line.quotedUnit)}</td>
+                <td>{optionalUnitMoney(line.quotedUnitPrice, currency)}</td>
+                <td>{optionalMoney(line.quotedLineTotal, currency)}</td>
+                <td>{optionalQuantity(line.acceptedQuantity, line.acceptedUnit, acceptedMissingLabel)}</td>
+                <td>{optionalUnitMoney(line.acceptedUnitPrice, currency, acceptedMissingLabel)}</td>
+                <td>
+                  {optionalMoney(line.acceptedLineTotal, currency, acceptedMissingLabel)}
+                  {line.accepted_line_total_derived && (
+                    <small className="qm-derived-total-note">Calculated from LPO qty x price</small>
+                  )}
+                </td>
+                <td>
+                  <span className={`qm-commercial-status ${statusInfo.className}`}>{statusInfo.label}</span>
+                  {line.review_required && <small className="qm-commercial-review-flag">Review required</small>}
+                  {line.confidence !== undefined && line.confidence !== null && line.confidence !== '' && (
+                    <small>{Math.round(Number(line.confidence || 0))}% match confidence</small>
+                  )}
+                  {line.reason && <small>{line.reason}</small>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const safelyActionableComparisonStatuses = new Set(['accepted', 'repriced', 'reduced', 'reduced_repriced']);
+
+const actualAcceptedValues = (row) => ({
+  quantity: firstDefined(
+    row?.acceptedQuantity,
+    row?.accepted_quantity,
+    row?.po_quantity,
+    row?.lpo_quantity,
+    row?.po_row?.quantity
+  ),
+  unitPrice: firstDefined(
+    row?.acceptedUnitPrice,
+    row?.accepted_unit_price,
+    row?.po_unit_price,
+    row?.lpo_unit_price,
+    row?.po_row?.unit_price
+  ),
+});
+
+const isSafelyActionableMatchedLine = (line) => {
+  const status = normalizeComparisonStatus(line);
+  const actual = actualAcceptedValues(line);
+  return safelyActionableComparisonStatuses.has(status)
+    && !line?.review_required
+    && !line?.requires_review
+    && numberOrNull(actual.quantity) !== null
+    && numberOrNull(actual.unitPrice) !== null;
+};
+
+const defaultSelectedPOResultIds = (result) => {
+  const authoritativeLines = result?.commercial_comparison?.lines;
+  if (Array.isArray(authoritativeLines)) {
+    return uniqueLineIds(
+      authoritativeLines
+        .filter(isSafelyActionableMatchedLine)
+        .map((line) => firstDefined(line.quotation_line_id, line.quote_line_id))
+    );
+  }
+  return uniqueLineIds(
+    (result?.suggestions || [])
+      .filter(isSafelyActionableMatchedLine)
+      .map((suggestion) => suggestion.quotation_line_id)
+  );
+};
+
 const evidenceConfidenceLabel = (confidence) => {
   const value = Number(confidence || 0);
   if (value >= 75) return 'Strong';
@@ -491,6 +914,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [poFile, setPoFile] = useState(null);
   const [poUseAi, setPoUseAi] = useState(true);
   const [poResult, setPoResult] = useState(null);
+  const [poResultEvidenceId, setPoResultEvidenceId] = useState(null);
   const [poEvidence, setPoEvidence] = useState([]);
   const [poEvidencePagination, setPoEvidencePagination] = useState(null);
   const [evidenceUseAi, setEvidenceUseAi] = useState(true);
@@ -516,6 +940,19 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [attachmentError, setAttachmentError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
+  const evidenceReturnFocusRef = useRef(null);
+  const evidenceCloseButtonRef = useRef(null);
+
+  const openEvidenceReview = useCallback((evidenceId) => {
+    evidenceReturnFocusRef.current = typeof document === 'undefined' ? null : document.activeElement;
+    setNotice(null);
+    setErrorInfo(null);
+    setSelectedEvidenceId(evidenceId);
+  }, []);
+
+  const closeEvidenceReview = useCallback(() => {
+    setSelectedEvidenceId(null);
+  }, []);
 
   const setLoaded = useCallback((data) => {
     setQuote(data.quotation);
@@ -627,6 +1064,49 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       },
     ].filter((section) => section.value !== undefined && section.value !== null && section.value !== '');
   }, [selectedEvidence]);
+  const sourceEvidenceComparison = useMemo(
+    () => normalizeCommercialComparison(
+      selectedEvidenceForReview?.commercial_comparison,
+      quote,
+      summary
+    ),
+    [selectedEvidenceForReview, quote, summary]
+  );
+  const parsedPOComparison = useMemo(
+    () => comparisonFromPOResult(poResult, quote, summary),
+    [poResult, quote, summary]
+  );
+  const selectedEvidenceUsesParsedComparison = Boolean(
+    poResult
+    && poResultEvidenceId !== null
+    && sameLineId(poResultEvidenceId, selectedEvidenceId)
+  );
+  const selectedEvidenceComparison = useMemo(
+    () => (
+      selectedEvidenceUsesParsedComparison
+        ? parsedPOComparison
+        : sourceEvidenceComparison
+    ),
+    [selectedEvidenceUsesParsedComparison, parsedPOComparison, sourceEvidenceComparison]
+  );
+  const parsedActionableLineIds = useMemo(
+    () => uniqueLineIds([
+      ...parsedPOComparison.lines
+        .filter((line) => (
+          isSafelyActionableMatchedLine(line)
+          && (poResult?.suggestions || []).some((suggestion) => (
+            sameLineId(suggestion.quotation_line_id, line.quotationLineId)
+          ))
+        ))
+        .map((line) => line.quotationLineId),
+      ...(poResult?.missing_quote_line_ids || []).filter((lineId) => (
+        parsedPOComparison.lines.some((line) => (
+          sameLineId(line.quotationLineId, lineId) && line.status === 'not_ordered'
+        ))
+      )),
+    ]),
+    [poResult, parsedPOComparison]
+  );
   const activeEvidence = useMemo(
     () => poEvidence.filter((item) => !isEvidenceArchived(item)),
     [poEvidence]
@@ -640,6 +1120,22 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     setAttachmentError(null);
     setViewingAttachmentKey(null);
   }, [selectedEvidenceId]);
+
+  useEffect(() => {
+    if (!selectedEvidenceId) return undefined;
+    const returnFocusTo = evidenceReturnFocusRef.current;
+    evidenceCloseButtonRef.current?.focus();
+    const handleKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeEvidenceReview();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (returnFocusTo?.isConnected && typeof returnFocusTo.focus === 'function') returnFocusTo.focus();
+    };
+  }, [selectedEvidenceId, closeEvidenceReview]);
 
   useEffect(() => {
     let cancelled = false;
@@ -681,10 +1177,12 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       setLoaded(response.data);
       setSelectedLines([]);
       setNotice({ type: 'success', message });
+      return true;
     } catch (error) {
       const details = await describeQuotationError(error, 'Save quotation outcome', `PATCH /quotations/quotes/${quoteId}/outcome/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -733,7 +1231,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         response = await quotationAPI.quotes.parseOutcomePO(quoteId, { text: poText, use_ai: poUseAi });
       }
       setPoResult(response.data);
-      setSelectedSuggestions((response.data.suggestions || []).map((suggestion) => suggestion.quotation_line_id).filter(Boolean));
+      setPoResultEvidenceId(null);
+      setSelectedSuggestions(defaultSelectedPOResultIds(response.data));
       setNotice({ type: 'success', message: 'PO suggestions parsed for review. Nothing was saved yet.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse outcome PO', `POST /quotations/quotes/${quoteId}/parse_outcome_po/`);
@@ -807,10 +1306,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         use_ai: evidenceUseAi,
       });
       setPoResult(response.data);
-      setSelectedSuggestions((response.data.suggestions || []).map((suggestion) => suggestion.quotation_line_id).filter(Boolean));
+      setPoResultEvidenceId(evidenceId);
+      setSelectedSuggestions(defaultSelectedPOResultIds(response.data));
       await loadPOEvidence();
-      setSelectedEvidenceId(null);
-      setNotice({ type: 'success', message: 'Email link approved and parsed into review-only PO suggestions. No line outcome was applied.' });
+      setNotice({ type: 'success', message: 'Email link approved and parsed. The line comparison is ready in this review window; no line outcome was applied.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse Gmail PO evidence', `POST /quotations/quotes/${quoteId}/parse_po_evidence/`);
       setErrorInfo(details);
@@ -904,20 +1403,53 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
-  const applySelectedSuggestions = () => {
-    const suggestions = (poResult?.suggestions || []).filter((suggestion) => selectedSuggestions.includes(suggestion.quotation_line_id));
-    if (!suggestions.length) return;
-    patchOutcome({
-      line_updates: suggestions.map((suggestion) => ({
-        id: suggestion.quotation_line_id,
-        outcome_status: suggestion.suggested_outcome_status,
-        accepted_quantity: suggestion.suggested_accepted_quantity,
-        accepted_unit_price: suggestion.suggested_accepted_unit_price,
-        outcome_notes: `PO suggestion applied: ${suggestion.reason}`,
-      })),
+  const applySelectedSuggestions = async () => {
+    const selectedMatchedLines = parsedPOComparison.lines.filter((line) => (
+      hasLineId(selectedSuggestions, line.quotationLineId)
+      && isSafelyActionableMatchedLine(line)
+      && (poResult?.suggestions || []).some((suggestion) => (
+        sameLineId(suggestion.quotation_line_id, line.quotationLineId)
+      ))
+    ));
+    const suggestionIds = uniqueLineIds(selectedMatchedLines.map((line) => line.quotationLineId));
+    const explicitlySelectedMissingIds = (poResult?.missing_quote_line_ids || []).filter(
+      (lineId) => hasLineId(selectedSuggestions, lineId) && !hasLineId(suggestionIds, lineId)
+    );
+    if (!selectedMatchedLines.length && !explicitlySelectedMissingIds.length) return;
+    const suggestionForLine = (lineId) => (poResult?.suggestions || []).find(
+      (suggestion) => sameLineId(suggestion.quotation_line_id, lineId)
+    );
+    const missingLineUpdates = explicitlySelectedMissingIds.map((lineId) => ({
+      id: lineId,
+      outcome_status: 'rejected',
+      outcome_notes: 'PO suggestion applied: this quoted line was not ordered on the reviewed LPO.',
+    }));
+    const applied = await patchOutcome({
+      line_updates: [
+        ...selectedMatchedLines.map((line) => {
+          const suggestion = suggestionForLine(line.quotationLineId);
+          const actual = actualAcceptedValues(line);
+          const quotedQuantity = numberOrNull(line.quotedQuantity);
+          const acceptedQuantity = numberOrNull(actual.quantity);
+          const quantityChanged = quotedQuantity !== null
+            && acceptedQuantity !== null
+            && Math.abs(quotedQuantity - acceptedQuantity) > 0.0005;
+          return {
+            id: line.quotationLineId,
+            outcome_status: quantityChanged ? 'quantity_changed' : 'accepted',
+            accepted_quantity: actual.quantity,
+            accepted_unit_price: actual.unitPrice,
+            outcome_notes: `PO suggestion applied: ${firstDefined(suggestion?.reason, line.reason, 'Deterministic LPO line match')}`,
+          };
+        }),
+        ...missingLineUpdates,
+      ],
       po_import_id: poResult?.id,
-      applied_po_line_ids: suggestions.map((suggestion) => suggestion.quotation_line_id),
-    }, 'Selected PO suggestions applied. Review and save final outcome when ready.');
+      // Omitted quotation lines are an explicit staff outcome, not a parsed PO
+      // suggestion, so they must not receive suggestion provenance.
+      applied_po_line_ids: suggestionIds,
+    }, 'Selected PO line decisions applied. Review and save the final outcome when ready.');
+    if (applied) setSelectedSuggestions([]);
   };
 
   if (loading) return <div className="qm-loading">Loading quotation outcome...</div>;
@@ -932,7 +1464,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
 
   return (
     <div className="qm-section qm-outcome">
-      <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+      {!selectedEvidence && <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />}
       <div className="qm-editor-header">
         <div>
           <button type="button" className="qm-secondary small" onClick={onBack}>Back to Quotations</button>
@@ -947,7 +1479,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         </div>
       </div>
 
-      {notice && <div className={`qm-feedback ${notice.type}`}>{notice.message}</div>}
+      {notice && !selectedEvidence && <div className={`qm-feedback ${notice.type}`}>{notice.message}</div>}
 
       <div className="qm-stat-grid">
         <div className="qm-stat"><span>{money(summary.quoted_value, quote.currency)}</span><p>Quoted value</p></div>
@@ -987,7 +1519,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                   key={evidence.id}
                   evidence={evidence}
                   markingEvidenceId={markingEvidenceId}
-                  onReview={setSelectedEvidenceId}
+                  onReview={openEvidenceReview}
                   onMarkNotRelevant={markEvidenceNotRelevant}
                 />
               ))}
@@ -1010,7 +1542,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                   key={evidence.id}
                   evidence={evidence}
                   markingEvidenceId={markingEvidenceId}
-                  onReview={setSelectedEvidenceId}
+                  onReview={openEvidenceReview}
                   onMarkNotRelevant={markEvidenceNotRelevant}
                 />
               ))}
@@ -1030,15 +1562,74 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       </div>
 
       {selectedEvidence && (
-        <div className="qm-modal-backdrop" role="presentation" onClick={() => setSelectedEvidenceId(null)}>
-          <div className="qm-modal qm-evidence-detail-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <div className="qm-modal-backdrop" role="presentation" onClick={closeEvidenceReview}>
+          <div
+            className="qm-modal qm-evidence-detail-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`qm-evidence-dialog-title-${selectedEvidence.id}`}
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="qm-panel-heading">
               <div>
                 <span className="qm-step-kicker">Gmail source review</span>
-                <h3>{selectedEvidence.subject || 'Untitled email'}</h3>
+                <h3 id={`qm-evidence-dialog-title-${selectedEvidence.id}`}>{selectedEvidenceComparison.companyName} - {selectedEvidence.subject || 'Untitled email'}</h3>
                 <p>{evidenceStatusInfo(selectedEvidence).description}</p>
               </div>
-              <button type="button" className="qm-secondary small" onClick={() => setSelectedEvidenceId(null)}>Close</button>
+              <button ref={evidenceCloseButtonRef} type="button" className="qm-secondary small" onClick={closeEvidenceReview}>Close</button>
+            </div>
+
+            <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+            {notice && <div className={`qm-feedback ${notice.type}`} aria-live="polite">{notice.message}</div>}
+
+            <div className="qm-evidence-detail-section qm-evidence-commercial-context">
+              <h4>Customer, quotation, and LPO</h4>
+              <div className="qm-evidence-detail-grid qm-commercial-summary-grid">
+                <div>
+                  <span>Company</span>
+                  <strong>{selectedEvidenceComparison.companyName}</strong>
+                </div>
+                <div>
+                  <span>Quotation</span>
+                  <strong>{selectedEvidenceComparison.quotationNumber}</strong>
+                </div>
+                {selectedEvidenceComparison.quotationSubtotal !== undefined && selectedEvidenceComparison.quotationSubtotal !== null && (
+                  <div>
+                    <span>Quote subtotal before VAT</span>
+                    <strong>{optionalMoney(selectedEvidenceComparison.quotationSubtotal, selectedEvidenceComparison.currency)}</strong>
+                  </div>
+                )}
+                {selectedEvidenceComparison.quotationVatTotal !== undefined && selectedEvidenceComparison.quotationVatTotal !== null && (
+                  <div>
+                    <span>Quote VAT</span>
+                    <strong>{optionalMoney(selectedEvidenceComparison.quotationVatTotal, selectedEvidenceComparison.currency)}</strong>
+                  </div>
+                )}
+                <div>
+                  <span>Quote total incl. VAT</span>
+                  <strong>{optionalMoney(selectedEvidenceComparison.quotationTotal, selectedEvidenceComparison.currency, 'Not available')}</strong>
+                </div>
+                <div>
+                  <span>PO / LPO reference</span>
+                  <strong>{loadingEvidenceSource && !selectedEvidenceUsesParsedComparison ? 'Loading source...' : selectedEvidenceComparison.lpoNumber}</strong>
+                </div>
+                <div>
+                  <span>LPO stated total</span>
+                  <strong>{loadingEvidenceSource && !selectedEvidenceUsesParsedComparison
+                    ? 'Loading source...'
+                    : optionalMoney(selectedEvidenceComparison.lpoTotal, selectedEvidenceComparison.currency, 'Not stated')}</strong>
+                </div>
+                <div className={`qm-total-result status-${String(selectedEvidenceComparison.totalResult || 'unknown').toLowerCase()}`}>
+                  <span>Total comparison</span>
+                  <strong>{loadingEvidenceSource && !selectedEvidenceUsesParsedComparison
+                    ? 'Loading source...'
+                    : totalResultText(
+                      selectedEvidenceComparison.totalResult,
+                      selectedEvidenceComparison.totalBasis,
+                      selectedEvidenceComparison.totalDetail
+                    )}</strong>
+                </div>
+              </div>
             </div>
 
             <div className="qm-evidence-detail-grid">
@@ -1078,6 +1669,24 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                     {selectedEvidenceReference.detail ? ` · ${selectedEvidenceReference.detail}` : ''}
                   </strong>
                 </div>
+              )}
+            </div>
+
+            <div className="qm-evidence-detail-section qm-commercial-comparison-section">
+              <div className="qm-evidence-section-heading">
+                <strong>Scanned line comparison</strong>
+                <span>Review-only - nothing here changes the outcome</span>
+              </div>
+              <p className="qm-evidence-comparison-help">
+                Omitted means the item was not present on this LPO; it does not prove the customer explicitly rejected it. Prices marked not stated are never copied from our quote into the customer-price column.
+              </p>
+              {selectedEvidenceComparison.warnings.map((warning) => (
+                <div className="qm-notice warning" key={warning}>{warning}</div>
+              ))}
+              {loadingEvidenceSource && !selectedEvidenceComparison.lines.length ? (
+                <div className="qm-empty subtle">Loading the deterministic item, quantity, and price comparison...</div>
+              ) : (
+                <CommercialComparisonTable comparison={selectedEvidenceComparison} />
               )}
             </div>
 
@@ -1193,6 +1802,41 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             </div>
 
             {selectedEvidence.error && <div className="qm-notice warning">{selectedEvidence.error}</div>}
+            {poResult && sameLineId(poResultEvidenceId, selectedEvidence.id) && (
+              <div className="qm-evidence-detail-section qm-parsed-comparison-section" aria-live="polite">
+                <div className="qm-evidence-section-heading">
+                  <strong>Confirmed link - parsed line decisions</strong>
+                  <span>{selectedSuggestions.length} selected to apply</span>
+                </div>
+                <p className="qm-evidence-comparison-help">
+                  Deterministic matched rows are preselected. Not-ordered rows stay unselected; checking one explicitly will mark that quotation line rejected when you apply. Unmatched LPO rows cannot be applied until they are linked.
+                </p>
+                {!!parsedPOComparison.warnings.length && (
+                  <div className="qm-notice warning">{parsedPOComparison.warnings.join(' ')}</div>
+                )}
+                <CommercialComparisonTable
+                  comparison={parsedPOComparison}
+                  selectedLineIds={selectedSuggestions}
+                  actionableLineIds={parsedActionableLineIds}
+                  onToggleLine={(lineId) => setSelectedSuggestions((current) => (
+                    hasLineId(current, lineId)
+                      ? current.filter((id) => !sameLineId(id, lineId))
+                      : [...current, lineId]
+                  ))}
+                />
+                <div className="qm-action-row qm-parsed-comparison-actions">
+                  <button
+                    type="button"
+                    className="qm-primary"
+                    disabled={!selectedSuggestions.length || saving}
+                    onClick={applySelectedSuggestions}
+                  >
+                    {saving ? 'Applying decisions...' : 'Apply selected line decisions'}
+                  </button>
+                  <small>Applying is the explicit staff confirmation step; parsing alone saves no line outcome.</small>
+                </div>
+              </div>
+            )}
             <div className="qm-action-row">
               <button
                 type="button"
@@ -1286,40 +1930,27 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         <div className="qm-panel">
           <div className="qm-panel-heading">
             <div>
-              <h3>PO Suggestions</h3>
-              <p>{poResult.suggestions.length} matched suggestion(s), {poResult.unmatched_po_rows.length} unmatched PO row(s), {poResult.missing_quote_line_ids.length} quoted line(s) not found in PO.</p>
+              <h3>PO line comparison</h3>
+              <p>{(poResult.suggestions || []).length} matched line(s), {(poResult.unmatched_po_rows || []).length} unmatched PO row(s), {(poResult.missing_quote_line_ids || []).length} quoted line(s) not found in the PO.</p>
             </div>
-            <button type="button" className="qm-primary" disabled={!selectedSuggestions.length || saving} onClick={applySelectedSuggestions}>Apply Selected Suggestions</button>
+            <button type="button" className="qm-primary" disabled={!selectedSuggestions.length || saving} onClick={applySelectedSuggestions}>
+              {saving ? 'Applying decisions...' : 'Apply selected line decisions'}
+            </button>
           </div>
-          {!!poResult.warnings?.length && <div className="qm-notice">{poResult.warnings.join(' ')}</div>}
-          <div className="qm-table-wrap compact">
-            <table className="qm-table">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>PO item</th>
-                  <th>Matched quote line</th>
-                  <th>Suggested qty</th>
-                  <th>Suggested price</th>
-                  <th>Confidence</th>
-                  <th>Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {poResult.suggestions.map((suggestion) => (
-                  <tr key={`${suggestion.quotation_line_id}-${suggestion.po_row_index}`}>
-                    <td><input type="checkbox" checked={selectedSuggestions.includes(suggestion.quotation_line_id)} onChange={() => setSelectedSuggestions((current) => current.includes(suggestion.quotation_line_id) ? current.filter((id) => id !== suggestion.quotation_line_id) : [...current, suggestion.quotation_line_id])} /></td>
-                    <td>{suggestion.po_row?.item_name || '-'}</td>
-                    <td>{suggestion.quotation_line_label}</td>
-                    <td>{suggestion.suggested_accepted_quantity || '-'}</td>
-                    <td>{suggestion.suggested_accepted_unit_price ? unitMoney(suggestion.suggested_accepted_unit_price, quote.currency) : '-'}</td>
-                    <td>{Math.round(Number(suggestion.confidence || 0))}%</td>
-                    <td>{suggestion.reason}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <p className="qm-evidence-comparison-help">
+            Our columns come from the quotation. Customer columns show only values actually stated on the parsed PO/LPO. Deterministic matches are preselected; omitted lines require an explicit checkbox before they can be applied as rejected.
+          </p>
+          {!!parsedPOComparison.warnings.length && <div className="qm-notice warning">{parsedPOComparison.warnings.join(' ')}</div>}
+          <CommercialComparisonTable
+            comparison={parsedPOComparison}
+            selectedLineIds={selectedSuggestions}
+            actionableLineIds={parsedActionableLineIds}
+            onToggleLine={(lineId) => setSelectedSuggestions((current) => (
+              hasLineId(current, lineId)
+                ? current.filter((id) => !sameLineId(id, lineId))
+                : [...current, lineId]
+            ))}
+          />
         </div>
       )}
 

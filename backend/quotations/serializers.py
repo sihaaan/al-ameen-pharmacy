@@ -10,6 +10,7 @@ from api.serializers import ProductListSerializer
 
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
+from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
 from .models import (
     Company,
     CompanyContact,
@@ -2221,6 +2222,7 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source="created_by.username", read_only=True, allow_null=True)
     gmail_evidence_subject = serializers.CharField(source="gmail_evidence.subject", read_only=True, allow_null=True)
     canonical_lpo = serializers.SerializerMethodField()
+    commercial_comparison = serializers.SerializerMethodField()
 
     class Meta:
         model = QuotationOutcomePOImport
@@ -2230,6 +2232,7 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "gmail_evidence",
             "gmail_evidence_subject",
             "canonical_lpo",
+            "commercial_comparison",
             "source_type",
             "source_filename",
             "source_sha256",
@@ -2257,6 +2260,12 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
         except QuotationLPO.DoesNotExist:
             return None
         return {"id": lpo.id, "status": lpo.status, "lpo_number": lpo.lpo_number}
+
+    def get_commercial_comparison(self, obj):
+        evidence = obj.gmail_evidence
+        if not evidence:
+            return None
+        return safe_build_po_evidence_commercial_comparison(evidence)
 
 
 class ProformaInvoiceLineSerializer(serializers.ModelSerializer):
