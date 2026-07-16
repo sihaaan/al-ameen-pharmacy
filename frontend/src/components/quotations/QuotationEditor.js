@@ -223,6 +223,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [lineFilter, setLineFilter] = useState('active');
   const [productCreateModal, setProductCreateModal] = useState(null);
+  const [productCreateError, setProductCreateError] = useState(null);
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
   const [contactSaving, setContactSaving] = useState(false);
@@ -842,13 +843,20 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const line = activeLines.find((candidate) => candidate.id === lineId);
       return [lineId, lineLabel(line, lineDrafts[lineId])];
     }));
+    setProductCreateError(null);
     setProductCreateModal({ lineIds: ids, names, confirmations: {} });
+  };
+
+  const closeCreateProductModal = () => {
+    setProductCreateError(null);
+    setProductCreateModal(null);
   };
 
   const confirmCreateProducts = async (forceCreate = false) => {
     if (!productCreateModal || saving || actionInFlight) return;
     setSaving(true);
     setErrorInfo(null);
+    setProductCreateError(null);
     setLineFeedback(null);
     try {
       const response = await quotationAPI.quotes.bulkCreateProductsForLines(quote.id, {
@@ -888,22 +896,26 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setSelectedLineIds((current) => current.filter((id) => !updatedIds.includes(id)));
       if (confirmationRequired.length > 0) {
         const pendingIds = confirmationRequired.map((entry) => entry.line_id);
-        setProductCreateModal((current) => ({
-          ...current,
-          lineIds: pendingIds,
-          confirmations: Object.fromEntries(confirmationRequired.map((entry) => [entry.line_id, entry])),
-        }));
+        setProductCreateModal((current) => (
+          current
+            ? {
+              ...current,
+              lineIds: pendingIds,
+              confirmations: Object.fromEntries(confirmationRequired.map((entry) => [entry.line_id, entry])),
+            }
+            : null
+        ));
         setLineFeedback({
           type: 'warning',
           message: `${confirmationRequired.length} row${confirmationRequired.length === 1 ? '' : 's'} look like existing Products. Review the matches before creating anything new.`,
         });
       } else {
-        setProductCreateModal(null);
+        closeCreateProductModal();
         setLineFeedback({ type: 'success', message: response.data.message || 'Products created/linked.' });
       }
     } catch (error) {
       const details = await describeQuotationError(error, 'Create Products from quote lines', `POST /quotations/quotes/${quote.id}/bulk_create_products_for_lines/`);
-      setErrorInfo(details);
+      setProductCreateError(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setSaving(false);
@@ -926,6 +938,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     };
     setSaving(true);
     setErrorInfo(null);
+    setProductCreateError(null);
     setLineFeedback(null);
     try {
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
@@ -953,7 +966,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setLineFeedback({ type: 'success', message: `Linked the row to existing Product '${candidate.product_name}'.` });
     } catch (error) {
       const details = await describeQuotationError(error, 'Link existing Product to quote line', `POST /quotations/quotes/${quote.id}/bulk_update_lines/`);
-      setErrorInfo(details);
+      setProductCreateError(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setSaving(false);
@@ -1016,6 +1029,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const warning = error?.response?.data;
       if (error?.response?.status === 409 && warning?.requires_confirmation) {
         const draft = lineDrafts[lineId] || {};
+        setProductCreateError(null);
         setProductCreateModal({
           lineIds: [lineId],
           names: { [lineId]: draft.item_name_snapshot || '' },
@@ -1719,8 +1733,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                 <h3>Create Products from unmatched rows</h3>
                 <p>The catalog is checked first. Exact matches are reused automatically; similar matches must be reviewed before a new internal Product is created.</p>
               </div>
-              <button type="button" className="qm-secondary small" onClick={() => setProductCreateModal(null)}>Close</button>
+              <button type="button" className="qm-secondary small" disabled={saving} onClick={closeCreateProductModal}>Close</button>
             </div>
+            <QuotationErrorNotice error={productCreateError} onDismiss={() => setProductCreateError(null)} />
             <div className="qm-table-wrap">
               <table className="qm-table">
                 <thead>
@@ -1739,7 +1754,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                         <td>
                           <input
                             value={productCreateModal.names[lineId] || ''}
+                            disabled={saving}
                             onChange={(event) => setProductCreateModal((current) => {
+                              if (!current) return current;
                               const confirmations = { ...current.confirmations };
                               delete confirmations[lineId];
                               return {
@@ -1792,7 +1809,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               >
                 {saving ? 'Checking catalog...' : hasProductCreationWarnings ? 'Create new Product anyway' : 'Check catalog and continue'}
               </button>
-              <button type="button" className="qm-secondary" disabled={saving} onClick={() => setProductCreateModal(null)}>Cancel</button>
+              <button type="button" className="qm-secondary" disabled={saving} onClick={closeCreateProductModal}>Cancel</button>
             </div>
           </div>
         </div>

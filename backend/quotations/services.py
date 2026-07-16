@@ -68,6 +68,11 @@ def _quotation_lines_for_update():
     return QuotationLine.objects.select_for_update(of=("self",))
 
 
+def _quotations_for_update():
+    """Lock only the quotation row when Company is joined for workflow data."""
+    return Quotation.objects.select_for_update(of=("self",))
+
+
 def recalculate_quotation_totals(quotation):
     totals = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).aggregate(
         subtotal=Sum("line_subtotal"),
@@ -417,11 +422,14 @@ def _record_applied_po_import_provenance(
 
 @transaction.atomic
 def update_quotation_outcome(quotation, data, actor):
-    quotation = Quotation.objects.select_for_update().select_related("company").get(pk=quotation.pk)
+    quotation = _quotations_for_update().select_related("company").get(pk=quotation.pk)
     ensure_outcome_reviewable(quotation)
     lines_by_id = {
         line.id: line
-        for line in quotation.lines.select_for_update().select_related("product", "quote_item").order_by("sort_order", "id")
+        for line in _quotation_lines_for_update()
+        .filter(quotation=quotation)
+        .select_related("product", "quote_item")
+        .order_by("sort_order", "id")
     }
     before = {
         "quotation": _quotation_outcome_snapshot(quotation),
@@ -1298,20 +1306,51 @@ def _product_name_from_line(line, override_name=""):
     return name[:200]
 
 
-def learn_confirmed_inquiry_line_alias(line, actor):
+def _audit_automatic_alias_learning(alias, created, actor, *, company, quotation=None):
+    action = getattr(alias, "_automatic_learning_action", "created" if created else "") if alias else ""
+    if not action:
+        return
+    previous = getattr(alias, "_automatic_learning_previous", None)
+    changes = {
+        "alias": alias.alias,
+        "alias_id": alias.id,
+        "learning_action": action,
+        "product_id": alias.product_id,
+        "previous": previous,
+    }
+    audit_log(
+        actor,
+        QuotationAuditLog.ACTION_CREATED if created else QuotationAuditLog.ACTION_UPDATED,
+        alias,
+        message=f"Automatically {action} company Product alias '{alias.alias}' from a confirmed item match.",
+        changes=changes,
+        company=company,
+        quotation=quotation,
+    )
+
+
+def learn_confirmed_inquiry_line_alias(line, actor, *, explicit_confirmation=False):
     if (
         line.match_status != InquiryLine.MATCH_CONFIRMED
         or not line.matched_product_id
         or not line.inquiry.company_id
     ):
         return None, False
-    return learn_confirmed_product_alias(
+    alias, created = learn_confirmed_product_alias(
         source_text=line.raw_name,
         product=line.matched_product,
         company=line.inquiry.company,
         actor=actor,
         notes=f"Learned from confirmed inquiry line {line.pk}.",
+        explicit_confirmation=explicit_confirmation,
     )
+    _audit_automatic_alias_learning(
+        alias,
+        created,
+        actor,
+        company=line.inquiry.company,
+    )
+    return alias, created
 
 
 def quotation_line_source_wording(line):
@@ -1322,7 +1361,13 @@ def quotation_line_source_wording(line):
     return ""
 
 
-def learn_confirmed_quotation_line_alias(line, actor, *, source_wording=""):
+def learn_confirmed_quotation_line_alias(
+    line,
+    actor,
+    *,
+    source_wording="",
+    explicit_confirmation=False,
+):
     if (
         line.match_status != QuotationLine.MATCH_CONFIRMED
         or not line.product_id
@@ -1330,13 +1375,22 @@ def learn_confirmed_quotation_line_alias(line, actor, *, source_wording=""):
     ):
         return None, False
     wording = source_wording if str(source_wording or "").strip() else quotation_line_source_wording(line)
-    return learn_confirmed_product_alias(
+    alias, created = learn_confirmed_product_alias(
         source_text=wording,
         product=line.product,
         company=line.quotation.company,
         actor=actor,
         notes=f"Learned from confirmed quotation line {line.pk}.",
+        explicit_confirmation=explicit_confirmation,
     )
+    _audit_automatic_alias_learning(
+        alias,
+        created,
+        actor,
+        company=line.quotation.company,
+        quotation=line.quotation,
+    )
+    return alias, created
 
 
 def _get_or_create_internal_product_from_line(line, actor, override_name="", *, confirm_create=False):
@@ -1367,7 +1421,12 @@ def _link_quotation_line_to_product(line, product, actor, *, reason="Created/lin
     line.match_status = QuotationLine.MATCH_CONFIRMED
     line.match_reason = reason
     line.save(update_fields=["product", "quote_item", "item_name_snapshot", "match_status", "match_reason", "line_subtotal", "vat_amount", "line_total", "updated_at"])
-    learn_confirmed_quotation_line_alias(line, actor, source_wording=source_wording)
+    learn_confirmed_quotation_line_alias(
+        line,
+        actor,
+        source_wording=source_wording,
+        explicit_confirmation=True,
+    )
     audit_log(
         actor,
         QuotationAuditLog.ACTION_UPDATED,
@@ -1906,7 +1965,7 @@ def apply_product_match_to_historical_line(line, company=None):
 @transaction.atomic
 def apply_product_matches_to_historical_import(historical_import, actor=None):
     historical_import = (
-        HistoricalPriceImport.objects.select_for_update()
+        HistoricalPriceImport.objects.select_for_update(of=("self",))
         .select_related("company")
         .get(pk=historical_import.pk)
     )
@@ -2130,6 +2189,7 @@ def create_imported_inquiry(validated_data, actor):
         **validated_data,
     )
     for index, line_data in enumerate(lines_data):
+        explicit_confirmation = bool(line_data.pop("match_confirmed_by_user", False))
         line = InquiryLine.objects.create(
             inquiry=inquiry,
             sort_order=index,
@@ -2147,7 +2207,11 @@ def create_imported_inquiry(validated_data, actor):
             parse_status=line_data.get("parse_status", InquiryLine.PARSE_NEEDS_REVIEW),
             parse_confidence=line_data.get("parse_confidence", 0.0),
         )
-        learn_confirmed_inquiry_line_alias(line, actor)
+        learn_confirmed_inquiry_line_alias(
+            line,
+            actor,
+            explicit_confirmation=explicit_confirmation,
+        )
     audit_log(
         actor,
         QuotationAuditLog.ACTION_IMPORTED,
@@ -2191,7 +2255,7 @@ def remember_inquiry_line_alias(line, actor):
 @transaction.atomic
 def remember_historical_import_line_alias(line, actor):
     line = (
-        HistoricalPriceImportLine.objects.select_for_update()
+        HistoricalPriceImportLine.objects.select_for_update(of=("self",))
         .select_related("historical_import__company")
         .get(pk=line.pk)
     )
@@ -2220,7 +2284,7 @@ def remember_historical_import_line_alias(line, actor):
 
 @transaction.atomic
 def remember_quotation_line_alias(line, actor):
-    line = QuotationLine.objects.select_for_update().select_related("quotation__company").get(pk=line.pk)
+    line = _quotation_lines_for_update().select_related("quotation__company").get(pk=line.pk)
     if not line.product_id:
         raise ValidationError("Select a product before remembering this alias.")
     alias_text = line.inquiry_line.raw_name if line.inquiry_line_id else line.item_name_snapshot
@@ -2284,7 +2348,7 @@ def bulk_create_products_from_quotation_lines(
     *,
     confirm_create_line_ids=None,
 ):
-    quotation = Quotation.objects.select_for_update().select_related("company").get(pk=quotation.pk)
+    quotation = _quotations_for_update().select_related("company").get(pk=quotation.pk)
     ensure_quotation_editable(quotation)
     names_by_id = {int(key): value for key, value in (names_by_id or {}).items() if str(key).isdigit()}
     confirm_create_line_ids = {int(line_id) for line_id in (confirm_create_line_ids or [])}
@@ -2409,13 +2473,21 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             "product" in payload
             and str(requested_product_id or "") != str(line.product_id or "")
         )
-        match_fields_touched = bool(
-            {"product", "item_name_snapshot", "match_status"}.intersection(payload)
+        requested_snapshot = payload.get("item_name_snapshot", line.item_name_snapshot)
+        snapshot_changed = (
+            "item_name_snapshot" in payload
+            and str(requested_snapshot or "").strip() != str(line.item_name_snapshot or "").strip()
         )
+        requested_match_status = payload.get("match_status", line.match_status)
+        match_status_changed = (
+            "match_status" in payload
+            and str(requested_match_status or "") != str(line.match_status or "")
+        )
+        match_fields_changed = product_changed or snapshot_changed or match_status_changed
         restore_source_snapshot = bool(
             str(source_wording or "").strip()
             and requested_product_id
-            and (product_changed or (line.inquiry_line_id and match_fields_touched))
+            and (product_changed or (line.inquiry_line_id and match_fields_changed))
         )
         for field in allowed_fields:
             if field not in payload:
@@ -2460,11 +2532,12 @@ def bulk_update_quotation_lines(quotation, rows, actor):
         elif line.product_id and not str(line.item_name_snapshot or "").strip():
             line.item_name_snapshot = source_wording or line.product.name
         line.save()
-        if match_fields_touched:
+        if match_fields_changed:
             learn_confirmed_quotation_line_alias(
                 line,
                 actor,
                 source_wording=source_wording if restore_source_snapshot else "",
+                explicit_confirmation=True,
             )
         updated.append(line)
     recalculate_quotation_totals(quotation)
@@ -2543,7 +2616,7 @@ def _validate_line_for_finalization(line):
 @transaction.atomic
 def finalize_quotation(quotation, actor):
     quotation = (
-        Quotation.objects.select_for_update()
+        _quotations_for_update()
         .select_related("company")
         .prefetch_related("lines__quote_item", "lines__product")
         .get(pk=quotation.pk)
@@ -2599,7 +2672,7 @@ def finalize_quotation(quotation, actor):
 @transaction.atomic
 def revise_quotation(quotation, actor):
     source = (
-        Quotation.objects.select_for_update()
+        _quotations_for_update()
         .select_related("company")
         .prefetch_related("lines")
         .get(pk=quotation.pk)

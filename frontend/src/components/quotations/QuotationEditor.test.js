@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import QuotationEditor from './QuotationEditor';
-import quotationAPI from '../../api/quotations';
+import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 
 jest.mock('../../api/quotations', () => ({
   __esModule: true,
@@ -110,6 +110,13 @@ const deferred = () => {
 describe('QuotationEditor Product price context', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    describeQuotationError.mockImplementation(async (error, action, endpoint) => ({
+      action,
+      endpoint,
+      status: error?.response?.status || 'Network error',
+      detail: error?.response?.data?.detail || error?.message || 'Request failed',
+    }));
+    formatQuotationError.mockImplementation(() => 'Request failed');
     quotationAPI.quotes.retrieve.mockResolvedValue({ data: quote });
     quotationAPI.quotes.productPrices.mockResolvedValue({ data: { results: {} } });
     quotationAPI.quotes.lpos.mockResolvedValue({ data: [] });
@@ -308,5 +315,58 @@ describe('QuotationEditor Product price context', () => {
     expect(quotationAPI.lines.rememberAlias).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
     expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
+  });
+
+  test('shows bulk Product creation errors inside the open modal', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.quotes.bulkCreateProductsForLines.mockRejectedValue({
+      message: 'A retired alias blocked this Product name.',
+      response: {
+        status: 400,
+        data: { detail: 'A retired alias blocked this Product name.' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create Products from quotation lines' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+
+    expect(await within(dialog).findByText('A retired alias blocked this Product name.')).toBeInTheDocument();
+    expect(within(dialog).getByRole('alert')).toBeInTheDocument();
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(dialog).toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('keeps the create modal stable while a catalog check is pending', async () => {
+    const request = deferred();
+    quotationAPI.quotes.bulkCreateProductsForLines.mockImplementationOnce(() => request.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create Products from quotation lines' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDisabled();
+    expect(within(dialog).getByDisplayValue('Imported gloves')).toBeDisabled();
+
+    await act(async () => request.resolve({
+      data: {
+        updated_lines: [],
+        confirmation_required: [{
+          line_id: 31,
+          warning: 'A similar Product exists.',
+          creation_blocked: false,
+          candidates: [],
+        }],
+      },
+    }));
+
+    expect(await within(dialog).findByText('Likely existing Product found')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue('Imported gloves')).toBeEnabled();
   });
 });

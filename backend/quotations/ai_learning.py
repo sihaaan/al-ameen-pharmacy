@@ -781,7 +781,7 @@ def _matching_pending_line_suggestions(source_suggestion):
     if not line or not batch or not line.normalized_item_name:
         return HistoricalImportAISuggestion.objects.none()
     return (
-        HistoricalImportAISuggestion.objects.select_for_update()
+        HistoricalImportAISuggestion.objects.select_for_update(of=("self",))
         .select_related("historical_import__company", "batch", "line", "suggested_company", "suggested_product")
         .filter(
             batch=batch,
@@ -825,36 +825,13 @@ def _safe_create_company_alias(suggestion, actor):
     if not suggestion.suggested_product_id:
         raise ValidationError("Select a target Product before creating an alias.")
     alias_text = suggestion.alias_text or line.item_name
-    normalized = normalize_label(alias_text)
-    existing_aliases = list(
-        ProductAlias.objects.select_for_update()
-        .select_related("product")
-        .filter(company=historical_import.company, normalized_alias=normalized)
-        .order_by("-is_active", "id")
+    alias, _ = create_product_alias(
+        alias_text=alias_text,
+        product=suggestion.suggested_product,
+        company=historical_import.company,
+        actor=actor,
+        notes=f"Approved from historical import AI suggestion {suggestion.pk}.",
     )
-    conflicting = [alias for alias in existing_aliases if alias.product_id != suggestion.suggested_product_id]
-    if conflicting:
-        existing = conflicting[0]
-        raise ValidationError(
-            f"Alias '{alias_text}' already points to '{existing.product.name}' for this company."
-        )
-    if existing_aliases:
-        alias = existing_aliases[0]
-        alias.alias = alias_text.strip()
-        alias.product = suggestion.suggested_product
-        alias.is_active = True
-        alias.notes = f"Approved from historical import AI suggestion {suggestion.pk}."
-        if not alias.created_by_id and getattr(actor, "is_authenticated", False):
-            alias.created_by = actor
-        alias.save(update_fields=["alias", "normalized_alias", "product", "is_active", "notes", "created_by", "updated_at"])
-    else:
-        alias, _ = create_product_alias(
-            alias_text=alias_text,
-            product=suggestion.suggested_product,
-            company=historical_import.company,
-            actor=actor,
-            notes=f"Approved from historical import AI suggestion {suggestion.pk}.",
-        )
     line.product = suggestion.suggested_product
     line.match_reason = f"Approved AI alias '{alias.alias}'."
     line.status = _ready_or_review(line)
@@ -958,16 +935,68 @@ def _apply_exact_matching_line_suggestions(source_suggestion, actor, source_resu
 def apply_historical_ai_suggestions(suggestion_ids, actor):
     if not suggestion_ids:
         raise ValidationError("Select at least one AI suggestion to apply.")
-    suggestions = list(
-        HistoricalImportAISuggestion.objects.select_for_update()
-        .select_related("historical_import__company", "batch", "line", "suggested_company", "suggested_product")
-        .filter(id__in=suggestion_ids)
-        .order_by("historical_import_id", "line__sort_order", "id")
+    try:
+        requested_ids = list(dict.fromkeys(int(suggestion_id) for suggestion_id in suggestion_ids))
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("AI suggestion ids must be valid integers.") from exc
+    seed_rows = list(
+        HistoricalImportAISuggestion.objects.filter(id__in=requested_ids).values("id", "batch_id")
     )
-    found_ids = {suggestion.id for suggestion in suggestions}
-    missing = [suggestion_id for suggestion_id in suggestion_ids if suggestion_id not in found_ids]
+    found_ids = {row["id"] for row in seed_rows}
+    missing = [suggestion_id for suggestion_id in requested_ids if suggestion_id not in found_ids]
     if missing:
         raise ValidationError(f"AI suggestions were not found: {missing}")
+
+    # Standalone imports do not share a propagation scope. Only batch-backed
+    # suggestions may auto-apply an exact-item decision to sibling rows.
+    batch_ids = {row["batch_id"] for row in seed_rows if row["batch_id"] is not None}
+    locked_suggestions = list(
+        HistoricalImportAISuggestion.objects.select_for_update(of=("self",))
+        .select_related("historical_import__company", "batch", "line", "suggested_company", "suggested_product")
+        .filter(
+            Q(id__in=requested_ids)
+            | Q(
+                batch_id__in=batch_ids,
+                suggestion_type=HistoricalImportAISuggestion.TYPE_LINE,
+                status=HistoricalImportAISuggestion.STATUS_PENDING,
+            )
+        )
+        .order_by("id")
+    )
+    locked_by_id = {suggestion.id: suggestion for suggestion in locked_suggestions}
+    missing_after_lock = [suggestion_id for suggestion_id in requested_ids if suggestion_id not in locked_by_id]
+    if missing_after_lock:
+        raise ValidationError(f"AI suggestions were no longer available: {missing_after_lock}")
+    import_ids = {suggestion.historical_import_id for suggestion in locked_suggestions}
+    line_ids = {suggestion.line_id for suggestion in locked_suggestions if suggestion.line_id}
+    locked_imports = {
+        historical_import.id: historical_import
+        for historical_import in HistoricalPriceImport.objects.select_for_update(of=("self",))
+        .select_related("company")
+        .filter(id__in=import_ids)
+        .order_by("id")
+    }
+    locked_lines = {
+        line.id: line
+        for line in HistoricalPriceImportLine.objects.select_for_update(of=("self",))
+        .select_related("historical_import__company", "product", "quote_item")
+        .filter(id__in=line_ids)
+        .order_by("id")
+    }
+    for line in locked_lines.values():
+        line.historical_import = locked_imports[line.historical_import_id]
+    for suggestion in locked_suggestions:
+        suggestion.historical_import = locked_imports[suggestion.historical_import_id]
+        if suggestion.line_id:
+            suggestion.line = locked_lines[suggestion.line_id]
+    suggestions = [locked_by_id[suggestion_id] for suggestion_id in requested_ids]
+    suggestions.sort(
+        key=lambda suggestion: (
+            suggestion.historical_import_id,
+            suggestion.line.sort_order if suggestion.line_id else -1,
+            suggestion.id,
+        )
+    )
 
     results = []
     touched_import_ids = set()

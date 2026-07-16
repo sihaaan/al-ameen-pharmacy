@@ -18,6 +18,7 @@ from rest_framework import status, viewsets
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
@@ -74,7 +75,12 @@ from .mailbox_po_reconciliation import (
     MailboxPOMatchBusy,
     reconcile_mailbox_po_audit_page,
 )
-from .matching import apply_match_to_preview_line, create_or_reuse_product
+from .matching import (
+    apply_match_to_preview_line,
+    create_managed_product_alias,
+    create_or_reuse_product,
+    update_managed_product_alias,
+)
 from .models import (
     Company,
     CompanyContact,
@@ -170,6 +176,8 @@ from .services import (
     learn_confirmed_inquiry_line_alias,
     learn_confirmed_quotation_line_alias,
     outcome_summary_for_quotation,
+    _quotation_lines_for_update,
+    _quotations_for_update,
     quotation_line_source_wording,
     remember_historical_import_line_alias,
     remember_inquiry_line_alias,
@@ -1642,12 +1650,50 @@ class ProductAliasViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        alias = serializer.save(created_by=self.request.user)
-        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, alias, message="Created product alias.")
+        with transaction.atomic():
+            alias = create_managed_product_alias(
+                company=serializer.validated_data.get("company"),
+                product=serializer.validated_data["product"],
+                alias_text=serializer.validated_data["alias"],
+                notes=serializer.validated_data.get("notes", ""),
+                is_active=serializer.validated_data.get("is_active", True),
+                actor=self.request.user,
+            )
+            serializer.instance = alias
+            audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, alias, message="Created product alias.")
 
     def perform_update(self, serializer):
-        alias = serializer.save()
-        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, alias, message="Updated product alias.")
+        with transaction.atomic():
+            alias = update_managed_product_alias(
+                alias_id=serializer.instance.pk,
+                changes=dict(serializer.validated_data),
+            )
+            serializer.instance = alias
+            audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, alias, message="Updated product alias.")
+
+    def create(self, request, *args, **kwargs):
+        try:
+            return super().create(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        except IntegrityError as exc:
+            return self.handle_safe_workflow_exception(exc, "Create product alias failed.")
+
+    def update(self, request, *args, **kwargs):
+        try:
+            return super().update(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        except IntegrityError as exc:
+            return self.handle_safe_workflow_exception(exc, "Update product alias failed.")
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            return super().partial_update(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+        except IntegrityError as exc:
+            return self.handle_safe_workflow_exception(exc, "Update product alias failed.")
 
 
 class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
@@ -1803,17 +1849,44 @@ class InquiryLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         with transaction.atomic():
             line = serializer.save()
-            learn_confirmed_inquiry_line_alias(line, self.request.user)
+            learn_confirmed_inquiry_line_alias(
+                line,
+                self.request.user,
+                explicit_confirmation=True,
+            )
             audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, line, message="Created inquiry line.")
 
     def perform_update(self, serializer):
-        match_fields_touched = bool(
-            {"raw_name", "matched_product", "match_status"}.intersection(serializer.validated_data)
-        )
         with transaction.atomic():
+            line = (
+                InquiryLine.objects.select_for_update(of=("self",))
+                .select_related("inquiry__company", "matched_product")
+                .get(pk=serializer.instance.pk)
+            )
+            serializer.instance = line
+            next_product = serializer.validated_data.get("matched_product", line.matched_product)
+            product_changed = (
+                "matched_product" in serializer.validated_data
+                and getattr(next_product, "pk", None) != line.matched_product_id
+            )
+            raw_name_changed = (
+                "raw_name" in serializer.validated_data
+                and str(serializer.validated_data.get("raw_name") or "").strip()
+                != str(line.raw_name or "").strip()
+            )
+            match_status_changed = (
+                "match_status" in serializer.validated_data
+                and str(serializer.validated_data.get("match_status") or "")
+                != str(line.match_status or "")
+            )
+            match_fields_changed = product_changed or raw_name_changed or match_status_changed
             line = serializer.save()
-            if match_fields_touched:
-                learn_confirmed_inquiry_line_alias(line, self.request.user)
+            if match_fields_changed:
+                learn_confirmed_inquiry_line_alias(
+                    line,
+                    self.request.user,
+                    explicit_confirmation=True,
+                )
             audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated inquiry line.")
 
     def create(self, request, *args, **kwargs):
@@ -3429,60 +3502,79 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        quotation = serializer.validated_data["quotation"]
-        ensure_quotation_editable(quotation)
         with transaction.atomic():
-            line = serializer.save()
+            quotation = (
+                _quotations_for_update()
+                .select_related("company")
+                .get(pk=serializer.validated_data["quotation"].pk)
+            )
+            ensure_quotation_editable(quotation)
+            line = serializer.save(quotation=quotation)
             source_wording = quotation_line_source_wording(line)
             if source_wording and line.item_name_snapshot != source_wording:
                 line.item_name_snapshot = source_wording
                 line.save(update_fields=["item_name_snapshot", "updated_at"])
-            learn_confirmed_quotation_line_alias(line, self.request.user)
+            learn_confirmed_quotation_line_alias(
+                line,
+                self.request.user,
+                explicit_confirmation=True,
+            )
             recalculate_quotation_totals(quotation)
             audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, line, message="Created quotation line.")
 
     def perform_update(self, serializer):
-        ensure_quotation_editable(serializer.instance.quotation)
-        next_inquiry_line = serializer.validated_data.get(
-            "inquiry_line",
-            serializer.instance.inquiry_line,
-        )
-        source_wording = (
-            next_inquiry_line.raw_name
-            if next_inquiry_line and str(next_inquiry_line.raw_name or "").strip()
-            else serializer.instance.item_name_snapshot
-        )
-        next_product = serializer.validated_data.get("product", serializer.instance.product)
-        product_changed = (
-            "product" in serializer.validated_data
-            and getattr(next_product, "pk", None) != serializer.instance.product_id
-        )
-        inquiry_changed = (
-            "inquiry_line" in serializer.validated_data
-            and getattr(next_inquiry_line, "pk", None) != serializer.instance.inquiry_line_id
-        )
-        match_fields_touched = bool(
-            {"inquiry_line", "product", "item_name_snapshot", "match_status"}.intersection(
-                serializer.validated_data
-            )
-        )
-        restore_source_snapshot = bool(
-            source_wording
-            and next_product
-            and (next_inquiry_line or product_changed or inquiry_changed)
-        )
-        if restore_source_snapshot:
-            serializer.validated_data["item_name_snapshot"] = source_wording
         with transaction.atomic():
+            quotation = _quotations_for_update().get(pk=serializer.instance.quotation_id)
+            ensure_quotation_editable(quotation)
+            line = (
+                _quotation_lines_for_update()
+                .select_related("quotation__company", "inquiry_line", "product")
+                .get(pk=serializer.instance.pk, quotation=quotation)
+            )
+            serializer.instance = line
+            next_inquiry_line = serializer.validated_data.get("inquiry_line", line.inquiry_line)
+            source_wording = (
+                next_inquiry_line.raw_name
+                if next_inquiry_line and str(next_inquiry_line.raw_name or "").strip()
+                else line.item_name_snapshot
+            )
+            next_product = serializer.validated_data.get("product", line.product)
+            product_changed = (
+                "product" in serializer.validated_data
+                and getattr(next_product, "pk", None) != line.product_id
+            )
+            inquiry_changed = (
+                "inquiry_line" in serializer.validated_data
+                and getattr(next_inquiry_line, "pk", None) != line.inquiry_line_id
+            )
+            snapshot_changed = (
+                "item_name_snapshot" in serializer.validated_data
+                and str(serializer.validated_data.get("item_name_snapshot") or "").strip()
+                != str(line.item_name_snapshot or "").strip()
+            )
+            match_status_changed = (
+                "match_status" in serializer.validated_data
+                and str(serializer.validated_data.get("match_status") or "")
+                != str(line.match_status or "")
+            )
+            match_fields_changed = product_changed or inquiry_changed or snapshot_changed or match_status_changed
+            restore_source_snapshot = bool(
+                source_wording
+                and next_product
+                and (next_inquiry_line or product_changed or inquiry_changed)
+            )
+            if restore_source_snapshot:
+                serializer.validated_data["item_name_snapshot"] = source_wording
             line = serializer.save()
             if restore_source_snapshot and line.item_name_snapshot != source_wording:
                 line.item_name_snapshot = source_wording
                 line.save(update_fields=["item_name_snapshot", "updated_at"])
-            if match_fields_touched:
+            if match_fields_changed:
                 learn_confirmed_quotation_line_alias(
                     line,
                     self.request.user,
                     source_wording=source_wording if restore_source_snapshot else "",
+                    explicit_confirmation=True,
                 )
             recalculate_quotation_totals(line.quotation)
             audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated quotation line.")
@@ -3834,6 +3926,17 @@ class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelVi
             queryset = queryset.filter(suggestion_type=suggestion_type)
         return queryset
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        suggestion = (
+            HistoricalImportAISuggestion.objects.select_for_update(of=("self",))
+            .get(pk=serializer.instance.pk)
+        )
+        if suggestion.status != HistoricalImportAISuggestion.STATUS_PENDING:
+            raise DRFValidationError({"detail": "Only pending suggestions can be edited."})
+        serializer.instance = suggestion
+        serializer.save()
+
     @action(detail=False, methods=["post"])
     def apply(self, request):
         try:
@@ -3854,12 +3957,21 @@ class HistoricalImportAISuggestionViewSet(QuotationBaseViewSet, viewsets.ModelVi
 
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):
-        suggestion = self.get_object()
-        if suggestion.status != HistoricalImportAISuggestion.STATUS_PENDING:
-            return Response({"detail": "Only pending suggestions can be rejected."}, status=status.HTTP_400_BAD_REQUEST)
-        suggestion.status = HistoricalImportAISuggestion.STATUS_REJECTED
-        suggestion.error_message = request.data.get("reason", "")
-        suggestion.save(update_fields=["status", "error_message", "updated_at"])
+        suggestion_id = self.get_object().pk
+        with transaction.atomic():
+            suggestion = (
+                HistoricalImportAISuggestion.objects.select_for_update(of=("self",))
+                .get(pk=suggestion_id)
+            )
+            self.check_object_permissions(request, suggestion)
+            if suggestion.status != HistoricalImportAISuggestion.STATUS_PENDING:
+                return Response(
+                    {"detail": "Only pending suggestions can be rejected."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            suggestion.status = HistoricalImportAISuggestion.STATUS_REJECTED
+            suggestion.error_message = request.data.get("reason", "")
+            suggestion.save(update_fields=["status", "error_message", "updated_at"])
         serializer = self.get_serializer(suggestion)
         return Response(serializer.data)
 

@@ -651,6 +651,20 @@ class ProductAliasSerializer(serializers.ModelSerializer):
         company = attrs.get("company", getattr(self.instance, "company", None))
         product = attrs.get("product", getattr(self.instance, "product", None))
         alias_text = attrs.get("alias", getattr(self.instance, "alias", ""))
+        if self.instance:
+            company_id = getattr(company, "pk", None)
+            product_id = getattr(product, "pk", None)
+            identity_unchanged = (
+                company_id == self.instance.company_id
+                and product_id == self.instance.product_id
+                and normalize_label(alias_text) == self.instance.normalized_alias
+            )
+            activating = (
+                not self.instance.is_active
+                and bool(attrs.get("is_active", self.instance.is_active))
+            )
+            if identity_unchanged and not activating:
+                return attrs
         identity = normalize_item_text(alias_text)
         if not identity:
             return attrs
@@ -1024,7 +1038,11 @@ class InquirySerializer(serializers.ModelSerializer):
                 line_data.pop("inquiry", None)
                 sort_order = line_data.pop("sort_order", index)
                 line = InquiryLine.objects.create(inquiry=inquiry, sort_order=sort_order, **line_data)
-                learn_confirmed_inquiry_line_alias(line, actor)
+                learn_confirmed_inquiry_line_alias(
+                    line,
+                    actor,
+                    explicit_confirmation=True,
+                )
         return inquiry
 
 
@@ -1051,6 +1069,7 @@ class ImportedInquiryLineSerializer(serializers.Serializer):
         choices=InquiryLine.MATCH_STATUS_CHOICES,
         default=InquiryLine.MATCH_UNRESOLVED,
     )
+    match_confirmed_by_user = serializers.BooleanField(required=False, default=False, write_only=True)
     parse_status = serializers.ChoiceField(
         choices=InquiryLine.PARSE_STATUS_CHOICES,
         default=InquiryLine.PARSE_NEEDS_REVIEW,
@@ -1694,6 +1713,15 @@ class QuotationLineSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, attrs):
+        requested_quotation = attrs.get("quotation")
+        if (
+            self.instance
+            and requested_quotation
+            and requested_quotation.pk != self.instance.quotation_id
+        ):
+            raise serializers.ValidationError(
+                {"quotation": "Quotation lines cannot be moved between quotations."}
+            )
         product = attrs.get("product") or getattr(self.instance, "product", None)
         product_image = attrs.get("product_image")
         if product_image is None and self.instance:

@@ -5,17 +5,18 @@ from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 
 from api.models import Product
 
-from .models import CompanyPriceHistory, ProductAlias, normalize_label
+from .models import Company, CompanyPriceHistory, ProductAlias, normalize_label
 
 
 AUTO_MATCH_CONFIDENCE = 0.88
 FUZZY_CANDIDATE_THRESHOLD = 0.58
 MAX_MATCH_CANDIDATES = 6
+GLOBAL_PRODUCT_ALIAS_ADVISORY_LOCK = 1_884_115_049
 
 _TOKEN_RE = re.compile(r"\d+(?:\.\d+)?|[a-z]+|%")
 _MEASUREMENT_RE = re.compile(
@@ -328,16 +329,147 @@ def _aliases_for_text(raw_text, company, *, for_update=False, include_inactive=F
             matches.append(alias)
     first_term = domain.split()[0] if domain.split() else ""
     fallback = queryset
-    if first_term:
-        fallback = fallback.filter(alias__icontains=first_term)
+    if first_term and not for_update:
+        raw_variants = {
+            first_term,
+            *(raw_token for raw_token, normalized_token in _TOKEN_ALIASES.items() if normalized_token == first_term),
+        }
+        token_filter = Q()
+        for raw_variant in sorted(raw_variants):
+            token_filter |= Q(alias__icontains=raw_variant)
+        fallback = fallback.filter(token_filter)
     seen = {alias.id for alias in matches}
-    for alias in fallback.order_by("id")[:100]:
+    ordered_fallback = fallback.order_by("id")
+    for alias in ordered_fallback:
         if alias.id in seen or alias.product.status == "archived":
             continue
         if normalize_item_text(alias.alias) == domain:
             matches.append(alias)
             seen.add(alias.id)
     return matches
+
+
+def _lock_product_alias_scopes(*companies):
+    """Serialize alias decisions before locking individual spelling rows."""
+    includes_global_scope = not companies or any(company is None for company in companies)
+    if connection.vendor == "postgresql" and includes_global_scope:
+        # The global (company=NULL) namespace has no row of its own to lock.
+        # Managed moves take this first as well, then lock Company rows in order.
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [GLOBAL_PRODUCT_ALIAS_ADVISORY_LOCK])
+    company_ids = sorted(
+        {
+            company.pk
+            for company in companies
+            if company and getattr(company, "pk", None)
+        }
+    )
+    if company_ids:
+        list(
+            Company.objects.select_for_update()
+            .filter(pk__in=company_ids)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+
+
+def _lock_product_alias_scope(company):
+    _lock_product_alias_scopes(company)
+
+
+def _assert_managed_alias_available(*, alias_text, product, company, exclude_alias_id=None):
+    cleaned_alias = str(alias_text or "").strip()
+    identity = normalize_item_text(cleaned_alias)
+    if not identity:
+        raise ValidationError("Alias text is required.")
+    queryset = (
+        ProductAlias.objects.select_for_update()
+        .select_related("product")
+        .filter(company=company)
+        .order_by("id")
+    )
+    if exclude_alias_id:
+        queryset = queryset.exclude(pk=exclude_alias_id)
+    for existing in queryset:
+        if normalize_item_text(existing.alias) != identity:
+            continue
+        if existing.product_id != product.id:
+            raise ValidationError(
+                f"Alias '{cleaned_alias}' is equivalent to '{existing.alias}', which already points to "
+                f"'{existing.product.name}' in this scope."
+            )
+        raise ValidationError(f"Equivalent alias '{existing.alias}' already exists in this scope.")
+    return cleaned_alias
+
+
+@transaction.atomic
+def create_managed_product_alias(*, company, product, alias_text, notes="", is_active=True, actor=None):
+    """Create an explicitly managed alias after an under-lock equivalence check."""
+    _lock_product_alias_scopes(company)
+    cleaned_alias = _assert_managed_alias_available(
+        alias_text=alias_text,
+        product=product,
+        company=company,
+    )
+    return ProductAlias.objects.create(
+        company=company,
+        product=product,
+        alias=cleaned_alias,
+        notes=notes,
+        is_active=is_active,
+        created_by=actor if getattr(actor, "is_authenticated", False) else None,
+    )
+
+
+@transaction.atomic
+def update_managed_product_alias(*, alias_id, changes):
+    """Update an explicitly managed alias without stale-instance overwrites."""
+    _lock_product_alias_scopes()
+    snapshot = ProductAlias.objects.select_related("company", "product").get(pk=alias_id)
+    requested_company = changes.get("company", snapshot.company)
+    _lock_product_alias_scopes(snapshot.company, requested_company)
+    alias = (
+        ProductAlias.objects.select_for_update()
+        .select_related("company", "product")
+        .get(pk=alias_id)
+    )
+    company = changes.get("company", alias.company)
+    product = changes.get("product", alias.product)
+    alias_text = changes.get("alias", alias.alias)
+    identity_changed = (
+        getattr(company, "pk", None) != alias.company_id
+        or getattr(product, "pk", None) != alias.product_id
+        or normalize_label(alias_text) != alias.normalized_alias
+    )
+    activating = not alias.is_active and bool(changes.get("is_active", alias.is_active))
+    if identity_changed or activating:
+        cleaned_alias = _assert_managed_alias_available(
+            alias_text=alias_text,
+            product=product,
+            company=company,
+            exclude_alias_id=alias.id,
+        )
+    else:
+        cleaned_alias = str(alias_text or "").strip()
+        if not cleaned_alias:
+            raise ValidationError("Alias text is required.")
+    alias.company = company
+    alias.product = product
+    alias.alias = cleaned_alias
+    alias.notes = changes.get("notes", alias.notes)
+    alias.is_active = changes.get("is_active", alias.is_active)
+    alias.save(
+        update_fields=[
+            "company",
+            "product",
+            "alias",
+            "normalized_alias",
+            "notes",
+            "is_active",
+            "updated_at",
+        ]
+    )
+    return alias
 
 
 def _alias_match(raw_text, company, scope_label):
@@ -620,6 +752,7 @@ def create_product_alias(*, alias_text, product, company=None, actor=None, notes
     normalized = normalize_label(alias_text)
     if not normalized:
         raise ValidationError("Alias text is required.")
+    _lock_product_alias_scope(company)
     exact_existing = list(
         ProductAlias.objects.select_for_update()
         .select_related("product")
@@ -679,18 +812,26 @@ def create_product_alias(*, alias_text, product, company=None, actor=None, notes
 
 
 @transaction.atomic
-def learn_confirmed_product_alias(*, source_text, product, company, actor=None, notes=""):
+def learn_confirmed_product_alias(
+    *,
+    source_text,
+    product,
+    company,
+    actor=None,
+    notes="",
+    explicit_confirmation=False,
+):
     """Remember confirmed customer wording without changing the Product identity.
 
-    Product matching previews are deliberately read-only. Callers use this only
-    while persisting a staff-confirmed match so an alias conflict rolls back the
-    surrounding match instead of leaving the catalogue in a contradictory state.
+    Product matching previews are deliberately read-only. Persisted automatic
+    matches may learn new wording, but only explicit staff confirmation may
+    supersede a retired alias. Conflicts roll back the surrounding match instead
+    of leaving the catalogue in a contradictory state.
     """
     cleaned_source = str(source_text or "").strip()
     if not cleaned_source or not product or not company:
         return None, False
-    if cleaned_source == str(product.name or "").strip():
-        return None, False
+    _lock_product_alias_scope(company)
 
     normalized = normalize_label(cleaned_source)
     exact_existing = list(
@@ -709,28 +850,109 @@ def learn_confirmed_product_alias(*, source_text, product, company, actor=None, 
         )
         if alias.id not in {existing.id for existing in exact_existing}
     ]
-    if equivalent:
-        # Automatic learning must never rewrite curated spelling/notes or
-        # reactivate an alias that staff deliberately disabled. Conflicts still
-        # go through the strict explicit helper so the surrounding match rolls
-        # back with the existing actionable validation message.
-        if any(alias.product_id != product.id for alias in equivalent):
-            return create_product_alias(
-                alias_text=cleaned_source,
-                product=product,
+    # Active cross-Product aliases remain authoritative. Staff must resolve
+    # those explicitly instead of silently remapping live catalogue knowledge.
+    if any(alias.is_active and alias.product_id != product.id for alias in equivalent):
+        return create_product_alias(
+            alias_text=cleaned_source,
+            product=product,
+            company=company,
+            actor=actor,
+            notes=notes,
+        )
+
+    exact_alias = exact_existing[0] if exact_existing else None
+    if exact_alias and exact_alias.product_id == product.id and exact_alias.is_active:
+        return exact_alias, False
+
+    if not explicit_confirmation and any(not alias.is_active for alias in equivalent):
+        # A retired equivalent is a human catalogue decision.  High-confidence
+        # automatic matching can keep its Product selection, but cannot work
+        # around that retirement by reviving or adding a spelling variant.
+        return None, False
+
+    if exact_alias:
+        # The exact spelling key was retired. A new explicit staff confirmation
+        # supersedes that retired mapping, so reactivate/reassign it and retain
+        # the previous values on the instance for the service-layer audit log.
+        exact_alias._automatic_learning_action = (
+            "reactivated" if exact_alias.product_id == product.id else "reassigned"
+        )
+        exact_alias._automatic_learning_previous = {
+            "alias": exact_alias.alias,
+            "product_id": exact_alias.product_id,
+            "product_name": exact_alias.product.name,
+            "is_active": exact_alias.is_active,
+            "notes": exact_alias.notes,
+        }
+        exact_alias.alias = cleaned_source
+        exact_alias.product = product
+        exact_alias.is_active = True
+        exact_alias.notes = "\n".join(part for part in [exact_alias.notes.strip(), notes.strip()] if part)
+        if not exact_alias.created_by_id and getattr(actor, "is_authenticated", False):
+            exact_alias.created_by = actor
+        exact_alias.save(
+            update_fields=["alias", "normalized_alias", "product", "is_active", "notes", "created_by", "updated_at"]
+        )
+        return exact_alias, False
+
+    # A canonical Product name does not need a duplicate alias, but only after
+    # checking the company alias table.  An active alias owned by another
+    # Product is authoritative, and an exact retired key must be restored and
+    # audited even when the confirmed Product happens to use the same name.
+    if cleaned_source == str(product.name or "").strip():
+        return None, False
+
+    # Domain-equivalent aliases may exist under other punctuation/spelling
+    # keys. Preserve them, including retired mappings, and add the exact source
+    # wording requested by staff as its own active alias.
+    try:
+        with transaction.atomic():
+            alias = ProductAlias.objects.create(
                 company=company,
-                actor=actor,
+                alias=cleaned_source,
+                product=product,
+                is_active=True,
+                created_by=actor if getattr(actor, "is_authenticated", False) else None,
                 notes=notes,
             )
-        return equivalent[0], False
-
-    return create_product_alias(
-        alias_text=cleaned_source,
-        product=product,
-        company=company,
-        actor=actor,
-        notes=notes,
-    )
+    except IntegrityError:
+        concurrent = (
+            ProductAlias.objects.select_for_update()
+            .select_related("product")
+            .get(company=company, normalized_alias=normalized)
+        )
+        if concurrent.is_active and concurrent.product_id != product.id:
+            raise ValidationError(
+                f"Alias '{cleaned_source}' was assigned to '{concurrent.product.name}' by another request."
+            )
+        if concurrent.is_active and concurrent.product_id == product.id:
+            return concurrent, False
+        if not explicit_confirmation:
+            return None, False
+        concurrent._automatic_learning_action = (
+            "reactivated" if concurrent.product_id == product.id else "reassigned"
+        )
+        concurrent._automatic_learning_previous = {
+            "alias": concurrent.alias,
+            "product_id": concurrent.product_id,
+            "product_name": concurrent.product.name,
+            "is_active": concurrent.is_active,
+            "notes": concurrent.notes,
+        }
+        concurrent.alias = cleaned_source
+        concurrent.product = product
+        concurrent.is_active = True
+        concurrent.notes = "\n".join(part for part in [concurrent.notes.strip(), notes.strip()] if part)
+        if not concurrent.created_by_id and getattr(actor, "is_authenticated", False):
+            concurrent.created_by = actor
+        concurrent.save(
+            update_fields=["alias", "normalized_alias", "product", "is_active", "notes", "created_by", "updated_at"]
+        )
+        return concurrent, False
+    alias._automatic_learning_action = "created"
+    alias._automatic_learning_previous = None
+    return alias, True
 
 
 @transaction.atomic

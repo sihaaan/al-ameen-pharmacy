@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
@@ -37,6 +37,8 @@ const CompanySelectWithCreate = ({
   const [allowSimilarCreate, setAllowSimilarCreate] = useState(false);
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState(null);
+  const externallyDisabledRef = useRef(disabled);
+  externallyDisabledRef.current = disabled;
 
   const filteredCompanies = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -84,6 +86,7 @@ const CompanySelectWithCreate = ({
   }, [form.name, isCreating]);
 
   const openCreate = () => {
+    if (disabled) return;
     setErrorInfo(null);
     setNotice(null);
     setForm((current) => ({
@@ -123,6 +126,7 @@ const CompanySelectWithCreate = ({
   };
 
   const selectExistingCompany = (company) => {
+    if (disabled) return;
     if (onChange) onChange(String(company.id), company);
     setSearch('');
     setForm(emptyCompanyForm);
@@ -133,7 +137,7 @@ const CompanySelectWithCreate = ({
   };
 
   const saveCompany = async () => {
-    if (saving) return;
+    if (saving || disabled) return;
     if (!form.name.trim()) {
       setNotice({ type: 'error', message: 'Enter a company name before saving.' });
       return;
@@ -150,13 +154,19 @@ const CompanySelectWithCreate = ({
       });
       const company = response.data;
       if (onCreated) onCreated(company);
-      if (onChange) onChange(String(company.id), company);
+      const canSelectCreatedCompany = !externallyDisabledRef.current;
+      if (canSelectCreatedCompany && onChange) onChange(String(company.id), company);
       setSearch('');
       setForm(emptyCompanyForm);
       setSimilarCompanies([]);
       setAllowSimilarCreate(false);
       setIsCreating(false);
-      setNotice({ type: 'success', message: allowSimilarCreate ? 'Company created after duplicate check and selected.' : 'Company created and selected.' });
+      setNotice({
+        type: 'success',
+        message: canSelectCreatedCompany
+          ? (allowSimilarCreate ? 'Company created after duplicate check and selected.' : 'Company created and selected.')
+          : 'Company created. Select it after the current operation finishes.',
+      });
     } catch (error) {
       const backendData = error?.response?.data || {};
       const suggestions = backendData.similar_companies || [];
@@ -210,7 +220,9 @@ const CompanySelectWithCreate = ({
           required={required}
           disabled={disabled}
           value={value || ''}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => {
+            if (!disabled && onChange) onChange(event.target.value);
+          }}
         >
           <option value="">{placeholder}</option>
           {filteredCompanies.map((company) => (
@@ -242,6 +254,7 @@ const CompanySelectWithCreate = ({
             <label>
               <span className="qm-label-text">Company name <span className="qm-required">*</span></span>
               <input
+                disabled={disabled || saving}
                 value={form.name}
                 onChange={(event) => setForm({ ...form, name: event.target.value })}
                 placeholder="Company name"
@@ -249,15 +262,15 @@ const CompanySelectWithCreate = ({
             </label>
             <label>
               <span className="qm-label-text">Email</span>
-              <input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="company@example.com" />
+              <input disabled={disabled || saving} type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="company@example.com" />
             </label>
             <label>
               <span className="qm-label-text">Phone</span>
-              <input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} placeholder="+971..." />
+              <input disabled={disabled || saving} value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} placeholder="+971..." />
             </label>
             <label>
               <span className="qm-label-text">TRN</span>
-              <input value={form.trn} onChange={(event) => setForm({ ...form, trn: event.target.value })} placeholder="TRN if available" />
+              <input disabled={disabled || saving} value={form.trn} onChange={(event) => setForm({ ...form, trn: event.target.value })} placeholder="TRN if available" />
             </label>
           </div>
           {(checkingSimilar || similarCompanies.length > 0) && (
@@ -275,7 +288,7 @@ const CompanySelectWithCreate = ({
                       <small>{[company.phone, company.email, company.trn && `TRN ${company.trn}`].filter(Boolean).join(' | ')}</small>
                     )}
                   </div>
-                  <button type="button" className="qm-secondary small" onClick={() => selectExistingCompany(company)}>
+                  <button type="button" className="qm-secondary small" disabled={disabled || saving} onClick={() => selectExistingCompany(company)}>
                     Select existing
                   </button>
                 </div>
@@ -284,10 +297,10 @@ const CompanySelectWithCreate = ({
           )}
           <label>
             <span className="qm-label-text">Billing address</span>
-            <textarea rows="2" value={form.billing_address} onChange={(event) => setForm({ ...form, billing_address: event.target.value })} />
+            <textarea disabled={disabled || saving} rows="2" value={form.billing_address} onChange={(event) => setForm({ ...form, billing_address: event.target.value })} />
           </label>
           <div className="qm-action-row">
-            <button type="button" className="qm-primary" disabled={saving} onClick={saveCompany}>
+            <button type="button" className="qm-primary" disabled={disabled || saving} onClick={saveCompany}>
               {saving ? 'Creating...' : allowSimilarCreate ? 'Create anyway' : 'Create Company'}
             </button>
             <button type="button" className="qm-secondary" onClick={cancelCreate} disabled={saving}>Cancel</button>

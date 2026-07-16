@@ -42,6 +42,44 @@ const normalizeVatRate = (value) => {
   return numeric === 5 ? '5' : '0';
 };
 
+export const importedLineNameEditPatch = (rawName) => ({
+  raw_name: rawName,
+  matched_product: null,
+  match_reason: '',
+  match_status: 'unresolved',
+  match_confirmed_by_user: false,
+});
+
+export const resetImportedMatchesForCompanyChange = (lines) => (lines || []).map((line) => ({
+  ...line,
+  matched_product: null,
+  match_reason: '',
+  match_status: 'unresolved',
+  match_confirmed_by_user: false,
+}));
+
+export const importCompanyRequestIsCurrent = (requestContext, currentCompany, currentGeneration) => (
+  Boolean(requestContext)
+  && String(requestContext.company || '') === String(currentCompany || '')
+  && Number(requestContext.generation) === Number(currentGeneration)
+);
+
+export const importedInquiryLinePayload = (line) => ({
+  raw_name: line.raw_name,
+  raw_line: line.raw_line || line.raw_name,
+  quantity: line.quantity || null,
+  unit: line.unit || '',
+  unit_price: line.unit_price || null,
+  vat_rate: normalizeVatRate(line.vat_rate),
+  notes: line.notes || '',
+  parse_status: line.parse_status || 'needs_review',
+  parse_confidence: Number(line.parse_confidence || 0),
+  matched_product: line.matched_product || null,
+  match_reason: line.match_reason || '',
+  match_status: line.match_status || (line.matched_product ? 'confirmed' : 'unresolved'),
+  match_confirmed_by_user: Boolean(line.match_confirmed_by_user),
+});
+
 const shouldShowMatchReason = (reason) => {
   const text = String(reason || '').trim();
   return text && !/no safe deterministic match found/i.test(text);
@@ -143,6 +181,18 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [manualNotice, setManualNotice] = useState(null);
   const [manualContactSaving, setManualContactSaving] = useState(false);
   const importPanelRef = useRef(null);
+  const importCompanyRef = useRef(String(importForm.company || ''));
+  const importCompanyGenerationRef = useRef(0);
+
+  const captureImportCompanyRequest = () => ({
+    company: importCompanyRef.current,
+    generation: importCompanyGenerationRef.current,
+  });
+  const isCurrentImportCompanyRequest = (requestContext) => importCompanyRequestIsCurrent(
+    requestContext,
+    importCompanyRef.current,
+    importCompanyGenerationRef.current
+  );
 
   const load = async () => {
     setLoading(true);
@@ -355,6 +405,7 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const runAiCleanParse = async () => {
     if (!importPreview || aiCleaning) return;
+    const requestContext = captureImportCompanyRequest();
     setAiCleaning(true);
     setErrorInfo(null);
     setImportNotice(null);
@@ -364,9 +415,11 @@ const InquiryManager = ({ onOpenQuote }) => {
         company: importForm.company || null,
         mode: 'auto',
       });
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       setAiCandidate(response.data);
       setImportNotice({ type: 'success', message: `${aiSourceLabel(response.data.result_source)}. Review the candidate rows before applying them.` });
     } catch (error) {
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'AI clean inquiry parse', 'POST /quotations/inquiries/ai_clean_parse/');
       setErrorInfo(details);
       setImportNotice({ type: 'warning', message: 'AI failed, using original parse.' });
@@ -421,6 +474,7 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const parsePastedText = async () => {
     if (importParsing) return;
+    const requestContext = captureImportCompanyRequest();
     setImportParsing(true);
     setErrorInfo(null);
     setImportNotice(null);
@@ -430,8 +484,10 @@ const InquiryManager = ({ onOpenQuote }) => {
         raw_html: importForm.raw_html || '',
         company: importForm.company || null,
       });
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       setPreview(response.data);
     } catch (error) {
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'Parse pasted inquiry text', 'POST /quotations/inquiries/parse_text/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -446,6 +502,7 @@ const InquiryManager = ({ onOpenQuote }) => {
       setImportNotice({ type: 'error', message: 'Choose an Excel or PDF file before parsing.' });
       return;
     }
+    const requestContext = captureImportCompanyRequest();
     setImportParsing(true);
     setErrorInfo(null);
     setImportNotice(null);
@@ -454,8 +511,10 @@ const InquiryManager = ({ onOpenQuote }) => {
     if (importForm.company) formData.append('company', importForm.company);
     try {
       const response = await quotationAPI.inquiries.parseFile(formData);
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       setPreview(response.data);
     } catch (error) {
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'Parse inquiry file', 'POST /quotations/inquiries/parse_file/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -478,6 +537,7 @@ const InquiryManager = ({ onOpenQuote }) => {
       setImportNotice({ type: 'error', message: "Paste Dad's price reference rows first." });
       return;
     }
+    const requestContext = captureImportCompanyRequest();
     setPriceReferenceApplying(true);
     setErrorInfo(null);
     setImportNotice(null);
@@ -492,6 +552,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     formData.append('preview', JSON.stringify(importPreview));
     try {
       const response = await quotationAPI.inquiries.applyPriceReference(formData);
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       const currentLines = importPreview.lines || [];
       const responseLines = response.data.lines || [];
       setPreview({
@@ -505,6 +566,7 @@ const InquiryManager = ({ onOpenQuote }) => {
         message: `Price reference applied. ${summary.matched_count || 0} prices filled, ${summary.needs_review_count || 0} likely matches need review, ${summary.unmatched_count || 0} unmatched.`,
       });
     } catch (error) {
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'Apply inquiry price reference', 'POST /quotations/inquiries/apply_price_reference/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -583,22 +645,10 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const saveImportedInquiry = async () => {
     if (importSaving) return;
+    const requestContext = captureImportCompanyRequest();
     const lines = (importPreview?.lines || [])
       .filter((line) => line.raw_name.trim())
-      .map((line) => ({
-        raw_name: line.raw_name,
-        raw_line: line.raw_line || line.raw_name,
-        quantity: line.quantity || null,
-        unit: line.unit || '',
-        unit_price: line.unit_price || null,
-        vat_rate: normalizeVatRate(line.vat_rate),
-        notes: line.notes || '',
-        parse_status: line.parse_status || 'needs_review',
-        parse_confidence: Number(line.parse_confidence || 0),
-        matched_product: line.matched_product || null,
-        match_reason: line.match_reason || '',
-        match_status: line.match_status || (line.matched_product ? 'confirmed' : 'unresolved'),
-      }));
+      .map(importedInquiryLinePayload);
     if (!importForm.company) {
       const message = 'Select a company before saving this imported inquiry.';
       setImportActionNotice({ type: 'error', message });
@@ -640,12 +690,18 @@ const InquiryManager = ({ onOpenQuote }) => {
         },
         lines,
       });
+      if (!isCurrentImportCompanyRequest(requestContext)) {
+        await load();
+        return;
+      }
       setSavedImportedInquiry(response.data);
       setImportNotice({ type: 'success', message: 'Imported inquiry saved. You can now create a quotation from it.' });
       setImportActionNotice({ type: 'success', message: 'Inquiry saved. Create the quotation here, then open it for Step 4 line editing.' });
       await load();
     } catch (error) {
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'Save imported inquiry', 'POST /quotations/inquiries/create_imported/');
+      if (!isCurrentImportCompanyRequest(requestContext)) return;
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -694,8 +750,24 @@ const InquiryManager = ({ onOpenQuote }) => {
             companies={companies}
             value={importForm.company}
             required
+            disabled={importParsing || aiCleaning || priceReferenceApplying || importSaving || importContactSaving}
             onChange={(companyId) => {
-              setImportForm({ ...importForm, company: companyId, contact: '' });
+              const normalizedCompanyId = String(companyId || '');
+              const companyChanged = normalizedCompanyId !== importCompanyRef.current;
+              importCompanyRef.current = normalizedCompanyId;
+              setImportForm((current) => ({ ...current, company: companyId, contact: '' }));
+              if (companyChanged) {
+                importCompanyGenerationRef.current += 1;
+                setImportPreview((current) => (
+                  current
+                    ? { ...current, lines: resetImportedMatchesForCompanyChange(current.lines) }
+                    : current
+                ));
+                setAiCandidate(null);
+                setSavedImportedInquiry(null);
+                setImportNotice(null);
+                setImportActionNotice(null);
+              }
               setImportContactForm(emptyContactForm);
               setShowImportContactForm(false);
             }}
@@ -952,11 +1024,12 @@ const InquiryManager = ({ onOpenQuote }) => {
                       <tr>
                         <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRows.includes(index)} onChange={() => toggleImportRowSelection(index)} /></td>
                         <td className="qm-serial-cell">{index + 1}</td>
-                        <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, { raw_name: event.target.value })} /></td>
+                        <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, importedLineNameEditPatch(event.target.value))} /></td>
                         <td className="qm-import-match-cell">
                           <select value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
                             matched_product: event.target.value || null,
                             match_status: event.target.value ? 'confirmed' : 'unresolved',
+                            match_confirmed_by_user: Boolean(event.target.value),
                           })}>
                             <option value="">Unmatched</option>
                             {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
