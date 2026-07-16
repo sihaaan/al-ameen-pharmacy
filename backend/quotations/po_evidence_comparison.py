@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 
 from .import_parsers import parse_text_preview
 from .mailbox_po_reconciliation import document_variants
-from .models import QuotationLine, normalize_label
+from .models import QuotationLine, QuotationOutcomePOImport, normalize_label
 from .services import build_po_outcome_suggestions
 
 
@@ -44,6 +44,46 @@ SAFE_UNMATCHED_REASON_CODES = {
 logger = logging.getLogger(__name__)
 AMBIGUOUS_DOCUMENT_VARIANT = object()
 AMBIGUOUS_STORED_ATTACHMENT = object()
+LATEST_PO_IMPORT_UNSET = object()
+
+
+def latest_relevant_po_import(evidence):
+    """Return the newest successful import for this exact evidence/quote pair."""
+
+    cached = getattr(evidence, "_latest_relevant_po_import_cache", LATEST_PO_IMPORT_UNSET)
+    if cached is not LATEST_PO_IMPORT_UNSET:
+        return cached
+
+    prefetched = getattr(evidence, "_prefetched_objects_cache", {}).get("po_imports")
+    if prefetched is not None:
+        candidates = [
+            po_import
+            for po_import in prefetched
+            if po_import.quotation_id == evidence.quotation_id
+            and po_import.status == QuotationOutcomePOImport.STATUS_PARSED
+        ]
+        latest = max(
+            candidates,
+            key=lambda po_import: (po_import.created_at, po_import.pk),
+            default=None,
+        )
+        evidence._latest_relevant_po_import_cache = latest
+        return latest
+
+    latest = (
+        QuotationOutcomePOImport.objects.select_related(
+            "created_by",
+            "gmail_evidence__canonical_lpo",
+        ).filter(
+            gmail_evidence_id=evidence.pk,
+            quotation_id=evidence.quotation_id,
+            status=QuotationOutcomePOImport.STATUS_PARSED,
+        )
+        .order_by("-created_at", "-id")
+        .first()
+    )
+    evidence._latest_relevant_po_import_cache = latest
+    return latest
 
 
 def _decimal(value):
@@ -795,7 +835,7 @@ def build_po_evidence_commercial_comparison(evidence):
     quotation = evidence.quotation
     quote_lines = list(quotation.lines.all())
     variant = _selected_variant(evidence)
-    latest_import = next(iter(evidence.po_imports.all()), None)
+    latest_import = latest_relevant_po_import(evidence)
     try:
         canonical_lpo = evidence.canonical_lpo
     except Exception:

@@ -135,9 +135,10 @@ describe('QuotationEditor Product price context', () => {
 
     fireEvent.change(productSelect, { target: { value: '11' } });
     fireEvent.change(productSelect, { target: { value: '12' } });
+    expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
 
     await act(async () => second.resolve({ data: priceContext(12, 'Gloves B', 22) }));
-    const priceInput = await screen.findByLabelText('Unit price for Gloves B');
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
     await waitFor(() => expect(priceInput).toHaveValue(22));
     expect(within(screen.getByRole('dialog', { name: /price history/i })).getByText(/Gloves B/)).toBeInTheDocument();
 
@@ -206,7 +207,8 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
     fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
-    const priceInput = await screen.findByLabelText('Unit price for Gloves A');
+    expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
     fireEvent.change(priceInput, { target: { value: '73' } });
 
     await act(async () => request.resolve({ data: priceContext(11, 'Gloves A', 10) }));
@@ -256,5 +258,55 @@ describe('QuotationEditor Product price context', () => {
       confirm_create_line_ids: [31],
     }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+  });
+
+  test('links a suggested Product without replacing the source snapshot or writing the alias separately', async () => {
+    quotationAPI.lines.createProduct.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          detail: 'A similar Product exists.',
+          warning: 'A similar Product exists.',
+          requires_confirmation: true,
+          creation_blocked: false,
+          candidates: [{
+            product_id: 11,
+            product_name: 'Gloves A',
+            confidence: 0.92,
+            pack_size: 'box',
+          }],
+        },
+      },
+    });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValue({
+      data: {
+        quotation: {
+          ...quote,
+          lines: [{
+            ...quote.lines[0],
+            product: 11,
+            product_name: 'Gloves A',
+            item_name_snapshot: 'Imported gloves',
+            match_status: 'confirmed',
+          }],
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Use Gloves A/i }));
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      lines: [expect.objectContaining({
+        id: 31,
+        product: '11',
+        item_name_snapshot: 'Imported gloves',
+        match_status: 'confirmed',
+      })],
+    }));
+    expect(quotationAPI.lines.rememberAlias).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
   });
 });

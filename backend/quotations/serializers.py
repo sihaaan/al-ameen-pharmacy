@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from rest_framework import serializers
 
 from api.models import Product, ProductImage
@@ -11,6 +12,7 @@ from api.serializers import ProductListSerializer
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
+from .services import learn_confirmed_inquiry_line_alias
 from .models import (
     Company,
     CompanyContact,
@@ -1015,11 +1017,14 @@ class InquirySerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if request and request.user.is_authenticated:
             validated_data["created_by"] = request.user
-        inquiry = Inquiry.objects.create(**validated_data)
-        for index, line_data in enumerate(lines_data):
-            line_data.pop("inquiry", None)
-            sort_order = line_data.pop("sort_order", index)
-            InquiryLine.objects.create(inquiry=inquiry, sort_order=sort_order, **line_data)
+        actor = request.user if request and request.user.is_authenticated else None
+        with transaction.atomic():
+            inquiry = Inquiry.objects.create(**validated_data)
+            for index, line_data in enumerate(lines_data):
+                line_data.pop("inquiry", None)
+                sort_order = line_data.pop("sort_order", index)
+                line = InquiryLine.objects.create(inquiry=inquiry, sort_order=sort_order, **line_data)
+                learn_confirmed_inquiry_line_alias(line, actor)
         return inquiry
 
 
@@ -2262,6 +2267,8 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
         return {"id": lpo.id, "status": lpo.status, "lpo_number": lpo.lpo_number}
 
     def get_commercial_comparison(self, obj):
+        if self.context.get("omit_commercial_comparison"):
+            return None
         evidence = obj.gmail_evidence
         if not evidence:
             return None

@@ -619,91 +619,6 @@ const totalResultText = (value, basis, detail) => {
   return 'Not enough data to compare';
 };
 
-const CommercialComparisonTable = ({ comparison, selectedLineIds, actionableLineIds, onToggleLine }) => {
-  const rows = comparison?.lines || [];
-  const currency = comparison?.currency || 'AED';
-  const selectable = typeof onToggleLine === 'function';
-  if (!rows.length) {
-    return (
-      <div className="qm-empty subtle">
-        No line-level comparison is available yet. Confirm and parse this evidence to build it from the selected LPO source.
-      </div>
-    );
-  }
-  return (
-    <div className="qm-table-wrap qm-commercial-comparison-wrap">
-      <table className="qm-table qm-commercial-comparison-table">
-        <thead>
-          <tr>
-            {selectable && <th rowSpan="2">Apply</th>}
-            <th rowSpan="2">Our quoted item</th>
-            <th rowSpan="2">Customer LPO item</th>
-            <th colSpan="3">Our quotation</th>
-            <th colSpan="3">Customer accepted</th>
-            <th rowSpan="2">Decision</th>
-          </tr>
-          <tr>
-            <th>Qty</th>
-            <th>Unit price</th>
-            <th>Total incl. VAT</th>
-            <th>Qty</th>
-            <th>Unit price</th>
-            <th>LPO line total</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((line, index) => {
-            const statusInfo = comparisonStatusDetails[line.status] || comparisonStatusDetails.uncertain;
-            const canApply = selectable
-              && line.quotationLineId !== undefined
-              && line.quotationLineId !== null
-              && hasLineId(actionableLineIds || [], line.quotationLineId);
-            const checked = canApply && hasLineId(selectedLineIds || [], line.quotationLineId);
-            const acceptedMissingLabel = line.status === 'not_ordered' ? 'Not ordered' : 'Not stated';
-            return (
-              <tr key={`${line.quotationLineId ?? 'lpo'}-${line.po_row_index ?? line.row_index ?? index}`} className={`qm-commercial-row status-${statusInfo.className} ${line.review_required ? 'review-required' : ''}`}>
-                {selectable && (
-                  <td>
-                    {canApply ? (
-                      <input
-                        type="checkbox"
-                        aria-label={`Apply decision for ${line.quoteItemName}`}
-                        checked={checked}
-                        onChange={() => onToggleLine(line.quotationLineId)}
-                      />
-                    ) : <span title="An unmatched LPO row cannot be applied until it is linked to a quotation line.">-</span>}
-                  </td>
-                )}
-                <td><strong>{line.quoteItemName}</strong></td>
-                <td><strong>{line.lpoItemName}</strong></td>
-                <td>{optionalQuantity(line.quotedQuantity, line.quotedUnit)}</td>
-                <td>{optionalUnitMoney(line.quotedUnitPrice, currency)}</td>
-                <td>{optionalMoney(line.quotedLineTotal, currency)}</td>
-                <td>{optionalQuantity(line.acceptedQuantity, line.acceptedUnit, acceptedMissingLabel)}</td>
-                <td>{optionalUnitMoney(line.acceptedUnitPrice, currency, acceptedMissingLabel)}</td>
-                <td>
-                  {optionalMoney(line.acceptedLineTotal, currency, acceptedMissingLabel)}
-                  {line.accepted_line_total_derived && (
-                    <small className="qm-derived-total-note">Calculated from LPO qty x price</small>
-                  )}
-                </td>
-                <td>
-                  <span className={`qm-commercial-status ${statusInfo.className}`}>{statusInfo.label}</span>
-                  {line.review_required && <small className="qm-commercial-review-flag">Review required</small>}
-                  {line.confidence !== undefined && line.confidence !== null && line.confidence !== '' && (
-                    <small>{Math.round(Number(line.confidence || 0))}% match confidence</small>
-                  )}
-                  {line.reason && <small>{line.reason}</small>}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-};
-
 const safelyActionableComparisonStatuses = new Set(['accepted', 'repriced', 'reduced', 'reduced_repriced']);
 
 const actualAcceptedValues = (row) => ({
@@ -733,20 +648,31 @@ const isSafelyActionableMatchedLine = (line) => {
     && numberOrNull(actual.unitPrice) !== null;
 };
 
-const defaultSelectedPOResultIds = (result) => {
-  const authoritativeLines = result?.commercial_comparison?.lines;
-  if (Array.isArray(authoritativeLines)) {
-    return uniqueLineIds(
-      authoritativeLines
-        .filter(isSafelyActionableMatchedLine)
-        .map((line) => firstDefined(line.quotation_line_id, line.quote_line_id))
-    );
+const draftPatchFromComparisonLine = (line) => {
+  const status = normalizeComparisonStatus(line);
+  if (status === 'not_ordered') {
+    return {
+      outcome_status: 'rejected',
+      accepted_quantity: '',
+      accepted_unit_price: '',
+      outcome_reason: '',
+      outcome_notes: 'LPO review: this quoted line was not ordered on the selected LPO.',
+    };
   }
-  return uniqueLineIds(
-    (result?.suggestions || [])
-      .filter(isSafelyActionableMatchedLine)
-      .map((suggestion) => suggestion.quotation_line_id)
-  );
+  if (!isSafelyActionableMatchedLine(line)) return null;
+  const actual = actualAcceptedValues(line);
+  const quotedQuantity = numberOrNull(firstDefined(line?.quotedQuantity, line?.quoted_quantity));
+  const acceptedQuantity = numberOrNull(actual.quantity);
+  const quantityChanged = quotedQuantity !== null
+    && acceptedQuantity !== null
+    && Math.abs(quotedQuantity - acceptedQuantity) > 0.0005;
+  return {
+    outcome_status: quantityChanged ? 'quantity_changed' : 'accepted',
+    accepted_quantity: actual.quantity,
+    accepted_unit_price: actual.unitPrice,
+    outcome_reason: '',
+    outcome_notes: `LPO review: ${firstDefined(line?.reason, 'Deterministic LPO line match')}`,
+  };
 };
 
 const evidenceConfidenceLabel = (confidence) => {
@@ -791,11 +717,26 @@ const evidenceStatusInfo = (evidence) => evidenceStatusDetails[evidenceStatus(ev
   description: 'Review this email source before taking any action.',
 };
 const isEvidenceArchived = (evidence) => archivedEvidenceStatuses.has(evidenceStatus(evidence));
+const canMarkEvidenceNotRelevant = (evidence) => Boolean(
+  evidence
+  && !isEvidenceArchived(evidence)
+  && evidenceStatus(evidence) !== 'parsed'
+  && !evidence.link_approved_at
+);
 
-const GmailEvidenceCard = ({ evidence, markingEvidenceId, onReview, onMarkNotRelevant }) => {
+const GmailEvidenceCard = ({
+  evidence,
+  markingEvidenceId,
+  disabled = false,
+  onReview,
+  onMarkNotRelevant,
+  selected = false,
+  expanded = false,
+}) => {
   const status = evidenceStatus(evidence);
   const statusInfo = evidenceStatusInfo(evidence);
   const archived = isEvidenceArchived(evidence);
+  const canMarkNotRelevant = canMarkEvidenceNotRelevant(evidence);
   const confidence = Math.round(Number(evidence.confidence || 0));
   const reasons = splitEvidenceReasons(evidence.matching_reason);
   const referenceInfo = quoteReferenceInfo(evidence);
@@ -803,7 +744,7 @@ const GmailEvidenceCard = ({ evidence, markingEvidenceId, onReview, onMarkNotRel
   const showStatusExplanation = ['ambiguous', 'superseded', 'not_relevant'].includes(status);
 
   return (
-    <article className={`qm-evidence-card status-${status}`}>
+    <article className={`qm-evidence-card status-${status} ${selected ? 'is-selected' : ''}`} aria-current={selected ? 'true' : undefined}>
       <div className="qm-evidence-card-main">
         <div>
           <h4>{evidence.subject || 'Untitled email'}</h4>
@@ -831,17 +772,30 @@ const GmailEvidenceCard = ({ evidence, markingEvidenceId, onReview, onMarkNotRel
         <button
           type="button"
           className="qm-secondary small"
+          aria-controls="qm-evidence-review-workspace"
+          aria-expanded={selected && expanded}
+          disabled={disabled}
           onClick={() => onReview(evidence.id)}
         >
-          {archived ? 'View archived evidence' : 'Review evidence'}
+          {selected && expanded
+            ? 'Hide inline review'
+            : selected
+              ? 'Show inline review'
+              : archived
+                ? 'View archived evidence'
+                : 'Review evidence here'}
         </button>
         <button
           type="button"
           className="qm-secondary small"
-          disabled={archived || markingEvidenceId === evidence.id}
+          disabled={disabled || !canMarkNotRelevant || markingEvidenceId === evidence.id}
           onClick={() => onMarkNotRelevant(evidence.id)}
         >
-          {markingEvidenceId === evidence.id ? 'Saving...' : 'Not relevant'}
+          {markingEvidenceId === evidence.id
+            ? 'Saving...'
+            : !archived && !canMarkNotRelevant
+              ? 'Approved - cannot reject'
+              : 'Not relevant'}
         </button>
       </div>
     </article>
@@ -908,6 +862,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [quote, setQuote] = useState(null);
   const [summary, setSummary] = useState(null);
   const [lineDrafts, setLineDrafts] = useState({});
+  const [dirtyLineIds, setDirtyLineIds] = useState([]);
   const [selectedLines, setSelectedLines] = useState([]);
   const [selectedSuggestions, setSelectedSuggestions] = useState([]);
   const [poText, setPoText] = useState('');
@@ -933,6 +888,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [parsingEvidenceId, setParsingEvidenceId] = useState(null);
   const [markingEvidenceId, setMarkingEvidenceId] = useState(null);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState(null);
+  const [evidenceReviewExpanded, setEvidenceReviewExpanded] = useState(false);
   const [selectedEvidenceSource, setSelectedEvidenceSource] = useState(null);
   const [loadingEvidenceSource, setLoadingEvidenceSource] = useState(false);
   const [evidenceSourceError, setEvidenceSourceError] = useState(null);
@@ -940,19 +896,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const [attachmentError, setAttachmentError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
-  const evidenceReturnFocusRef = useRef(null);
-  const evidenceCloseButtonRef = useRef(null);
-
-  const openEvidenceReview = useCallback((evidenceId) => {
-    evidenceReturnFocusRef.current = typeof document === 'undefined' ? null : document.activeElement;
-    setNotice(null);
-    setErrorInfo(null);
-    setSelectedEvidenceId(evidenceId);
-  }, []);
-
-  const closeEvidenceReview = useCallback(() => {
-    setSelectedEvidenceId(null);
-  }, []);
+  const lineOutcomesRef = useRef(null);
+  const mutationLockRef = useRef(false);
 
   const setLoaded = useCallback((data) => {
     setQuote(data.quotation);
@@ -961,6 +906,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     setPoEvidencePagination(data.po_evidence_pagination || null);
     const drafts = Object.fromEntries((data.quotation.lines || []).map((line) => [line.id, draftFromLine(line)]));
     setLineDrafts(drafts);
+    setDirtyLineIds([]);
+    setSelectedSuggestions([]);
     setManualOutcome({
       outcome_status: data.quotation.outcome_status_is_manual ? data.quotation.outcome_status : '',
       outcome_notes: data.quotation.outcome_notes || '',
@@ -995,6 +942,14 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
 
   const lineIds = useMemo(() => (quote?.lines || []).map((line) => line.id), [quote]);
   const selectedActiveLines = selectedLines.filter((id) => lineIds.includes(id));
+  const hasUnsavedLineChanges = dirtyLineIds.length > 0 || selectedSuggestions.length > 0;
+  const outcomeMutationInProgress = (
+    saving
+    || poLoading
+    || findingEvidence
+    || parsingEvidenceId !== null
+    || markingEvidenceId !== null
+  );
   const selectedEvidence = useMemo(
     () => poEvidence.find((item) => item.id === selectedEvidenceId) || null,
     [poEvidence, selectedEvidenceId]
@@ -1010,8 +965,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     [selectedEvidenceForReview]
   );
   const selectedEvidenceReference = useMemo(
-    () => quoteReferenceInfo(selectedEvidence),
-    [selectedEvidence]
+    () => quoteReferenceInfo(selectedEvidenceForReview),
+    [selectedEvidenceForReview]
   );
   const selectedEvidenceSignalSections = useMemo(() => {
     if (!selectedEvidence) return [];
@@ -1089,6 +1044,52 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     ),
     [selectedEvidenceUsesParsedComparison, parsedPOComparison, sourceEvidenceComparison]
   );
+  const activeParsedPOResult = Boolean(
+    poResult
+    && (!selectedEvidence || !isEvidenceArchived(selectedEvidence))
+    && (
+      selectedEvidenceId === null
+        ? poResultEvidenceId === null
+        : poResultEvidenceId !== null && sameLineId(poResultEvidenceId, selectedEvidenceId)
+    )
+  );
+  const activeOutcomeComparison = useMemo(() => {
+    if (selectedEvidence) return selectedEvidenceComparison;
+    return activeParsedPOResult ? parsedPOComparison : null;
+  }, [selectedEvidence, selectedEvidenceComparison, activeParsedPOResult, parsedPOComparison]);
+  const activeComparisonRowsByLineId = useMemo(() => {
+    const byLineId = new Map();
+    (activeOutcomeComparison?.lines || []).forEach((line) => {
+      if (line.quotationLineId !== undefined && line.quotationLineId !== null) {
+        byLineId.set(String(line.quotationLineId), line);
+      }
+    });
+    return byLineId;
+  }, [activeOutcomeComparison]);
+  const unmatchedActiveLPORows = useMemo(
+    () => (activeOutcomeComparison?.lines || []).filter((line) => (
+      line.quotationLineId === undefined || line.quotationLineId === null
+    )),
+    [activeOutcomeComparison]
+  );
+  const activeComparisonStatusCounts = useMemo(() => (
+    (activeOutcomeComparison?.lines || []).reduce((counts, line) => {
+      const status = normalizeComparisonStatus(line);
+      counts[status] = (counts[status] || 0) + 1;
+      return counts;
+    }, {})
+  ), [activeOutcomeComparison]);
+  const latestSelectedPOImport = (
+    selectedEvidenceSource?.id === selectedEvidenceId
+    && selectedEvidenceSource?.latest_po_import
+  ) ? {
+      ...selectedEvidenceSource.latest_po_import,
+      commercial_comparison: firstDefined(
+        selectedEvidenceSource.commercial_comparison,
+        selectedEvidenceSource.latest_po_import.commercial_comparison
+      ),
+    }
+    : null;
   const parsedActionableLineIds = useMemo(
     () => uniqueLineIds([
       ...parsedPOComparison.lines
@@ -1121,21 +1122,15 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     setViewingAttachmentKey(null);
   }, [selectedEvidenceId]);
 
-  useEffect(() => {
-    if (!selectedEvidenceId) return undefined;
-    const returnFocusTo = evidenceReturnFocusRef.current;
-    evidenceCloseButtonRef.current?.focus();
-    const handleKeyDown = (event) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      closeEvidenceReview();
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      if (returnFocusTo?.isConnected && typeof returnFocusTo.focus === 'function') returnFocusTo.focus();
-    };
-  }, [selectedEvidenceId, closeEvidenceReview]);
+  const acquireMutationLock = () => {
+    if (mutationLockRef.current) return false;
+    mutationLockRef.current = true;
+    return true;
+  };
+
+  const releaseMutationLock = () => {
+    mutationLockRef.current = false;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1161,20 +1156,126 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     return () => { cancelled = true; };
   }, [selectedEvidenceId]);
 
+  const savedDraftForLine = (lineId) => {
+    const line = (quote?.lines || []).find((item) => sameLineId(item.id, lineId));
+    return line ? draftFromLine(line) : null;
+  };
+
+  const resetStagedPODrafts = (lineIdsToReset = selectedSuggestions) => {
+    if (!lineIdsToReset.length) return;
+    setLineDrafts((current) => {
+      const next = { ...current };
+      lineIdsToReset.forEach((lineId) => {
+        const saved = savedDraftForLine(lineId);
+        if (saved) next[lineId] = saved;
+      });
+      return next;
+    });
+    setSelectedSuggestions([]);
+  };
+
+  const stagePOResult = (result, evidenceId, { scroll = true } = {}) => {
+    const comparison = comparisonFromPOResult(result, quote, summary);
+    const dirtyIds = new Set(dirtyLineIds.map(String));
+    const rowsToStage = comparison.lines.filter((line) => (
+      line.quotationLineId !== undefined
+      && line.quotationLineId !== null
+      && (quote?.lines || []).some((quoteLine) => sameLineId(quoteLine.id, line.quotationLineId))
+      && isSafelyActionableMatchedLine(line)
+      && !dirtyIds.has(String(line.quotationLineId))
+      && (result?.suggestions || []).some((suggestion) => (
+        sameLineId(suggestion.quotation_line_id, line.quotationLineId)
+      ))
+    ));
+    const stagedIds = uniqueLineIds(rowsToStage.map((line) => line.quotationLineId));
+    const previousStagedIds = selectedSuggestions;
+    setLineDrafts((current) => {
+      const next = { ...current };
+      previousStagedIds.forEach((lineId) => {
+        if (dirtyIds.has(String(lineId))) return;
+        const saved = savedDraftForLine(lineId);
+        if (saved) next[lineId] = saved;
+      });
+      rowsToStage.forEach((line) => {
+        const saved = savedDraftForLine(line.quotationLineId) || current[line.quotationLineId] || {};
+        next[line.quotationLineId] = {
+          ...saved,
+          ...draftPatchFromComparisonLine(line),
+        };
+      });
+      return next;
+    });
+    setPoResult(result);
+    setPoResultEvidenceId(evidenceId);
+    setSelectedSuggestions(stagedIds);
+    if (scroll) {
+      window.setTimeout(() => {
+        if (typeof lineOutcomesRef.current?.scrollIntoView === 'function') {
+          lineOutcomesRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 0);
+    }
+    return stagedIds;
+  };
+
+  const openEvidenceReview = (evidenceId) => {
+    if (mutationLockRef.current || outcomeMutationInProgress) return;
+    setNotice(null);
+    setErrorInfo(null);
+    if (sameLineId(selectedEvidenceId, evidenceId)) {
+      setEvidenceReviewExpanded((current) => !current);
+      return;
+    }
+    resetStagedPODrafts();
+    setPoResult(null);
+    setPoResultEvidenceId(null);
+    setSelectedEvidenceId(evidenceId);
+    setEvidenceReviewExpanded(true);
+  };
+
   const updateLineDraft = (lineId, patch) => {
     setLineDrafts((current) => ({
       ...current,
       [lineId]: { ...(current[lineId] || {}), ...patch },
     }));
+    setDirtyLineIds((current) => (hasLineId(current, lineId) ? current : [...current, lineId]));
+    setSelectedSuggestions((current) => current.filter((id) => !sameLineId(id, lineId)));
   };
 
-  const patchOutcome = async (payload, message) => {
+  const togglePOProposal = (lineId) => {
+    if (!activeParsedPOResult || !hasLineId(parsedActionableLineIds, lineId)) return;
+    const currentlySelected = hasLineId(selectedSuggestions, lineId);
+    if (currentlySelected) {
+      const saved = savedDraftForLine(lineId);
+      if (saved) setLineDrafts((current) => ({ ...current, [lineId]: saved }));
+      setSelectedSuggestions((current) => current.filter((id) => !sameLineId(id, lineId)));
+      return;
+    }
+    const comparisonLine = parsedPOComparison.lines.find((line) => sameLineId(line.quotationLineId, lineId));
+    const patch = comparisonLine ? draftPatchFromComparisonLine(comparisonLine) : null;
+    if (!patch) return;
+    const saved = savedDraftForLine(lineId) || lineDrafts[lineId] || { id: lineId };
+    setLineDrafts((current) => ({ ...current, [lineId]: { ...saved, ...patch } }));
+    setDirtyLineIds((current) => current.filter((id) => !sameLineId(id, lineId)));
+    setSelectedSuggestions((current) => [...current, lineId]);
+  };
+
+  const patchOutcome = async (
+    payload,
+    message,
+    { preserveFollowup = false, preserveManualOutcome = false } = {}
+  ) => {
+    if (!acquireMutationLock()) return false;
+    const followupBeforeSave = followupDraft;
+    const manualOutcomeBeforeSave = manualOutcome;
     setSaving(true);
     setNotice(null);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.updateOutcome(quoteId, payload);
       setLoaded(response.data);
+      if (preserveFollowup) setFollowupDraft(followupBeforeSave);
+      if (preserveManualOutcome) setManualOutcome(manualOutcomeBeforeSave);
       setSelectedLines([]);
       setNotice({ type: 'success', message });
       return true;
@@ -1185,23 +1286,58 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       return false;
     } finally {
       setSaving(false);
+      releaseMutationLock();
     }
   };
 
-  const saveLineDrafts = () => {
-    patchOutcome(
-      { line_updates: Object.values(lineDrafts) },
-      'Outcome lines saved.'
+  const saveLineDrafts = async () => {
+    const changedLineIds = uniqueLineIds([...dirtyLineIds, ...selectedSuggestions]);
+    const lineUpdates = changedLineIds.length
+      ? changedLineIds.map((lineId) => lineDrafts[lineId]).filter(Boolean)
+      : Object.values(lineDrafts);
+    const payload = { line_updates: lineUpdates };
+    if (activeParsedPOResult && poResult?.id && selectedSuggestions.length) {
+      const appliedMatchedLineIds = uniqueLineIds(
+        parsedPOComparison.lines
+          .filter((line) => (
+            hasLineId(selectedSuggestions, line.quotationLineId)
+            && isSafelyActionableMatchedLine(line)
+            && (poResult?.suggestions || []).some((suggestion) => (
+              sameLineId(suggestion.quotation_line_id, line.quotationLineId)
+            ))
+          ))
+          .map((line) => line.quotationLineId)
+      );
+      payload.po_import_id = poResult.id;
+      // Explicit not-ordered decisions are staff outcomes, not parser matches,
+      // and therefore must never be attributed as applied suggestion rows.
+      payload.applied_po_line_ids = appliedMatchedLineIds;
+    }
+    const saved = await patchOutcome(
+      payload,
+      selectedSuggestions.length
+        ? 'Selected LPO decisions and line outcomes saved.'
+        : 'Outcome lines saved.',
+      { preserveFollowup: true, preserveManualOutcome: true }
     );
+    if (saved) setSelectedSuggestions([]);
   };
 
   const runBulk = (action, ids, message) => {
     if (!ids.length) return;
-    patchOutcome({ bulk_action: action, line_ids: ids }, message);
+    patchOutcome(
+      { bulk_action: action, line_ids: ids },
+      message,
+      { preserveFollowup: true, preserveManualOutcome: true }
+    );
   };
 
   const saveFollowup = () => {
-    patchOutcome(followupDraft, 'Follow-up details saved.');
+    patchOutcome(
+      followupDraft,
+      'Follow-up details saved.',
+      { preserveManualOutcome: true }
+    );
   };
 
   const saveManualOutcome = () => {
@@ -1211,15 +1347,16 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         outcome_status: manualOutcome.outcome_status || undefined,
         outcome_notes: manualOutcome.outcome_notes,
       },
-      manualOutcome.outcome_status ? 'Manual outcome saved.' : 'Outcome recalculated from line statuses.'
+      manualOutcome.outcome_status ? 'Manual outcome saved.' : 'Outcome recalculated from line statuses.',
+      { preserveFollowup: true }
     );
   };
 
   const parsePo = async () => {
+    if (!acquireMutationLock()) return;
     setPoLoading(true);
     setNotice(null);
     setErrorInfo(null);
-    setPoResult(null);
     try {
       let response;
       if (poFile) {
@@ -1230,16 +1367,22 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       } else {
         response = await quotationAPI.quotes.parseOutcomePO(quoteId, { text: poText, use_ai: poUseAi });
       }
-      setPoResult(response.data);
-      setPoResultEvidenceId(null);
-      setSelectedSuggestions(defaultSelectedPOResultIds(response.data));
-      setNotice({ type: 'success', message: 'PO suggestions parsed for review. Nothing was saved yet.' });
+      setSelectedEvidenceId(null);
+      setEvidenceReviewExpanded(false);
+      const stagedIds = stagePOResult(response.data, null);
+      setNotice({
+        type: 'success',
+        message: stagedIds.length
+          ? `${stagedIds.length} safe PO decision(s) filled into Line Outcomes as unsaved drafts.`
+          : 'PO parsed for review. No customer quantity/price pair was safe enough to fill automatically.',
+      });
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse outcome PO', `POST /quotations/quotes/${quoteId}/parse_outcome_po/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setPoLoading(false);
+      releaseMutationLock();
     }
   };
 
@@ -1269,12 +1412,18 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const loadMoreArchivedEvidence = async () => {
     const nextOffset = poEvidencePagination?.archived_next_offset;
     if (nextOffset === undefined || nextOffset === null) return;
+    if (!acquireMutationLock()) return;
     setFindingEvidence(true);
-    await loadPOEvidence({ archivedOffset: nextOffset, append: true });
-    setFindingEvidence(false);
+    try {
+      await loadPOEvidence({ archivedOffset: nextOffset, append: true });
+    } finally {
+      setFindingEvidence(false);
+      releaseMutationLock();
+    }
   };
 
   const findPOEvidence = async () => {
+    if (!acquireMutationLock()) return;
     setFindingEvidence(true);
     setNotice(null);
     setErrorInfo(null);
@@ -1292,10 +1441,12 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setFindingEvidence(false);
+      releaseMutationLock();
     }
   };
 
   const approveAndParseEvidence = async (evidenceId) => {
+    if (!acquireMutationLock()) return;
     setParsingEvidenceId(evidenceId);
     setNotice(null);
     setErrorInfo(null);
@@ -1305,27 +1456,42 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         approve_link: true,
         use_ai: evidenceUseAi,
       });
-      setPoResult(response.data);
-      setPoResultEvidenceId(evidenceId);
-      setSelectedSuggestions(defaultSelectedPOResultIds(response.data));
+      const stagedIds = stagePOResult(response.data, evidenceId);
       await loadPOEvidence();
-      setNotice({ type: 'success', message: 'Email link approved and parsed. The line comparison is ready in this review window; no line outcome was applied.' });
+      setNotice({
+        type: 'success',
+        message: stagedIds.length
+          ? `Email link approved. ${stagedIds.length} safe LPO decision(s) filled into Line Outcomes as unsaved drafts.`
+          : 'Email link approved and parsed. No customer quantity/price pair was safe enough to fill automatically.',
+      });
     } catch (error) {
       const details = await describeQuotationError(error, 'Parse Gmail PO evidence', `POST /quotations/quotes/${quoteId}/parse_po_evidence/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setParsingEvidenceId(null);
+      releaseMutationLock();
     }
   };
 
   const markEvidenceNotRelevant = async (evidenceId) => {
+    if (!acquireMutationLock()) return;
     setMarkingEvidenceId(evidenceId);
     setNotice(null);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.markPOEvidenceNotRelevant(quoteId, { evidence_id: evidenceId });
       setPoEvidence((current) => current.map((item) => (item.id === evidenceId ? response.data : item)));
+      if (
+        sameLineId(selectedEvidenceId, evidenceId)
+        || sameLineId(poResultEvidenceId, evidenceId)
+      ) {
+        resetStagedPODrafts();
+        setPoResult(null);
+        setPoResultEvidenceId(null);
+        setSelectedEvidenceId(null);
+        setEvidenceReviewExpanded(false);
+      }
       setNotice({ type: 'success', message: 'Gmail evidence marked not relevant.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Mark Gmail evidence not relevant', `POST /quotations/quotes/${quoteId}/mark_po_evidence_not_relevant/`);
@@ -1333,6 +1499,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setMarkingEvidenceId(null);
+      releaseMutationLock();
     }
   };
 
@@ -1403,55 +1570,6 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
-  const applySelectedSuggestions = async () => {
-    const selectedMatchedLines = parsedPOComparison.lines.filter((line) => (
-      hasLineId(selectedSuggestions, line.quotationLineId)
-      && isSafelyActionableMatchedLine(line)
-      && (poResult?.suggestions || []).some((suggestion) => (
-        sameLineId(suggestion.quotation_line_id, line.quotationLineId)
-      ))
-    ));
-    const suggestionIds = uniqueLineIds(selectedMatchedLines.map((line) => line.quotationLineId));
-    const explicitlySelectedMissingIds = (poResult?.missing_quote_line_ids || []).filter(
-      (lineId) => hasLineId(selectedSuggestions, lineId) && !hasLineId(suggestionIds, lineId)
-    );
-    if (!selectedMatchedLines.length && !explicitlySelectedMissingIds.length) return;
-    const suggestionForLine = (lineId) => (poResult?.suggestions || []).find(
-      (suggestion) => sameLineId(suggestion.quotation_line_id, lineId)
-    );
-    const missingLineUpdates = explicitlySelectedMissingIds.map((lineId) => ({
-      id: lineId,
-      outcome_status: 'rejected',
-      outcome_notes: 'PO suggestion applied: this quoted line was not ordered on the reviewed LPO.',
-    }));
-    const applied = await patchOutcome({
-      line_updates: [
-        ...selectedMatchedLines.map((line) => {
-          const suggestion = suggestionForLine(line.quotationLineId);
-          const actual = actualAcceptedValues(line);
-          const quotedQuantity = numberOrNull(line.quotedQuantity);
-          const acceptedQuantity = numberOrNull(actual.quantity);
-          const quantityChanged = quotedQuantity !== null
-            && acceptedQuantity !== null
-            && Math.abs(quotedQuantity - acceptedQuantity) > 0.0005;
-          return {
-            id: line.quotationLineId,
-            outcome_status: quantityChanged ? 'quantity_changed' : 'accepted',
-            accepted_quantity: actual.quantity,
-            accepted_unit_price: actual.unitPrice,
-            outcome_notes: `PO suggestion applied: ${firstDefined(suggestion?.reason, line.reason, 'Deterministic LPO line match')}`,
-          };
-        }),
-        ...missingLineUpdates,
-      ],
-      po_import_id: poResult?.id,
-      // Omitted quotation lines are an explicit staff outcome, not a parsed PO
-      // suggestion, so they must not receive suggestion provenance.
-      applied_po_line_ids: suggestionIds,
-    }, 'Selected PO line decisions applied. Review and save the final outcome when ready.');
-    if (applied) setSelectedSuggestions([]);
-  };
-
   if (loading) return <div className="qm-loading">Loading quotation outcome...</div>;
   if (!quote) {
     return (
@@ -1464,7 +1582,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
 
   return (
     <div className="qm-section qm-outcome">
-      {!selectedEvidence && <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />}
+      <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       <div className="qm-editor-header">
         <div>
           <button type="button" className="qm-secondary small" onClick={onBack}>Back to Quotations</button>
@@ -1473,13 +1591,13 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         </div>
         <div className="qm-action-row">
           <span className={`qm-badge status-${quote.outcome_status}`}>{quoteOutcomeLabels[quote.outcome_status] || quote.outcome_status}</span>
-          <button type="button" className="qm-primary" disabled={saving} onClick={saveLineDrafts}>
+          <button type="button" className="qm-primary" disabled={outcomeMutationInProgress} onClick={saveLineDrafts}>
             {saving ? 'Saving...' : 'Save Line Outcomes'}
           </button>
         </div>
       </div>
 
-      {notice && !selectedEvidence && <div className={`qm-feedback ${notice.type}`}>{notice.message}</div>}
+      {notice && <div className={`qm-feedback ${notice.type}`} aria-live="polite">{notice.message}</div>}
 
       <div className="qm-stat-grid">
         <div className="qm-stat"><span>{money(summary.quoted_value, quote.currency)}</span><p>Quoted value</p></div>
@@ -1499,10 +1617,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           </div>
           <div className="qm-evidence-controls">
             <label className="qm-checkbox">
-              <input type="checkbox" checked={evidenceUseAi} onChange={(event) => setEvidenceUseAi(event.target.checked)} />
+              <input type="checkbox" disabled={outcomeMutationInProgress} checked={evidenceUseAi} onChange={(event) => setEvidenceUseAi(event.target.checked)} />
               AI cleanup
             </label>
-            <button type="button" className="qm-primary" disabled={findingEvidence} onClick={findPOEvidence}>
+            <button type="button" className="qm-primary" disabled={outcomeMutationInProgress} onClick={findPOEvidence}>
               {findingEvidence ? 'Refreshing...' : 'Refresh Evidence'}
             </button>
           </div>
@@ -1519,6 +1637,9 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                   key={evidence.id}
                   evidence={evidence}
                   markingEvidenceId={markingEvidenceId}
+                  disabled={outcomeMutationInProgress}
+                  selected={sameLineId(selectedEvidenceId, evidence.id)}
+                  expanded={evidenceReviewExpanded}
                   onReview={openEvidenceReview}
                   onMarkNotRelevant={markEvidenceNotRelevant}
                 />
@@ -1542,6 +1663,9 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                   key={evidence.id}
                   evidence={evidence}
                   markingEvidenceId={markingEvidenceId}
+                  disabled={outcomeMutationInProgress}
+                  selected={sameLineId(selectedEvidenceId, evidence.id)}
+                  expanded={evidenceReviewExpanded}
                   onReview={openEvidenceReview}
                   onMarkNotRelevant={markEvidenceNotRelevant}
                 />
@@ -1551,7 +1675,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <button
                 type="button"
                 className="qm-secondary small"
-                disabled={findingEvidence}
+                disabled={outcomeMutationInProgress}
                 onClick={loadMoreArchivedEvidence}
               >
                 {findingEvidence ? 'Loading archive...' : 'Load more archived evidence'}
@@ -1561,26 +1685,31 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         )}
       </div>
 
-      {selectedEvidence && (
-        <div className="qm-modal-backdrop" role="presentation" onClick={closeEvidenceReview}>
-          <div
-            className="qm-modal qm-evidence-detail-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={`qm-evidence-dialog-title-${selectedEvidence.id}`}
-            onClick={(event) => event.stopPropagation()}
+      {selectedEvidence && evidenceReviewExpanded && (
+          <section
+            id="qm-evidence-review-workspace"
+            className="qm-panel qm-evidence-review-workspace"
+            aria-labelledby={`qm-evidence-review-title-${selectedEvidence.id}`}
           >
             <div className="qm-panel-heading">
               <div>
-                <span className="qm-step-kicker">Gmail source review</span>
-                <h3 id={`qm-evidence-dialog-title-${selectedEvidence.id}`}>{selectedEvidenceComparison.companyName} - {selectedEvidence.subject || 'Untitled email'}</h3>
-                <p>{evidenceStatusInfo(selectedEvidence).description}</p>
+                <span className="qm-step-kicker">Selected LPO review</span>
+                <h3 id={`qm-evidence-review-title-${selectedEvidence.id}`}>{selectedEvidenceComparison.companyName} - {selectedEvidence.subject || 'Untitled email'}</h3>
+                <p>{evidenceStatusInfo(selectedEvidence).description} The item-by-item comparison is shown in Line Outcomes below.</p>
               </div>
-              <button ref={evidenceCloseButtonRef} type="button" className="qm-secondary small" onClick={closeEvidenceReview}>Close</button>
+              <div className="qm-action-row">
+                <button
+                  type="button"
+                  className="qm-secondary small"
+                  onClick={() => {
+                    if (typeof lineOutcomesRef.current?.scrollIntoView === 'function') {
+                      lineOutcomesRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                  }}
+                >View Line Outcomes</button>
+                <button type="button" className="qm-secondary small" onClick={() => setEvidenceReviewExpanded(false)}>Hide details</button>
+              </div>
             </div>
-
-            <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
-            {notice && <div className={`qm-feedback ${notice.type}`} aria-live="polite">{notice.message}</div>}
 
             <div className="qm-evidence-detail-section qm-evidence-commercial-context">
               <h4>Customer, quotation, and LPO</h4>
@@ -1675,10 +1804,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             <div className="qm-evidence-detail-section qm-commercial-comparison-section">
               <div className="qm-evidence-section-heading">
                 <strong>Scanned line comparison</strong>
-                <span>Review-only - nothing here changes the outcome</span>
+                <span>Full-width comparison is in Line Outcomes</span>
               </div>
               <p className="qm-evidence-comparison-help">
-                Omitted means the item was not present on this LPO; it does not prove the customer explicitly rejected it. Prices marked not stated are never copied from our quote into the customer-price column.
+                Omitted means the item was not present on this LPO; it does not prove an explicit rejection. Prices marked not stated are never copied from our quotation into the customer-price fields.
               </p>
               {selectedEvidenceComparison.warnings.map((warning) => (
                 <div className="qm-notice warning" key={warning}>{warning}</div>
@@ -1686,10 +1815,18 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               {loadingEvidenceSource && !selectedEvidenceComparison.lines.length ? (
                 <div className="qm-empty subtle">Loading the deterministic item, quantity, and price comparison...</div>
               ) : (
-                <CommercialComparisonTable comparison={selectedEvidenceComparison} />
+                <div className="qm-comparison-counts" aria-label="LPO comparison summary">
+                  {Object.entries(activeComparisonStatusCounts).map(([status, count]) => {
+                    const statusInfo = comparisonStatusDetails[status] || comparisonStatusDetails.uncertain;
+                    return <span key={status} className={`qm-commercial-status ${statusInfo.className}`}>{count} {statusInfo.label}</span>;
+                  })}
+                  {!selectedEvidenceComparison.lines.length && <span>No line comparison is available yet.</span>}
+                </div>
               )}
             </div>
 
+            <details className="qm-evidence-source-details">
+              <summary>Email text and matching diagnostics</summary>
             <div className="qm-evidence-detail-section">
               <h4>Why this was suggested</h4>
               <div className="qm-evidence-reason-list expanded">
@@ -1739,6 +1876,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             {selectedEvidenceSignalSections.map((section) => (
               <EvidenceSignalSection key={section.title} title={section.title} value={section.value} />
             ))}
+            </details>
 
             <div className="qm-evidence-detail-section">
               <h4>Attachments</h4>
@@ -1802,46 +1940,54 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             </div>
 
             {selectedEvidence.error && <div className="qm-notice warning">{selectedEvidence.error}</div>}
-            {poResult && sameLineId(poResultEvidenceId, selectedEvidence.id) && (
+            {activeParsedPOResult && (
               <div className="qm-evidence-detail-section qm-parsed-comparison-section" aria-live="polite">
                 <div className="qm-evidence-section-heading">
-                  <strong>Confirmed link - parsed line decisions</strong>
-                  <span>{selectedSuggestions.length} selected to apply</span>
+                  <strong>Parsed LPO loaded into Line Outcomes</strong>
+                  <span>{selectedSuggestions.length} unsaved decision(s) staged</span>
                 </div>
                 <p className="qm-evidence-comparison-help">
-                  Deterministic matched rows are preselected. Not-ordered rows stay unselected; checking one explicitly will mark that quotation line rejected when you apply. Unmatched LPO rows cannot be applied until they are linked.
+                  Safe deterministic quantity and price matches are filled as drafts. Not-ordered rows stay pending until you explicitly include them; uncertain or price-missing rows remain manual review items.
                 </p>
                 {!!parsedPOComparison.warnings.length && (
                   <div className="qm-notice warning">{parsedPOComparison.warnings.join(' ')}</div>
                 )}
-                <CommercialComparisonTable
-                  comparison={parsedPOComparison}
-                  selectedLineIds={selectedSuggestions}
-                  actionableLineIds={parsedActionableLineIds}
-                  onToggleLine={(lineId) => setSelectedSuggestions((current) => (
-                    hasLineId(current, lineId)
-                      ? current.filter((id) => !sameLineId(id, lineId))
-                      : [...current, lineId]
-                  ))}
-                />
                 <div className="qm-action-row qm-parsed-comparison-actions">
                   <button
                     type="button"
                     className="qm-primary"
-                    disabled={!selectedSuggestions.length || saving}
-                    onClick={applySelectedSuggestions}
+                    disabled={!selectedSuggestions.length || outcomeMutationInProgress}
+                    onClick={saveLineDrafts}
                   >
-                    {saving ? 'Applying decisions...' : 'Apply selected line decisions'}
+                    {saving ? 'Saving decisions...' : 'Save staged LPO decisions'}
                   </button>
-                  <small>Applying is the explicit staff confirmation step; parsing alone saves no line outcome.</small>
+                  <small>Nothing is saved until this button or Save Line Outcomes is pressed.</small>
                 </div>
               </div>
             )}
             <div className="qm-action-row">
+              {latestSelectedPOImport && !activeParsedPOResult && !isEvidenceArchived(selectedEvidence) && (
+                <button
+                  type="button"
+                  className="qm-primary"
+                  disabled={outcomeMutationInProgress}
+                  onClick={() => {
+                    const stagedIds = stagePOResult(latestSelectedPOImport, selectedEvidence.id);
+                    setNotice({
+                      type: 'success',
+                      message: stagedIds.length
+                        ? `${stagedIds.length} safe decision(s) loaded from the latest parsed LPO as unsaved drafts.`
+                        : 'The latest parsed LPO has no quantity/price pair safe enough to fill automatically.',
+                    });
+                  }}
+                >
+                  Populate Line Outcomes from this LPO
+                </button>
+              )}
               <button
                 type="button"
-                className="qm-primary"
-                disabled={parsingEvidenceId === selectedEvidence.id || isEvidenceArchived(selectedEvidence)}
+                className={latestSelectedPOImport ? 'qm-secondary' : 'qm-primary'}
+                disabled={outcomeMutationInProgress || isEvidenceArchived(selectedEvidence)}
                 onClick={() => approveAndParseEvidence(selectedEvidence.id)}
               >
                 {parsingEvidenceId === selectedEvidence.id
@@ -1857,15 +2003,229 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <button
                 type="button"
                 className="qm-secondary"
-                disabled={markingEvidenceId === selectedEvidence.id || isEvidenceArchived(selectedEvidence)}
+                disabled={outcomeMutationInProgress || !canMarkEvidenceNotRelevant(selectedEvidence)}
                 onClick={() => markEvidenceNotRelevant(selectedEvidence.id)}
               >
-                {markingEvidenceId === selectedEvidence.id ? 'Saving...' : 'Mark not relevant'}
+                {markingEvidenceId === selectedEvidence.id
+                  ? 'Saving...'
+                  : !isEvidenceArchived(selectedEvidence) && !canMarkEvidenceNotRelevant(selectedEvidence)
+                    ? 'Approved evidence cannot be rejected'
+                    : 'Mark not relevant'}
               </button>
             </div>
+          </section>
+      )}
+
+      <div className="qm-panel qm-line-outcomes-panel" ref={lineOutcomesRef}>
+        <div className="qm-panel-heading">
+          <div>
+            <span className="qm-step-kicker">Quote-to-LPO reconciliation</span>
+            <h3>Line Outcomes</h3>
+            <p>Compare our quoted quantity and price with the selected customer LPO, then review the final outcome in the same row.</p>
+          </div>
+          <div className="qm-action-row">
+            {selectedSuggestions.length > 0 && <span className="qm-badge status-pending">{selectedSuggestions.length} LPO decision(s) staged</span>}
+            <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress} onClick={() => setSelectedLines(lineIds)}>Select all</button>
+            <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress} onClick={() => setSelectedLines([])}>Clear</button>
+            <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={() => runBulk('mark_selected_accepted', selectedActiveLines, 'Selected lines marked accepted.')}>Mark accepted</button>
+            <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={() => runBulk('mark_selected_rejected', selectedActiveLines, 'Selected lines marked rejected.')}>Mark rejected</button>
+            <button type="button" className="qm-primary" disabled={outcomeMutationInProgress} onClick={saveLineDrafts}>
+              {saving ? 'Saving...' : 'Save Line Outcomes'}
+            </button>
           </div>
         </div>
-      )}
+
+        {hasUnsavedLineChanges && (
+          <div id="qm-unsaved-line-changes" className="qm-notice warning qm-unsaved-line-notice" role="status" aria-live="polite">
+            <strong>Unsaved line outcome changes</strong>
+            <span>Save Line Outcomes before running bulk actions or saving follow-up and final-outcome details.</span>
+          </div>
+        )}
+
+        {activeOutcomeComparison ? (
+          <div className="qm-inline-lpo-summary" aria-label="Selected LPO summary">
+            <div>
+              <span>Selected source</span>
+              <strong>{selectedEvidence?.subject || poResult?.source_filename || 'Uploaded / pasted PO'}</strong>
+              {selectedEvidence && <small>{selectedEvidence.sender || 'Unknown sender'} · {selectedEvidence.sent_at ? new Date(selectedEvidence.sent_at).toLocaleString() : 'No email date'}</small>}
+            </div>
+            <div>
+              <span>PO / LPO reference</span>
+              <strong>{loadingEvidenceSource && selectedEvidence ? 'Loading source...' : activeOutcomeComparison.lpoNumber}</strong>
+            </div>
+            <div>
+              <span>LPO stated total</span>
+              <strong>{optionalMoney(activeOutcomeComparison.lpoTotal, activeOutcomeComparison.currency, 'Not stated')}</strong>
+            </div>
+            <div>
+              <span>Total comparison</span>
+              <strong>{totalResultText(activeOutcomeComparison.totalResult, activeOutcomeComparison.totalBasis, activeOutcomeComparison.totalDetail)}</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="qm-empty subtle">Select “Review here” on an LPO candidate above, or parse an uploaded PO, to add customer values beside these quotation lines.</div>
+        )}
+
+        <div className="qm-table-wrap qm-reconciliation-wrap">
+          <table className="qm-table qm-outcome-reconciliation-table">
+            <caption className="qm-sr-only">Quotation lines compared with the selected customer LPO and editable final outcomes</caption>
+            <thead>
+              <tr>
+                <th scope="col">Select</th>
+                <th scope="col">#</th>
+                <th scope="col">Our quotation</th>
+                <th scope="col">Customer LPO</th>
+                <th scope="col">Detected decision</th>
+                <th scope="col">Final outcome</th>
+                <th scope="col">Saved value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(quote.lines || []).map((line, index) => {
+                const draft = lineDrafts[line.id] || draftFromLine(line);
+                const comparisonLine = activeComparisonRowsByLineId.get(String(line.id));
+                const comparisonStatus = comparisonLine ? normalizeComparisonStatus(comparisonLine) : null;
+                const statusInfo = comparisonStatus
+                  ? comparisonStatusDetails[comparisonStatus] || comparisonStatusDetails.uncertain
+                  : null;
+                const canStageDecision = activeParsedPOResult && hasLineId(parsedActionableLineIds, line.id);
+                const decisionSelected = canStageDecision && hasLineId(selectedSuggestions, line.id);
+                const acceptedMissingLabel = comparisonStatus === 'not_ordered' ? 'Not ordered' : 'Not stated';
+                return (
+                  <tr
+                    key={line.id}
+                    className={`${statusInfo ? `qm-commercial-row status-${statusInfo.className}` : ''} ${comparisonLine?.review_required ? 'review-required' : ''}`}
+                  >
+                    <td data-label="Select">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${line.item_name_snapshot} for bulk outcome action`}
+                        disabled={outcomeMutationInProgress}
+                        checked={selectedLines.includes(line.id)}
+                        onChange={() => setSelectedLines((current) => current.includes(line.id) ? current.filter((id) => id !== line.id) : [...current, line.id])}
+                      />
+                    </td>
+                    <td data-label="Line">{index + 1}</td>
+                    <th scope="row" data-label="Our quotation" className="qm-reconciliation-source-cell">
+                      <strong>{line.item_name_snapshot}</strong>
+                      <small>{line.product_name || 'No Product'}</small>
+                      <span>{optionalQuantity(line.quantity, line.unit)} × {optionalUnitMoney(line.unit_price, quote.currency)}</span>
+                      <b>{optionalMoney(line.line_total, quote.currency)}</b>
+                    </th>
+                    <td data-label="Customer LPO" className="qm-reconciliation-source-cell">
+                      {comparisonLine ? (
+                        <>
+                          <strong>{comparisonLine.lpoItemName}</strong>
+                          <span>
+                            {optionalQuantity(comparisonLine.acceptedQuantity, comparisonLine.acceptedUnit, acceptedMissingLabel)} × {' '}
+                            {optionalUnitMoney(comparisonLine.acceptedUnitPrice, activeOutcomeComparison?.currency || quote.currency, acceptedMissingLabel)}
+                          </span>
+                          <b>{optionalMoney(comparisonLine.acceptedLineTotal, activeOutcomeComparison?.currency || quote.currency, acceptedMissingLabel)}</b>
+                          {comparisonLine.accepted_line_total_derived && <small>Calculated from LPO qty × price</small>}
+                        </>
+                      ) : (
+                        <span className="qm-muted">{activeOutcomeComparison ? 'No matched LPO row' : 'No LPO selected'}</span>
+                      )}
+                    </td>
+                    <td data-label="Detected decision" className="qm-reconciliation-decision-cell">
+                      {statusInfo ? (
+                        <>
+                          <span className={`qm-commercial-status ${statusInfo.className}`}>{statusInfo.label}</span>
+                          {comparisonLine?.review_required && <span className="qm-commercial-review-flag">Review required</span>}
+                          {comparisonLine?.confidence !== undefined && comparisonLine?.confidence !== null && comparisonLine?.confidence !== '' && (
+                            <small>{Math.round(Number(comparisonLine.confidence || 0))}% match confidence</small>
+                          )}
+                          {comparisonLine?.reason && <small>{comparisonLine.reason}</small>}
+                          {canStageDecision && (
+                            <label className="qm-lpo-stage-choice">
+                              <input
+                                type="checkbox"
+                                disabled={outcomeMutationInProgress}
+                                checked={decisionSelected}
+                                onChange={() => togglePOProposal(line.id)}
+                              />
+                              {comparisonStatus === 'not_ordered' ? 'Mark rejected from this LPO' : 'Use these LPO values'}
+                            </label>
+                          )}
+                        </>
+                      ) : (
+                        <span className="qm-muted">Waiting for a parsed LPO comparison</span>
+                      )}
+                    </td>
+                    <td data-label="Final outcome">
+                      <div className="qm-final-outcome-controls">
+                        <label className="span-two">Outcome
+                          <select
+                            aria-label={`Outcome for ${line.item_name_snapshot}`}
+                            disabled={outcomeMutationInProgress}
+                            value={draft.outcome_status}
+                            onChange={(event) => updateLineDraft(line.id, { outcome_status: event.target.value })}
+                          >
+                            {Object.entries(lineStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                          </select>
+                        </label>
+                        <label>Accepted qty
+                          <input
+                            aria-label={`Accepted quantity for ${line.item_name_snapshot}`}
+                            type="number"
+                            min="0"
+                            step="0.001"
+                            disabled={outcomeMutationInProgress}
+                            value={draft.accepted_quantity}
+                            onChange={(event) => updateLineDraft(line.id, { accepted_quantity: event.target.value })}
+                          />
+                        </label>
+                        <label>Accepted unit price
+                          <input
+                            aria-label={`Accepted unit price for ${line.item_name_snapshot}`}
+                            type="number"
+                            min="0"
+                            step="0.001"
+                            disabled={outcomeMutationInProgress}
+                            value={draft.accepted_unit_price}
+                            onChange={(event) => updateLineDraft(line.id, { accepted_unit_price: event.target.value })}
+                          />
+                        </label>
+                        <label className="span-two">Reason
+                          <select
+                            aria-label={`Outcome reason for ${line.item_name_snapshot}`}
+                            disabled={outcomeMutationInProgress}
+                            value={draft.outcome_reason}
+                            onChange={(event) => updateLineDraft(line.id, { outcome_reason: event.target.value })}
+                          >
+                            <option value="">No reason</option>
+                            {Object.entries(reasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                    </td>
+                    <td data-label="Saved value" className="qm-reconciliation-value-cell">
+                      <span>Accepted</span>
+                      <strong>{money(line.accepted_total, quote.currency)}</strong>
+                      <span>Lost</span>
+                      <strong>{money(line.lost_value, quote.currency)}</strong>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {unmatchedActiveLPORows.length > 0 && (
+          <div className="qm-unmatched-lpo-summary">
+            <strong>{unmatchedActiveLPORows.length} unmatched customer LPO row(s)</strong>
+            <p>These rows are not applied until a staff member links them to a quotation line.</p>
+            <div>
+              {unmatchedActiveLPORows.map((line, index) => (
+                <span key={`${line.lpoItemName}-${index}`}>
+                  {line.lpoItemName} · {optionalQuantity(line.acceptedQuantity, line.acceptedUnit)} · {optionalUnitMoney(line.acceptedUnitPrice, activeOutcomeComparison?.currency || quote.currency)}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="qm-grid-two">
         <div className="qm-panel">
@@ -1874,29 +2234,29 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <h3>Follow-up</h3>
               <p>Track calls, WhatsApp, email, visits, and next action dates.</p>
             </div>
-            <button type="button" className="qm-secondary" disabled={saving} onClick={saveFollowup}>Save Follow-up</button>
+            <button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={saveFollowup}>Save Follow-up</button>
           </div>
           <div className="qm-outcome-form-grid">
             <label>Status
-              <select value={followupDraft.follow_up_status} onChange={(event) => setFollowupDraft({ ...followupDraft, follow_up_status: event.target.value })}>
+              <select disabled={outcomeMutationInProgress} value={followupDraft.follow_up_status} onChange={(event) => setFollowupDraft({ ...followupDraft, follow_up_status: event.target.value })}>
                 {Object.entries(followupStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
             <label>Method
-              <select value={followupDraft.follow_up_contact_method} onChange={(event) => setFollowupDraft({ ...followupDraft, follow_up_contact_method: event.target.value })}>
+              <select disabled={outcomeMutationInProgress} value={followupDraft.follow_up_contact_method} onChange={(event) => setFollowupDraft({ ...followupDraft, follow_up_contact_method: event.target.value })}>
                 <option value="">Not set</option>
                 {Object.entries(methodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
             <label>Next follow-up
-              <input type="date" value={followupDraft.next_follow_up_date || ''} onChange={(event) => setFollowupDraft({ ...followupDraft, next_follow_up_date: event.target.value })} />
+              <input type="date" disabled={outcomeMutationInProgress} value={followupDraft.next_follow_up_date || ''} onChange={(event) => setFollowupDraft({ ...followupDraft, next_follow_up_date: event.target.value })} />
             </label>
             <label className="qm-checkbox">
-              <input type="checkbox" checked={followupDraft.last_contacted_now} onChange={(event) => setFollowupDraft({ ...followupDraft, last_contacted_now: event.target.checked })} />
+              <input type="checkbox" disabled={outcomeMutationInProgress} checked={followupDraft.last_contacted_now} onChange={(event) => setFollowupDraft({ ...followupDraft, last_contacted_now: event.target.checked })} />
               Mark contacted now
             </label>
             <label className="span-two">Notes
-              <textarea rows="3" value={followupDraft.follow_up_notes} onChange={(event) => setFollowupDraft({ ...followupDraft, follow_up_notes: event.target.value })} />
+              <textarea rows="3" disabled={outcomeMutationInProgress} value={followupDraft.follow_up_notes} onChange={(event) => setFollowupDraft({ ...followupDraft, follow_up_notes: event.target.value })} />
             </label>
           </div>
         </div>
@@ -1907,112 +2267,22 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <h3>PO Assistant</h3>
               <p>Upload or paste a PO. Suggestions are review-only until applied.</p>
             </div>
-            <button type="button" className="qm-secondary" disabled={poLoading || (!poText.trim() && !poFile)} onClick={parsePo}>
+            <button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || (!poText.trim() && !poFile)} onClick={parsePo}>
               {poLoading ? 'Parsing...' : 'Parse PO'}
             </button>
           </div>
           <div className="qm-outcome-form-grid">
             <label className="span-two">Paste PO text
-              <textarea rows="4" value={poText} onChange={(event) => setPoText(event.target.value)} placeholder="Paste accepted PO lines here..." />
+              <textarea rows="4" disabled={outcomeMutationInProgress} value={poText} onChange={(event) => setPoText(event.target.value)} placeholder="Paste accepted PO lines here..." />
             </label>
             <label className="span-two">Or upload PO file
-              <input type="file" accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg,.webp" onChange={(event) => setPoFile(event.target.files?.[0] || null)} />
+              <input type="file" disabled={outcomeMutationInProgress} accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg,.webp" onChange={(event) => setPoFile(event.target.files?.[0] || null)} />
             </label>
             <label className="qm-checkbox span-two">
-              <input type="checkbox" checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />
+              <input type="checkbox" disabled={outcomeMutationInProgress} checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />
               Use AI cleanup when available
             </label>
           </div>
-        </div>
-      </div>
-
-      {poResult && (
-        <div className="qm-panel">
-          <div className="qm-panel-heading">
-            <div>
-              <h3>PO line comparison</h3>
-              <p>{(poResult.suggestions || []).length} matched line(s), {(poResult.unmatched_po_rows || []).length} unmatched PO row(s), {(poResult.missing_quote_line_ids || []).length} quoted line(s) not found in the PO.</p>
-            </div>
-            <button type="button" className="qm-primary" disabled={!selectedSuggestions.length || saving} onClick={applySelectedSuggestions}>
-              {saving ? 'Applying decisions...' : 'Apply selected line decisions'}
-            </button>
-          </div>
-          <p className="qm-evidence-comparison-help">
-            Our columns come from the quotation. Customer columns show only values actually stated on the parsed PO/LPO. Deterministic matches are preselected; omitted lines require an explicit checkbox before they can be applied as rejected.
-          </p>
-          {!!parsedPOComparison.warnings.length && <div className="qm-notice warning">{parsedPOComparison.warnings.join(' ')}</div>}
-          <CommercialComparisonTable
-            comparison={parsedPOComparison}
-            selectedLineIds={selectedSuggestions}
-            actionableLineIds={parsedActionableLineIds}
-            onToggleLine={(lineId) => setSelectedSuggestions((current) => (
-              hasLineId(current, lineId)
-                ? current.filter((id) => !sameLineId(id, lineId))
-                : [...current, lineId]
-            ))}
-          />
-        </div>
-      )}
-
-      <div className="qm-panel">
-        <div className="qm-panel-heading">
-          <div>
-            <h3>Line Outcomes</h3>
-            <p>Accepted lines create won value. Rejected, unavailable, substituted, and partial quantities create lost value.</p>
-          </div>
-          <div className="qm-action-row">
-            <button type="button" className="qm-secondary small" onClick={() => setSelectedLines(lineIds)}>Select all</button>
-            <button type="button" className="qm-secondary small" onClick={() => setSelectedLines([])}>Clear</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || saving} onClick={() => runBulk('mark_selected_accepted', selectedActiveLines, 'Selected lines marked accepted.')}>Mark accepted</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || saving} onClick={() => runBulk('mark_selected_rejected', selectedActiveLines, 'Selected lines marked rejected.')}>Mark rejected</button>
-            <button type="button" className="qm-secondary small" disabled={saving} onClick={() => runBulk('mark_all_accepted', lineIds, 'All lines marked accepted.')}>Mark all accepted</button>
-          </div>
-        </div>
-        <div className="qm-table-wrap">
-          <table className="qm-table">
-            <thead>
-              <tr>
-                <th></th>
-                <th>#</th>
-                <th>Item</th>
-                <th>Quoted</th>
-                <th>Outcome</th>
-                <th>Accepted qty</th>
-                <th>Accepted price</th>
-                <th>Reason</th>
-                <th>Accepted</th>
-                <th>Lost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(quote.lines || []).map((line, index) => {
-                const draft = lineDrafts[line.id] || draftFromLine(line);
-                return (
-                  <tr key={line.id}>
-                    <td><input type="checkbox" checked={selectedLines.includes(line.id)} onChange={() => setSelectedLines((current) => current.includes(line.id) ? current.filter((id) => id !== line.id) : [...current, line.id])} /></td>
-                    <td>{index + 1}</td>
-                    <td><strong>{line.item_name_snapshot}</strong><br /><small>{line.product_name || 'No Product'} - {line.quantity} {line.unit}</small></td>
-                    <td>{money(line.line_total, quote.currency)}<br /><small>{line.quantity} x {unitMoney(line.unit_price, quote.currency)}</small></td>
-                    <td>
-                      <select value={draft.outcome_status} onChange={(event) => updateLineDraft(line.id, { outcome_status: event.target.value })}>
-                        {Object.entries(lineStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                      </select>
-                    </td>
-                    <td><input type="number" min="0" step="0.001" value={draft.accepted_quantity} onChange={(event) => updateLineDraft(line.id, { accepted_quantity: event.target.value })} /></td>
-                    <td><input type="number" min="0" step="0.001" value={draft.accepted_unit_price} onChange={(event) => updateLineDraft(line.id, { accepted_unit_price: event.target.value })} /></td>
-                    <td>
-                      <select value={draft.outcome_reason} onChange={(event) => updateLineDraft(line.id, { outcome_reason: event.target.value })}>
-                        <option value="">No reason</option>
-                        {Object.entries(reasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                      </select>
-                    </td>
-                    <td>{money(line.accepted_total, quote.currency)}</td>
-                    <td>{money(line.lost_value, quote.currency)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
         </div>
       </div>
 
@@ -2022,17 +2292,17 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
             <h3>Final Outcome</h3>
             <p>Leave override blank to let the system calculate pending/won/lost/partial from the line statuses.</p>
           </div>
-          <button type="button" className="qm-primary" disabled={saving} onClick={saveManualOutcome}>Save Final Outcome</button>
+          <button type="button" className="qm-primary" disabled={outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={saveManualOutcome}>Save Final Outcome</button>
         </div>
         <div className="qm-outcome-form-grid">
           <label>Override status
-            <select value={manualOutcome.outcome_status} onChange={(event) => setManualOutcome({ ...manualOutcome, outcome_status: event.target.value })}>
+            <select disabled={outcomeMutationInProgress} value={manualOutcome.outcome_status} onChange={(event) => setManualOutcome({ ...manualOutcome, outcome_status: event.target.value })}>
               <option value="">Auto-calculate</option>
               {Object.entries(quoteOutcomeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
           <label className="span-two">Outcome notes
-            <textarea rows="3" value={manualOutcome.outcome_notes} onChange={(event) => setManualOutcome({ ...manualOutcome, outcome_notes: event.target.value })} placeholder="Required when overriding the calculated outcome." />
+            <textarea rows="3" disabled={outcomeMutationInProgress} value={manualOutcome.outcome_notes} onChange={(event) => setManualOutcome({ ...manualOutcome, outcome_notes: event.target.value })} placeholder="Required when overriding the calculated outcome." />
           </label>
         </div>
       </div>

@@ -3,7 +3,9 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -191,6 +193,170 @@ class POEvidenceCommercialComparisonTests(TestCase):
         self.assertEqual(lines[self.line_not_ordered.id]["status"], "not_ordered")
         self.assertTrue(lines[self.line_not_ordered.id]["not_on_lpo"])
         self.assertIn("not an explicit customer rejection", lines[self.line_not_ordered.id]["reason"])
+
+    def test_source_returns_latest_parsed_import_for_reload(self):
+        evidence = self._evidence(
+            [],
+            message_id="reload-latest-import",
+            attachment_id="stable-reload-import",
+            status=QuotationPOEvidence.STATUS_PARSED,
+        )
+        older = QuotationOutcomePOImport.objects.create(
+            quotation=self.quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            source_filename="older.pdf",
+            suggestions=[
+                {
+                    "quotation_line_id": self.line_exact.id,
+                    "suggested_accepted_quantity": "10",
+                    "suggested_accepted_unit_price": "9",
+                }
+            ],
+            missing_quote_line_ids=[self.line_reduced.id],
+            created_by=self.staff,
+        )
+        latest_row = {
+            "raw_name": self.line_exact.item_name_snapshot,
+            "quantity": "10",
+            "unit": "box",
+            "unit_price": "8",
+            "line_total": "80",
+        }
+        latest = QuotationOutcomePOImport.objects.create(
+            quotation=self.quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            source_filename="latest.pdf",
+            parsed_rows=[latest_row],
+            suggestions=[
+                {
+                    "po_row_number": 1,
+                    "po_row": latest_row,
+                    "po_item_name": self.line_exact.item_name_snapshot,
+                    "quotation_line_id": self.line_exact.id,
+                    "suggested_accepted_quantity": "10",
+                    "suggested_accepted_unit_price": "8",
+                    "confidence": 99,
+                }
+            ],
+            missing_quote_line_ids=[
+                self.line_reduced.id,
+                self.line_repriced.id,
+                self.line_not_ordered.id,
+            ],
+            created_by=self.staff,
+        )
+
+        with CaptureQueriesContext(connection) as captured_queries:
+            response = self._source(evidence)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.data["latest_po_import"]
+        self.assertNotEqual(payload["id"], older.id)
+        self.assertEqual(payload["id"], latest.id)
+        self.assertEqual(payload["quotation"], self.quote.id)
+        self.assertEqual(payload["gmail_evidence"], evidence.id)
+        self.assertEqual(payload["suggestions"], latest.suggestions)
+        self.assertEqual(
+            payload["missing_quote_line_ids"],
+            latest.missing_quote_line_ids,
+        )
+        self.assertIsNone(payload["canonical_lpo"])
+        self.assertNotIn("commercial_comparison", payload)
+        import_queries = [
+            query["sql"]
+            for query in captured_queries.captured_queries
+            if "quotations_quotationoutcomepoimport" in query["sql"].lower()
+        ]
+        self.assertEqual(len(import_queries), 1)
+        self.assertIn("LIMIT 1", import_queries[0].upper())
+        comparison = response.data["commercial_comparison"]
+        self.assertEqual(
+            comparison["parse_source"],
+            "approved_po_import",
+        )
+        compared_line = next(
+            line
+            for line in comparison["lines"]
+            if line["quotation_line_id"] == self.line_exact.id
+        )
+        self.assertEqual(compared_line["accepted_unit_price"], "8")
+
+    def test_source_import_is_scoped_to_exact_evidence_and_quotation(self):
+        evidence = self._evidence(
+            [],
+            message_id="reload-import-scope",
+            attachment_id="stable-import-scope",
+            status=QuotationPOEvidence.STATUS_PARSED,
+        )
+        expected = QuotationOutcomePOImport.objects.create(
+            quotation=self.quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            source_filename="expected.pdf",
+            suggestions=[{"quotation_line_id": self.line_exact.id}],
+            created_by=self.staff,
+        )
+        other_quote = Quotation.objects.create(
+            company=self.company,
+            quotation_number="QT-20260716-0902",
+            status=Quotation.STATUS_SENT,
+            created_by=self.staff,
+        )
+        QuotationOutcomePOImport.objects.create(
+            quotation=other_quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            source_filename="wrong-quotation.pdf",
+            suggestions=[{"quotation_line_id": self.line_reduced.id}],
+            created_by=self.staff,
+        )
+        other_evidence = self._evidence(
+            [],
+            message_id="reload-other-evidence",
+            attachment_id="stable-other-evidence",
+            status=QuotationPOEvidence.STATUS_PARSED,
+        )
+        QuotationOutcomePOImport.objects.create(
+            quotation=self.quote,
+            gmail_evidence=other_evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            source_filename="wrong-evidence.pdf",
+            suggestions=[{"quotation_line_id": self.line_repriced.id}],
+            created_by=self.staff,
+        )
+        QuotationOutcomePOImport.objects.create(
+            quotation=self.quote,
+            gmail_evidence=evidence,
+            source_type=QuotationOutcomePOImport.SOURCE_GMAIL,
+            source_filename="failed.pdf",
+            status=QuotationOutcomePOImport.STATUS_FAILED,
+            suggestions=[{"quotation_line_id": self.line_not_ordered.id}],
+            created_by=self.staff,
+        )
+
+        response = self._source(evidence)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["latest_po_import"]["id"], expected.id)
+        self.assertEqual(
+            response.data["latest_po_import"]["suggestions"],
+            expected.suggestions,
+        )
+
+    def test_source_returns_null_latest_import_when_evidence_has_no_import(self):
+        evidence = self._evidence(
+            [],
+            message_id="reload-no-import",
+            attachment_id="stable-no-import",
+            status=QuotationPOEvidence.STATUS_PARSED,
+        )
+
+        response = self._source(evidence)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["latest_po_import"])
 
     def test_missing_po_quantity_and_price_never_use_quotation_fallbacks(self):
         line_without_quote_price = QuotationLine.objects.create(

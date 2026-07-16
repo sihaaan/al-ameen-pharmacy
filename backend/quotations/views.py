@@ -109,6 +109,7 @@ from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_p
 from .permissions import IsQuotationStaff
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
 from .po_evidence_comparison import (
+    latest_relevant_po_import,
     safe_build_po_evidence_commercial_comparison,
     unavailable_po_evidence_commercial_comparison,
 )
@@ -166,7 +167,10 @@ from .services import (
     ensure_quotation_editable,
     find_historical_import_duplicates,
     finalize_quotation,
+    learn_confirmed_inquiry_line_alias,
+    learn_confirmed_quotation_line_alias,
     outcome_summary_for_quotation,
+    quotation_line_source_wording,
     remember_historical_import_line_alias,
     remember_inquiry_line_alias,
     remember_quotation_line_alias,
@@ -1664,12 +1668,19 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        inquiry = serializer.save()
-        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, inquiry, message="Created inquiry.")
+        with transaction.atomic():
+            inquiry = serializer.save()
+            audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, inquiry, message="Created inquiry.")
 
     def perform_update(self, serializer):
         inquiry = serializer.save()
         audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, inquiry, message="Updated inquiry.")
+
+    def create(self, request, *args, **kwargs):
+        try:
+            return super().create(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
 
     @action(detail=False, methods=["post"])
     def parse_text(self, request):
@@ -1735,7 +1746,10 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def create_imported(self, request):
         serializer = ImportedInquiryCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        inquiry = create_imported_inquiry(serializer.validated_data, request.user)
+        try:
+            inquiry = create_imported_inquiry(serializer.validated_data, request.user)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
         response_serializer = InquirySerializer(inquiry, context={"request": request})
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -1787,12 +1801,38 @@ class InquiryLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        line = serializer.save()
-        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, line, message="Created inquiry line.")
+        with transaction.atomic():
+            line = serializer.save()
+            learn_confirmed_inquiry_line_alias(line, self.request.user)
+            audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, line, message="Created inquiry line.")
 
     def perform_update(self, serializer):
-        line = serializer.save()
-        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated inquiry line.")
+        match_fields_touched = bool(
+            {"raw_name", "matched_product", "match_status"}.intersection(serializer.validated_data)
+        )
+        with transaction.atomic():
+            line = serializer.save()
+            if match_fields_touched:
+                learn_confirmed_inquiry_line_alias(line, self.request.user)
+            audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated inquiry line.")
+
+    def create(self, request, *args, **kwargs):
+        try:
+            return super().create(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+
+    def update(self, request, *args, **kwargs):
+        try:
+            return super().update(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
+
+    def partial_update(self, request, *args, **kwargs):
+        try:
+            return super().partial_update(request, *args, **kwargs)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
 
     @action(detail=True, methods=["post"])
     def remember_alias(self, request, pk=None):
@@ -2090,7 +2130,6 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
             "quotation__lines",
             "quotation__lines__product",
             "quotation__lines__quote_item",
-            "po_imports",
         )
     )
 
@@ -2104,6 +2143,7 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
     def source(self, request, pk=None):
         evidence = self.get_object()
         message = evidence.mailbox_message
+        latest_po_import = latest_relevant_po_import(evidence)
         max_chars = _bounded_int(
             getattr(settings, "PO_EVIDENCE_SOURCE_VIEW_MAX_CHARS", 100000),
             default=100000,
@@ -2123,6 +2163,22 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
                 evidence.pk,
             )
             commercial_comparison = unavailable_po_evidence_commercial_comparison(evidence)
+        latest_po_import_payload = None
+        if latest_po_import:
+            latest_po_import_payload = dict(
+                QuotationOutcomePOImportSerializer(
+                    latest_po_import,
+                    context={
+                        "request": request,
+                        "omit_commercial_comparison": True,
+                    },
+                ).data
+            )
+            # The authoritative comparison is already returned once at the
+            # top level. The client combines it with this reload-safe import
+            # metadata instead of downloading every line twice.
+            latest_po_import_payload.pop("commercial_comparison", None)
+
         response = Response(
             {
                 "id": evidence.id,
@@ -2132,6 +2188,7 @@ class QuotationPOEvidenceViewSet(QuotationBaseViewSet, viewsets.GenericViewSet):
                 "email_body_text": email_body[:max_chars],
                 "email_body_text_truncated": len(email_body) > max_chars,
                 "commercial_comparison": commercial_comparison,
+                "latest_po_import": latest_po_import_payload,
             }
         )
         response["Cache-Control"] = "private, no-store, max-age=0"
@@ -3374,15 +3431,61 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         quotation = serializer.validated_data["quotation"]
         ensure_quotation_editable(quotation)
-        line = serializer.save()
-        recalculate_quotation_totals(quotation)
-        audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, line, message="Created quotation line.")
+        with transaction.atomic():
+            line = serializer.save()
+            source_wording = quotation_line_source_wording(line)
+            if source_wording and line.item_name_snapshot != source_wording:
+                line.item_name_snapshot = source_wording
+                line.save(update_fields=["item_name_snapshot", "updated_at"])
+            learn_confirmed_quotation_line_alias(line, self.request.user)
+            recalculate_quotation_totals(quotation)
+            audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, line, message="Created quotation line.")
 
     def perform_update(self, serializer):
         ensure_quotation_editable(serializer.instance.quotation)
-        line = serializer.save()
-        recalculate_quotation_totals(line.quotation)
-        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated quotation line.")
+        next_inquiry_line = serializer.validated_data.get(
+            "inquiry_line",
+            serializer.instance.inquiry_line,
+        )
+        source_wording = (
+            next_inquiry_line.raw_name
+            if next_inquiry_line and str(next_inquiry_line.raw_name or "").strip()
+            else serializer.instance.item_name_snapshot
+        )
+        next_product = serializer.validated_data.get("product", serializer.instance.product)
+        product_changed = (
+            "product" in serializer.validated_data
+            and getattr(next_product, "pk", None) != serializer.instance.product_id
+        )
+        inquiry_changed = (
+            "inquiry_line" in serializer.validated_data
+            and getattr(next_inquiry_line, "pk", None) != serializer.instance.inquiry_line_id
+        )
+        match_fields_touched = bool(
+            {"inquiry_line", "product", "item_name_snapshot", "match_status"}.intersection(
+                serializer.validated_data
+            )
+        )
+        restore_source_snapshot = bool(
+            source_wording
+            and next_product
+            and (next_inquiry_line or product_changed or inquiry_changed)
+        )
+        if restore_source_snapshot:
+            serializer.validated_data["item_name_snapshot"] = source_wording
+        with transaction.atomic():
+            line = serializer.save()
+            if restore_source_snapshot and line.item_name_snapshot != source_wording:
+                line.item_name_snapshot = source_wording
+                line.save(update_fields=["item_name_snapshot", "updated_at"])
+            if match_fields_touched:
+                learn_confirmed_quotation_line_alias(
+                    line,
+                    self.request.user,
+                    source_wording=source_wording if restore_source_snapshot else "",
+                )
+            recalculate_quotation_totals(line.quotation)
+            audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated quotation line.")
 
     def create(self, request, *args, **kwargs):
         try:

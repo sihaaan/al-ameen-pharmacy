@@ -519,9 +519,10 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const productPatch = (draft, productId) => {
     const item = items.find((candidate) => String(candidate.id) === String(productId));
+    const hasSnapshotName = String(draft.item_name_snapshot || '').trim().length > 0;
     return {
       product: productId,
-      item_name_snapshot: item ? item.name : draft.item_name_snapshot,
+      item_name_snapshot: hasSnapshotName ? draft.item_name_snapshot : (item?.name || ''),
       unit: draft.unit || sanitizeUnitText(item?.unit || ''),
       match_status: productId ? 'confirmed' : 'unresolved',
       product_image: '',
@@ -912,10 +913,11 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const linkCandidateFromCreateModal = async (lineId, candidate) => {
     if (!candidate?.product_id || saving || actionInFlight) return;
     const currentDraft = lineDrafts[lineId] || {};
+    const hasSnapshotName = String(currentDraft.item_name_snapshot || '').trim().length > 0;
     const linkedDraft = {
       ...currentDraft,
       product: String(candidate.product_id),
-      item_name_snapshot: candidate.product_name || currentDraft.item_name_snapshot,
+      item_name_snapshot: hasSnapshotName ? currentDraft.item_name_snapshot : (candidate.product_name || ''),
       match_status: 'confirmed',
       product_image: '',
       product_image_url: '',
@@ -949,9 +951,6 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       });
       setSelectedLineIds((current) => current.filter((id) => id !== lineId));
       setLineFeedback({ type: 'success', message: `Linked the row to existing Product '${candidate.product_name}'.` });
-      quotationAPI.lines.rememberAlias(lineId).catch((error) => {
-        console.warn('The row was linked, but its source wording could not be remembered as an alias.', error);
-      });
     } catch (error) {
       const details = await describeQuotationError(error, 'Link existing Product to quote line', `POST /quotations/quotes/${quote.id}/bulk_update_lines/`);
       setErrorInfo(details);

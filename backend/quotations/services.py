@@ -10,7 +10,12 @@ from django.utils import timezone
 from api.models import Product, ProductImage, ProductSupplier
 
 from .import_rules import is_obvious_po_metadata_item
-from .matching import create_or_reuse_product, create_product_alias, suggest_product_for_text
+from .matching import (
+    create_or_reuse_product,
+    create_product_alias,
+    learn_confirmed_product_alias,
+    suggest_product_for_text,
+)
 from .models import (
     Company,
     CompanyPriceHistory,
@@ -1281,6 +1286,47 @@ def _product_name_from_line(line, override_name=""):
     return name[:200]
 
 
+def learn_confirmed_inquiry_line_alias(line, actor):
+    if (
+        line.match_status != InquiryLine.MATCH_CONFIRMED
+        or not line.matched_product_id
+        or not line.inquiry.company_id
+    ):
+        return None, False
+    return learn_confirmed_product_alias(
+        source_text=line.raw_name,
+        product=line.matched_product,
+        company=line.inquiry.company,
+        actor=actor,
+        notes=f"Learned from confirmed inquiry line {line.pk}.",
+    )
+
+
+def quotation_line_source_wording(line):
+    if line.inquiry_line_id and str(line.inquiry_line.raw_name or "").strip():
+        return line.inquiry_line.raw_name
+    if str(line.item_name_snapshot or "").strip():
+        return line.item_name_snapshot
+    return ""
+
+
+def learn_confirmed_quotation_line_alias(line, actor, *, source_wording=""):
+    if (
+        line.match_status != QuotationLine.MATCH_CONFIRMED
+        or not line.product_id
+        or not line.quotation.company_id
+    ):
+        return None, False
+    wording = source_wording if str(source_wording or "").strip() else quotation_line_source_wording(line)
+    return learn_confirmed_product_alias(
+        source_text=wording,
+        product=line.product,
+        company=line.quotation.company,
+        actor=actor,
+        notes=f"Learned from confirmed quotation line {line.pk}.",
+    )
+
+
 def _get_or_create_internal_product_from_line(line, actor, override_name="", *, confirm_create=False):
     product_name = _product_name_from_line(line, override_name)
     resolution = create_or_reuse_product(
@@ -1302,12 +1348,14 @@ def _get_or_create_internal_product_from_line(line, actor, override_name="", *, 
 
 
 def _link_quotation_line_to_product(line, product, actor, *, reason="Created/linked from quotation line."):
+    source_wording = quotation_line_source_wording(line)
     line.product = product
     line.quote_item = None
-    line.item_name_snapshot = product.name
+    line.item_name_snapshot = source_wording or product.name
     line.match_status = QuotationLine.MATCH_CONFIRMED
     line.match_reason = reason
     line.save(update_fields=["product", "quote_item", "item_name_snapshot", "match_status", "match_reason", "line_subtotal", "vat_amount", "line_total", "updated_at"])
+    learn_confirmed_quotation_line_alias(line, actor, source_wording=source_wording)
     audit_log(
         actor,
         QuotationAuditLog.ACTION_UPDATED,
@@ -2070,7 +2118,7 @@ def create_imported_inquiry(validated_data, actor):
         **validated_data,
     )
     for index, line_data in enumerate(lines_data):
-        InquiryLine.objects.create(
+        line = InquiryLine.objects.create(
             inquiry=inquiry,
             sort_order=index,
             raw_line=line_data.get("raw_line", ""),
@@ -2087,6 +2135,7 @@ def create_imported_inquiry(validated_data, actor):
             parse_status=line_data.get("parse_status", InquiryLine.PARSE_NEEDS_REVIEW),
             parse_confidence=line_data.get("parse_confidence", 0.0),
         )
+        learn_confirmed_inquiry_line_alias(line, actor)
     audit_log(
         actor,
         QuotationAuditLog.ACTION_IMPORTED,
@@ -2187,7 +2236,7 @@ def remember_quotation_line_alias(line, actor):
 def create_product_from_quotation_line(line, actor, product_name="", *, confirm_create=False):
     line = (
         QuotationLine.objects.select_for_update()
-        .select_related("quotation__company")
+        .select_related("quotation__company", "inquiry_line")
         .get(pk=line.pk)
     )
     ensure_quotation_editable(line.quotation)
@@ -2229,7 +2278,7 @@ def bulk_create_products_from_quotation_lines(
     confirm_create_line_ids = {int(line_id) for line_id in (confirm_create_line_ids or [])}
     lines = list(
         quotation.lines.select_for_update()
-        .select_related("quotation__company")
+        .select_related("quotation__company", "inquiry_line")
         .filter(id__in=line_ids)
         .order_by("sort_order", "id")
     )
@@ -2308,7 +2357,9 @@ def bulk_update_quotation_lines(quotation, rows, actor):
 
     lines = {
         line.id: line
-        for line in quotation.lines.select_for_update().filter(id__in=rows_by_id.keys())
+        for line in quotation.lines.select_for_update()
+        .select_related("inquiry_line", "product", "quotation__company")
+        .filter(id__in=rows_by_id.keys())
     }
     updated = []
     allowed_fields = {
@@ -2340,8 +2391,24 @@ def bulk_update_quotation_lines(quotation, rows, actor):
         line = lines.get(line_id)
         if not line:
             raise ValidationError(f"Line {line_id} does not belong to this quotation.")
+        source_wording = quotation_line_source_wording(line)
+        requested_product_id = payload.get("product") if "product" in payload else line.product_id
+        product_changed = (
+            "product" in payload
+            and str(requested_product_id or "") != str(line.product_id or "")
+        )
+        match_fields_touched = bool(
+            {"product", "item_name_snapshot", "match_status"}.intersection(payload)
+        )
+        restore_source_snapshot = bool(
+            str(source_wording or "").strip()
+            and requested_product_id
+            and (product_changed or (line.inquiry_line_id and match_fields_touched))
+        )
         for field in allowed_fields:
             if field not in payload:
+                continue
+            if field == "item_name_snapshot" and restore_source_snapshot:
                 continue
             value = payload[field]
             if field in {"product", "quote_item", "product_image"}:
@@ -2376,7 +2443,17 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             line.match_status = QuotationLine.MATCH_CONFIRMED
         if not line.product_id and not line.quote_item_id and line.match_status == QuotationLine.MATCH_CONFIRMED:
             line.match_status = QuotationLine.MATCH_UNRESOLVED
+        if line.product_id and restore_source_snapshot:
+            line.item_name_snapshot = source_wording
+        elif line.product_id and not str(line.item_name_snapshot or "").strip():
+            line.item_name_snapshot = source_wording or line.product.name
         line.save()
+        if match_fields_touched:
+            learn_confirmed_quotation_line_alias(
+                line,
+                actor,
+                source_wording=source_wording if restore_source_snapshot else "",
+            )
         updated.append(line)
     recalculate_quotation_totals(quotation)
     audit_log(
@@ -2410,8 +2487,8 @@ def create_quotation_from_inquiry(inquiry, actor):
     for index, line in enumerate(inquiry.lines.select_related("matched_quote_item", "matched_product").order_by("sort_order", "id")):
         quote_item = line.matched_quote_item
         product = line.matched_product
-        item_name = product.name if product else quote_item.name if quote_item else line.raw_name
-        QuotationLine.objects.create(
+        item_name = line.raw_name or (product.name if product else quote_item.name if quote_item else "")
+        quotation_line = QuotationLine.objects.create(
             quotation=quotation,
             inquiry_line=line,
             quote_item=quote_item,
@@ -2426,6 +2503,7 @@ def create_quotation_from_inquiry(inquiry, actor):
             sort_order=index,
             notes=line.notes,
         )
+        learn_confirmed_quotation_line_alias(quotation_line, actor)
 
     inquiry.status = Inquiry.STATUS_QUOTED
     inquiry.save(update_fields=["status", "updated_at"])

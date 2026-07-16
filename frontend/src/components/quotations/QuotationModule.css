@@ -865,6 +865,11 @@
   background: #f8fafc;
 }
 
+.qm-evidence-card.is-selected {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.18), 0 12px 28px rgba(15, 118, 110, 0.1);
+}
+
 .qm-evidence-section-heading {
   display: flex;
   align-items: baseline;
@@ -974,10 +979,34 @@
   color: #b91c1c;
 }
 
-.qm-evidence-detail-modal {
-  width: min(1280px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
-  overflow: auto;
+.qm-evidence-review-workspace {
+  scroll-margin-top: 16px;
+  border-color: #5eead4;
+  background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 28%);
+  box-shadow: 0 14px 34px rgba(15, 118, 110, 0.08);
+}
+
+.qm-evidence-source-details {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.qm-evidence-source-details > summary {
+  width: fit-content;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.qm-comparison-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .qm-evidence-detail-grid {
@@ -1144,56 +1173,6 @@
   font-size: 12px;
   font-weight: 650;
   line-height: 1.5;
-}
-
-.qm-commercial-comparison-wrap {
-  margin-top: 10px;
-}
-
-.qm-commercial-comparison-table {
-  min-width: 1180px;
-}
-
-.qm-commercial-comparison-table thead tr:first-child th {
-  border-bottom-color: #cbd5e1;
-  background: #e2e8f0;
-  color: #334155;
-  text-align: center;
-}
-
-.qm-commercial-comparison-table thead tr:nth-child(2) th {
-  background: #f1f5f9;
-  white-space: nowrap;
-}
-
-.qm-commercial-comparison-table td {
-  vertical-align: top;
-}
-
-.qm-commercial-comparison-table td:nth-last-child(-n + 7) {
-  white-space: nowrap;
-}
-
-.qm-commercial-comparison-table td:last-child {
-  min-width: 180px;
-  white-space: normal;
-}
-
-.qm-commercial-comparison-table td:last-child small {
-  display: block;
-  margin-top: 5px;
-  max-width: 260px;
-  color: #64748b;
-  line-height: 1.35;
-}
-
-.qm-commercial-comparison-table .qm-derived-total-note {
-  display: block;
-  margin-top: 4px;
-  color: #64748b;
-  font-size: 10px;
-  font-weight: 700;
-  white-space: normal;
 }
 
 .qm-commercial-row.status-not-ordered,
@@ -1405,6 +1384,253 @@
   color: #64748b;
   font-size: 12px;
   font-weight: 700;
+}
+
+.qm-line-outcomes-panel {
+  scroll-margin-top: 16px;
+}
+
+.qm-unsaved-line-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 12px 0 0;
+}
+
+.qm-unsaved-line-notice span {
+  color: #78350f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.qm-inline-lpo-summary {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.4fr) repeat(3, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #99f6e4;
+  border-radius: 9px;
+  background: #f0fdfa;
+}
+
+.qm-inline-lpo-summary > div {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #ccfbf1;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.qm-inline-lpo-summary span,
+.qm-inline-lpo-summary small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.qm-inline-lpo-summary strong {
+  color: #0f172a;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.qm-reconciliation-wrap {
+  margin-top: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+}
+
+.qm-outcome-reconciliation-table {
+  width: 100%;
+  min-width: 1080px;
+  table-layout: fixed;
+}
+
+.qm-outcome-reconciliation-table th:nth-child(1),
+.qm-outcome-reconciliation-table td:nth-child(1) {
+  width: 54px;
+  text-align: center;
+}
+
+.qm-outcome-reconciliation-table th:nth-child(2),
+.qm-outcome-reconciliation-table td:nth-child(2) {
+  width: 42px;
+  text-align: center;
+}
+
+.qm-outcome-reconciliation-table th:nth-child(3),
+.qm-outcome-reconciliation-table th:nth-child(4) {
+  width: 18%;
+}
+
+.qm-outcome-reconciliation-table th:nth-child(5) {
+  width: 18%;
+}
+
+.qm-outcome-reconciliation-table th:nth-child(6) {
+  width: 30%;
+}
+
+.qm-outcome-reconciliation-table th:nth-child(7) {
+  width: 110px;
+}
+
+.qm-outcome-reconciliation-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f8fafc;
+  white-space: nowrap;
+}
+
+.qm-outcome-reconciliation-table tbody th,
+.qm-outcome-reconciliation-table tbody td {
+  padding: 12px;
+  vertical-align: top;
+}
+
+.qm-outcome .qm-outcome-reconciliation-table input[type="checkbox"] {
+  min-width: 0;
+}
+
+.qm-reconciliation-source-cell,
+.qm-reconciliation-decision-cell,
+.qm-reconciliation-value-cell {
+  vertical-align: top;
+}
+
+.qm-reconciliation-source-cell > *,
+.qm-reconciliation-decision-cell > *,
+.qm-reconciliation-value-cell > * {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.qm-reconciliation-source-cell strong,
+.qm-reconciliation-source-cell b,
+.qm-reconciliation-value-cell strong {
+  color: #0f172a;
+}
+
+.qm-reconciliation-source-cell span,
+.qm-reconciliation-source-cell small,
+.qm-reconciliation-decision-cell small,
+.qm-reconciliation-value-cell span,
+.qm-muted {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.qm-reconciliation-decision-cell .qm-commercial-review-flag {
+  margin-top: 0;
+}
+
+.qm-lpo-stage-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 5px;
+  padding: 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.78);
+  color: #334155;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.qm-lpo-stage-choice input {
+  min-width: 0 !important;
+  margin-top: 1px;
+}
+
+.qm-final-outcome-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.qm-final-outcome-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+
+.qm-final-outcome-controls .span-two {
+  grid-column: 1 / -1;
+}
+
+.qm-outcome .qm-final-outcome-controls input,
+.qm-outcome .qm-final-outcome-controls select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.qm-reconciliation-value-cell span:not(:first-child) {
+  margin-top: 6px;
+}
+
+.qm-unmatched-lpo-summary {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff7f7;
+}
+
+.qm-unmatched-lpo-summary strong {
+  color: #991b1b;
+}
+
+.qm-unmatched-lpo-summary p {
+  margin: 4px 0 8px;
+  color: #7f1d1d;
+  font-size: 12px;
+}
+
+.qm-unmatched-lpo-summary > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.qm-unmatched-lpo-summary span {
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #7f1d1d;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.qm-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .qm-controls,
@@ -4658,6 +4884,10 @@
     grid-template-columns: 1fr;
   }
 
+  .qm-inline-lpo-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .qm-summary-banner.compact,
   .qm-lpo-metadata,
   .qm-meta-grid {
@@ -4677,15 +4907,82 @@
   }
 }
 
+@media (max-width: 1240px) {
+  .qm-reconciliation-wrap {
+    overflow: visible;
+    border: 0;
+  }
+
+  .qm-outcome-reconciliation-table {
+    min-width: 0;
+    border-collapse: separate;
+  }
+
+  .qm-outcome-reconciliation-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .qm-outcome-reconciliation-table,
+  .qm-outcome-reconciliation-table tbody,
+  .qm-outcome-reconciliation-table tr,
+  .qm-outcome-reconciliation-table td,
+  .qm-outcome-reconciliation-table tbody th {
+    display: block;
+    width: 100% !important;
+  }
+
+  .qm-outcome-reconciliation-table tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  .qm-outcome-reconciliation-table tbody tr {
+    overflow: hidden;
+    border: 1px solid #e2e8f0;
+    border-radius: 9px;
+    background: #ffffff;
+  }
+
+  .qm-outcome-reconciliation-table tbody td,
+  .qm-outcome-reconciliation-table tbody th {
+    padding: 10px 12px;
+    border-bottom: 1px solid #edf2f7;
+    text-align: left !important;
+  }
+
+  .qm-outcome-reconciliation-table tbody td:last-child {
+    border-bottom: 0;
+  }
+
+  .qm-outcome-reconciliation-table [data-label]::before {
+    display: block;
+    margin-bottom: 5px;
+    color: #64748b;
+    content: attr(data-label);
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+}
+
 @media (max-width: 768px) {
   .qm-evidence-detail-grid,
   .qm-evidence-commercial-context .qm-commercial-summary-grid {
     grid-template-columns: 1fr;
   }
 
-  .qm-evidence-detail-modal {
-    width: calc(100vw - 16px);
-    max-height: calc(100vh - 16px);
+  .qm-inline-lpo-summary,
+  .qm-final-outcome-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-final-outcome-controls .span-two {
+    grid-column: span 1;
   }
 
   .qm-panel,

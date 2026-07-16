@@ -313,10 +313,12 @@ def _candidate(product, score, method, reason):
     return ProductCandidate(product=product, score=score, method=method, reason=reason)
 
 
-def _aliases_for_text(raw_text, company, *, for_update=False):
+def _aliases_for_text(raw_text, company, *, for_update=False, include_inactive=False):
     simple = normalize_label(raw_text)
     domain = normalize_item_text(raw_text)
-    queryset = ProductAlias.objects.filter(company=company, is_active=True).select_related("product")
+    queryset = ProductAlias.objects.filter(company=company).select_related("product")
+    if not include_inactive:
+        queryset = queryset.filter(is_active=True)
     if for_update:
         queryset = queryset.select_for_update()
     matches = []
@@ -626,7 +628,12 @@ def create_product_alias(*, alias_text, product, company=None, actor=None, notes
     )
     equivalent = exact_existing + [
         alias
-        for alias in _aliases_for_text(alias_text, company, for_update=True)
+        for alias in _aliases_for_text(
+            alias_text,
+            company,
+            for_update=True,
+            include_inactive=True,
+        )
         if alias.id not in {existing.id for existing in exact_existing}
     ]
     existing = equivalent[0] if equivalent else None
@@ -669,6 +676,61 @@ def create_product_alias(*, alias_text, product, company=None, actor=None, notes
             )
         return existing, False
     return alias, True
+
+
+@transaction.atomic
+def learn_confirmed_product_alias(*, source_text, product, company, actor=None, notes=""):
+    """Remember confirmed customer wording without changing the Product identity.
+
+    Product matching previews are deliberately read-only. Callers use this only
+    while persisting a staff-confirmed match so an alias conflict rolls back the
+    surrounding match instead of leaving the catalogue in a contradictory state.
+    """
+    cleaned_source = str(source_text or "").strip()
+    if not cleaned_source or not product or not company:
+        return None, False
+    if cleaned_source == str(product.name or "").strip():
+        return None, False
+
+    normalized = normalize_label(cleaned_source)
+    exact_existing = list(
+        ProductAlias.objects.select_for_update()
+        .select_related("product")
+        .filter(company=company, normalized_alias=normalized)
+        .order_by("id")[:10]
+    )
+    equivalent = exact_existing + [
+        alias
+        for alias in _aliases_for_text(
+            cleaned_source,
+            company,
+            for_update=True,
+            include_inactive=True,
+        )
+        if alias.id not in {existing.id for existing in exact_existing}
+    ]
+    if equivalent:
+        # Automatic learning must never rewrite curated spelling/notes or
+        # reactivate an alias that staff deliberately disabled. Conflicts still
+        # go through the strict explicit helper so the surrounding match rolls
+        # back with the existing actionable validation message.
+        if any(alias.product_id != product.id for alias in equivalent):
+            return create_product_alias(
+                alias_text=cleaned_source,
+                product=product,
+                company=company,
+                actor=actor,
+                notes=notes,
+            )
+        return equivalent[0], False
+
+    return create_product_alias(
+        alias_text=cleaned_source,
+        product=product,
+        company=company,
+        actor=actor,
+        notes=notes,
+    )
 
 
 @transaction.atomic

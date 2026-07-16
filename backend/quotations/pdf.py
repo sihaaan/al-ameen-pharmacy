@@ -16,7 +16,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.platypus import Flowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .models import QuotationLine
 from .pdf_config import get_quotation_pdf_config
@@ -71,7 +72,71 @@ def _unit_money(currency, value):
 
 
 def _number(value):
-    return f"{value:g}" if value is not None else "-"
+    if value is None:
+        return "-"
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return str(value)
+    if not number.is_finite():
+        return str(value)
+    if number == 0:
+        return "0"
+    text = format(number, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+class _MeasuredSingleLineCell(Flowable):
+    """Draw one measured line, shrinking its font enough to stay in its cell."""
+
+    def __init__(self, value, style, *, h_align):
+        super().__init__()
+        text = "" if value is None else str(value)
+        self.text = " ".join(text.split()) or "-"
+        self.style = style
+        self.h_align = str(h_align or "LEFT").upper()
+        self.draw_font_size = float(style.fontSize)
+        self.rendered_text_width = 0.0
+
+    def wrap(self, avail_width, avail_height):
+        self.width = max(0.0, float(avail_width))
+        self.height = min(float(self.style.leading), max(0.0, float(avail_height)))
+        natural_width = pdfmetrics.stringWidth(self.text, self.style.fontName, self.style.fontSize)
+        if not self.width or not natural_width:
+            self.draw_font_size = 0.0 if not self.width else float(self.style.fontSize)
+            self.rendered_text_width = 0.0
+            return self.width, self.height
+
+        self.draw_font_size = float(self.style.fontSize) * min(1.0, self.width / natural_width)
+        self.rendered_text_width = pdfmetrics.stringWidth(
+            self.text,
+            self.style.fontName,
+            self.draw_font_size,
+        )
+        return self.width, self.height
+
+    def draw(self):
+        if not self.text or self.draw_font_size <= 0:
+            return
+        canvas = self.canv
+        canvas.saveState()
+        canvas.setFillColor(self.style.textColor or colors.black)
+        canvas.setFont(self.style.fontName, self.draw_font_size)
+        ascent, descent = pdfmetrics.getAscentDescent(self.style.fontName, self.draw_font_size)
+        baseline = max(0.0, (self.height - (ascent - descent)) / 2.0 - descent)
+        if self.h_align == "RIGHT":
+            canvas.drawRightString(self.width, baseline, self.text)
+        elif self.h_align == "CENTER":
+            canvas.drawCentredString(self.width / 2.0, baseline, self.text)
+        else:
+            canvas.drawString(0, baseline, self.text)
+        canvas.restoreState()
+
+
+def _single_line_table_cell(value, style, *, h_align):
+    return _MeasuredSingleLineCell(value, style, h_align=h_align)
 
 
 def _customer_line_detail(value):
@@ -404,6 +469,8 @@ def _pdf_styles(primary):
     styles.add(ParagraphStyle(name="TableCell", parent=styles["Normal"], fontName="Helvetica", fontSize=7.8, leading=9.4, textColor=TEXT))
     styles.add(ParagraphStyle(name="TableCellCenter", parent=styles["TableCell"], alignment=TA_CENTER))
     styles.add(ParagraphStyle(name="TableCellRight", parent=styles["TableCell"], alignment=TA_RIGHT))
+    styles.add(ParagraphStyle(name="TableCellQuantity", parent=styles["TableCellRight"], splitLongWords=False))
+    styles.add(ParagraphStyle(name="TableCellUnit", parent=styles["TableCellCenter"], fontSize=7.5, leading=9.2, splitLongWords=False))
     styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=7.8, leading=9.4, splitLongWords=False, spaceShrinkage=0.03))
     styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading4"], fontSize=10, leading=12, textColor=primary))
     styles.add(ParagraphStyle(name="QuoteTitle", parent=styles["Title"], alignment=TA_RIGHT, fontSize=18, leading=22, textColor=TEXT))
@@ -519,8 +586,8 @@ def build_quotation_pdf(quotation):
             [
                 Paragraph(str(index), styles["TableCellCenter"]),
                 item_cell,
-                Paragraph(_number(line.quantity), styles["TableCellRight"]),
-                Paragraph(_text(line.unit), styles["TableCell"]),
+                _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
+                _single_line_table_cell(line.unit, styles["TableCellUnit"], h_align="CENTER"),
                 Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
@@ -529,7 +596,7 @@ def build_quotation_pdf(quotation):
 
     line_table = Table(
         table_data,
-        colWidths=[10 * mm, 73 * mm, 14 * mm, 15 * mm, 26 * mm, 25 * mm, 25 * mm],
+        colWidths=[10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm],
         repeatRows=1,
     )
     line_table.setStyle(
@@ -747,8 +814,8 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
             [
                 Paragraph(str(index), styles["TableCellCenter"]),
                 item_cell,
-                Paragraph(_number(line.quantity), styles["TableCellRight"]),
-                Paragraph(_text(line.unit), styles["TableCell"]),
+                _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
+                _single_line_table_cell(line.unit, styles["TableCellUnit"], h_align="CENTER"),
                 Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
                 Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
@@ -757,7 +824,7 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
 
     line_table = Table(
         table_data,
-        colWidths=[10 * mm, 73 * mm, 14 * mm, 15 * mm, 26 * mm, 25 * mm, 25 * mm],
+        colWidths=[10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm],
         repeatRows=1,
     )
     line_table.setStyle(
@@ -952,8 +1019,8 @@ def build_standalone_proforma_invoice_pdf(proforma):
             [
                 Paragraph(str(index), styles["TableCellCenter"]),
                 Paragraph(item_text, styles["TableCell"]),
-                Paragraph(_number(line.quantity), styles["TableCellRight"]),
-                Paragraph(_text(line.unit), styles["TableCell"]),
+                _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
+                _single_line_table_cell(line.unit, styles["TableCellUnit"], h_align="CENTER"),
                 Paragraph(_unit_money(proforma.currency, line.unit_price), styles["TableCellMoney"]),
                 Paragraph(_money(proforma.currency, line.vat_amount), styles["TableCellMoney"]),
                 Paragraph(_money(proforma.currency, line.line_total), styles["TableCellMoney"]),
@@ -962,7 +1029,7 @@ def build_standalone_proforma_invoice_pdf(proforma):
 
     line_table = Table(
         table_data,
-        colWidths=[10 * mm, 73 * mm, 14 * mm, 15 * mm, 26 * mm, 25 * mm, 25 * mm],
+        colWidths=[10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm],
         repeatRows=1,
     )
     line_table.setStyle(
