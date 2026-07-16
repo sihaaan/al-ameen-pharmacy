@@ -56,6 +56,18 @@ def ensure_quotation_editable(quotation):
         raise ValidationError("Finalized, sent, revised, and cancelled quotations cannot be edited directly.")
 
 
+def _quotation_lines_for_update():
+    """Lock quotation-line rows without locking nullable joined relations.
+
+    PostgreSQL rejects an unrestricted ``FOR UPDATE`` when ``select_related``
+    adds an outer join for optional relations such as ``inquiry_line`` or
+    ``product``. Restricting the lock to the base table keeps those related
+    objects available for the workflow while preserving the intended row lock.
+    """
+
+    return QuotationLine.objects.select_for_update(of=("self",))
+
+
 def recalculate_quotation_totals(quotation):
     totals = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).aggregate(
         subtotal=Sum("line_subtotal"),
@@ -2235,7 +2247,7 @@ def remember_quotation_line_alias(line, actor):
 @transaction.atomic
 def create_product_from_quotation_line(line, actor, product_name="", *, confirm_create=False):
     line = (
-        QuotationLine.objects.select_for_update()
+        _quotation_lines_for_update()
         .select_related("quotation__company", "inquiry_line")
         .get(pk=line.pk)
     )
@@ -2277,9 +2289,9 @@ def bulk_create_products_from_quotation_lines(
     names_by_id = {int(key): value for key, value in (names_by_id or {}).items() if str(key).isdigit()}
     confirm_create_line_ids = {int(line_id) for line_id in (confirm_create_line_ids or [])}
     lines = list(
-        quotation.lines.select_for_update()
+        _quotation_lines_for_update()
         .select_related("quotation__company", "inquiry_line")
-        .filter(id__in=line_ids)
+        .filter(quotation=quotation, id__in=line_ids)
         .order_by("sort_order", "id")
     )
     if not lines:
@@ -2357,9 +2369,9 @@ def bulk_update_quotation_lines(quotation, rows, actor):
 
     lines = {
         line.id: line
-        for line in quotation.lines.select_for_update()
+        for line in _quotation_lines_for_update()
         .select_related("inquiry_line", "product", "quotation__company")
-        .filter(id__in=rows_by_id.keys())
+        .filter(quotation=quotation, id__in=rows_by_id.keys())
     }
     updated = []
     allowed_fields = {

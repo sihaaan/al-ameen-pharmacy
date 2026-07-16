@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from django.db.backends.postgresql.base import DatabaseWrapper
+from django.test import SimpleTestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -27,6 +29,40 @@ from .models import (
     Quotation,
     QuotationLine,
 )
+from .services import _quotation_lines_for_update
+
+
+class QuotationLineLockScopeTests(SimpleTestCase):
+    def test_postgresql_locks_only_the_line_when_nullable_relations_are_joined(self):
+        connection = DatabaseWrapper(
+            {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": "compile_only",
+                "USER": "",
+                "PASSWORD": "",
+                "HOST": "",
+                "PORT": "",
+                "OPTIONS": {},
+                "TIME_ZONE": None,
+                "CONN_HEALTH_CHECKS": False,
+                "CONN_MAX_AGE": 0,
+                "AUTOCOMMIT": False,
+                "ATOMIC_REQUESTS": False,
+            },
+            alias="compile_only",
+        )
+        connection.get_autocommit = lambda: False
+        queryset = (
+            _quotation_lines_for_update()
+            .select_related("quotation__company", "inquiry_line", "product")
+            .filter(pk=1)
+        )
+
+        sql, _ = queryset.query.get_compiler(connection=connection).as_sql()
+
+        self.assertIn('LEFT OUTER JOIN "quotations_inquiryline"', sql)
+        self.assertIn('LEFT OUTER JOIN "api_product"', sql)
+        self.assertTrue(sql.endswith('FOR UPDATE OF "quotations_quotationline"'))
 
 
 class ProductMatchingReworkTests(APITestCase):
