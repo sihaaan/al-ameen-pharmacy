@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Added
+- Added an embedded quotation/proforma PDF fallback for supported extended-Latin characters such as dotless `ı`, preventing missing-symbol glyphs without changing the established layout.
+- Consolidated inquiry imports into one auto-detecting `Upload File` control for supported Excel, PDF, PNG, JPEG, and WebP sources.
+- Added direct PNG/JPEG/WebP inquiry import with secure image validation, metadata-free Vision AI normalization, drag-and-drop upload, and matched editable rows.
+- Added insert-at-position and reorder controls for inquiry rows, including stable row identity so typing no longer loses focus.
+- Added one-step inquiry save/create/open behavior and collapsed, lazy-loaded manual-entry and inquiry-history sections.
+- Added debounced company search, bounded company/history results, lazy company contacts, and inquiry serializer prefetching to remove the company-picker delay and matched-product N+1 queries.
+- Prevented mouse-wheel edits on inquiry, quotation, and accepted unit-price controls.
 - Added a simple `Accounting access` checkbox to Django User admin so superusers can grant/revoke Accounting module access without manually managing groups and permissions.
 - Added protected `Admin Dashboard -> Accounting` overdue statement workflow for accounting staff to upload monthly POS agewise outstanding exports, review due customers, persist customer emails/categories, and download statement PDFs or a ZIP of due statements without sending emails.
 - Added Accounting statement PDF output with split `Invoice No.` and `LPO / Reference No.` columns for POS bill references.

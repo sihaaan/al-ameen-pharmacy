@@ -224,6 +224,18 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.getByRole('dialog', { name: /price history/i })).toBeInTheDocument();
   });
 
+  test('does not change a quotation unit price when the mouse wheel scrolls', async () => {
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    fireEvent.change(priceInput, { target: { value: '12.5' } });
+    priceInput.focus();
+    fireEvent.wheel(priceInput, { deltaY: 100 });
+
+    expect(document.activeElement).not.toBe(priceInput);
+    expect(priceInput).toHaveValue(12.5);
+  });
+
   test('warns about a similar Product and only creates after an explicit override', async () => {
     quotationAPI.lines.createProduct.mockRejectedValue({
       response: {

@@ -1,9 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
+let clientRowSequence = 0;
+
+const nextClientRowId = (prefix) => `${prefix}-${++clientRowSequence}`;
+
+const ensureClientRowId = (line, prefix = 'row') => ({
+  ...line,
+  _client_row_id: line?._client_row_id || nextClientRowId(prefix),
+});
+
 const newLine = () => ({
+  _client_row_id: nextClientRowId('manual'),
   raw_name: '',
   quantity: '1',
   unit: '',
@@ -13,6 +23,7 @@ const newLine = () => ({
 });
 
 const newImportLine = () => ({
+  _client_row_id: nextClientRowId('import'),
   raw_name: '',
   quantity: '',
   unit: '',
@@ -42,6 +53,22 @@ const normalizeVatRate = (value) => {
   return numeric === 5 ? '5' : '0';
 };
 
+export const releaseNumberWheelFocus = (event) => {
+  event.preventDefault();
+  event.currentTarget.blur();
+};
+
+export const inquiryUploadModeForFile = (file) => {
+  const filename = String(file?.name || '').toLowerCase();
+  const mimeType = String(file?.type || '').toLowerCase();
+  if (/\.(xlsx|xlsb|xls)$/.test(filename) || mimeType.includes('spreadsheet') || mimeType.includes('excel')) return 'excel';
+  if (filename.endsWith('.pdf') || mimeType === 'application/pdf') return 'pdf';
+  if (/\.(png|jpe?g|webp)$/.test(filename) || ['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) return 'image';
+  return '';
+};
+
+export const INQUIRY_UPLOAD_ACCEPT = '.xlsx,.xlsb,.xls,.pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp';
+
 export const importedLineNameEditPatch = (rawName) => ({
   raw_name: rawName,
   matched_product: null,
@@ -58,11 +85,57 @@ export const resetImportedMatchesForCompanyChange = (lines) => (lines || []).map
   match_confirmed_by_user: false,
 }));
 
-export const importCompanyRequestIsCurrent = (requestContext, currentCompany, currentGeneration) => (
+export const importCompanyRequestIsCurrent = (
+  requestContext,
+  currentCompany,
+  currentGeneration,
+  currentRevision = requestContext?.revision
+) => (
   Boolean(requestContext)
   && String(requestContext.company || '') === String(currentCompany || '')
   && Number(requestContext.generation) === Number(currentGeneration)
+  && (
+    requestContext.revision === undefined
+    || Number(requestContext.revision) === Number(currentRevision)
+  )
 );
+
+export const moveInquiryRow = (rows, fromIndex, toIndex) => {
+  const next = [...(rows || [])];
+  if (
+    fromIndex < 0
+    || fromIndex >= next.length
+    || toIndex < 0
+    || toIndex >= next.length
+    || fromIndex === toIndex
+  ) return next;
+  const [row] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, row);
+  return next;
+};
+
+export const insertInquiryRow = (rows, index, row) => {
+  const next = [...(rows || [])];
+  const safeIndex = Math.max(0, Math.min(Number(index) || 0, next.length));
+  next.splice(safeIndex, 0, row);
+  return next;
+};
+
+export const aiCandidateWouldLoseReviewedRows = (currentPreview, candidate) => {
+  const originalLineCount = currentPreview?.lines?.length || 0;
+  const candidateLineCount = candidate?.lines?.length || 0;
+  const isStructuredExcel = (
+    currentPreview?.source_type === 'excel'
+    || /(?:openpyxl|calamine)_structured/i.test(String(currentPreview?.parse_method || ''))
+  );
+  return (
+    originalLineCount > 0
+    && (
+      candidateLineCount === 0
+      || (candidateLineCount < originalLineCount && isStructuredExcel)
+    )
+  );
+};
 
 export const importedInquiryLinePayload = (line) => ({
   raw_name: line.raw_name,
@@ -119,6 +192,7 @@ const mergePriceReferenceLines = (currentLines, responseLines) => {
     const currentLine = currentByKey.get(importLineKey(line, index)) || currentLines[index] || {};
     return {
       ...line,
+      _client_row_id: currentLine._client_row_id || line._client_row_id,
       quantity: preserveParsedField(currentLine, line, 'quantity'),
       unit: useReferenceWhenBlank(currentLine, line, 'unit'),
     };
@@ -148,13 +222,19 @@ const InquiryManager = ({ onOpenQuote }) => {
     lines: [newLine()],
   });
   const [statusFilter, setStatusFilter] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [companiesLoading, setCompaniesLoading] = useState(true);
+  const [contactLoadingCompanyId, setContactLoadingCompanyId] = useState('');
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [showInquiryHistory, setShowInquiryHistory] = useState(false);
+  const [showManualEntry, setShowManualEntry] = useState(false);
   const [saving, setSaving] = useState(false);
   const [creatingQuoteId, setCreatingQuoteId] = useState(null);
   const [quoteSuccess, setQuoteSuccess] = useState(null);
   const [importMode, setImportMode] = useState('paste');
   const [importForm, setImportForm] = useState(emptyImportForm);
   const [importFile, setImportFile] = useState(null);
+  const [importDragActive, setImportDragActive] = useState(false);
   const [priceReferenceMode, setPriceReferenceMode] = useState('file');
   const [priceReferenceFile, setPriceReferenceFile] = useState(null);
   const [priceReferenceText, setPriceReferenceText] = useState('');
@@ -168,10 +248,11 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [importNotice, setImportNotice] = useState(null);
   const [importActionNotice, setImportActionNotice] = useState(null);
   const [importValidationDialog, setImportValidationDialog] = useState(null);
-  const [expandedRawRows, setExpandedRawRows] = useState({});
-  const [selectedImportRows, setSelectedImportRows] = useState([]);
+  const [expandedRawRowIds, setExpandedRawRowIds] = useState({});
+  const [selectedImportRowIds, setSelectedImportRowIds] = useState([]);
+  const [draggedImportRowId, setDraggedImportRowId] = useState(null);
   const [aiCleaning, setAiCleaning] = useState(false);
-  const [aiCandidate, setAiCandidate] = useState(null);
+  const [aiUndoPreview, setAiUndoPreview] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
   const [showImportContactForm, setShowImportContactForm] = useState(false);
   const [importContactForm, setImportContactForm] = useState(emptyContactForm);
@@ -183,47 +264,134 @@ const InquiryManager = ({ onOpenQuote }) => {
   const importPanelRef = useRef(null);
   const importCompanyRef = useRef(String(importForm.company || ''));
   const importCompanyGenerationRef = useRef(0);
+  const importRevisionRef = useRef(0);
+  const importOperationLockRef = useRef(false);
+  const companyRequestSequenceRef = useRef(0);
+  const loadedContactCompaniesRef = useRef(new Set());
 
   const captureImportCompanyRequest = () => ({
     company: importCompanyRef.current,
     generation: importCompanyGenerationRef.current,
+    revision: importRevisionRef.current,
   });
   const isCurrentImportCompanyRequest = (requestContext) => importCompanyRequestIsCurrent(
     requestContext,
     importCompanyRef.current,
-    importCompanyGenerationRef.current
+    importCompanyGenerationRef.current,
+    importRevisionRef.current
   );
+  const importWorkflowBusy = importParsing || aiCleaning || priceReferenceApplying || importSaving || importContactSaving;
+  const importSourceMode = importMode === 'paste' ? 'paste' : 'upload';
+  const detectedImportType = {
+    excel: 'Excel',
+    pdf: 'PDF',
+    image: 'Image',
+  }[importMode] || '';
+  const activeImportSourceType = importMode === 'paste'
+    ? 'pasted_text'
+    : (['excel', 'pdf', 'image'].includes(importMode) ? importMode : 'manual');
+  const acquireImportOperation = () => {
+    if (importOperationLockRef.current) return false;
+    importOperationLockRef.current = true;
+    return true;
+  };
+  const releaseImportOperation = () => {
+    importOperationLockRef.current = false;
+  };
+  const importOperationIsLocked = () => importWorkflowBusy || importOperationLockRef.current;
 
-  const load = async () => {
-    setLoading(true);
-    setErrorInfo(null);
+  const invalidateParsedImport = () => {
+    importRevisionRef.current += 1;
+    setImportPreview(null);
+    setSavedImportedInquiry(null);
+    setQuoteSuccess(null);
+    setAiUndoPreview(null);
+    setImportNotice(null);
+    setImportActionNotice(null);
+    setSelectedImportRowIds([]);
+    setExpandedRawRowIds({});
+  };
+
+  const loadCompanies = useCallback(async (search = '') => {
+    const requestSequence = ++companyRequestSequenceRef.current;
+    setCompaniesLoading(true);
     try {
-      const [companiesRes, contactsRes, itemsRes, inquiriesRes] = await Promise.all([
-        quotationAPI.companies.list({ active: 'true' }),
-        quotationAPI.contacts.list({ active: 'true' }),
-        quotationAPI.items.list({ active: 'true' }),
-        quotationAPI.inquiries.list(),
-      ]);
-      setCompanies(companiesRes.data);
-      setContacts(contactsRes.data);
-      setItems(itemsRes.data);
-      setInquiries(inquiriesRes.data);
+      const response = await quotationAPI.companies.list({
+        active: 'true',
+        limit: 100,
+        ...(search.trim() ? { search: search.trim() } : {}),
+      });
+      setCompanies((current) => {
+        const byId = new Map(current.map((company) => [String(company.id), company]));
+        (response.data || []).forEach((company) => byId.set(String(company.id), company));
+        return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+      });
     } catch (error) {
+      if (requestSequence !== companyRequestSequenceRef.current) return;
       const details = await describeQuotationError(
         error,
-        'Load inquiries',
-        'GET /quotations/companies/, /quotations/contacts/, /quotations/items/, /quotations/inquiries/'
+        'Load companies',
+        'GET /quotations/companies/'
       );
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (requestSequence === companyRequestSequenceRef.current) setCompaniesLoading(false);
+    }
+  }, []);
+
+  const loadItems = useCallback(async () => {
+    try {
+      const response = await quotationAPI.items.list({ active: 'true' });
+      setItems(response.data || []);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load quotation products', 'GET /quotations/items/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    }
+  }, []);
+
+  const loadInquiries = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await quotationAPI.inquiries.list({ limit: 100 });
+      setInquiries(response.data || []);
+      setHistoryLoaded(true);
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Load inquiry history', 'GET /quotations/inquiries/');
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const loadContactsForCompany = useCallback(async (companyId) => {
+    const normalizedCompanyId = String(companyId || '');
+    if (!normalizedCompanyId || loadedContactCompaniesRef.current.has(normalizedCompanyId)) return;
+    loadedContactCompaniesRef.current.add(normalizedCompanyId);
+    setContactLoadingCompanyId(normalizedCompanyId);
+    try {
+      const response = await quotationAPI.contacts.list({ active: 'true', company: normalizedCompanyId });
+      setContacts((current) => {
+        const byId = new Map(current.map((contact) => [String(contact.id), contact]));
+        (response.data || []).forEach((contact) => byId.set(String(contact.id), contact));
+        return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+      });
+    } catch (error) {
+      loadedContactCompaniesRef.current.delete(normalizedCompanyId);
+      const details = await describeQuotationError(error, 'Load company contacts', 'GET /quotations/contacts/');
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setContactLoadingCompanyId((current) => current === normalizedCompanyId ? '' : current);
+    }
+  }, []);
 
   useEffect(() => {
-    load();
-  }, []);
+    loadCompanies();
+    loadItems();
+  }, [loadCompanies, loadItems]);
 
   const filteredContacts = contacts.filter((contact) => String(contact.company) === String(form.company));
   const filteredImportContacts = contacts.filter((contact) => String(contact.company) === String(importForm.company));
@@ -317,9 +485,17 @@ const InquiryManager = ({ onOpenQuote }) => {
         })),
     };
     try {
-      await quotationAPI.inquiries.create(payload);
+      const response = await quotationAPI.inquiries.create(payload);
       setForm({ company: '', contact: '', subject: '', original_text: '', lines: [newLine()] });
-      await load();
+      setManualNotice({ type: 'success', message: 'Inquiry saved. Creating and opening its quotation…' });
+      const quoteId = await createQuote(response.data, { openAfterCreate: true });
+      if (!quoteId) {
+        if (historyLoaded) loadInquiries();
+        setManualNotice({
+          type: 'warning',
+          message: 'The inquiry was saved, but its quotation could not be opened. Use Inquiry History to retry safely.',
+        });
+      }
     } catch (error) {
       const details = await describeQuotationError(error, 'Create inquiry', 'POST /quotations/inquiries/');
       setErrorInfo(details);
@@ -329,8 +505,12 @@ const InquiryManager = ({ onOpenQuote }) => {
     }
   };
 
-  const createQuote = async (inquiry) => {
-    if (creatingQuoteId) return;
+  const openCreatedQuote = (quoteId) => {
+    if (quoteId && onOpenQuote) onOpenQuote(quoteId);
+  };
+
+  async function createQuote(inquiry, { openAfterCreate = false } = {}) {
+    if (creatingQuoteId) return null;
     if (inquiry.quotation_id) {
       setQuoteSuccess({
         inquiryId: inquiry.id,
@@ -341,7 +521,8 @@ const InquiryManager = ({ onOpenQuote }) => {
       if (savedImportedInquiry?.id === inquiry.id) {
         setImportActionNotice({ type: 'success', message: 'Quotation already exists. Open it to continue editing the lines.' });
       }
-      return;
+      if (openAfterCreate) openCreatedQuote(inquiry.quotation_id);
+      return inquiry.quotation_id;
     }
     setCreatingQuoteId(inquiry.id);
     setErrorInfo(null);
@@ -362,39 +543,18 @@ const InquiryManager = ({ onOpenQuote }) => {
             : 'Quotation created. Open it to continue editing the lines.',
         });
       }
-      await load();
+      if (historyLoaded) loadInquiries();
+      if (openAfterCreate) openCreatedQuote(response.data.id);
+      return response.data.id;
     } catch (error) {
       const details = await describeQuotationError(error, 'Create quote from inquiry', `POST /quotations/inquiries/${inquiry.id}/create_quote/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
+      return null;
     } finally {
       setCreatingQuoteId(null);
     }
-  };
-
-  const openCreatedQuote = (quoteId) => {
-    if (quoteId && onOpenQuote) onOpenQuote(quoteId);
-  };
-
-  const setPreview = (preview) => {
-    setSavedImportedInquiry(null);
-    setImportNotice(null);
-    setImportActionNotice(null);
-    setExpandedRawRows({});
-    setSelectedImportRows([]);
-    const candidate = preview.ai_candidate || null;
-    setAiCandidate(candidate);
-    setImportPreview({
-      ...preview,
-      result_source: preview.result_source || 'deterministic_parse',
-      lines: (preview.lines || []).map((line) => ({
-        ...newImportLine(),
-        ...line,
-        raw_line: line.raw_line || line.raw_source_line || '',
-        parse_confidence: Number(line.parse_confidence || 0),
-      })),
-    });
-  };
+  }
 
   const aiSourceLabel = (source) => {
     if (source === 'ai_vision_cleanup') return 'AI vision cleanup used';
@@ -403,8 +563,70 @@ const InquiryManager = ({ onOpenQuote }) => {
     return 'Deterministic parse';
   };
 
+  const editablePreview = (preview, { aiApplied = false } = {}) => ({
+    ...preview,
+    ai_candidate: null,
+    result_source: preview.result_source || 'deterministic_parse',
+    lines: (preview.lines || []).map((line) => ensureClientRowId({
+      ...newImportLine(),
+      ...line,
+      raw_line: line.raw_line || line.raw_source_line || '',
+      parse_status: aiApplied ? (line.parse_status || 'needs_review') : line.parse_status,
+      parse_confidence: Number(line.parse_confidence || 0),
+    }, 'import')),
+  });
+
+  const aiCandidateWouldLoseStructuredRows = (currentPreview, candidate) => {
+    return aiCandidateWouldLoseReviewedRows(currentPreview, candidate);
+  };
+
+  const applyAiResult = (currentPreview, candidate) => {
+    if (!candidate) return false;
+    if (aiCandidateWouldLoseStructuredRows(currentPreview, candidate)) {
+      setImportNotice({
+        type: 'warning',
+        message: `AI returned ${candidate.lines?.length || 0} rows, but the current parser found ${currentPreview.lines.length}. Kept the original rows so no items are lost.`,
+      });
+      return false;
+    }
+    importRevisionRef.current += 1;
+    setAiUndoPreview(currentPreview);
+    setSavedImportedInquiry(null);
+    setExpandedRawRowIds({});
+    setSelectedImportRowIds([]);
+    setImportPreview(editablePreview({
+      ...currentPreview,
+      ...candidate,
+      result_source: candidate.result_source,
+      ai_status: candidate.ai_status,
+      ai_status_label: candidate.ai_status_label,
+    }, { aiApplied: true }));
+    setImportNotice({
+      type: 'success',
+      message: `${aiSourceLabel(candidate.result_source)} and applied automatically. Review the rows below or undo the cleanup.`,
+    });
+    return true;
+  };
+
+  const setPreview = (preview) => {
+    importRevisionRef.current += 1;
+    setSavedImportedInquiry(null);
+    setImportActionNotice(null);
+    setExpandedRawRowIds({});
+    setSelectedImportRowIds([]);
+    setAiUndoPreview(null);
+    const candidate = preview.ai_candidate || null;
+    const deterministicPreview = editablePreview(preview);
+    setImportPreview(deterministicPreview);
+    if (candidate) {
+      applyAiResult(deterministicPreview, candidate);
+    } else {
+      setImportNotice(null);
+    }
+  };
+
   const runAiCleanParse = async () => {
-    if (!importPreview || aiCleaning) return;
+    if (!importPreview || importWorkflowBusy || !acquireImportOperation()) return;
     const requestContext = captureImportCompanyRequest();
     setAiCleaning(true);
     setErrorInfo(null);
@@ -416,8 +638,7 @@ const InquiryManager = ({ onOpenQuote }) => {
         mode: 'auto',
       });
       if (!isCurrentImportCompanyRequest(requestContext)) return;
-      setAiCandidate(response.data);
-      setImportNotice({ type: 'success', message: `${aiSourceLabel(response.data.result_source)}. Review the candidate rows before applying them.` });
+      applyAiResult(importPreview, response.data);
     } catch (error) {
       if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'AI clean inquiry parse', 'POST /quotations/inquiries/ai_clean_parse/');
@@ -426,54 +647,22 @@ const InquiryManager = ({ onOpenQuote }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setAiCleaning(false);
+      releaseImportOperation();
     }
   };
 
-  const applyAiCandidate = () => {
-    if (!aiCandidate) return;
-    const originalLineCount = importPreview?.lines?.length || 0;
-    const candidateLineCount = aiCandidate.lines?.length || 0;
-    const parseMethod = String(importPreview?.parse_method || '');
-    if (
-      originalLineCount > 0
-      && candidateLineCount > 0
-      && parseMethod.includes('openpyxl_structured')
-      && candidateLineCount < originalLineCount
-    ) {
-      setImportNotice({
-        type: 'warning',
-        message: `AI returned ${candidateLineCount} rows, but the deterministic Excel parser found ${originalLineCount}. Kept the original rows so no items are lost.`,
-      });
-      return;
-    }
-    setSavedImportedInquiry(null);
-    setExpandedRawRows({});
-    setSelectedImportRows([]);
-    setImportPreview({
-      ...importPreview,
-      ...aiCandidate,
-      result_source: aiCandidate.result_source,
-      ai_status: aiCandidate.ai_status,
-      ai_status_label: aiCandidate.ai_status_label,
-      lines: (aiCandidate.lines || []).map((line) => ({
-        ...newImportLine(),
-        ...line,
-        raw_line: line.raw_line || line.raw_source_line || '',
-        parse_status: 'parsed',
-        parse_confidence: Number(line.parse_confidence || 0),
-      })),
-    });
-    setAiCandidate(null);
-    setImportNotice({ type: 'success', message: 'AI cleaned rows applied and marked parsed. You can still edit rows before saving the inquiry.' });
-  };
-
-  const keepOriginalRows = () => {
-    setAiCandidate(null);
-    setImportNotice({ type: 'success', message: 'Kept deterministic parser rows.' });
+  const undoAiCleanup = () => {
+    if (!aiUndoPreview) return;
+    importRevisionRef.current += 1;
+    setImportPreview(aiUndoPreview);
+    setAiUndoPreview(null);
+    setExpandedRawRowIds({});
+    setSelectedImportRowIds([]);
+    setImportNotice({ type: 'success', message: 'Restored the rows from before AI cleanup.' });
   };
 
   const parsePastedText = async () => {
-    if (importParsing) return;
+    if (importWorkflowBusy || !acquireImportOperation()) return;
     const requestContext = captureImportCompanyRequest();
     setImportParsing(true);
     setErrorInfo(null);
@@ -493,23 +682,55 @@ const InquiryManager = ({ onOpenQuote }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setImportParsing(false);
+      releaseImportOperation();
     }
   };
 
-  const parseUploadedFile = async () => {
-    if (importParsing) return;
-    if (!importFile) {
-      setImportNotice({ type: 'error', message: 'Choose an Excel or PDF file before parsing.' });
+  const changeImportMode = (mode) => {
+    const nextSourceMode = mode === 'paste' ? 'paste' : 'upload';
+    if (importOperationIsLocked() || nextSourceMode === importSourceMode) return;
+    invalidateParsedImport();
+    setImportMode(nextSourceMode);
+    setImportFile(null);
+    setImportDragActive(false);
+  };
+
+  const handleImportFile = (file) => {
+    if (importOperationIsLocked()) return;
+    if (!file) {
+      setImportFile(null);
       return;
     }
+    const detectedMode = inquiryUploadModeForFile(file);
+    if (!detectedMode) {
+      invalidateParsedImport();
+      setImportFile(null);
+      setImportNotice({
+        type: 'error',
+        message: 'Use an Excel, PDF, PNG, JPEG, or WebP inquiry file.',
+      });
+      return;
+    }
+    invalidateParsedImport();
+    setImportMode(detectedMode);
+    setImportFile(file);
+  };
+
+  const parseUploadedFile = async () => {
+    if (importWorkflowBusy) return;
+    if (!importFile) {
+      setImportNotice({ type: 'error', message: 'Choose or drop an Excel, PDF, or image file before parsing.' });
+      return;
+    }
+    if (!acquireImportOperation()) return;
     const requestContext = captureImportCompanyRequest();
     setImportParsing(true);
     setErrorInfo(null);
     setImportNotice(null);
-    const formData = new FormData();
-    formData.append('file', importFile);
-    if (importForm.company) formData.append('company', importForm.company);
     try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      if (importForm.company) formData.append('company', importForm.company);
       const response = await quotationAPI.inquiries.parseFile(formData);
       if (!isCurrentImportCompanyRequest(requestContext)) return;
       setPreview(response.data);
@@ -520,11 +741,12 @@ const InquiryManager = ({ onOpenQuote }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setImportParsing(false);
+      releaseImportOperation();
     }
   };
 
   const applyPriceReference = async () => {
-    if (priceReferenceApplying) return;
+    if (importWorkflowBusy) return;
     if (!importPreview?.lines?.length) {
       setImportNotice({ type: 'error', message: 'Parse an inquiry before applying a price reference.' });
       return;
@@ -537,20 +759,21 @@ const InquiryManager = ({ onOpenQuote }) => {
       setImportNotice({ type: 'error', message: "Paste Dad's price reference rows first." });
       return;
     }
+    if (!acquireImportOperation()) return;
     const requestContext = captureImportCompanyRequest();
     setPriceReferenceApplying(true);
     setErrorInfo(null);
     setImportNotice(null);
-    const formData = new FormData();
-    if (priceReferenceMode === 'file') {
-      formData.append('file', priceReferenceFile);
-    } else {
-      formData.append('raw_text', priceReferenceText);
-      formData.append('raw_html', priceReferenceHtml);
-    }
-    formData.append('use_ai', priceReferenceUseAi ? 'true' : 'false');
-    formData.append('preview', JSON.stringify(importPreview));
     try {
+      const formData = new FormData();
+      if (priceReferenceMode === 'file') {
+        formData.append('file', priceReferenceFile);
+      } else {
+        formData.append('raw_text', priceReferenceText);
+        formData.append('raw_html', priceReferenceHtml);
+      }
+      formData.append('use_ai', priceReferenceUseAi ? 'true' : 'false');
+      formData.append('preview', JSON.stringify(importPreview));
       const response = await quotationAPI.inquiries.applyPriceReference(formData);
       if (!isCurrentImportCompanyRequest(requestContext)) return;
       const currentLines = importPreview.lines || [];
@@ -572,10 +795,13 @@ const InquiryManager = ({ onOpenQuote }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setPriceReferenceApplying(false);
+      releaseImportOperation();
     }
   };
 
   const updateImportLine = (index, patch) => {
+    if (importOperationIsLocked()) return;
+    importRevisionRef.current += 1;
     setSavedImportedInquiry(null);
     setImportActionNotice(null);
     setImportPreview((current) => ({
@@ -584,46 +810,70 @@ const InquiryManager = ({ onOpenQuote }) => {
     }));
   };
 
-  const removeImportLine = (index) => {
+  const removeImportLine = (rowId) => {
+    if (importOperationIsLocked()) return;
+    importRevisionRef.current += 1;
     setSavedImportedInquiry(null);
     setImportActionNotice(null);
-    setSelectedImportRows((current) => current.filter((rowIndex) => rowIndex !== index).map((rowIndex) => rowIndex > index ? rowIndex - 1 : rowIndex));
+    setSelectedImportRowIds((current) => current.filter((candidateId) => candidateId !== rowId));
+    setExpandedRawRowIds((current) => {
+      const next = { ...current };
+      delete next[rowId];
+      return next;
+    });
     setImportPreview((current) => ({
       ...current,
-      lines: current.lines.filter((_, lineIndex) => lineIndex !== index),
+      lines: current.lines.filter((line) => line._client_row_id !== rowId),
     }));
   };
 
-  const toggleImportRowSelection = (index) => {
-    setSelectedImportRows((current) => (
-      current.includes(index)
-        ? current.filter((rowIndex) => rowIndex !== index)
-        : [...current, index]
+  const insertManualLine = (index) => {
+    setForm((current) => ({
+      ...current,
+      lines: insertInquiryRow(current.lines, index, newLine()),
+    }));
+  };
+
+  const moveManualLine = (fromIndex, toIndex) => {
+    setForm((current) => ({
+      ...current,
+      lines: moveInquiryRow(current.lines, fromIndex, toIndex),
+    }));
+  };
+
+  const toggleImportRowSelection = (rowId) => {
+    setSelectedImportRowIds((current) => (
+      current.includes(rowId)
+        ? current.filter((candidateId) => candidateId !== rowId)
+        : [...current, rowId]
     ));
   };
 
   const toggleAllImportRows = () => {
-    const allIndexes = (importPreview?.lines || []).map((_, index) => index);
-    setSelectedImportRows((current) => current.length === allIndexes.length ? [] : allIndexes);
+    const allRowIds = (importPreview?.lines || []).map((line) => line._client_row_id);
+    setSelectedImportRowIds((current) => current.length === allRowIds.length ? [] : allRowIds);
   };
 
   const removeSelectedImportRows = () => {
-    if (!selectedImportRows.length) return;
+    if (importOperationIsLocked() || !selectedImportRowIds.length) return;
+    importRevisionRef.current += 1;
     setSavedImportedInquiry(null);
     setImportActionNotice(null);
     setImportPreview((current) => ({
       ...current,
-      lines: current.lines.filter((_, index) => !selectedImportRows.includes(index)),
+      lines: current.lines.filter((line) => !selectedImportRowIds.includes(line._client_row_id)),
     }));
-    setSelectedImportRows([]);
+    setSelectedImportRowIds([]);
   };
 
-  const addImportLine = () => {
+  const insertImportLine = (index) => {
+    if (importOperationIsLocked()) return;
+    importRevisionRef.current += 1;
     setSavedImportedInquiry(null);
     setImportActionNotice(null);
     setImportPreview((current) => ({
       ...(current || {
-        source_type: importMode === 'paste' ? 'pasted_text' : importMode,
+        source_type: activeImportSourceType,
         source_filename: importFile?.name || '',
         source_mime_type: importFile?.type || '',
         source_sha256: '',
@@ -635,16 +885,36 @@ const InquiryManager = ({ onOpenQuote }) => {
         summary: {},
         meta: {},
       }),
-      lines: [...(current?.lines || []), newImportLine()],
+      lines: insertInquiryRow(current?.lines || [], index, newImportLine()),
     }));
   };
 
-  const toggleRawRow = (index) => {
-    setExpandedRawRows((current) => ({ ...current, [index]: !current[index] }));
+  const addImportLine = () => insertImportLine(importPreview?.lines?.length || 0);
+
+  const moveImportLine = (fromIndex, toIndex) => {
+    if (importOperationIsLocked() || fromIndex === toIndex || toIndex < 0 || toIndex >= (importPreview?.lines?.length || 0)) return;
+    importRevisionRef.current += 1;
+    setSavedImportedInquiry(null);
+    setImportActionNotice(null);
+    setImportPreview((current) => ({
+      ...current,
+      lines: moveInquiryRow(current.lines, fromIndex, toIndex),
+    }));
+  };
+
+  const dropImportLine = (targetIndex) => {
+    if (!draggedImportRowId) return;
+    const fromIndex = (importPreview?.lines || []).findIndex((line) => line._client_row_id === draggedImportRowId);
+    moveImportLine(fromIndex, targetIndex);
+    setDraggedImportRowId(null);
+  };
+
+  const toggleRawRow = (rowId) => {
+    setExpandedRawRowIds((current) => ({ ...current, [rowId]: !current[rowId] }));
   };
 
   const saveImportedInquiry = async () => {
-    if (importSaving) return;
+    if (importWorkflowBusy) return;
     const requestContext = captureImportCompanyRequest();
     const lines = (importPreview?.lines || [])
       .filter((line) => line.raw_name.trim())
@@ -668,6 +938,7 @@ const InquiryManager = ({ onOpenQuote }) => {
       });
       return;
     }
+    if (!acquireImportOperation()) return;
     setImportSaving(true);
     setErrorInfo(null);
     setImportNotice(null);
@@ -677,7 +948,7 @@ const InquiryManager = ({ onOpenQuote }) => {
         contact: importForm.contact || null,
         subject: importForm.subject,
         original_text: importPreview?.original_text || importForm.raw_text,
-        source_type: importPreview?.source_type || (importMode === 'paste' ? 'pasted_text' : importMode),
+        source_type: importPreview?.source_type || activeImportSourceType,
         source_filename: importPreview?.source_filename || importFile?.name || '',
         source_mime_type: importPreview?.source_mime_type || importFile?.type || '',
         source_sha256: importPreview?.source_sha256 || '',
@@ -691,13 +962,19 @@ const InquiryManager = ({ onOpenQuote }) => {
         lines,
       });
       if (!isCurrentImportCompanyRequest(requestContext)) {
-        await load();
         return;
       }
       setSavedImportedInquiry(response.data);
-      setImportNotice({ type: 'success', message: 'Imported inquiry saved. You can now create a quotation from it.' });
-      setImportActionNotice({ type: 'success', message: 'Inquiry saved. Create the quotation here, then open it for Step 4 line editing.' });
-      await load();
+      setImportNotice({ type: 'success', message: 'Imported inquiry saved. Creating and opening its quotation…' });
+      setImportActionNotice({ type: 'success', message: 'Inquiry saved. Preparing the quotation for line editing.' });
+      const quoteId = await createQuote(response.data, { openAfterCreate: true });
+      if (!quoteId && isCurrentImportCompanyRequest(requestContext)) {
+        if (historyLoaded) loadInquiries();
+        setImportActionNotice({
+          type: 'warning',
+          message: 'The inquiry is safely saved, but the quotation could not be opened. Retry below; this will not create a duplicate quotation.',
+        });
+      }
     } catch (error) {
       if (!isCurrentImportCompanyRequest(requestContext)) return;
       const details = await describeQuotationError(error, 'Save imported inquiry', 'POST /quotations/inquiries/create_imported/');
@@ -706,6 +983,7 @@ const InquiryManager = ({ onOpenQuote }) => {
       console.error(formatQuotationError(details), error);
     } finally {
       setImportSaving(false);
+      releaseImportOperation();
     }
   };
 
@@ -736,12 +1014,11 @@ const InquiryManager = ({ onOpenQuote }) => {
         <div className="qm-panel-heading">
           <div>
             <h3>Import Inquiry</h3>
-            <p>Paste text or preview a supported file, review the lines, then save the inquiry. Source files are kept private and are never exposed publicly.</p>
+            <p>Paste text or upload Excel, PDF, or image files, review the lines, then save and open the quotation. Source files stay private.</p>
           </div>
           <div className="qm-mode-tabs">
-            <button type="button" className={importMode === 'paste' ? 'active' : ''} onClick={() => { setImportMode('paste'); setImportFile(null); }}>Paste Text</button>
-            <button type="button" className={importMode === 'excel' ? 'active' : ''} onClick={() => { setImportMode('excel'); setImportFile(null); }}>Upload Excel</button>
-            <button type="button" className={importMode === 'pdf' ? 'active' : ''} onClick={() => { setImportMode('pdf'); setImportFile(null); }}>Upload PDF</button>
+            <button type="button" disabled={importWorkflowBusy} className={importSourceMode === 'paste' ? 'active' : ''} onClick={() => changeImportMode('paste')}>Paste Text</button>
+            <button type="button" disabled={importWorkflowBusy} className={importSourceMode === 'upload' ? 'active' : ''} onClick={() => changeImportMode('upload')}>Upload File</button>
           </div>
         </div>
 
@@ -750,6 +1027,8 @@ const InquiryManager = ({ onOpenQuote }) => {
             companies={companies}
             value={importForm.company}
             required
+            loading={companiesLoading}
+            onSearch={loadCompanies}
             disabled={importParsing || aiCleaning || priceReferenceApplying || importSaving || importContactSaving}
             onChange={(companyId) => {
               const normalizedCompanyId = String(companyId || '');
@@ -763,11 +1042,13 @@ const InquiryManager = ({ onOpenQuote }) => {
                     ? { ...current, lines: resetImportedMatchesForCompanyChange(current.lines) }
                     : current
                 ));
-                setAiCandidate(null);
+                setAiUndoPreview(null);
                 setSavedImportedInquiry(null);
+                setQuoteSuccess(null);
                 setImportNotice(null);
                 setImportActionNotice(null);
               }
+              loadContactsForCompany(companyId);
               setImportContactForm(emptyContactForm);
               setShowImportContactForm(false);
             }}
@@ -776,12 +1057,12 @@ const InquiryManager = ({ onOpenQuote }) => {
           <div className="qm-contact-control">
             <label>
               <span className="qm-label-text">Contact / Purchaser</span>
-              <select disabled={!importForm.company} value={importForm.contact} onChange={(event) => setImportForm({ ...importForm, contact: event.target.value })}>
-                <option value="">No contact</option>
+              <select disabled={!importForm.company || importWorkflowBusy} value={importForm.contact} onChange={(event) => setImportForm({ ...importForm, contact: event.target.value })}>
+                <option value="">{contactLoadingCompanyId === String(importForm.company) ? 'Loading contacts…' : 'No contact'}</option>
                 {filteredImportContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
               </select>
             </label>
-            <button type="button" className="qm-secondary small" disabled={!importForm.company} onClick={() => setShowImportContactForm((value) => !value)}>
+            <button type="button" className="qm-secondary small" disabled={!importForm.company || importWorkflowBusy} onClick={() => setShowImportContactForm((value) => !value)}>
               {showImportContactForm ? 'Cancel new contact' : '+ Create contact'}
             </button>
           </div>
@@ -800,39 +1081,75 @@ const InquiryManager = ({ onOpenQuote }) => {
           </div>
         )}
         <label className="qm-full-label"><span className="qm-label-text">Subject</span>
-          <input className="qm-input" placeholder="Inquiry subject or LPO reference" value={importForm.subject} onChange={(event) => setImportForm({ ...importForm, subject: event.target.value })} />
+          <input className="qm-input" disabled={importWorkflowBusy} placeholder="Inquiry subject or LPO reference" value={importForm.subject} onChange={(event) => setImportForm({ ...importForm, subject: event.target.value })} />
         </label>
 
-        {importMode === 'paste' ? (
+        {importSourceMode === 'paste' ? (
           <div className="qm-import-source">
             <label><span className="qm-label-text">Paste inquiry text</span>
               <textarea
                 rows="5"
+                disabled={importWorkflowBusy}
                 value={importForm.raw_text}
                 onPaste={(event) => {
                   const html = event.clipboardData?.getData('text/html') || '';
                   setImportForm((current) => ({ ...current, raw_html: html.includes('<table') ? html : current.raw_html }));
                 }}
-                onChange={(event) => setImportForm({ ...importForm, raw_text: event.target.value, raw_html: event.target.value ? importForm.raw_html : '' })}
+                onChange={(event) => {
+                  if (importOperationIsLocked()) return;
+                  if (event.target.value !== importForm.raw_text) invalidateParsedImport();
+                  setImportForm({ ...importForm, raw_text: event.target.value, raw_html: event.target.value ? importForm.raw_html : '' });
+                }}
                 placeholder="Paste the customer's requested items here..."
               />
             </label>
-            <button type="button" className="qm-primary" disabled={importParsing || !importForm.raw_text.trim()} onClick={parsePastedText}>
+            <button type="button" className="qm-primary" disabled={importWorkflowBusy || !importForm.raw_text.trim()} onClick={parsePastedText}>
               {importParsing ? 'Extracting...' : 'Extract Lines'}
             </button>
           </div>
         ) : (
           <div className="qm-import-source">
-            <label><span className="qm-label-text">{importMode === 'excel' ? 'Upload Excel file' : 'Upload digitally generated .pdf file'}</span>
-              <input
-                key={importMode}
-                type="file"
-                accept={importMode === 'excel' ? '.xlsx,.xlsb,.xls' : '.pdf'}
-                onChange={(event) => setImportFile(event.target.files?.[0] || null)}
-              />
-            </label>
-            <button type="button" className="qm-primary" disabled={importParsing || !importFile} onClick={parseUploadedFile}>
-              {importParsing ? 'Parsing...' : 'Parse File'}
+            <div
+              className={`qm-file-dropzone${importDragActive ? ' drag-active' : ''}${importWorkflowBusy ? ' disabled' : ''}`}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                if (importWorkflowBusy) return;
+                setImportDragActive(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                if (importWorkflowBusy) return;
+                event.dataTransfer.dropEffect = 'copy';
+                setImportDragActive(true);
+              }}
+              onDragLeave={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setImportDragActive(false);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setImportDragActive(false);
+                handleImportFile(event.dataTransfer.files?.[0] || null);
+              }}
+            >
+              <label>
+                <span className="qm-label-text">Inquiry file</span>
+                <strong>{importFile ? importFile.name : 'Drag a file here, or choose from your computer'}</strong>
+                <small>Supported: XLSX, XLSB, XLS, PDF, PNG, JPEG, and WebP.</small>
+                {importFile && detectedImportType && <small>Detected: {detectedImportType}</small>}
+                <input
+                  aria-label="Inquiry file"
+                  type="file"
+                  disabled={importWorkflowBusy}
+                  accept={INQUIRY_UPLOAD_ACCEPT}
+                  onChange={(event) => {
+                    handleImportFile(event.target.files?.[0] || null);
+                    event.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+            <button type="button" className="qm-primary" disabled={importWorkflowBusy || !importFile} onClick={parseUploadedFile}>
+              {importParsing ? 'Parsing…' : 'Parse File'}
             </button>
           </div>
         )}
@@ -851,6 +1168,7 @@ const InquiryManager = ({ onOpenQuote }) => {
               <div className="qm-reference-tabs" role="tablist" aria-label="Price reference source">
                 <button
                   type="button"
+                  disabled={importWorkflowBusy}
                   className={priceReferenceMode === 'file' ? 'active' : ''}
                   onClick={() => setPriceReferenceMode('file')}
                 >
@@ -858,6 +1176,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                 </button>
                 <button
                   type="button"
+                  disabled={importWorkflowBusy}
                   className={priceReferenceMode === 'paste' ? 'active' : ''}
                   onClick={() => setPriceReferenceMode('paste')}
                 >
@@ -871,6 +1190,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                   <span className="qm-label-text">Price reference file</span>
                   <input
                     type="file"
+                    disabled={importWorkflowBusy}
                     accept=".xlsx,.xls,.xlsb,.pdf"
                     onChange={(event) => setPriceReferenceFile(event.target.files?.[0] || null)}
                   />
@@ -880,6 +1200,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                   <span className="qm-label-text">Pasted price reference</span>
                   <textarea
                     rows="4"
+                    disabled={importWorkflowBusy}
                     value={priceReferenceText}
                     onPaste={(event) => {
                       const html = event.clipboardData?.getData('text/html') || '';
@@ -896,6 +1217,7 @@ const InquiryManager = ({ onOpenQuote }) => {
               <label className="qm-checkbox qm-price-reference-ai">
                 <input
                   type="checkbox"
+                  disabled={importWorkflowBusy}
                   checked={priceReferenceUseAi}
                   onChange={(event) => setPriceReferenceUseAi(event.target.checked)}
                 />
@@ -907,7 +1229,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                 type="button"
                 className="qm-primary qm-price-reference-action"
                 disabled={
-                  priceReferenceApplying ||
+                  importWorkflowBusy ||
                   !importPreview?.lines?.length ||
                   (priceReferenceMode === 'file' ? !priceReferenceFile : !priceReferenceText.trim())
                 }
@@ -922,7 +1244,7 @@ const InquiryManager = ({ onOpenQuote }) => {
 
         {importNotice && <div className={`qm-feedback ${importNotice.type}`}>{importNotice.message}</div>}
         {importPreview && (
-          <div className="qm-import-preview">
+          <fieldset disabled={importWorkflowBusy} className="qm-import-preview qm-import-preview-fieldset">
             <div className="qm-summary-banner">
               <div className="qm-summary-stat">
                 <span>Source</span>
@@ -951,21 +1273,24 @@ const InquiryManager = ({ onOpenQuote }) => {
               </span>
               {importPreview.ai_status_label && <span>{importPreview.ai_status_label}</span>}
               <span>Total lines: {importPreview.lines.length}</span>
-              <span>Selected: {selectedImportRows.length}</span>
+              <span>Selected: {selectedImportRowIds.length}</span>
               {(importPreview.meta?.selected_sheets || []).map((sheet) => (
                 <span key={sheet.sheet_name}>{sheet.sheet_name}: header row {sheet.header_row}</span>
               ))}
               {importPreview.source_file_ref && <span>Private source saved</span>}
             </div>
             <div className="qm-bulk-toolbar compact">
-              <strong>{selectedImportRows.length} rows selected</strong>
-              <button type="button" className="qm-secondary small" disabled={aiCleaning || !importPreview.lines.length} onClick={runAiCleanParse}>
-                {aiCleaning ? 'Cleaning...' : 'AI Clean Parse'}
+              <strong>{selectedImportRowIds.length} rows selected</strong>
+              <button type="button" className="qm-secondary small" disabled={aiCleaning || (!importPreview.lines.length && !importPreview.source_file_ref)} onClick={runAiCleanParse}>
+                {aiCleaning ? 'Cleaning & applying...' : 'AI Clean & Apply'}
               </button>
+              {aiUndoPreview && (
+                <button type="button" className="qm-secondary small" onClick={undoAiCleanup}>Undo AI cleanup</button>
+              )}
               <button type="button" className="qm-secondary small" disabled={!importPreview.lines.length} onClick={toggleAllImportRows}>
-                {selectedImportRows.length === importPreview.lines.length ? 'Deselect All' : 'Select All'}
+                {selectedImportRowIds.length === importPreview.lines.length ? 'Deselect All' : 'Select All'}
               </button>
-              <button type="button" className="qm-secondary small danger" disabled={!selectedImportRows.length} onClick={removeSelectedImportRows}>Delete Selected</button>
+              <button type="button" className="qm-secondary small danger" disabled={!selectedImportRowIds.length} onClick={removeSelectedImportRows}>Delete Selected</button>
             </div>
             {(importPreview.warnings || []).length > 0 && (
               <div className="qm-notice">
@@ -973,39 +1298,11 @@ const InquiryManager = ({ onOpenQuote }) => {
                 <ul>{importPreview.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
               </div>
             )}
-            {aiCandidate && (
-              <div className="qm-ai-candidate">
-                <div>
-                  <strong>{aiSourceLabel(aiCandidate.result_source)}</strong>
-                  <p>These are AI-cleaned candidate rows. They do not replace the current review rows until you apply them.</p>
-                </div>
-                <div className="qm-ai-candidate-summary">
-                  <span>{aiCandidate.lines?.length || 0} candidate rows</span>
-                  <span>Provider: {aiCandidate.provider || '-'}</span>
-                  <span>Model: {aiCandidate.model || '-'}</span>
-                  {aiCandidate.cache_hit && <span>Cached result</span>}
-                </div>
-                <div className="qm-ai-candidate-preview">
-                  {(aiCandidate.lines || []).slice(0, 5).map((line, index) => (
-                    <div key={`${line.raw_name}-${index}`}>
-                      <strong>{line.raw_name}</strong>
-                      <span>{line.quantity || '-'} {line.unit || ''}</span>
-                      {line.unit_price && <span>Price {line.unit_price}</span>}
-                      <em>{Math.round(Number(line.parse_confidence || 0) * 100)}%</em>
-                    </div>
-                  ))}
-                </div>
-                <div className="qm-action-row">
-                  <button type="button" className="qm-primary small" onClick={applyAiCandidate}>Apply AI Cleaned Rows</button>
-                  <button type="button" className="qm-secondary small" onClick={keepOriginalRows}>Keep Original</button>
-                </div>
-              </div>
-            )}
             <div className="qm-table-wrap">
               <table className="qm-table import-table">
                 <thead>
                   <tr>
-                    <th className="qm-check-cell"><input type="checkbox" checked={importPreview.lines.length > 0 && selectedImportRows.length === importPreview.lines.length} onChange={toggleAllImportRows} /></th>
+                    <th className="qm-check-cell"><input type="checkbox" checked={importPreview.lines.length > 0 && selectedImportRowIds.length === importPreview.lines.length} onChange={toggleAllImportRows} /></th>
                     <th className="qm-serial-cell">#</th>
                     <th>Requested Item Name</th>
                     <th>Matched Product</th>
@@ -1020,13 +1317,44 @@ const InquiryManager = ({ onOpenQuote }) => {
                 </thead>
                 <tbody>
                   {importPreview.lines.map((line, index) => (
-                    <React.Fragment key={`${line.raw_line || line.raw_name}-${index}`}>
-                      <tr>
-                        <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRows.includes(index)} onChange={() => toggleImportRowSelection(index)} /></td>
-                        <td className="qm-serial-cell">{index + 1}</td>
-                        <td className="qm-import-item-cell"><input value={line.raw_name} onChange={(event) => updateImportLine(index, importedLineNameEditPatch(event.target.value))} /></td>
+                    <React.Fragment key={line._client_row_id}>
+                      <tr
+                        className={draggedImportRowId === line._client_row_id ? 'qm-row-dragging' : ''}
+                        onDragOver={(event) => {
+                          if (!draggedImportRowId) return;
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = 'move';
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          dropImportLine(index);
+                        }}
+                      >
+                        <td className="qm-check-cell"><input type="checkbox" checked={selectedImportRowIds.includes(line._client_row_id)} onChange={() => toggleImportRowSelection(line._client_row_id)} /></td>
+                        <td className="qm-serial-cell">
+                          <div className="qm-row-order-cell">
+                            <button
+                              type="button"
+                              className="qm-row-drag-handle"
+                              draggable={!importWorkflowBusy}
+                              aria-label={`Drag row ${index + 1}`}
+                              title="Drag this row to a new position"
+                              onDragStart={(event) => {
+                                if (importOperationIsLocked()) return;
+                                setDraggedImportRowId(line._client_row_id);
+                                event.dataTransfer.effectAllowed = 'move';
+                                event.dataTransfer.setData('text/plain', line._client_row_id);
+                              }}
+                              onDragEnd={() => setDraggedImportRowId(null)}
+                            >
+                              ⋮⋮
+                            </button>
+                            <span>{index + 1}</span>
+                          </div>
+                        </td>
+                        <td className="qm-import-item-cell"><input aria-label={`Requested item name row ${index + 1}`} value={line.raw_name} onChange={(event) => updateImportLine(index, importedLineNameEditPatch(event.target.value))} /></td>
                         <td className="qm-import-match-cell">
-                          <select value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
+                          <select aria-label={`Matched product row ${index + 1}`} value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
                             matched_product: event.target.value || null,
                             match_status: event.target.value ? 'confirmed' : 'unresolved',
                             match_confirmed_by_user: Boolean(event.target.value),
@@ -1039,7 +1367,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                         <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
                         <td className="qm-import-price-cell">
-                          <input type="number" min="0" step="0.001" value={line.unit_price || ''} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
+                          <input aria-label={`Unit price row ${index + 1}`} type="number" min="0" step="0.001" value={line.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
                           {line.price_reference_match && (
                             <small className={`qm-price-match ${line.price_reference_status || ''}`}>
                               {line.price_reference_match.match_label} match: {line.price_reference_match.item_name} ({Math.round(Number(line.price_reference_match.confidence || 0) * 100)}%)
@@ -1062,13 +1390,16 @@ const InquiryManager = ({ onOpenQuote }) => {
                         </td>
                         <td><span className={`qm-confidence status-${line.parse_status || 'needs_review'}`}>{Math.round(Number(line.parse_confidence || 0) * 100)}%</span></td>
                         <td className="qm-row-actions">
-                          <button type="button" className="qm-secondary small" onClick={() => toggleRawRow(index)}>
-                            {expandedRawRows[index] ? 'Hide Raw' : 'View Raw'}
+                          <button type="button" className="qm-secondary small" onClick={() => insertImportLine(index)}>+ Above</button>
+                          <button type="button" className="qm-secondary small" disabled={index === 0} onClick={() => moveImportLine(index, index - 1)} aria-label={`Move row ${index + 1} up`}>↑</button>
+                          <button type="button" className="qm-secondary small" disabled={index === importPreview.lines.length - 1} onClick={() => moveImportLine(index, index + 1)} aria-label={`Move row ${index + 1} down`}>↓</button>
+                          <button type="button" className="qm-secondary small" onClick={() => toggleRawRow(line._client_row_id)}>
+                            {expandedRawRowIds[line._client_row_id] ? 'Hide Raw' : 'View Raw'}
                           </button>
-                          <button type="button" className="qm-secondary small danger" onClick={() => removeImportLine(index)}>Delete</button>
+                          <button type="button" className="qm-secondary small danger" onClick={() => removeImportLine(line._client_row_id)}>Delete</button>
                         </td>
                       </tr>
-                      {expandedRawRows[index] && (
+                      {expandedRawRowIds[line._client_row_id] && (
                         <tr className="qm-raw-row">
                           <td />
                           <td />
@@ -1103,11 +1434,11 @@ const InquiryManager = ({ onOpenQuote }) => {
               )}
               <button type="button" className="qm-secondary" onClick={addImportLine}>Add Missing Row</button>
               <button type="button" className="qm-primary" disabled={importSaving || Boolean(savedImportedInquiry)} onClick={saveImportedInquiry}>
-                {importSaving ? 'Saving...' : savedImportedInquiry ? 'Inquiry Saved' : 'Save Inquiry'}
+                {importSaving ? 'Saving & opening…' : savedImportedInquiry ? 'Inquiry Saved' : 'Save & Open Quotation'}
               </button>
               {savedImportedInquiry && !savedQuoteForCurrentImport && (
-                <button type="button" className="qm-secondary" disabled={Boolean(creatingQuoteId)} onClick={() => createQuote(savedImportedInquiry)}>
-                  {creatingQuoteId === savedImportedInquiry.id ? 'Creating...' : 'Create Quotation from This Inquiry'}
+                <button type="button" className="qm-secondary" disabled={Boolean(creatingQuoteId)} onClick={() => createQuote(savedImportedInquiry, { openAfterCreate: true })}>
+                  {creatingQuoteId === savedImportedInquiry.id ? 'Creating…' : 'Retry Create & Open Quotation'}
                 </button>
               )}
               {savedQuoteForCurrentImport && (
@@ -1116,11 +1447,44 @@ const InquiryManager = ({ onOpenQuote }) => {
                 </button>
               )}
             </div>
-          </div>
+          </fieldset>
         )}
       </div>
 
-      <div className="qm-split wide-left">
+      <div className="qm-inquiry-secondary-launchers">
+        <button
+          type="button"
+          className="qm-disclosure-card"
+          aria-expanded={showManualEntry}
+          onClick={() => setShowManualEntry((current) => !current)}
+        >
+          <span>
+            <strong>Manual inquiry entry</strong>
+            <small>For short requests that do not need file parsing.</small>
+          </span>
+          <b>{showManualEntry ? 'Hide' : 'Open'}</b>
+        </button>
+        <button
+          type="button"
+          className="qm-disclosure-card"
+          aria-expanded={showInquiryHistory}
+          onClick={() => {
+            const next = !showInquiryHistory;
+            setShowInquiryHistory(next);
+            if (next && !historyLoaded && !loading) loadInquiries();
+          }}
+        >
+          <span>
+            <strong>Inquiry history</strong>
+            <small>View recent saved inquiries or reopen their quotations.</small>
+          </span>
+          <b>{showInquiryHistory ? 'Hide' : 'Open'}</b>
+        </button>
+      </div>
+
+      {(showInquiryHistory || showManualEntry) && (
+      <div className={`qm-split wide-left${showInquiryHistory !== showManualEntry ? ' single-panel' : ''}`}>
+        {showInquiryHistory && (
         <div className="qm-panel">
         <div className="qm-panel-heading">
           <h3>Inquiries</h3>
@@ -1171,10 +1535,10 @@ const InquiryManager = ({ onOpenQuote }) => {
                           disabled={creatingQuoteId === inquiry.id || Boolean(creatingQuoteId)}
                           onClick={(event) => {
                             event.stopPropagation();
-                            createQuote(inquiry);
+                            createQuote(inquiry, { openAfterCreate: true });
                           }}
                         >
-                          {creatingQuoteId === inquiry.id ? 'Creating...' : 'Create Quotation from Inquiry'}
+                          {creatingQuoteId === inquiry.id ? 'Creating…' : 'Create & Open Quotation'}
                         </button>
                       )}
                     </td>
@@ -1206,22 +1570,29 @@ const InquiryManager = ({ onOpenQuote }) => {
           </div>
         )}
         </div>
+        )}
 
+        {showManualEntry && (
         <div className="qm-panel qm-manual-fallback">
         <div className="qm-workflow-step">
           <span>Step 1</span>
           <div>
-            <h3>Manual Inquiry Fallback</h3>
+            <h3>Manual Inquiry Entry</h3>
             <p>Use this when the customer request is short or the file cannot be parsed safely.</p>
           </div>
         </div>
         <form onSubmit={saveInquiry} className="qm-form">
+          <fieldset disabled={saving || manualContactSaving} className="qm-manual-inquiry-fieldset">
           <CompanySelectWithCreate
             companies={companies}
             value={form.company}
             required
+            loading={companiesLoading}
+            onSearch={loadCompanies}
+            disabled={saving || manualContactSaving}
             onChange={(companyId) => {
               setForm({ ...form, company: companyId, contact: '' });
+              loadContactsForCompany(companyId);
               setManualContactForm(emptyContactForm);
               setShowManualContactForm(false);
             }}
@@ -1231,7 +1602,7 @@ const InquiryManager = ({ onOpenQuote }) => {
             <label>
               <span className="qm-label-text">Contact / Purchaser</span>
               <select disabled={!form.company} value={form.contact} onChange={(event) => setForm({ ...form, contact: event.target.value })}>
-                <option value="">No contact</option>
+                <option value="">{contactLoadingCompanyId === String(form.company) ? 'Loading contacts…' : 'No contact'}</option>
                 {filteredContacts.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
               </select>
             </label>
@@ -1263,10 +1634,10 @@ const InquiryManager = ({ onOpenQuote }) => {
                 <h4>Inquiry Lines</h4>
               <p>Add the items requested by the customer. Match now if you know the product item.</p>
               </div>
-              <button type="button" className="qm-secondary small" onClick={() => setForm({ ...form, lines: [...form.lines, newLine()] })}>Add Line</button>
+              <button type="button" className="qm-secondary small" onClick={() => insertManualLine(form.lines.length)}>Add Line</button>
             </div>
             {form.lines.map((line, index) => (
-              <div key={index} className="qm-line-form">
+              <div key={line._client_row_id} className="qm-line-form">
                 <input aria-label="Requested item name" placeholder="Requested item name" required value={line.raw_name} onChange={(event) => updateLine(index, { raw_name: event.target.value })} />
                 <input aria-label="Qty" type="number" min="0" step="0.001" placeholder="Qty" value={line.quantity} onChange={(event) => updateLine(index, { quantity: event.target.value })} />
                 <input aria-label="Unit" placeholder="Unit" value={line.unit} onChange={(event) => updateLine(index, { unit: event.target.value })} />
@@ -1277,7 +1648,12 @@ const InquiryManager = ({ onOpenQuote }) => {
                   <option value="">Match status: Unmatched</option>
                   {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                 </select>
-                <button type="button" className="qm-icon danger" onClick={() => removeLine(index)} disabled={form.lines.length === 1}>Delete</button>
+                <div className="qm-line-order-actions">
+                  <button type="button" className="qm-secondary small" onClick={() => insertManualLine(index)}>+ Above</button>
+                  <button type="button" className="qm-secondary small" disabled={index === 0} onClick={() => moveManualLine(index, index - 1)} aria-label={`Move manual row ${index + 1} up`}>↑</button>
+                  <button type="button" className="qm-secondary small" disabled={index === form.lines.length - 1} onClick={() => moveManualLine(index, index + 1)} aria-label={`Move manual row ${index + 1} down`}>↓</button>
+                  <button type="button" className="qm-icon danger" onClick={() => removeLine(index)} disabled={form.lines.length === 1}>Delete</button>
+                </div>
               </div>
             ))}
           </div>
@@ -1286,13 +1662,16 @@ const InquiryManager = ({ onOpenQuote }) => {
             <span>Step 3</span>
             <div>
               <h4>Create Quote</h4>
-              <p>Save the inquiry first, then use the table action to create one quotation from it.</p>
+              <p>Saving creates its quotation and opens it immediately for pricing.</p>
             </div>
           </div>
-          <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving...' : 'Create Inquiry'}</button>
+          <button type="submit" className="qm-primary" disabled={saving}>{saving ? 'Saving & opening…' : 'Save & Open Quotation'}</button>
+          </fieldset>
         </form>
         </div>
+        )}
       </div>
+      )}
       {importValidationDialog && (
         <div className="qm-modal-backdrop" role="presentation">
           <div className="qm-modal qm-validation-modal" role="dialog" aria-modal="true" aria-labelledby="import-validation-title">

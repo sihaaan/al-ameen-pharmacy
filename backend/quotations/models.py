@@ -932,11 +932,13 @@ class Inquiry(models.Model):
     SOURCE_TYPE_PASTED_TEXT = "pasted_text"
     SOURCE_TYPE_EXCEL = "excel"
     SOURCE_TYPE_PDF = "pdf"
+    SOURCE_TYPE_IMAGE = "image"
     SOURCE_TYPE_CHOICES = [
         (SOURCE_TYPE_MANUAL, "Manual"),
         (SOURCE_TYPE_PASTED_TEXT, "Pasted Text"),
         (SOURCE_TYPE_EXCEL, "Excel"),
         (SOURCE_TYPE_PDF, "PDF"),
+        (SOURCE_TYPE_IMAGE, "Image"),
     ]
 
     STATUS_DRAFT = "draft"

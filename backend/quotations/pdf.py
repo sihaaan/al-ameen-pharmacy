@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape
 
+import reportlab
 from django.conf import settings
 from django.utils import timezone
 from reportlab.lib import colors
@@ -17,6 +18,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Flowable, Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .models import QuotationLine
@@ -31,6 +33,38 @@ LIGHT_BORDER = colors.HexColor("#E5E7EB")
 SOFT = colors.HexColor("#F9FAFB")
 SUCCESS_SOFT = colors.HexColor("#ECFDF5")
 
+PDF_FONT_REGULAR = "AlAmeenVeraSans"
+PDF_FONT_BOLD = "AlAmeenVeraSans-Bold"
+PDF_FONT_ITALIC = "AlAmeenVeraSans-Italic"
+PDF_FONT_BOLD_ITALIC = "AlAmeenVeraSans-BoldItalic"
+
+
+def _register_pdf_fonts():
+    """Register ReportLab's packaged Unicode TrueType fonts on every platform."""
+
+    font_directory = Path(reportlab.__file__).resolve().parent / "fonts"
+    font_files = {
+        PDF_FONT_REGULAR: "Vera.ttf",
+        PDF_FONT_BOLD: "VeraBd.ttf",
+        PDF_FONT_ITALIC: "VeraIt.ttf",
+        PDF_FONT_BOLD_ITALIC: "VeraBI.ttf",
+    }
+    registered_fonts = set(pdfmetrics.getRegisteredFontNames())
+    for font_name, filename in font_files.items():
+        if font_name not in registered_fonts:
+            pdfmetrics.registerFont(TTFont(font_name, str(font_directory / filename)))
+    pdfmetrics.registerFontFamily(
+        PDF_FONT_REGULAR,
+        normal=PDF_FONT_REGULAR,
+        bold=PDF_FONT_BOLD,
+        italic=PDF_FONT_ITALIC,
+        boldItalic=PDF_FONT_BOLD_ITALIC,
+    )
+
+
+_register_pdf_fonts()
+
+
 INTERNAL_LINE_DETAIL_PATTERNS = [
     re.compile(r"\bquantity and unit\b", re.IGNORECASE),
     re.compile(r"\b(?:verify|validate|confirm|check)\b.*\b(?:accuracy|details?|item|product|quantity|composition|spelling|consistency)\b", re.IGNORECASE),
@@ -39,9 +73,37 @@ INTERNAL_LINE_DETAIL_PATTERNS = [
 ]
 
 
+def _needs_pdf_font_fallback(value):
+    try:
+        str(value).encode("cp1252")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
+def _pdf_text_markup(value):
+    """Keep Helvetica metrics while using the embedded font for unsupported runs."""
+
+    runs = []
+    run = []
+    fallback_font = None
+    for character in str(value):
+        needs_fallback = _needs_pdf_font_fallback(character)
+        if fallback_font is not None and fallback_font != needs_fallback:
+            text = escape("".join(run))
+            runs.append(f'<font name="{PDF_FONT_REGULAR}">{text}</font>' if fallback_font else text)
+            run = []
+        fallback_font = needs_fallback
+        run.append(character)
+    if run:
+        text = escape("".join(run))
+        runs.append(f'<font name="{PDF_FONT_REGULAR}">{text}</font>' if fallback_font else text)
+    return "".join(runs)
+
+
 def _text(value, fallback="-"):
     value = "" if value is None else str(value)
-    return escape(value.strip() or fallback)
+    return _pdf_text_markup(value.strip() or fallback)
 
 
 def _optional_text(value):
@@ -96,6 +158,7 @@ class _MeasuredSingleLineCell(Flowable):
         text = "" if value is None else str(value)
         self.text = " ".join(text.split()) or "-"
         self.style = style
+        self.font_name = PDF_FONT_REGULAR if _needs_pdf_font_fallback(self.text) else style.fontName
         self.h_align = str(h_align or "LEFT").upper()
         self.draw_font_size = float(style.fontSize)
         self.rendered_text_width = 0.0
@@ -103,7 +166,7 @@ class _MeasuredSingleLineCell(Flowable):
     def wrap(self, avail_width, avail_height):
         self.width = max(0.0, float(avail_width))
         self.height = min(float(self.style.leading), max(0.0, float(avail_height)))
-        natural_width = pdfmetrics.stringWidth(self.text, self.style.fontName, self.style.fontSize)
+        natural_width = pdfmetrics.stringWidth(self.text, self.font_name, self.style.fontSize)
         if not self.width or not natural_width:
             self.draw_font_size = 0.0 if not self.width else float(self.style.fontSize)
             self.rendered_text_width = 0.0
@@ -112,7 +175,7 @@ class _MeasuredSingleLineCell(Flowable):
         self.draw_font_size = float(self.style.fontSize) * min(1.0, self.width / natural_width)
         self.rendered_text_width = pdfmetrics.stringWidth(
             self.text,
-            self.style.fontName,
+            self.font_name,
             self.draw_font_size,
         )
         return self.width, self.height
@@ -123,8 +186,8 @@ class _MeasuredSingleLineCell(Flowable):
         canvas = self.canv
         canvas.saveState()
         canvas.setFillColor(self.style.textColor or colors.black)
-        canvas.setFont(self.style.fontName, self.draw_font_size)
-        ascent, descent = pdfmetrics.getAscentDescent(self.style.fontName, self.draw_font_size)
+        canvas.setFont(self.font_name, self.draw_font_size)
+        ascent, descent = pdfmetrics.getAscentDescent(self.font_name, self.draw_font_size)
         baseline = max(0.0, (self.height - (ascent - descent)) / 2.0 - descent)
         if self.h_align == "RIGHT":
             canvas.drawRightString(self.width, baseline, self.text)

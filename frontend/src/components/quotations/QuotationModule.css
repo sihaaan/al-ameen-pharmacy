@@ -140,6 +140,11 @@
   grid-template-columns: minmax(0, 1.45fr) minmax(360px, 0.8fr);
 }
 
+.qm-split.single-panel,
+.qm-split.wide-left.single-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .qm-grid-two {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2468,7 +2473,7 @@
 }
 
 .import-table {
-  min-width: 1380px;
+  min-width: 1510px;
   table-layout: fixed;
 }
 
@@ -2508,8 +2513,41 @@
 }
 
 .import-table .qm-row-actions {
-  width: 120px;
-  min-width: 120px;
+  width: 225px;
+  min-width: 225px;
+}
+
+.qm-row-order-cell,
+.qm-line-order-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.qm-row-order-cell {
+  justify-content: center;
+}
+
+.qm-row-drag-handle {
+  width: 26px;
+  min-width: 26px;
+  padding: 4px 2px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #64748b;
+  cursor: grab;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.qm-row-drag-handle:active {
+  cursor: grabbing;
+}
+
+.qm-row-dragging {
+  opacity: 0.48;
 }
 
 .import-table .qm-import-qty-cell input,
@@ -2888,6 +2926,86 @@
   align-items: end;
 }
 
+.qm-file-dropzone label {
+  min-height: 132px;
+  justify-content: center;
+  padding: 18px;
+  border: 2px dashed #94a3b8;
+  border-radius: 10px;
+  background: #f8fafc;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.qm-file-dropzone label:hover,
+.qm-file-dropzone.drag-active label {
+  border-color: #0d9488;
+  background: #f0fdfa;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
+}
+
+.qm-file-dropzone.disabled {
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.qm-file-dropzone strong {
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+
+.qm-file-dropzone small {
+  color: #64748b;
+  font-weight: 650;
+}
+
+.qm-file-dropzone input[type="file"] {
+  margin-top: 4px;
+  cursor: pointer;
+}
+
+.qm-inquiry-secondary-launchers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.qm-disclosure-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4ea;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.qm-disclosure-card:hover,
+.qm-disclosure-card[aria-expanded="true"] {
+  border-color: #5eead4;
+  background: #f0fdfa;
+}
+
+.qm-disclosure-card span {
+  display: grid;
+  gap: 3px;
+}
+
+.qm-disclosure-card small {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.qm-disclosure-card b {
+  color: #0f766e;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
 .qm-price-reference-box {
   display: grid;
   grid-template-columns: 1fr;
@@ -3019,6 +3137,27 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.qm-import-preview-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.qm-manual-inquiry-fieldset {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.qm-import-preview-fieldset:disabled {
+  opacity: 0.82;
 }
 
 .qm-preview-meta,
@@ -4876,6 +5015,10 @@
   .qm-details-grid,
   .qm-details-grid.relaxed,
   .qm-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-inquiry-secondary-launchers {
     grid-template-columns: 1fr;
   }
 

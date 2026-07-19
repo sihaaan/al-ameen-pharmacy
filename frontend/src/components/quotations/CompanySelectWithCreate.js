@@ -15,6 +15,9 @@ const sortCompanies = (companies) => [...companies].sort((a, b) => a.name.locale
 
 const normalizeCompanyName = (name) => (name || '').trim().replace(/\s+/g, ' ').toLowerCase();
 
+const DEFAULT_MAX_RENDERED_COMPANIES = 100;
+const DEFAULT_SEARCH_DEBOUNCE_MS = 250;
+
 const CompanySelectWithCreate = ({
   companies = [],
   value,
@@ -27,6 +30,10 @@ const CompanySelectWithCreate = ({
   initialName = '',
   suggestedName = '',
   helperText = '',
+  loading = false,
+  onSearch,
+  searchDebounceMs = DEFAULT_SEARCH_DEBOUNCE_MS,
+  maxRenderedCompanies = DEFAULT_MAX_RENDERED_COMPANIES,
 }) => {
   const [search, setSearch] = useState('');
   const [isCreating, setIsCreating] = useState(false);
@@ -38,7 +45,10 @@ const CompanySelectWithCreate = ({
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState(null);
   const externallyDisabledRef = useRef(disabled);
+  const onSearchRef = useRef(onSearch);
+  const hasRemoteSearch = typeof onSearch === 'function';
   externallyDisabledRef.current = disabled;
+  onSearchRef.current = onSearch;
 
   const filteredCompanies = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -47,7 +57,8 @@ const CompanySelectWithCreate = ({
     return sorted.filter((company) => (
       company.name.toLowerCase().includes(term) ||
       (company.email || '').toLowerCase().includes(term) ||
-      (company.phone || '').toLowerCase().includes(term)
+      (company.phone || '').toLowerCase().includes(term) ||
+      (company.trn || '').toLowerCase().includes(term)
     ));
   }, [companies, search]);
 
@@ -55,6 +66,33 @@ const CompanySelectWithCreate = ({
     () => companies.find((company) => String(company.id) === String(value)),
     [companies, value]
   );
+
+  const renderedCompanyState = useMemo(() => {
+    const parsedMaximum = Number(maxRenderedCompanies);
+    const maximum = Number.isFinite(parsedMaximum)
+      ? Math.max(1, Math.floor(parsedMaximum))
+      : DEFAULT_MAX_RENDERED_COMPANIES;
+    const capped = filteredCompanies.slice(0, maximum);
+    const selectedIsRendered = selectedCompany && capped.some(
+      (company) => String(company.id) === String(selectedCompany.id)
+    );
+    return {
+      companies: selectedCompany && !selectedIsRendered ? [...capped, selectedCompany] : capped,
+      hiddenCount: Math.max(filteredCompanies.length - capped.length, 0),
+      maximum,
+    };
+  }, [filteredCompanies, maxRenderedCompanies, selectedCompany]);
+
+  useEffect(() => {
+    if (!hasRemoteSearch || disabled) return undefined;
+    if (!search.trim()) return undefined;
+    const parsedDelay = Number(searchDebounceMs);
+    const delay = Number.isFinite(parsedDelay) ? Math.max(0, parsedDelay) : DEFAULT_SEARCH_DEBOUNCE_MS;
+    const timer = setTimeout(() => {
+      onSearchRef.current?.(search.trim());
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [disabled, hasRemoteSearch, search, searchDebounceMs]);
 
   useEffect(() => {
     if (!isCreating) return undefined;
@@ -215,17 +253,19 @@ const CompanySelectWithCreate = ({
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Search companies"
+          aria-busy={loading}
         />
         <select
           required={required}
-          disabled={disabled}
+          disabled={disabled || (loading && renderedCompanyState.companies.length === 0)}
           value={value || ''}
+          aria-busy={loading}
           onChange={(event) => {
             if (!disabled && onChange) onChange(event.target.value);
           }}
         >
-          <option value="">{placeholder}</option>
-          {filteredCompanies.map((company) => (
+          <option value="">{loading && renderedCompanyState.companies.length === 0 ? 'Loading companies...' : placeholder}</option>
+          {renderedCompanyState.companies.map((company) => (
             <option key={company.id} value={company.id}>{company.name}</option>
           ))}
         </select>
@@ -235,6 +275,12 @@ const CompanySelectWithCreate = ({
           </button>
         )}
       </div>
+      {loading && <small className="qm-helper compact" role="status">Loading company results...</small>}
+      {!loading && renderedCompanyState.hiddenCount > 0 && (
+        <small className="qm-helper compact" role="status">
+          Showing the first {renderedCompanyState.maximum} of {filteredCompanies.length} matches. Type to narrow the list.
+        </small>
+      )}
       {selectedCompany && (
         <div className="qm-selected-company">
           <span>Selected company:</span>

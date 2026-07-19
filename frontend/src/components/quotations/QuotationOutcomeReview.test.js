@@ -946,6 +946,39 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
   });
 
+  test('does not let the mouse wheel change an accepted unit price', async () => {
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({
+      data: {
+        ...outcomePayload,
+        quotation: {
+          ...outcomePayload.quotation,
+          lines: [{
+            id: 501,
+            item_name_snapshot: 'Bandage Pack',
+            quantity: '2.000',
+            unit: 'pack',
+            unit_price: '12.00',
+            line_total: '25.20',
+            outcome_status: 'accepted',
+            accepted_quantity: '2.000',
+            accepted_unit_price: '12.00',
+            outcome_reason: '',
+            outcome_notes: '',
+          }],
+        },
+      },
+    });
+
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    const acceptedPrice = await screen.findByRole('spinbutton', { name: /accepted unit price for bandage pack/i });
+    acceptedPrice.focus();
+    expect(document.activeElement).toBe(acceptedPrice);
+    fireEvent.wheel(acceptedPrice, { deltaY: 100 });
+    expect(document.activeElement).not.toBe(acceptedPrice);
+    expect(acceptedPrice).toHaveValue(12);
+  });
+
   test('locks all editable outcome controls until an in-flight line save completes', async () => {
     const quoteLine = {
       id: 501,

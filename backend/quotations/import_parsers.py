@@ -1,5 +1,6 @@
 import hashlib
 import re
+import warnings
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -9,6 +10,8 @@ import pdfplumber
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from openpyxl import load_workbook as load_openpyxl_workbook
+from PIL import Image as PILImage
+from PIL import ImageOps, UnidentifiedImageError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from python_calamine import load_workbook as load_calamine_workbook
@@ -41,12 +44,24 @@ from .private_storage import store_import_source
 
 
 ALLOWED_EXTENSIONS = {".xlsx", ".xlsb", ".xls", ".pdf"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 ZIP_EXCEL_EXTENSIONS = {".xlsx", ".xlsb"}
 OLE_EXCEL_EXTENSIONS = {".xls"}
 PDF_MIME = "application/pdf"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 XLSB_MIME = "application/vnd.ms-excel.sheet.binary.macroenabled.12"
 XLS_MIME = "application/vnd.ms-excel"
+IMAGE_FORMAT_BY_EXTENSION = {
+    ".png": "PNG",
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".webp": "WEBP",
+}
+IMAGE_MIME_BY_FORMAT = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "WEBP": "image/webp",
+}
 OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 AGGREGATE_ITEM_SUMMARY_RE = re.compile(
     r"\b\d+(?:[.,]\d+)?\s+(?:individual\s+)?(?:line\s+)?items?\b",
@@ -68,6 +83,27 @@ def max_pdf_pages():
 
 def max_excel_sheets():
     return int(getattr(settings, "QUOTATION_IMPORT_MAX_EXCEL_SHEETS", 10))
+
+
+def max_image_pixels():
+    configured = max(1, int(getattr(settings, "QUOTATION_IMPORT_MAX_IMAGE_PIXELS", 25_000_000)))
+    hard_limit = max(1, int(getattr(settings, "QUOTATION_IMPORT_HARD_MAX_IMAGE_PIXELS", 50_000_000)))
+    return min(configured, hard_limit)
+
+
+def max_image_upload_bytes(override=None):
+    configured = max_upload_bytes() if override is None else max(1, int(override))
+    hard_limit = max(
+        1,
+        int(getattr(settings, "QUOTATION_IMPORT_HARD_MAX_IMAGE_BYTES", 10 * 1024 * 1024)),
+    )
+    return min(configured, hard_limit)
+
+
+def max_image_dimension():
+    configured = max(1, int(getattr(settings, "QUOTATION_IMPORT_MAX_IMAGE_DIMENSION", 12_000)))
+    hard_limit = max(1, int(getattr(settings, "QUOTATION_IMPORT_HARD_MAX_IMAGE_DIMENSION", 20_000)))
+    return min(configured, hard_limit)
 
 
 def _cell_text(value):
@@ -143,6 +179,122 @@ def _validate_upload_type(data, filename):
         return extension, sniffed_mime or XLS_MIME
 
     raise ValidationError("Unsupported file type.")
+
+
+def validate_image_bytes(data, filename=""):
+    """Decode and validate a bounded, single-frame inquiry screenshot.
+
+    Browser-provided MIME values are intentionally ignored. The decoded Pillow
+    format and filename extension must agree; provider-bound pixels are later
+    re-encoded so metadata and any trailing payload are not forwarded.
+    """
+
+    extension = Path(filename or "").suffix.lower()
+    expected_format = IMAGE_FORMAT_BY_EXTENSION.get(extension)
+    if not expected_format:
+        raise ValidationError("Unsupported image type. Upload .png, .jpg, .jpeg, or .webp files only.")
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PILImage.DecompressionBombWarning)
+            with PILImage.open(BytesIO(data)) as image:
+                decoded_format = str(image.format or "").upper()
+                width, height = image.size
+                frame_count = int(getattr(image, "n_frames", 1) or 1)
+                if decoded_format != expected_format:
+                    raise ValidationError(
+                        f"Image extension {extension} does not match the decoded {decoded_format or 'unknown'} image format."
+                    )
+                if width <= 0 or height <= 0:
+                    raise ValidationError("Uploaded image has invalid dimensions.")
+                if max(width, height) > max_image_dimension():
+                    raise ValidationError(
+                        f"Uploaded image dimensions are too large. Maximum edge is {max_image_dimension():,} pixels."
+                    )
+                if width * height > max_image_pixels():
+                    raise ValidationError(
+                        f"Uploaded image has too many pixels. Maximum is {max_image_pixels():,} pixels."
+                    )
+                if frame_count != 1:
+                    raise ValidationError("Animated or multi-frame images are not supported.")
+                image.verify()
+
+            # ``verify`` deliberately invalidates the decoder. Reopen and load
+            # all pixels so truncated files cannot pass on header data alone.
+            with PILImage.open(BytesIO(data)) as image:
+                image.load()
+    except ValidationError:
+        raise
+    except (PILImage.DecompressionBombError, PILImage.DecompressionBombWarning):
+        raise ValidationError("Uploaded image exceeds the safe pixel limit.")
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise ValidationError("Invalid image file. Upload a complete PNG, JPEG, or WebP image.") from exc
+
+    decoded_mime = IMAGE_MIME_BY_FORMAT[decoded_format]
+    sniffed_mime = _sniff_mime(data)
+    if sniffed_mime not in {decoded_mime, "application/octet-stream"}:
+        raise ValidationError(
+            f"Image content does not match its decoded {decoded_format} format."
+        )
+    return {
+        "format": decoded_format,
+        "mime_type": decoded_mime,
+        "width": width,
+        "height": height,
+        "frame_count": frame_count,
+    }
+
+
+def normalize_image_bytes_for_ai(data, filename=""):
+    """Return a metadata-free, orientation-corrected PNG for the AI provider."""
+
+    source_meta = validate_image_bytes(data, filename)
+    hard_max_dimension = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_HARD_IMAGE_MAX_DIMENSION", 2000)),
+    )
+    configured_max_dimension = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", 1400)),
+    )
+    max_dimension = min(configured_max_dimension, hard_max_dimension)
+    try:
+        with PILImage.open(BytesIO(data)) as source_image:
+            source_image.seek(0)
+            normalized = ImageOps.exif_transpose(source_image)
+            normalized.load()
+            if normalized.mode in {"RGBA", "LA"} or (
+                normalized.mode == "P" and "transparency" in normalized.info
+            ):
+                rgba_image = normalized.convert("RGBA")
+                flattened = PILImage.new("RGB", rgba_image.size, "white")
+                flattened.paste(rgba_image, mask=rgba_image.getchannel("A"))
+                normalized = flattened
+            elif normalized.mode != "RGB":
+                normalized = normalized.convert("RGB")
+            normalized.thumbnail((max_dimension, max_dimension), PILImage.Resampling.LANCZOS)
+            output = BytesIO()
+            # Re-encoding strips EXIF/GPS/profile metadata before bytes leave
+            # the application. PNG is supported consistently by Vision AI.
+            normalized.save(output, format="PNG", optimize=True)
+            normalized_bytes = output.getvalue()
+            normalized_width, normalized_height = normalized.size
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise ValidationError("Image could not be normalized safely for Vision AI.") from exc
+
+    max_normalized_bytes = max(
+        1,
+        int(getattr(settings, "QUOTATION_AI_PARSE_MAX_RENDERED_BYTES", 12 * 1024 * 1024)),
+    )
+    if len(normalized_bytes) > max_normalized_bytes:
+        raise ValidationError("Normalized image exceeds the in-memory AI image byte limit.")
+    return normalized_bytes, {
+        **source_meta,
+        "normalized_mime_type": "image/png",
+        "normalized_width": normalized_width,
+        "normalized_height": normalized_height,
+        "normalized_size": len(normalized_bytes),
+    }
 
 
 def _preview_response(
@@ -240,9 +392,20 @@ def parse_file_preview(
     attachment on ephemeral application storage.
     """
 
-    data = read_upload_bytes(uploaded_file, max_bytes=max_bytes)
-    filename = Path(uploaded_file.name or "").name
-    extension, sniffed_mime = _validate_upload_type(data, filename)
+    filename = Path(getattr(uploaded_file, "name", "") or "").name
+    extension = Path(filename).suffix.lower()
+    effective_max_bytes = max_image_upload_bytes(max_bytes) if extension in IMAGE_EXTENSIONS else max_bytes
+    data = read_upload_bytes(uploaded_file, max_bytes=effective_max_bytes)
+    image_meta = None
+    if extension in IMAGE_EXTENSIONS:
+        image_meta = validate_image_bytes(data, filename)
+        sniffed_mime = image_meta["mime_type"]
+    elif extension in ALLOWED_EXTENSIONS:
+        extension, sniffed_mime = _validate_upload_type(data, filename)
+    else:
+        raise ValidationError(
+            "Unsupported file type. Upload .xlsx, .xlsb, .xls, .pdf, .png, .jpg, .jpeg, or .webp files only."
+        )
     sha256 = hashlib.sha256(data).hexdigest()
 
     if extension in {".xlsx", ".xlsb", ".xls"}:
@@ -253,13 +416,21 @@ def parse_file_preview(
             sha256,
             extension=extension,
         )
-    else:
+    elif extension == ".pdf":
         preview = parse_pdf_preview(
             data,
             filename,
             sniffed_mime,
             sha256,
             max_pages=max_pdf_pages_override,
+        )
+    else:
+        preview = parse_image_preview(
+            data,
+            filename,
+            sniffed_mime,
+            sha256,
+            image_meta=image_meta,
         )
 
     source_file_ref = ""
@@ -270,6 +441,31 @@ def parse_file_preview(
         preview["meta"] = {}
     preview["meta"]["source_file_ref"] = source_file_ref
     return preview
+
+
+def parse_image_preview(data, filename, content_type, sha256, *, source_file_ref="", image_meta=None):
+    image_meta = image_meta or validate_image_bytes(data, filename)
+    return _preview_response(
+        source_type="image",
+        source_filename=filename,
+        source_mime_type=image_meta.get("mime_type") or content_type,
+        source_sha256=sha256,
+        source_file_ref=source_file_ref,
+        source_file_size=len(data),
+        parse_method="image_vision_input_v1",
+        original_text="",
+        lines=[],
+        warnings=["This image requires Vision AI extraction before its rows can be reviewed."],
+        meta={
+            "image_format": image_meta.get("format", ""),
+            "image_width": image_meta.get("width"),
+            "image_height": image_meta.get("height"),
+            "image_frame_count": image_meta.get("frame_count", 1),
+            "requires_vision": True,
+            "source_file_ref": source_file_ref,
+            "source_file_size": len(data),
+        },
+    )
 
 
 def _mapped_columns(header):

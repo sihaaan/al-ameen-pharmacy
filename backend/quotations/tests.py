@@ -85,6 +85,23 @@ def extract_pdf_text(content):
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
+def extract_pdf_font_names(content):
+    reader = PdfReader(BytesIO(content))
+    font_names = set()
+    for page in reader.pages:
+        resources = page.get("/Resources")
+        if not resources:
+            continue
+        fonts = resources.get_object().get("/Font")
+        if not fonts:
+            continue
+        for font_reference in fonts.get_object().values():
+            base_font = font_reference.get_object().get("/BaseFont")
+            if base_font:
+                font_names.add(str(base_font))
+    return font_names
+
+
 class QuotationPermissionTests(APITestCase):
     list_route_names = [
         "quotation-company-list",
@@ -268,6 +285,43 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIn("contacts", detail_response.data)
         self.assertEqual(detail_response.data["contacts"][0]["name"], "Buyer")
 
+    def test_company_list_applies_only_an_explicit_bounded_limit(self):
+        Company.objects.create(name="Alpha Limited Company")
+        Company.objects.create(name="Beta Limited Company")
+        Company.objects.create(name="Gamma Limited Company")
+
+        unbounded_response = self.client.get(reverse("quotation-company-list"))
+        limited_response = self.client.get(reverse("quotation-company-list"), {"limit": "2"})
+        negative_response = self.client.get(reverse("quotation-company-list"), {"limit": "-20"})
+        invalid_response = self.client.get(reverse("quotation-company-list"), {"limit": "not-a-number"})
+
+        self.assertEqual(unbounded_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(unbounded_response.data), 4)
+        self.assertEqual([row["name"] for row in limited_response.data], ["Alpha Limited Company", "Beta Limited Company"])
+        self.assertEqual(len(negative_response.data), 1)
+        self.assertEqual(len(invalid_response.data), 4)
+
+    def test_inquiry_list_limit_prefetches_matched_products_without_n_plus_one_queries(self):
+        for index in range(3):
+            inquiry = Inquiry.objects.create(
+                company=self.company,
+                created_by=self.staff,
+                subject=f"Prefetch inquiry {index}",
+            )
+            InquiryLine.objects.create(
+                inquiry=inquiry,
+                raw_name=f"Bandage request {index}",
+                matched_product=self.product,
+                match_status=InquiryLine.MATCH_CONFIRMED,
+            )
+
+        with self.assertNumQueries(3):
+            response = self.client.get(reverse("quotation-inquiry-list"), {"limit": "2"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
+        self.assertTrue(all(row["lines"][0]["matched_product_name"] == self.product.name for row in response.data))
+
     def test_company_similar_endpoint_strips_legal_suffixes(self):
         intermass = Company.objects.create(name="Intermass")
 
@@ -404,6 +458,41 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIn("Bandage Pack", text)
         self.assertNotIn("Payment Note", text)
         self.assertNotIn("Payment Terms", text)
+
+    def test_unicode_contact_name_round_trips_in_quotation_and_proforma_pdfs(self):
+        contact = CompanyContact.objects.create(
+            company=self.company,
+            name="Cel\u0131ne Lozano",
+            email="celine@example.com",
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            contact=contact,
+            created_by=self.staff,
+            status=Quotation.STATUS_APPROVED,
+        )
+        self.create_valid_line(quotation)
+        QuotationLPO.objects.create(
+            quotation=quotation,
+            source_type=QuotationLPO.SOURCE_PASTED_TEXT,
+            lpo_number="LPO-UNICODE-1",
+            received_by=self.staff,
+        )
+
+        responses = {
+            "quotation": self.client.get(reverse("quotation-pdf", args=[quotation.id])),
+            "proforma": self.client.get(reverse("quotation-proforma-pdf", args=[quotation.id])),
+        }
+
+        for document_type, response in responses.items():
+            with self.subTest(document_type=document_type):
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                text = extract_pdf_text(response.content)
+                self.assertIn(contact.name, text)
+                self.assertNotIn("\u25a0", text)
+                font_names = extract_pdf_font_names(response.content)
+                self.assertTrue(any("BitstreamVeraSans" in name for name in font_names), font_names)
+                self.assertFalse(any("ZapfDingbats" in name for name in font_names), font_names)
 
     def test_standalone_proforma_can_be_created_without_quotation(self):
         create_response = self.client.post(

@@ -11,6 +11,11 @@ const unitMoney = (value, currency = 'AED') => `${currency} ${Number(value || 0)
 
 const percent = (value) => `${Number(value || 0).toFixed(1)}%`;
 
+const releaseNumberWheelFocus = (event) => {
+  event.preventDefault();
+  event.currentTarget.blur();
+};
+
 const splitEvidenceReasons = (reason) => String(reason || '')
   .split(';')
   .map((part) => part.trim())
@@ -2183,6 +2188,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                             step="0.001"
                             disabled={outcomeMutationInProgress}
                             value={draft.accepted_unit_price}
+                            onWheel={releaseNumberWheelFocus}
                             onChange={(event) => updateLineDraft(line.id, { accepted_unit_price: event.target.value })}
                           />
                         </label>

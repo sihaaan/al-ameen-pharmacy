@@ -384,7 +384,7 @@ const QuotationSettings = () => {
                   disabled={!settings.ai_parsing_enabled}
                   onChange={(event) => updateField('ai_pdf_vision_enabled', event.target.checked)}
                 />
-                Enable Vision AI for PDFs
+                Enable Vision AI for PDFs and inquiry images
               </label>
             </div>
             <div className="qm-meta-grid compact">
@@ -392,7 +392,7 @@ const QuotationSettings = () => {
               <div className="qm-meta-item"><span>Text model</span><strong>{settings.ai_text_model || '-'}</strong></div>
               <div className="qm-meta-item"><span>Vision model</span><strong>{settings.ai_vision_model || '-'}</strong></div>
             </div>
-            <p className="qm-helper compact">No AI API calls happen when AI Parsing is off. Missing Product matches never trigger AI cleanup.</p>
+            <p className="qm-helper compact">No AI API calls happen when AI Parsing is off. Uploaded inquiry images are normalized, stripped of metadata, and sent only when Vision AI is enabled. Missing Product matches never trigger AI cleanup.</p>
           </div>
         </div>
       </form>

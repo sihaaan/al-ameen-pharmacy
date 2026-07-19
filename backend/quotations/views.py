@@ -28,6 +28,7 @@ from .ai_parsing import (
     AIParseError,
     apply_ai_rows_to_historical_import,
     clean_historical_import_with_ai,
+    clean_image_bytes_with_ai,
     clean_preview_with_ai,
     maybe_attach_auto_ai_candidate,
     prefer_safe_ai_preview,
@@ -1454,6 +1455,17 @@ def _build_product_price_contexts(quotation, products_by_id, product_ids, histor
     }
 
 
+def _optional_bounded_list_limit(request, *, default=100, maximum=200):
+    raw_limit = request.query_params.get("limit")
+    if raw_limit in (None, ""):
+        return None
+    try:
+        parsed_limit = int(raw_limit)
+    except (TypeError, ValueError):
+        parsed_limit = default
+    return max(1, min(parsed_limit, maximum))
+
+
 class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = CompanySerializer
     queryset = Company.objects.all()
@@ -1479,6 +1491,11 @@ class CompanyViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         if self.request.query_params.get("active") == "true":
             queryset = queryset.filter(is_active=True)
+        if self.action == "list":
+            queryset = queryset.order_by("name", "id")
+            limit = _optional_bounded_list_limit(self.request)
+            if limit is not None:
+                queryset = queryset[:limit]
         return queryset
 
     def perform_create(self, serializer):
@@ -1698,7 +1715,22 @@ class ProductAliasViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = InquirySerializer
-    queryset = Inquiry.objects.select_related("company", "contact", "created_by").prefetch_related("lines", "quotations")
+    queryset = Inquiry.objects.select_related("company", "contact", "created_by").prefetch_related(
+        Prefetch(
+            "lines",
+            queryset=InquiryLine.objects.select_related("matched_quote_item", "matched_product"),
+        ),
+        Prefetch(
+            "quotations",
+            queryset=Quotation.objects.only(
+                "id",
+                "inquiry_id",
+                "quotation_number",
+                "version",
+                "created_at",
+            ),
+        ),
+    )
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1711,6 +1743,10 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             queryset = queryset.filter(status=status_filter)
         if search:
             queryset = queryset.filter(Q(subject__icontains=search) | Q(original_text__icontains=search))
+        if self.action == "list":
+            limit = _optional_bounded_list_limit(self.request)
+            if limit is not None:
+                queryset = queryset[:limit]
         return queryset
 
     def perform_create(self, serializer):
@@ -1743,10 +1779,30 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def parse_file(self, request):
+        uploaded_file = request.FILES.get("file")
         try:
-            preview = parse_file_preview(request.FILES.get("file"))
+            preview = parse_file_preview(uploaded_file)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
+        if preview.get("source_type") == Inquiry.SOURCE_TYPE_IMAGE:
+            try:
+                uploaded_file.seek(0)
+                preview = clean_image_bytes_with_ai(
+                    uploaded_file.read(),
+                    preview,
+                    actor=request.user,
+                )
+            except AIParseError as exc:
+                return Response(
+                    {
+                        "detail": str(exc),
+                        "ai_status": "ai_failed_using_original_parse",
+                        "ai_status_label": "The image could not be read with Vision AI.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            self._apply_product_matches(preview, request.data.get("company"))
+            return Response(preview)
         self._apply_product_matches(preview, request.data.get("company"))
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
         if preview.get("ai_candidate"):

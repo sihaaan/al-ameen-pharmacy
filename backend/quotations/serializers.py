@@ -1091,6 +1091,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
             Inquiry.SOURCE_TYPE_PASTED_TEXT,
             Inquiry.SOURCE_TYPE_EXCEL,
             Inquiry.SOURCE_TYPE_PDF,
+            Inquiry.SOURCE_TYPE_IMAGE,
         ]
     )
     source_filename = serializers.CharField(max_length=255, required=False, allow_blank=True)

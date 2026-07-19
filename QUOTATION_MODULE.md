@@ -110,11 +110,11 @@ Completed:
   - finalized quotations and historical imports write price history against Products
 - used Products are archived instead of deleted; used Companies are deactivated instead of deleted
 - AI-assisted parsing cleanup:
-  - `Quotations -> Settings` controls `Enable AI Parsing`, `Enable Auto AI Cleanup`, and `Enable Vision AI for PDFs`
+  - `Quotations -> Settings` controls `Enable AI Parsing`, `Enable Auto AI Cleanup`, and `Enable Vision AI for PDFs and inquiry images`
   - provider keys and hard safety limits stay in environment variables
   - deterministic parsing always runs first
-  - staff can click `AI Clean Parse` or `AI Clean Rows` to create candidate rows
-  - AI candidate rows must be applied by staff before they replace deterministic review rows
+  - inquiry staff can click `AI Clean & Apply`, which applies the reviewed extraction in one operation and offers Undo
+  - historical import `AI Clean Rows` remains a staged candidate workflow that requires explicit application
   - AI parsing does not match Products, create Products, create aliases, create price history, finalize quotations, or bypass review
   - missing Product matches never trigger AI cleanup and do not lower parse confidence
 - Batch AI-assisted historical quotation learning:
@@ -182,15 +182,15 @@ Create an inquiry:
 - Enter a subject and source text
 - Add one or more requested lines
 - For each line, either select a Product to confirm the match or leave it unmatched
-- Click `Create Inquiry`
+- Click `Save & Open Quotation`; the inquiry is saved, its idempotent quotation is created, and the quotation editor opens directly
 
 Import an inquiry:
 - Go to `Quotations -> Inquiries`
 - In `Import Inquiry`, select a company and optional contact
-- Choose one import mode:
+- Choose one source:
   - `Paste Text`: paste item lines, then click `Extract Lines`
-  - `Upload Excel`: choose a `.xlsx`, `.xlsb`, or `.xls` workbook, then click `Parse File`
-  - `Upload PDF`: choose a digitally generated `.pdf`, then click `Parse File`
+  - `Upload File`: choose or drop an `.xlsx`, `.xlsb`, `.xls`, `.pdf`, `.png`, `.jpg`, `.jpeg`, or `.webp` file, then click `Parse File`
+- The upload automatically identifies Excel, PDF, or image input. The backend still validates the real file signature and rejects unsupported or renamed files.
 - Review the preview table before saving:
   - requested item name
   - quantity
@@ -198,15 +198,14 @@ Import an inquiry:
   - parse status
   - confidence
   - raw source line
-- Delete weak/irrelevant rows or add missing rows manually
-- Click `Save Inquiry`
-- After the inquiry is saved, click `Create Quotation from This Inquiry` if you want to start the quotation editor
+- Delete weak/irrelevant rows, insert missing rows at any position, or drag/use arrow controls to reorder them
+- Click `Save & Open Quotation`
 
 Import limitations:
 - Uploaded source files are stored as private source-file refs after a successful parse; they are not exposed through public URLs.
-- PDF import supports selectable text/tables only.
-- Scanned/image-only PDFs show: `No selectable text detected. OCR is not enabled in this environment.`
-- AI Clean Parse can help clean messy extracted rows when enabled, including capped vision cleanup for PDFs. It still produces review candidates only.
+- PDF import uses selectable text/tables first and can use capped Vision AI when explicitly enabled.
+- Image import requires configured Vision AI. Images are decoded, bounded, orientation-corrected, downscaled, and stripped of metadata before provider use.
+- `AI Clean & Apply` updates inquiry rows in one action and provides Undo. Empty AI results and lossy structured-Excel results never replace existing rows.
 - OCR, Gmail import, fully automatic AI product matching, and background workers are intentionally not part of this implementation.
 - No AI API calls happen when `Enable AI Parsing` is off in `Quotations -> Settings` or the global environment kill switch is disabled.
 - Missing Product matches never trigger AI cleanup. Parse confidence describes extraction quality only.
@@ -741,10 +740,11 @@ Supported sources:
 - Pasted text
 - `.xlsx`, `.xlsb`, and `.xls` Excel workbooks
 - Digitally generated `.pdf` files with selectable text/tables
+- `.png`, `.jpg`, `.jpeg`, and `.webp` inquiry screenshots when Vision AI is configured
 
 Unsupported in this implementation:
 - scanned/image-only PDF OCR
-- `.csv`, `.docx`, images, email messages, ZIPs, or arbitrary file types
+- `.csv`, `.docx`, HEIC, email messages, ZIPs, or arbitrary file types
 - AI matching or product guessing
 - automatic quotation creation from uploaded files
 - public storage or public download URLs for uploaded inquiry source files
