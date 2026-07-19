@@ -193,6 +193,20 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(len(detail_response.data["lines"]), 1)
         self.assertEqual(list_response.data[0]["created_by_username"], self.staff.username)
 
+    def test_quotation_rejects_a_contact_from_another_company(self):
+        other_company = Company.objects.create(name="Other Contact Company")
+        other_contact = CompanyContact.objects.create(company=other_company, name="Wrong Buyer")
+
+        response = self.client.post(
+            reverse("quotation-list"),
+            {"company": self.company.id, "contact": other_contact.id, "notes": "Must not be created"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["contact"][0], "Contact must belong to the selected company.")
+        self.assertFalse(Quotation.objects.filter(notes="Must not be created").exists())
+
     def test_delete_draft_quotation_keeps_audit_snapshot_and_reopens_single_inquiry(self):
         inquiry = Inquiry.objects.create(
             company=self.company,

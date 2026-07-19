@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError } from '../../api/quotations';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
@@ -582,7 +583,7 @@ const ProformaInvoiceManager = () => {
                               <input value={line.item_name || ''} onChange={(event) => updateLineDraft(line.id, { item_name: event.target.value })} placeholder="Item description" />
                               <input value={line.description || ''} onChange={(event) => updateLineDraft(line.id, { description: event.target.value })} placeholder="Optional detail" />
                             </td>
-                            <td><input type="number" step="0.001" value={line.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
+                            <td><input aria-label={`Quantity for ${line.item_name || `line ${index + 1}`}`} type="number" step="0.001" value={line.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
                             <td><input value={line.unit || ''} onChange={(event) => updateLineDraft(line.id, { unit: event.target.value })} /></td>
                             <td><input type="number" step="0.001" value={line.unit_price || ''} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} /></td>
                             <td>

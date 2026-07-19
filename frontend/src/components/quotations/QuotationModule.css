@@ -145,6 +145,10 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.qm-quotation-list-panel {
+  min-width: 0;
+}
+
 .qm-grid-two {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1910,6 +1914,20 @@
   box-shadow: 0 24px 80px rgba(17, 24, 39, 0.28);
 }
 
+.qm-create-quotation-modal {
+  width: min(680px, 96vw);
+}
+
+.qm-create-quotation-modal > .qm-panel-heading {
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.qm-create-quotation-actions {
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
 .qm-input,
 .qm-form input,
 .qm-form textarea,
@@ -2189,6 +2207,32 @@
   width: 100%;
   border-collapse: collapse;
   background: #ffffff;
+}
+
+.qm-table.qm-quotation-list-table {
+  min-width: 1180px;
+}
+
+.qm-quotation-list-table th,
+.qm-quotation-list-table td:nth-child(1),
+.qm-quotation-list-table td:nth-child(3),
+.qm-quotation-list-table td:nth-child(4),
+.qm-quotation-list-table td:nth-child(5),
+.qm-quotation-list-table td:nth-child(7),
+.qm-quotation-list-table td:nth-child(8),
+.qm-quotation-list-table td:nth-child(9),
+.qm-quotation-list-table td:nth-child(10) {
+  white-space: nowrap;
+}
+
+.qm-quotation-list-table th:nth-child(2),
+.qm-quotation-list-table td:nth-child(2) {
+  min-width: 180px;
+}
+
+.qm-quotation-list-table th:nth-child(6),
+.qm-quotation-list-table td:nth-child(6) {
+  min-width: 150px;
 }
 
 .qm-table th,

@@ -1888,6 +1888,13 @@ class QuotationSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def validate(self, attrs):
+        company = attrs.get("company", getattr(self.instance, "company", None))
+        contact = attrs.get("contact", getattr(self.instance, "contact", None))
+        if contact and company and contact.company_id != company.id:
+            raise serializers.ValidationError({"contact": "Contact must belong to the selected company."})
+        return attrs
+
     def create(self, validated_data):
         request = self.context.get("request")
         if request and request.user.is_authenticated:

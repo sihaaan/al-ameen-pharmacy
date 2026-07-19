@@ -946,7 +946,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
   });
 
-  test('does not let the mouse wheel change an accepted unit price', async () => {
+  test('does not let the mouse wheel change an accepted quantity or unit price', async () => {
     quotationAPI.quotes.outcome.mockResolvedValueOnce({
       data: {
         ...outcomePayload,
@@ -970,6 +970,13 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     });
 
     render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    const acceptedQuantity = await screen.findByRole('spinbutton', { name: /accepted quantity for bandage pack/i });
+    acceptedQuantity.focus();
+    expect(document.activeElement).toBe(acceptedQuantity);
+    fireEvent.wheel(acceptedQuantity, { deltaY: 100 });
+    expect(document.activeElement).not.toBe(acceptedQuantity);
+    expect(acceptedQuantity).toHaveValue(2);
 
     const acceptedPrice = await screen.findByRole('spinbutton', { name: /accepted unit price for bandage pack/i });
     acceptedPrice.focus();

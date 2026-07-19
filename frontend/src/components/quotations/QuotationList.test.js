@@ -1,8 +1,23 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import QuotationList, { MAILBOX_AUDIT_REQUEST_BUDGET } from './QuotationList';
 import quotationAPI from '../../api/quotations';
 
-jest.mock('./CompanySelectWithCreate', () => () => <div data-testid="company-select" />);
+jest.mock('./CompanySelectWithCreate', () => ({ companies = [], onChange, required, value }) => (
+  <label>
+    Company
+    <select
+      aria-label="Company"
+      required={required}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    >
+      <option value="">Select company</option>
+      {companies.map((company) => (
+        <option key={company.id} value={company.id}>{company.name}</option>
+      ))}
+    </select>
+  </label>
+));
 
 jest.mock('../../api/quotations', () => ({
   __esModule: true,
@@ -56,6 +71,7 @@ describe('QuotationList PO/LPO evidence summaries', () => {
     jest.clearAllMocks();
     quotationAPI.quotes.list.mockResolvedValue({ data: [quotation] });
     quotationAPI.companies.list.mockResolvedValue({ data: [] });
+    quotationAPI.contacts.list.mockResolvedValue({ data: [] });
     quotationAPI.mailboxPOAudits.latest.mockResolvedValue({
       data: { run: null, match_run: null, inventory_done: false, done: false },
     });
@@ -68,6 +84,154 @@ describe('QuotationList PO/LPO evidence summaries', () => {
     expect(screen.getByText('2 candidates')).toBeInTheDocument();
     expect(screen.getByText('2 need assignment')).toBeInTheDocument();
     expect(screen.getByText('1 parsed')).toBeInTheDocument();
+  });
+
+  test('uses the full page width and keeps the new quotation form out of the list', async () => {
+    const { container } = render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(container.querySelector('.qm-split.wide-left.single-panel')).toBeInTheDocument();
+
+    const listPanel = screen.getByRole('region', { name: 'Quotations' });
+    expect(listPanel).toHaveClass('qm-panel', 'qm-quotation-list-panel');
+    expect(within(listPanel).getByRole('table')).toHaveClass('qm-table', 'qm-quotation-list-table');
+    expect(within(listPanel).getByRole('button', { name: 'New Quotation' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'New Quotation' })).not.toBeInTheDocument();
+  });
+
+  test('opens the compact new quotation dialog and Cancel closes it', async () => {
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    fireEvent.click(screen.getByRole('button', { name: 'New Quotation' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'New Quotation' });
+    expect(within(dialog).getByRole('heading', { name: 'New Quotation' })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Company')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Contact')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Notes')).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByRole('dialog', { name: 'New Quotation' })).not.toBeInTheDocument();
+  });
+
+  test('creates a quotation from the dialog and opens the new quote', async () => {
+    const onOpenQuote = jest.fn();
+    quotationAPI.companies.list.mockResolvedValue({
+      data: [{ id: 7, name: 'Customer B' }],
+    });
+    quotationAPI.quotes.create.mockResolvedValue({ data: { id: 88 } });
+
+    render(<QuotationList onOpenQuote={onOpenQuote} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    fireEvent.click(screen.getByRole('button', { name: 'New Quotation' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'New Quotation' });
+    fireEvent.change(within(dialog).getByLabelText('Company'), { target: { value: '7' } });
+    fireEvent.change(within(dialog).getByLabelText('Notes'), { target: { value: 'Urgent delivery' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.create).toHaveBeenCalledWith({
+      company: '7',
+      contact: null,
+      notes: 'Urgent delivery',
+    }));
+    expect(onOpenQuote).toHaveBeenCalledWith(88);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'New Quotation' })).not.toBeInTheDocument();
+    });
+  });
+
+  test('ignores a stale contact response after the company changes', async () => {
+    let resolveCompanyA;
+    let resolveCompanyB;
+    const companyAContacts = new Promise((resolve) => { resolveCompanyA = resolve; });
+    const companyBContacts = new Promise((resolve) => { resolveCompanyB = resolve; });
+    quotationAPI.companies.list.mockResolvedValue({
+      data: [
+        { id: 1, name: 'Company A' },
+        { id: 2, name: 'Company B' },
+      ],
+    });
+    quotationAPI.contacts.list.mockImplementation(({ company }) => (
+      String(company) === '1' ? companyAContacts : companyBContacts
+    ));
+
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    fireEvent.click(screen.getByRole('button', { name: 'New Quotation' }));
+    const dialog = screen.getByRole('dialog', { name: 'New Quotation' });
+    const companySelect = within(dialog).getByLabelText('Company');
+    fireEvent.change(companySelect, { target: { value: '1' } });
+    fireEvent.change(companySelect, { target: { value: '2' } });
+
+    await act(async () => {
+      resolveCompanyB({ data: [{ id: 22, name: 'Contact B' }] });
+      await companyBContacts;
+    });
+    expect(await within(dialog).findByRole('option', { name: 'Contact B' })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveCompanyA({ data: [{ id: 11, name: 'Contact A' }] });
+      await companyAContacts;
+    });
+    expect(within(dialog).queryByRole('option', { name: 'Contact A' })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('option', { name: 'Contact B' })).toBeInTheDocument();
+  });
+
+  test('clears contact loading state when the dialog closes and reopens', async () => {
+    let resolveContacts;
+    const pendingContacts = new Promise((resolve) => { resolveContacts = resolve; });
+    quotationAPI.companies.list.mockResolvedValue({
+      data: [{ id: 1, name: 'Company A' }],
+    });
+    quotationAPI.contacts.list.mockReturnValue(pendingContacts);
+
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    fireEvent.click(screen.getByRole('button', { name: 'New Quotation' }));
+    let dialog = screen.getByRole('dialog', { name: 'New Quotation' });
+    fireEvent.change(within(dialog).getByLabelText('Company'), { target: { value: '1' } });
+    expect(within(dialog).getByRole('option', { name: 'Loading contacts...' })).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'New Quotation' })).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'New Quotation' }));
+
+    dialog = screen.getByRole('dialog', { name: 'New Quotation' });
+    expect(within(dialog).getByRole('option', { name: 'No contact' })).toBeInTheDocument();
+    expect(within(dialog).queryByRole('option', { name: 'Loading contacts...' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveContacts({ data: [{ id: 11, name: 'Late Contact' }] });
+      await pendingContacts;
+    });
+  });
+
+  test('moves focus into the dialog and restores it after Escape closes', async () => {
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    const trigger = screen.getByRole('button', { name: 'New Quotation' });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = screen.getByRole('dialog', { name: 'New Quotation' });
+    await waitFor(() => expect(dialog).toContainElement(document.activeElement));
+
+    fireEvent.keyDown(document, { key: 'Escape', code: 'Escape' });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'New Quotation' })).not.toBeInTheDocument();
+    });
+    expect(trigger).toHaveFocus();
   });
 
   test('shows mailbox inventory and safe-match totals returned by the audit API', async () => {

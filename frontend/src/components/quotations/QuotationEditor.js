@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import ProductPriceHistoryDialog from './ProductPriceHistoryDialog';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationErrorNotice from './QuotationErrorNotice';
@@ -150,11 +151,6 @@ const partyDraftsMatch = (left = {}, right = {}) => (
   String(left.company || '') === String(right.company || '') &&
   String(left.contact || '') === String(right.contact || '')
 );
-
-const releaseNumberWheelFocus = (event) => {
-  event.preventDefault();
-  event.currentTarget.blur();
-};
 
 const safeDownloadNamePart = (value) => {
   const cleaned = String(value || '')
@@ -1626,7 +1622,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                       </select>
                     </td>
                     <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
-                    <td><input disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
+                    <td><input aria-label={`Quantity for ${lineLabel(line, draft)}`} disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
                     <td>
                       <input
                         className="qm-unit-input"
@@ -1703,7 +1699,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               {renderProductOptions(lineForm)}
             </select>
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
-            <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
+            <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
             <input
               placeholder="Unit"
               list="quotation-unit-suggestions"

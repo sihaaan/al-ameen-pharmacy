@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
@@ -51,11 +52,6 @@ const emptyImportForm = {
 const normalizeVatRate = (value) => {
   const numeric = Number(value || 0);
   return numeric === 5 ? '5' : '0';
-};
-
-export const releaseNumberWheelFocus = (event) => {
-  event.preventDefault();
-  event.currentTarget.blur();
 };
 
 export const inquiryUploadModeForFile = (file) => {
@@ -1364,7 +1360,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                           </select>
                           {shouldShowMatchReason(line.match_reason) && <small className="qm-muted-text">{line.match_reason}</small>}
                         </td>
-                        <td className="qm-import-qty-cell"><input type="number" min="0" step="0.001" value={line.quantity || ''} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
+                        <td className="qm-import-qty-cell"><input aria-label={`Quantity row ${index + 1}`} type="number" min="0" step="0.001" value={line.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
                         <td className="qm-import-price-cell">
                           <input aria-label={`Unit price row ${index + 1}`} type="number" min="0" step="0.001" value={line.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
@@ -1639,7 +1635,7 @@ const InquiryManager = ({ onOpenQuote }) => {
             {form.lines.map((line, index) => (
               <div key={line._client_row_id} className="qm-line-form">
                 <input aria-label="Requested item name" placeholder="Requested item name" required value={line.raw_name} onChange={(event) => updateLine(index, { raw_name: event.target.value })} />
-                <input aria-label="Qty" type="number" min="0" step="0.001" placeholder="Qty" value={line.quantity} onChange={(event) => updateLine(index, { quantity: event.target.value })} />
+                <input aria-label="Qty" type="number" min="0" step="0.001" placeholder="Qty" value={line.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLine(index, { quantity: event.target.value })} />
                 <input aria-label="Unit" placeholder="Unit" value={line.unit} onChange={(event) => updateLine(index, { unit: event.target.value })} />
                 <select aria-label="Matched product" value={line.matched_product} onChange={(event) => {
                   const matched = event.target.value;

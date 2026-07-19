@@ -9,7 +9,8 @@
 - Added insert-at-position and reorder controls for inquiry rows, including stable row identity so typing no longer loses focus.
 - Added one-step inquiry save/create/open behavior and collapsed, lazy-loaded manual-entry and inquiry-history sections.
 - Added debounced company search, bounded company/history results, lazy company contacts, and inquiry serializer prefetching to remove the company-picker delay and matched-product N+1 queries.
-- Prevented mouse-wheel edits on inquiry, quotation, and accepted unit-price controls.
+- Prevented mouse-wheel edits on inquiry, quotation, and accepted unit-price controls, plus editable quantities across inquiry, quotation, LPO outcome, historical-import, proforma, and product-stock forms.
+- Expanded the Quotations list to a full-width single-panel layout, moved direct quotation creation into a keyboard-safe on-demand dialog, and preserved readable table columns with responsive horizontal scrolling.
 - Added a simple `Accounting access` checkbox to Django User admin so superusers can grant/revoke Accounting module access without manually managing groups and permissions.
 - Added protected `Admin Dashboard -> Accounting` overdue statement workflow for accounting staff to upload monthly POS agewise outstanding exports, review due customers, persist customer emails/categories, and download statement PDFs or a ZIP of due statements without sending emails.
 - Added Accounting statement PDF output with split `Invoice No.` and `LPO / Reference No.` columns for POS bill references.

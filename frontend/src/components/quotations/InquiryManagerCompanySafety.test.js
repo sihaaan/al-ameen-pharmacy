@@ -203,7 +203,7 @@ describe('InquiryManager company-scoped async safety', () => {
     expect(screen.queryByRole('button', { name: 'Save & Open Quotation' })).not.toBeInTheDocument();
   });
 
-  test('blurs inquiry unit price on wheel so scrolling cannot change it', async () => {
+  test('blurs imported inquiry quantity and unit price on wheel so scrolling cannot change them', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({
       data: {
         ...parsedPreview,
@@ -217,11 +217,31 @@ describe('InquiryManager company-scoped async safety', () => {
       target: { value: 'Priced item' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
-    const price = await screen.findByLabelText('Unit price row 1');
+    const quantity = await screen.findByLabelText('Quantity row 1');
+    const price = screen.getByLabelText('Unit price row 1');
+    quantity.focus();
+    fireEvent.wheel(quantity, { deltaY: 100 });
+    expect(document.activeElement).not.toBe(quantity);
+    expect(quantity).toHaveValue(1);
+
     price.focus();
     fireEvent.wheel(price, { deltaY: 100 });
     expect(document.activeElement).not.toBe(price);
     expect(price).toHaveValue(12.5);
+  });
+
+  test('blurs manual inquiry quantity on wheel and retains the typed value', async () => {
+    render(<InquiryManager />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Manual inquiry entry/i }));
+    await screen.findByRole('option', { name: 'Matched Product' });
+    const quantity = screen.getByRole('spinbutton', { name: 'Qty' });
+    fireEvent.change(quantity, { target: { value: '7.5' } });
+    quantity.focus();
+    fireEvent.wheel(quantity, { deltaY: 100 });
+
+    expect(document.activeElement).not.toBe(quantity);
+    expect(quantity).toHaveValue(7.5);
   });
 
   test('saves, creates one quotation, and opens it in a single action', async () => {

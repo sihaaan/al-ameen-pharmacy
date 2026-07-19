@@ -6,9 +6,9 @@ import {
   inquiryUploadModeForFile,
   insertInquiryRow,
   moveInquiryRow,
-  releaseNumberWheelFocus,
   resetImportedMatchesForCompanyChange,
 } from './InquiryManager';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 
 describe('InquiryManager imported match provenance', () => {
   test('editing the requested name clears a stale Product confirmation', () => {
@@ -89,7 +89,7 @@ describe('InquiryManager imported match provenance', () => {
     expect(inquiryUploadModeForFile({ name: 'request.txt', type: 'text/plain' })).toBe('');
   });
 
-  test('prevents wheel price changes by blurring the number input', () => {
+  test('prevents wheel changes by blurring a protected number input', () => {
     const preventDefault = jest.fn();
     const blur = jest.fn();
 

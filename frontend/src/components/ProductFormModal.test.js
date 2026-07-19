@@ -55,4 +55,19 @@ describe('ProductFormModal duplicate prevention', () => {
     expect(retryBody.get('confirm_create')).toBe('true');
     expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ id: 9 }));
   });
+
+  test('blurs stock quantity on wheel and retains the typed value', () => {
+    axiosInstance.get.mockReturnValue(new Promise(() => {}));
+    const { container } = render(
+      <ProductFormModal isOpen onClose={jest.fn()} onSaved={jest.fn()} defaultStatus="draft" />
+    );
+    const stockQuantity = container.querySelector('input[name="stock_quantity"]');
+
+    fireEvent.change(stockQuantity, { target: { value: '125' } });
+    stockQuantity.focus();
+    fireEvent.wheel(stockQuantity, { deltaY: 100 });
+
+    expect(document.activeElement).not.toBe(stockQuantity);
+    expect(stockQuantity).toHaveValue(125);
+  });
 });

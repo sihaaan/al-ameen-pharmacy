@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 const STEPS = [
@@ -1541,7 +1542,7 @@ const HistoricalImportManager = () => {
               <input value={lineDraft.item_name || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { item_name: event.target.value })} />
             </label>
             <label><span className="qm-label-text">Qty</span>
-              <input type="number" step="0.001" value={lineDraft.quantity || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { quantity: event.target.value })} />
+              <input aria-label={`Quantity for ${lineDraft.item_name || `historical line ${suggestion.line}`}`} type="number" step="0.001" value={lineDraft.quantity || ''} disabled={suggestion.line_status === 'committed'} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(suggestion.line, { quantity: event.target.value })} />
             </label>
             <label><span className="qm-label-text">Unit</span>
               <input value={lineDraft.unit || ''} disabled={suggestion.line_status === 'committed'} onChange={(event) => updateLineDraft(suggestion.line, { unit: event.target.value })} />

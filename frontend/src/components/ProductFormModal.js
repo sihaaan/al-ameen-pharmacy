@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axiosInstance from '../utils/axios';
+import { releaseNumberWheelFocus } from '../utils/numberInput';
 
 const emptyProductForm = (defaultStatus = 'draft') => ({
   name: '',
@@ -448,7 +449,7 @@ const ProductFormModal = ({
                     </div>
                     <div className="pm-field">
                       <label>Stock Quantity <span className="required">*</span></label>
-                      <input type="number" min="0" name="stock_quantity" value={formData.stock_quantity} onChange={handleInputChange} required placeholder="0" />
+                      <input aria-label="Stock quantity" type="number" min="0" name="stock_quantity" value={formData.stock_quantity} onWheel={releaseNumberWheelFocus} onChange={handleInputChange} required placeholder="0" />
                     </div>
                   </div>
                 </div>

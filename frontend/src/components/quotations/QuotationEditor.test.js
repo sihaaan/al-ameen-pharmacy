@@ -224,16 +224,32 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.getByRole('dialog', { name: /price history/i })).toBeInTheDocument();
   });
 
-  test('does not change a quotation unit price when the mouse wheel scrolls', async () => {
+  test('does not change existing or new quotation quantities and prices when the mouse wheel scrolls', async () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
     const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    const quantityInput = screen.getByLabelText('Quantity for Imported gloves');
+    fireEvent.change(quantityInput, { target: { value: '4.5' } });
+    quantityInput.focus();
+    fireEvent.wheel(quantityInput, { deltaY: 100 });
+
+    expect(document.activeElement).not.toBe(quantityInput);
+    expect(quantityInput).toHaveValue(4.5);
+
     fireEvent.change(priceInput, { target: { value: '12.5' } });
     priceInput.focus();
     fireEvent.wheel(priceInput, { deltaY: 100 });
 
     expect(document.activeElement).not.toBe(priceInput);
     expect(priceInput).toHaveValue(12.5);
+
+    const newLineQuantity = screen.getByRole('spinbutton', { name: 'Qty' });
+    fireEvent.change(newLineQuantity, { target: { value: '8' } });
+    newLineQuantity.focus();
+    fireEvent.wheel(newLineQuantity, { deltaY: 100 });
+
+    expect(document.activeElement).not.toBe(newLineQuantity);
+    expect(newLineQuantity).toHaveValue(8);
   });
 
   test('warns about a similar Product and only creates after an explicit override', async () => {

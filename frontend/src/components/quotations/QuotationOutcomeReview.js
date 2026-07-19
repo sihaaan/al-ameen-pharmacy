@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 const money = (value, currency = 'AED') => `${currency} ${Number(value || 0).toFixed(2)}`;
@@ -10,11 +11,6 @@ const unitMoney = (value, currency = 'AED') => `${currency} ${Number(value || 0)
 })}`;
 
 const percent = (value) => `${Number(value || 0).toFixed(1)}%`;
-
-const releaseNumberWheelFocus = (event) => {
-  event.preventDefault();
-  event.currentTarget.blur();
-};
 
 const splitEvidenceReasons = (reason) => String(reason || '')
   .split(';')
@@ -2177,6 +2173,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
                             step="0.001"
                             disabled={outcomeMutationInProgress}
                             value={draft.accepted_quantity}
+                            onWheel={releaseNumberWheelFocus}
                             onChange={(event) => updateLineDraft(line.id, { accepted_quantity: event.target.value })}
                           />
                         </label>
