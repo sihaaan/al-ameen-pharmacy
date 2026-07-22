@@ -93,6 +93,26 @@ describe('CompanySelectWithCreate external locking', () => {
     expect(screen.getByText('Showing the first 2 of 3 matches. Type to narrow the list.')).toBeInTheDocument();
   });
 
+  test('renders every company when a caller opts into the complete directory', () => {
+    const companies = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      name: `Alpha Company ${String(index + 1).padStart(3, '0')}`,
+    }));
+    companies.push({ id: 101, name: 'Trojan Construction Group' });
+
+    render(
+      <CompanySelectWithCreate
+        companies={companies}
+        value=""
+        onChange={jest.fn()}
+        maxRenderedCompanies={companies.length}
+      />
+    );
+
+    expect(screen.getByRole('option', { name: 'Trojan Construction Group' })).toBeInTheDocument();
+    expect(screen.queryByText(/Showing the first/i)).not.toBeInTheDocument();
+  });
+
   test('shows an explicit loading state while the first company results load', () => {
     render(
       <CompanySelectWithCreate companies={[]} value="" onChange={jest.fn()} loading />

@@ -343,6 +343,36 @@ describe('InquiryManager company-scoped async safety', () => {
     });
   });
 
+  test('makes the first companies usable before hydrating Trojan from the complete directory', async () => {
+    const initialCompanies = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      name: `Alpha Company ${String(index + 1).padStart(3, '0')}`,
+    }));
+    const completeCompanies = [
+      ...initialCompanies,
+      { id: 501, name: 'Trojan General Contracting' },
+    ];
+    let resolveCompleteDirectory;
+    quotationAPI.companies.list
+      .mockResolvedValueOnce({ data: initialCompanies })
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveCompleteDirectory = resolve;
+      }));
+
+    render(<InquiryManager />);
+
+    expect(await screen.findByText(/Alpha Company 100/)).toBeInTheDocument();
+    expect(screen.queryByText(/Trojan General Contracting/)).not.toBeInTheDocument();
+    expect(quotationAPI.companies.list).toHaveBeenNthCalledWith(1, { active: 'true', limit: 100 });
+    await waitFor(() => expect(quotationAPI.companies.list).toHaveBeenNthCalledWith(2, { active: 'true' }));
+
+    await act(async () => {
+      resolveCompleteDirectory({ data: completeCompanies });
+    });
+
+    expect(await screen.findByText(/Trojan General Contracting/)).toBeInTheDocument();
+  });
+
   test('merges a slow initial company response after a faster search response', async () => {
     let resolveInitialCompanies;
     quotationAPI.companies.list

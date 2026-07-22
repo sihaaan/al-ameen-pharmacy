@@ -263,6 +263,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const importRevisionRef = useRef(0);
   const importOperationLockRef = useRef(false);
   const companyRequestSequenceRef = useRef(0);
+  const completeCompanyDirectoryStartedRef = useRef(false);
   const loadedContactCompaniesRef = useRef(new Set());
 
   const captureImportCompanyRequest = () => ({
@@ -336,6 +337,28 @@ const InquiryManager = ({ onOpenQuote }) => {
     }
   }, []);
 
+  const loadCompleteCompanyDirectory = useCallback(async () => {
+    if (completeCompanyDirectoryStartedRef.current) return;
+    completeCompanyDirectoryStartedRef.current = true;
+    try {
+      const response = await quotationAPI.companies.list({ active: 'true' });
+      setCompanies((current) => {
+        const byId = new Map(current.map((company) => [String(company.id), company]));
+        (response.data || []).forEach((company) => byId.set(String(company.id), company));
+        return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+      });
+    } catch (error) {
+      completeCompanyDirectoryStartedRef.current = false;
+      const details = await describeQuotationError(
+        error,
+        'Load complete company directory',
+        'GET /quotations/companies/'
+      );
+      setErrorInfo(details);
+      console.error(formatQuotationError(details), error);
+    }
+  }, []);
+
   const loadItems = useCallback(async () => {
     try {
       const response = await quotationAPI.items.list({ active: 'true' });
@@ -385,9 +408,15 @@ const InquiryManager = ({ onOpenQuote }) => {
   }, []);
 
   useEffect(() => {
-    loadCompanies();
+    let cancelled = false;
+    loadCompanies().then(() => {
+      if (!cancelled) loadCompleteCompanyDirectory();
+    });
     loadItems();
-  }, [loadCompanies, loadItems]);
+    return () => {
+      cancelled = true;
+    };
+  }, [loadCompanies, loadCompleteCompanyDirectory, loadItems]);
 
   const filteredContacts = contacts.filter((contact) => String(contact.company) === String(form.company));
   const filteredImportContacts = contacts.filter((contact) => String(contact.company) === String(importForm.company));
@@ -1025,6 +1054,7 @@ const InquiryManager = ({ onOpenQuote }) => {
             required
             loading={companiesLoading}
             onSearch={loadCompanies}
+            maxRenderedCompanies={Math.max(companies.length, 100)}
             disabled={importParsing || aiCleaning || priceReferenceApplying || importSaving || importContactSaving}
             onChange={(companyId) => {
               const normalizedCompanyId = String(companyId || '');
@@ -1585,6 +1615,7 @@ const InquiryManager = ({ onOpenQuote }) => {
             required
             loading={companiesLoading}
             onSearch={loadCompanies}
+            maxRenderedCompanies={Math.max(companies.length, 100)}
             disabled={saving || manualContactSaving}
             onChange={(companyId) => {
               setForm({ ...form, company: companyId, contact: '' });
