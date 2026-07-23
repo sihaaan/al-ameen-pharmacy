@@ -162,14 +162,20 @@ WSGI_APPLICATION = 'pharmacy_api.wsgi.application'
 
 # ---- database configuration ----
 # PostgreSQL via Neon (cloud database)
-# Good for: production, learning real-world setup
-DATABASES = {
-    "default": dj_database_url.parse(
-        DATABASE_URL,
-        conn_max_age=600
-    )
-}
+# Keep SQLite on Django's close-after-request default. For PostgreSQL, retain a
+# short-lived persistent connection and check it before every request that uses
+# the database. This prevents an idle Neon/Railway SSL connection from causing
+# the first request after it is closed to fail with an OperationalError.
+DATABASES = {"default": dj_database_url.parse(DATABASE_URL)}
 if DATABASES["default"].get("ENGINE", "").endswith("postgresql"):
+    DATABASES["default"]["CONN_MAX_AGE"] = max(
+        0,
+        int(os.environ.get("DATABASE_CONN_MAX_AGE_SECONDS", "60")),
+    )
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = env_bool(
+        "DATABASE_CONN_HEALTH_CHECKS",
+        True,
+    )
     # Railway/Neon expose PostgreSQL through a transaction-pooling proxy.
     # Django's QuerySet.iterator() otherwise opens a named server-side cursor
     # that the next pooled transaction cannot see (InvalidCursorName).  Keep

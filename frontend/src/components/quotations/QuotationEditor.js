@@ -190,6 +190,26 @@ const lpoDraftFromRecord = (lpo = null) => {
   };
 };
 
+const transientLoadStatuses = new Set([408, 500, 502, 503, 504]);
+
+export const shouldRetryQuotationGet = (error) => {
+  if (error?.code === 'ERR_CANCELED') return false;
+  if (!error?.response) return true;
+  return transientLoadStatuses.has(Number(error.response.status));
+};
+
+export const retryTransientQuotationGet = async (request, delayMs = 150) => {
+  try {
+    return await request();
+  } catch (error) {
+    if (!shouldRetryQuotationGet(error)) throw error;
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    return request();
+  }
+};
+
 const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [quote, setQuote] = useState(null);
   const [companies, setCompanies] = useState([]);
@@ -216,6 +236,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [priceContextError, setPriceContextError] = useState(null);
   const [priceHistoryDialog, setPriceHistoryDialog] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
+  const [referenceLoadFailures, setReferenceLoadFailures] = useState([]);
+  const [referenceRetrying, setReferenceRetrying] = useState(false);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [lineFilter, setLineFilter] = useState('active');
   const [productCreateModal, setProductCreateModal] = useState(null);
@@ -236,10 +258,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const lineFormPriceVersionRef = useRef(0);
   const lineFormSelectedProductRef = useRef('');
   const priceContextGenerationRef = useRef(0);
+  const loadGenerationRef = useRef(0);
+  const referenceLoadGenerationRef = useRef(0);
+  const contactLoadGenerationRef = useRef(0);
+  const quoteRef = useRef(null);
+  const quotePartyDraftRef = useRef(quotePartyDraft);
+  quotePartyDraftRef.current = quotePartyDraft;
 
   const setLoadedQuote = useCallback((quoteData) => {
+    quoteRef.current = quoteData;
     setQuote(quoteData);
     const nextPartyDraft = partyDraftFromQuote(quoteData);
+    quotePartyDraftRef.current = nextPartyDraft;
     setQuotePartyDraft(nextPartyDraft);
     setSavedQuotePartyDraft(nextPartyDraft);
     const nextTermsDraft = termsDraftFromQuote(quoteData);
@@ -268,36 +298,151 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setLpoDraft(lpoDraftFromRecord(nextRecords[0] || null));
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setErrorInfo(null);
-    setPriceContextError(null);
+  const load = useCallback(async ({
+    refreshQuote = true,
+    refreshReferences = true,
+    referenceKeys = null,
+  } = {}) => {
+    const loadGeneration = refreshQuote
+      ? ++loadGenerationRef.current
+      : loadGenerationRef.current;
+    const referenceLoadGeneration = refreshReferences
+      ? ++referenceLoadGenerationRef.current
+      : referenceLoadGenerationRef.current;
+    const quoteLoadIsCurrent = () => loadGenerationRef.current === loadGeneration;
+    const referenceLoadIsCurrent = () => (
+      quoteLoadIsCurrent()
+      && referenceLoadGenerationRef.current === referenceLoadGeneration
+    );
+    if (refreshQuote) {
+      contactLoadGenerationRef.current += 1;
+      setLoading(true);
+      setLoadingContacts(false);
+      setReferenceRetrying(false);
+      setQuote((current) => {
+        if (current && String(current.id) !== String(quoteId)) {
+          quoteRef.current = null;
+          return null;
+        }
+        return current;
+      });
+      setErrorInfo(null);
+      if (refreshReferences) setReferenceLoadFailures([]);
+      setPriceContextError(null);
+    } else {
+      setReferenceRetrying(true);
+    }
     try {
-      const quoteRes = await quotationAPI.quotes.retrieve(quoteId);
+      let quoteData = quoteRef.current;
+      if (
+        refreshQuote
+        || !quoteData
+        || String(quoteData.id) !== String(quoteId)
+      ) {
+        const quoteRes = await retryTransientQuotationGet(
+          () => quotationAPI.quotes.retrieve(quoteId)
+        );
+        if (!quoteLoadIsCurrent()) return;
+        quoteData = quoteRes.data;
+        setLoadedQuote(quoteData);
+      }
+
       const productIds = Array.from(new Set(
-        (quoteRes.data.lines || []).map((line) => line.product).filter(Boolean).map(String)
+        (quoteData.lines || []).map((line) => line.product).filter(Boolean).map(String)
       ));
-      const [itemsRes, companyItemsRes, companiesRes, contactsRes, lposRes] = await Promise.all([
-        quotationAPI.items.list({ active: 'true' }),
-        quotationAPI.items.list({ active: 'true', company_used: quoteRes.data.company }),
-        quotationAPI.companies.list({ active: 'true' }),
-        quoteRes.data.company
-          ? quotationAPI.contacts.list({ company: quoteRes.data.company, active: 'true' })
-          : Promise.resolve({ data: [] }),
-        quotationAPI.quotes.lpos(quoteId),
-      ]);
-      setLoadedQuote(quoteRes.data);
-      setItems(itemsRes.data);
-      setCompanyItems(companyItemsRes.data);
-      setCompanies(companiesRes.data);
-      setContacts(contactsRes.data);
-      syncLpos(lposRes.data);
+      if (refreshReferences) {
+        const referenceCompany = refreshQuote
+          ? quoteData.company
+          : (quotePartyDraftRef.current.company || quoteData.company);
+        const requestedReferenceKeys = Array.isArray(referenceKeys)
+          ? new Set(referenceKeys)
+          : null;
+        if (refreshQuote) {
+          setCompanyItems([]);
+          setContacts([]);
+          syncLpos([]);
+        }
+        const referenceRequests = [
+          {
+            key: 'items',
+            action: 'Load quotation Product catalogue',
+            endpoint: 'GET /quotations/items/?active=true',
+            request: () => quotationAPI.items.list({ active: 'true' }),
+            apply: (response) => setItems(response.data || []),
+          },
+          {
+            key: 'companyItems',
+            action: 'Load customer Product history',
+            endpoint: `GET /quotations/items/?active=true&company_used=${referenceCompany}`,
+            request: () => quotationAPI.items.list({ active: 'true', company_used: referenceCompany }),
+            apply: (response) => setCompanyItems(response.data || []),
+          },
+          {
+            key: 'companies',
+            action: 'Load company directory',
+            endpoint: 'GET /quotations/companies/?active=true',
+            request: () => quotationAPI.companies.list({ active: 'true' }),
+            apply: (response) => setCompanies(response.data || []),
+          },
+          {
+            key: 'contacts',
+            action: 'Load company contacts',
+            endpoint: `GET /quotations/contacts/?company=${referenceCompany}&active=true`,
+            request: () => (
+              referenceCompany
+                ? quotationAPI.contacts.list({ company: referenceCompany, active: 'true' })
+                : Promise.resolve({ data: [] })
+            ),
+            apply: (response) => {
+              if (
+                String(quotePartyDraftRef.current.company || quoteData.company)
+                === String(referenceCompany)
+              ) {
+                setContacts(response.data || []);
+              }
+            },
+          },
+          {
+            key: 'lpos',
+            action: 'Load quotation LPO records',
+            endpoint: `GET /quotations/quotes/${quoteId}/lpos/`,
+            request: () => quotationAPI.quotes.lpos(quoteId),
+            apply: (response) => syncLpos(response.data || []),
+          },
+        ];
+        const selectedReferenceRequests = requestedReferenceKeys
+          ? referenceRequests.filter((request) => requestedReferenceKeys.has(request.key))
+          : referenceRequests;
+        const referenceResults = await Promise.all(selectedReferenceRequests.map(async (referenceRequest) => {
+          try {
+            const response = await retryTransientQuotationGet(referenceRequest.request);
+            return { ...referenceRequest, response };
+          } catch (error) {
+            return { ...referenceRequest, error };
+          }
+        }));
+        if (!referenceLoadIsCurrent()) return;
+
+        referenceResults
+          .filter((result) => result.response)
+          .forEach((result) => result.apply(result.response));
+        const failedReferences = await Promise.all(
+          referenceResults
+            .filter((result) => result.error)
+            .map(async (result) => ({
+              key: result.key,
+              details: await describeQuotationError(result.error, result.action, result.endpoint),
+            }))
+        );
+        if (!referenceLoadIsCurrent()) return;
+        setReferenceLoadFailures(failedReferences);
+      }
 
       // Price history is useful context, but it is not required to edit a quote.
       // Load it after the core editor data so a transient batch failure cannot
       // turn an otherwise healthy quotation into a blank/error screen.
       const requestGeneration = priceContextGenerationRef.current;
-      if (productIds.length) {
+      if (refreshQuote && productIds.length) {
         void (async () => {
           const contextRequests = [];
           for (let index = 0; index < productIds.length; index += 100) {
@@ -307,7 +452,10 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             }));
           }
           const results = await Promise.allSettled(contextRequests);
-          if (priceContextGenerationRef.current !== requestGeneration) return;
+          if (
+            priceContextGenerationRef.current !== requestGeneration
+            || !quoteLoadIsCurrent()
+          ) return;
 
           const successfulResponses = results
             .filter((result) => result.status === 'fulfilled')
@@ -318,7 +466,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           );
           setPriceContexts(nextPriceContexts);
           setLinePriceHints(Object.fromEntries(
-            (quoteRes.data.lines || [])
+            (quoteData.lines || [])
               .filter((line) => line.product && nextPriceContexts[String(line.product)])
               .map((line) => {
                 const context = nextPriceContexts[String(line.product)];
@@ -333,23 +481,45 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               'Load price history previews',
               `GET /quotations/quotes/${quoteId}/product_prices/`
             );
-            if (priceContextGenerationRef.current !== requestGeneration) return;
+            if (
+              priceContextGenerationRef.current !== requestGeneration
+              || !quoteLoadIsCurrent()
+            ) return;
             setPriceContextError(details);
             console.error(formatQuotationError(details), failedResult.reason);
           }
         })();
       }
     } catch (error) {
-      const details = await describeQuotationError(error, 'Load quotation', `GET /quotations/quotes/${quoteId}/, GET /quotations/items/`);
+      if (refreshQuote ? !quoteLoadIsCurrent() : !referenceLoadIsCurrent()) return;
+      const details = await describeQuotationError(
+        error,
+        refreshQuote ? 'Load quotation' : 'Retry quotation supporting data',
+        refreshQuote
+          ? `GET /quotations/quotes/${quoteId}/`
+          : 'GET quotation supporting endpoints'
+      );
+      if (refreshQuote ? !quoteLoadIsCurrent() : !referenceLoadIsCurrent()) return;
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
-      setLoading(false);
+      const requestIsCurrent = refreshQuote
+        ? quoteLoadIsCurrent()
+        : referenceLoadIsCurrent();
+      if (requestIsCurrent) {
+        if (refreshQuote) setLoading(false);
+        else setReferenceRetrying(false);
+      }
     }
   }, [quoteId, setLoadedQuote, syncLpos]);
 
   useEffect(() => {
     load();
+    return () => {
+      loadGenerationRef.current += 1;
+      referenceLoadGenerationRef.current += 1;
+      contactLoadGenerationRef.current += 1;
+    };
   }, [load]);
 
   const isEditable = quote && editableStatuses.has(quote.status);
@@ -361,23 +531,40 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const hasUnsavedQuoteParty = !partyDraftsMatch(quotePartyDraft, savedQuotePartyDraft);
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
   const contactsForQuoteCompany = contacts;
+  const referenceFailureKeys = new Set(referenceLoadFailures.map((failure) => failure.key));
+  const productCatalogueUnavailable = referenceFailureKeys.has('items');
+  const companyDirectoryUnavailable = referenceFailureKeys.has('companies');
+  const companyContactsUnavailable = referenceFailureKeys.has('contacts');
+  const partyDataUnavailable = companyDirectoryUnavailable || companyContactsUnavailable;
+  const lpoRecordsUnavailable = referenceFailureKeys.has('lpos');
 
   const loadContactsForCompany = async (companyId) => {
+    const requestGeneration = ++contactLoadGenerationRef.current;
+    const normalizedCompanyId = String(companyId || '');
     if (!companyId) {
       setContacts([]);
+      setLoadingContacts(false);
       return;
     }
     setLoadingContacts(true);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.contacts.list({ company: companyId, active: 'true' });
+      if (
+        contactLoadGenerationRef.current !== requestGeneration
+        || String(quotePartyDraftRef.current.company || '') !== normalizedCompanyId
+      ) return;
       setContacts(response.data);
     } catch (error) {
+      if (contactLoadGenerationRef.current !== requestGeneration) return;
       const details = await describeQuotationError(error, 'Load company contacts', `GET /quotations/contacts/?company=${companyId}`);
+      if (contactLoadGenerationRef.current !== requestGeneration) return;
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
-      setLoadingContacts(false);
+      if (contactLoadGenerationRef.current === requestGeneration) {
+        setLoadingContacts(false);
+      }
     }
   };
 
@@ -497,7 +684,11 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const updateQuotePartyDraft = (patch) => {
     setLineFeedback(null);
-    setQuotePartyDraft((current) => ({ ...current, ...patch }));
+    setQuotePartyDraft((current) => {
+      const next = { ...current, ...patch };
+      quotePartyDraftRef.current = next;
+      return next;
+    });
   };
 
   const rememberCompany = (company) => {
@@ -784,7 +975,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       lineFormPriceVersionRef.current += 1;
       lineFormSelectedProductRef.current = '';
       setLineForm(emptyLine);
-      await load();
+      await load({ refreshReferences: false });
       setLineFeedback({ type: 'success', message: 'Line added.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Add quote line', 'POST /quotations/quote-lines/');
@@ -803,7 +994,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setErrorInfo(null);
     try {
       await quotationAPI.lines.delete(lineId);
-      await load();
+      await load({ refreshReferences: false });
       setLineFeedback({ type: 'success', message: 'Line deleted.' });
     } catch (error) {
       const details = await describeQuotationError(error, 'Delete quote line', `DELETE /quotations/quote-lines/${lineId}/`);
@@ -1116,7 +1307,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           setDownloadLoading(false);
         }
       }
-      await load();
+      await load({ refreshReferences: false });
     } catch (error) {
       const details = await describeQuotationError(error, label, actionEndpoint(label));
       setErrorInfo(details);
@@ -1264,14 +1455,22 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   if (!quote) {
     return (
       <div className="qm-section">
-        <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
-        <div className="qm-empty">Quotation not found</div>
+        <QuotationErrorNotice
+          error={errorInfo}
+          onRetry={() => load()}
+          retrying={loading}
+          retryLabel="Retry quotation"
+        />
+        <div className="qm-empty">The quotation could not be loaded. Retry here without closing the editor.</div>
       </div>
     );
   }
 
   const latestLpo = lpos[0] || null;
-  const canUseLpoWorkflow = ['approved', 'finalized', 'sent'].includes(quote.status);
+  const canUseLpoWorkflow = (
+    ['approved', 'finalized', 'sent'].includes(quote.status)
+    && !lpoRecordsUnavailable
+  );
   const productCreationWarnings = productCreateModal ? Object.values(productCreateModal.confirmations || {}) : [];
   const hasProductCreationWarnings = productCreationWarnings.length > 0;
   const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked);
@@ -1279,6 +1478,34 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   return (
     <div className="qm-editor">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+      {referenceLoadFailures.length > 0 && (
+        <div className="qm-feedback warning qm-reference-load-warning" role="alert">
+          <div>
+            <strong>Quotation loaded, but some supporting data is temporarily unavailable.</strong>
+            <p>
+              Safe GET requests were retried automatically. Controls that depend on the missing data are disabled until retry succeeds.
+            </p>
+            <ul>
+              {referenceLoadFailures.map((failure) => (
+                <li key={failure.key}>
+                  {failure.details.action}: status {failure.details.status} — <code>{failure.details.endpoint}</code>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <button
+            type="button"
+            className="qm-primary small"
+            disabled={referenceRetrying}
+            onClick={() => load({
+              refreshQuote: false,
+              referenceKeys: referenceLoadFailures.map((failure) => failure.key),
+            })}
+          >
+            {referenceRetrying ? 'Retrying missing data...' : 'Retry missing data'}
+          </button>
+        </div>
+      )}
       <div className="qm-editor-header">
         <div>
           <button type="button" className="qm-secondary small" onClick={onClose}>Back to List</button>
@@ -1453,7 +1680,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             <p>Select the customer company and the purchaser/contact shown on this quotation.</p>
           </div>
           {isEditable && (
-            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || referenceRetrying || partyDataUnavailable || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
               {saving && hasUnsavedQuoteParty ? 'Saving...' : hasUnsavedQuoteParty ? 'Save Customer & Contact' : 'Saved'}
             </button>
           )}
@@ -1463,7 +1690,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             companies={companies}
             value={quotePartyDraft.company}
             required
-            disabled={!isEditable || saving || Boolean(actionInFlight)}
+            disabled={!isEditable || saving || Boolean(actionInFlight) || referenceRetrying || companyDirectoryUnavailable}
             onChange={(companyId) => {
               updateQuotePartyDraft({ company: companyId, contact: '' });
               setContactForm(emptyContactForm);
@@ -1479,19 +1706,19 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           <div className="qm-contact-control">
             <label>
               <span className="qm-label-text">Contact / Purchaser</span>
-              <select disabled={!isEditable || saving || Boolean(actionInFlight) || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })}>
+              <select disabled={!isEditable || saving || Boolean(actionInFlight) || referenceRetrying || companyContactsUnavailable || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })}>
                 <option value="">{loadingContacts ? 'Loading contacts...' : 'No contact'}</option>
                 {contactsForQuoteCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
               </select>
             </label>
             {isEditable && (
-              <button type="button" className="qm-secondary small" disabled={!quotePartyDraft.company || saving || Boolean(actionInFlight)} onClick={() => setShowContactForm((value) => !value)}>
+              <button type="button" className="qm-secondary small" disabled={!quotePartyDraft.company || saving || Boolean(actionInFlight) || referenceRetrying || companyContactsUnavailable} onClick={() => setShowContactForm((value) => !value)}>
                 {showContactForm ? 'Cancel new contact' : '+ Create contact'}
               </button>
             )}
           </div>
         </div>
-        {showContactForm && isEditable && (
+        {showContactForm && isEditable && !referenceRetrying && !companyContactsUnavailable && (
           <div className="qm-inline-card qm-contact-card">
             <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
             <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
@@ -1562,8 +1789,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               <option value="skipped">Skipped</option>
               <option value="all">All lines</option>
             </select>
-            <button type="button" className="qm-secondary small" onClick={selectVisibleUnmatched}>Select visible unmatched</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
+            <button type="button" className="qm-secondary small" disabled={productCatalogueUnavailable} onClick={selectVisibleUnmatched}>Select visible unmatched</button>
+            <button type="button" className="qm-secondary small" disabled={productCatalogueUnavailable || !selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLines} onClick={saveAllLines}>
               {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
             </button>
@@ -1615,7 +1842,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
                     <td className="qm-serial-cell">{lineIndex + 1}</td>
                     <td>
-                      <select aria-label={`Product for ${lineLabel(line, draft)}`} disabled={!isEditable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
+                      <select aria-label={`Product for ${lineLabel(line, draft)}`} disabled={!isEditable || productCatalogueUnavailable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>
                         {isEditable && <option value="__create__">+ Create a new Product…</option>}
                         {renderProductOptions(draft)}
@@ -1694,7 +1921,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
         {isEditable && (
           <form onSubmit={addLine} className="qm-add-line">
-            <select value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
+            <select disabled={productCatalogueUnavailable} value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
               <option value="">Select item</option>
               {renderProductOptions(lineForm)}
             </select>

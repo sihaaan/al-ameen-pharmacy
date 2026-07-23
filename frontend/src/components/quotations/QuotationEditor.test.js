@@ -397,4 +397,175 @@ describe('QuotationEditor Product price context', () => {
     expect(await within(dialog).findByText('Likely existing Product found')).toBeInTheDocument();
     expect(within(dialog).getByDisplayValue('Imported gloves')).toBeEnabled();
   });
+
+  test('automatically retries a transient quotation 500 without closing the editor', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.quotes.retrieve
+      .mockRejectedValueOnce({
+        response: { status: 500, data: { detail: 'Temporary database connection failure.' } },
+        config: { url: '/quotations/quotes/21/' },
+      })
+      .mockResolvedValueOnce({ data: quote });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
+  test('does not automatically retry a non-transient quote error and offers an in-place retry', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.quotes.retrieve.mockRejectedValueOnce({
+      response: { status: 404, data: { detail: 'Quotation was not found.' } },
+      config: { url: '/quotations/quotes/21/' },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const retryButton = await screen.findByRole('button', { name: 'Retry quotation' });
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('The quotation could not be loaded. Retry here without closing the editor.')).toBeInTheDocument();
+
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: quote });
+    fireEvent.click(retryButton);
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
+  });
+
+  test('keeps the quotation visible and retries in place when the Product catalogue stays unavailable', async () => {
+    const failedCatalogueRequest = {
+      response: { status: 500, data: { detail: 'SSL connection has been closed unexpectedly.' } },
+      config: { url: '/quotations/items/' },
+    };
+    let fullCatalogueAttempts = 0;
+    quotationAPI.items.list.mockImplementation((params) => {
+      if (params?.company_used) return Promise.resolve({ data: [products[0]] });
+      fullCatalogueAttempts += 1;
+      return Promise.reject(failedCatalogueRequest);
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(await screen.findByText(/supporting data is temporarily unavailable/i)).toBeInTheDocument();
+    expect(fullCatalogueAttempts).toBe(2);
+    expect(screen.getByText('GET /quotations/items/?active=true')).toBeInTheDocument();
+    expect(screen.getByLabelText('Product for Imported gloves')).toBeDisabled();
+    const quantityInput = screen.getByLabelText('Quantity for Imported gloves');
+    expect(quantityInput).toBeEnabled();
+    fireEvent.change(quantityInput, { target: { value: '7.5' } });
+
+    quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
+      data: params?.company_used ? [products[0]] : products,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry missing data' }));
+
+    expect(await screen.findByRole('button', { name: 'Retrying missing data...' })).toBeDisabled();
+    expect(screen.queryByText('Loading quotation...')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/supporting data is temporarily unavailable/i)).not.toBeInTheDocument());
+    expect(await screen.findByLabelText('Product for Imported gloves')).toBeEnabled();
+    expect(screen.getByLabelText('Quantity for Imported gloves')).toHaveValue(7.5);
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(1);
+  });
+
+  test('a supporting-data retry does not cancel an in-flight price-history preview', async () => {
+    const pricedQuote = {
+      ...quote,
+      lines: [{
+        ...quote.lines[0],
+        product: 11,
+        match_status: 'confirmed',
+      }],
+    };
+    const priceHistoryRequest = deferred();
+    const failedCatalogueRequest = {
+      response: { status: 500, data: { detail: 'Temporary catalogue failure.' } },
+      config: { url: '/quotations/items/' },
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: pricedQuote });
+    quotationAPI.quotes.productPrices.mockReturnValue(priceHistoryRequest.promise);
+    quotationAPI.items.list.mockImplementation((params) => (
+      params?.company_used
+        ? Promise.resolve({ data: [products[0]] })
+        : Promise.reject(failedCatalogueRequest)
+    ));
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByText(/supporting data is temporarily unavailable/i)).toBeInTheDocument();
+    quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
+      data: params?.company_used ? [products[0]] : products,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry missing data' }));
+    await waitFor(() => expect(screen.queryByText(/supporting data is temporarily unavailable/i)).not.toBeInTheDocument());
+
+    await act(async () => priceHistoryRequest.resolve({
+      data: { results: { 11: priceContext(11, 'Gloves A', 10) } },
+    }));
+
+    expect(await screen.findByText(/Last quoted AED 10/)).toBeInTheDocument();
+    expect(quotationAPI.quotes.productPrices).toHaveBeenCalledTimes(1);
+  });
+
+  test('ignores contacts returned for an older company selection', async () => {
+    const oldCompanyContacts = deferred();
+    const currentCompanyContacts = deferred();
+    let contactRequestCount = 0;
+    quotationAPI.companies.list.mockResolvedValue({
+      data: [
+        { id: 7, name: 'Customer A' },
+        { id: 8, name: 'Customer B' },
+      ],
+    });
+    quotationAPI.contacts.list.mockImplementation(({ company }) => {
+      contactRequestCount += 1;
+      if (contactRequestCount === 1) return Promise.resolve({ data: [] });
+      return String(company) === '8'
+        ? oldCompanyContacts.promise
+        : currentCompanyContacts.promise;
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const companyOption = await screen.findByRole('option', { name: 'Customer B' });
+    const companySelect = companyOption.closest('select');
+    fireEvent.change(companySelect, { target: { value: '8' } });
+    fireEvent.change(companySelect, { target: { value: '7' } });
+
+    await act(async () => currentCompanyContacts.resolve({
+      data: [{ id: 71, company: 7, name: 'Buyer A' }],
+    }));
+    expect(await screen.findByRole('option', { name: 'Buyer A' })).toBeInTheDocument();
+
+    await act(async () => oldCompanyContacts.resolve({
+      data: [{ id: 81, company: 8, name: 'Buyer B' }],
+    }));
+    expect(screen.getByRole('option', { name: 'Buyer A' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Buyer B' })).not.toBeInTheDocument();
+  });
+
+  test('ignores a late quotation response after the editor switches to another quote', async () => {
+    const oldRequest = deferred();
+    const nextQuote = {
+      ...quote,
+      id: 22,
+      quotation_number: 'Q-0022',
+    };
+    quotationAPI.quotes.retrieve.mockImplementation((id) => (
+      Number(id) === 21 ? oldRequest.promise : Promise.resolve({ data: nextQuote })
+    ));
+
+    const { rerender } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    rerender(<QuotationEditor quoteId={22} onClose={jest.fn()} />);
+
+    expect(await screen.findByText('Q-0022')).toBeInTheDocument();
+    await act(async () => oldRequest.resolve({ data: quote }));
+
+    expect(screen.getByText('Q-0022')).toBeInTheDocument();
+    expect(screen.queryByText('Q-0021')).not.toBeInTheDocument();
+  });
 });

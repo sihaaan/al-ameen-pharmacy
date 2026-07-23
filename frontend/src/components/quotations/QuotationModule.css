@@ -2906,6 +2906,21 @@
   font-weight: 700;
 }
 
+.qm-reference-load-warning {
+  align-items: flex-start;
+}
+
+.qm-reference-load-warning p,
+.qm-reference-load-warning ul {
+  margin: 6px 0 0;
+}
+
+.qm-reference-load-warning code {
+  color: inherit;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .qm-inline-feedback {
   grid-column: 1 / -1;
   margin-top: 8px;
