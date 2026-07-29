@@ -23,7 +23,7 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, 
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from api.models import Product, ProductImage
+from api.models import Brand, Product, ProductImage
 
 from .contract_intelligence import build_contract_gmail_query, encrypt_token, exchange_gmail_code
 from .import_parsers import parse_text_preview
@@ -193,6 +193,178 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(len(detail_response.data["lines"]), 1)
         self.assertEqual(list_response.data[0]["created_by_username"], self.staff.username)
 
+    def test_brand_column_defaults_off_and_can_be_enabled_on_a_draft(self):
+        quotation = self.create_quote()
+
+        detail_response = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        update_response = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {"show_brand_column": True},
+            format="json",
+        )
+
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertFalse(detail_response.data["show_brand_column"])
+        self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(update_response.data["show_brand_column"])
+        quotation.refresh_from_db()
+        self.assertTrue(quotation.show_brand_column)
+
+    def test_quotation_line_brand_autofills_and_allows_a_draft_override(self):
+        brand = Brand.objects.create(name="Catalog Brand")
+        product = Product.objects.create(
+            name="Branded Gauze",
+            brand=brand,
+            price=Decimal("1.00"),
+            status="draft",
+        )
+        quotation = self.create_quote()
+
+        create_response = self.client.post(
+            reverse("quotation-line-list"),
+            {
+                "quotation": quotation.id,
+                "product": product.id,
+                "item_name_snapshot": "Customer Gauze Wording",
+                "quantity": "2",
+                "unit": "box",
+                "unit_price": "4.00",
+                "match_status": QuotationLine.MATCH_CONFIRMED,
+            },
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_response.data["brand_name_snapshot"], "Catalog Brand")
+        line = QuotationLine.objects.get(pk=create_response.data["id"])
+
+        override_response = self.client.patch(
+            reverse("quotation-line-detail", args=[line.id]),
+            {"brand_name_snapshot": "Customer-approved Brand"},
+            format="json",
+        )
+        unrelated_response = self.client.patch(
+            reverse("quotation-line-detail", args=[line.id]),
+            {"unit_price": "4.50"},
+            format="json",
+        )
+
+        self.assertEqual(override_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(override_response.data["brand_name_snapshot"], "Customer-approved Brand")
+        self.assertEqual(unrelated_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(unrelated_response.data["brand_name_snapshot"], "Customer-approved Brand")
+
+    def test_bulk_product_change_refreshes_brand_unless_override_is_explicit(self):
+        first_brand = Brand.objects.create(name="First Brand")
+        second_brand = Brand.objects.create(name="Second Brand")
+        first_product = Product.objects.create(
+            name="First Branded Item",
+            brand=first_brand,
+            price=Decimal("1.00"),
+            status="draft",
+        )
+        second_product = Product.objects.create(
+            name="Second Branded Item",
+            brand=second_brand,
+            price=Decimal("1.00"),
+            status="draft",
+        )
+        quotation = self.create_quote()
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            product=first_product,
+            item_name_snapshot="Customer Item",
+            brand_name_snapshot="First Brand",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+
+        changed_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {"lines": [{"id": line.id, "product": second_product.id}]},
+            format="json",
+        )
+
+        self.assertEqual(changed_response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.brand_name_snapshot, "Second Brand")
+
+        explicit_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": line.id,
+                        "brand_name_snapshot": "Special Contract Brand",
+                    }
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(explicit_response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.brand_name_snapshot, "Special Contract Brand")
+
+    def test_unbranded_product_change_does_not_reuse_a_legacy_item_brand(self):
+        legacy_item = QuoteItem.objects.create(
+            name="Legacy Branded Item",
+            brand_text="Old Legacy Brand",
+        )
+        unbranded_product = Product.objects.create(
+            name="New Unbranded Product",
+            price=Decimal("1.00"),
+            status="draft",
+        )
+        quotation = self.create_quote()
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            quote_item=legacy_item,
+            item_name_snapshot="Customer Item",
+            brand_name_snapshot="Old Legacy Brand",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {"lines": [{"id": line.id, "product": unbranded_product.id}]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.brand_name_snapshot, "")
+
+        finalize_response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.brand_name_snapshot, "")
+
+    def test_bulk_brand_update_rejects_values_over_200_characters(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": line.id,
+                        "brand_name_snapshot": "B" * 201,
+                    }
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("200 characters or fewer", str(response.data))
+
     def test_quotation_rejects_a_contact_from_another_company(self):
         other_company = Company.objects.create(name="Other Contact Company")
         other_contact = CompanyContact.objects.create(company=other_company, name="Wrong Buyer")
@@ -216,6 +388,10 @@ class QuotationWorkflowTests(APITestCase):
         )
         quotation = Quotation.objects.create(company=self.company, inquiry=inquiry, created_by=self.staff)
         line = self.create_valid_line(quotation)
+        quotation.show_brand_column = True
+        quotation.save(update_fields=["show_brand_column", "updated_at"])
+        line.brand_name_snapshot = "Deleted Quote Brand"
+        line.save(update_fields=["brand_name_snapshot", "updated_at"])
         quotation_id = quotation.id
         line_id = line.id
 
@@ -231,7 +407,9 @@ class QuotationWorkflowTests(APITestCase):
         snapshot = audit.changes["snapshot"]
         self.assertEqual(snapshot["quotation"]["quotation_number"], quotation.quotation_number)
         self.assertEqual(snapshot["quotation"]["inquiry_id"], inquiry.id)
+        self.assertTrue(snapshot["quotation"]["show_brand_column"])
         self.assertEqual(snapshot["lines"][0]["item_name_snapshot"], "Bandage Pack")
+        self.assertEqual(snapshot["lines"][0]["brand_name_snapshot"], "Deleted Quote Brand")
         self.assertEqual(snapshot["lines"][0]["line_total"], "20.00")
         self.assertIsNone(audit.quotation_id)
 
@@ -1268,9 +1446,37 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(quote_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(line_response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_finalization_fills_and_freezes_the_brand_snapshot(self):
+        brand = Brand.objects.create(name="Brand At Finalization")
+        self.product.brand = brand
+        self.product.save(update_fields=["brand"])
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        self.assertEqual(line.brand_name_snapshot, "")
+
+        finalize_response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+
+        self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        self.assertEqual(line.brand_name_snapshot, "Brand At Finalization")
+
+        brand.name = "Renamed Catalog Brand"
+        brand.save(update_fields=["name"])
+        detail_response = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            detail_response.data["lines"][0]["brand_name_snapshot"],
+            "Brand At Finalization",
+        )
+
     def test_revision_creates_new_draft(self):
         quotation = self.create_quote()
-        self.create_valid_line(quotation)
+        quotation.show_brand_column = True
+        quotation.save(update_fields=["show_brand_column", "updated_at"])
+        line = self.create_valid_line(quotation)
+        line.brand_name_snapshot = "Revision Brand"
+        line.save(update_fields=["brand_name_snapshot", "updated_at"])
         self.client.post(reverse("quotation-finalize", args=[quotation.id]))
 
         response = self.client.post(reverse("quotation-revise", args=[quotation.id]))
@@ -1283,6 +1489,8 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(revision.version, 2)
         self.assertEqual(revision.parent, quotation)
         self.assertEqual(revision.lines.count(), 1)
+        self.assertTrue(revision.show_brand_column)
+        self.assertEqual(revision.lines.get().brand_name_snapshot, "Revision Brand")
 
     def test_create_quote_from_inquiry_is_idempotent(self):
         inquiry = Inquiry.objects.create(company=self.company, subject="Repeat inquiry", created_by=self.staff)
@@ -1302,6 +1510,31 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(second_response.status_code, status.HTTP_200_OK)
         self.assertEqual(first_response.data["id"], second_response.data["id"])
         self.assertEqual(Quotation.objects.filter(inquiry=inquiry).count(), 1)
+
+    def test_create_quote_from_inquiry_snapshots_the_matched_product_brand(self):
+        brand = Brand.objects.create(name="Inquiry Product Brand")
+        self.product.brand = brand
+        self.product.save(update_fields=["brand"])
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Branded supplies",
+            created_by=self.staff,
+        )
+        InquiryLine.objects.create(
+            inquiry=inquiry,
+            raw_name="Customer Bandage Wording",
+            matched_product=self.product,
+            quantity=Decimal("2.000"),
+            unit="box",
+            match_status=InquiryLine.MATCH_CONFIRMED,
+        )
+
+        response = self.client.post(reverse("quotation-inquiry-create-quote", args=[inquiry.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        line = QuotationLine.objects.get(quotation_id=response.data["id"])
+        self.assertEqual(line.item_name_snapshot, "Customer Bandage Wording")
+        self.assertEqual(line.brand_name_snapshot, "Inquiry Product Brand")
 
     def test_price_reference_workbook_fills_inquiry_preview_prices(self):
         workbook = Workbook()
@@ -1604,7 +1837,13 @@ class QuotationWorkflowTests(APITestCase):
 
     def test_create_product_reuses_same_slug_product_instead_of_duplicate(self):
         quotation = self.create_quote()
-        existing = Product.objects.create(name="Alcohol Detector Mouth-Piece", price=Decimal("1.00"), status="draft")
+        brand = Brand.objects.create(name="Linked Product Brand")
+        existing = Product.objects.create(
+            name="Alcohol Detector Mouth-Piece",
+            brand=brand,
+            price=Decimal("1.00"),
+            status="draft",
+        )
         line = QuotationLine.objects.create(
             quotation=quotation,
             item_name_snapshot="ALCOHOL DETECTOR MOUTH PIECE",
@@ -1619,6 +1858,7 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         line.refresh_from_db()
         self.assertEqual(line.product, existing)
+        self.assertEqual(line.brand_name_snapshot, "Linked Product Brand")
         self.assertEqual(Product.objects.filter(name__icontains="Alcohol Detector").count(), 1)
 
     def test_bulk_create_products_returns_json_error_for_invalid_selection(self):

@@ -1460,6 +1460,7 @@ class Quotation(models.Model):
         choices=PAYMENT_TERM_CHOICES,
         default=PAYMENT_AS_PER_AGREEMENT,
     )
+    show_brand_column = models.BooleanField(default=False)
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
@@ -1677,6 +1678,7 @@ class QuotationLine(models.Model):
     include_product_image = models.BooleanField(default=False)
     match_reason = models.CharField(max_length=255, blank=True)
     item_name_snapshot = models.CharField(max_length=255)
+    brand_name_snapshot = models.CharField(max_length=200, blank=True)
     description = models.TextField(blank=True)
     quantity = models.DecimalField(
         max_digits=12,

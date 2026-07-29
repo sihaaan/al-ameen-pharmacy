@@ -80,6 +80,7 @@ const emptyContactForm = {
 const emptyLine = {
   product: '',
   item_name_snapshot: '',
+  brand_name_snapshot: '',
   description: '',
   quantity: '1',
   unit: '',
@@ -103,6 +104,7 @@ const normalizeVatRate = (value) => {
 const normalizeDraft = (draft = {}) => ({
   product: String(draft.product || ''),
   item_name_snapshot: String(draft.item_name_snapshot || ''),
+  brand_name_snapshot: String(draft.brand_name_snapshot || ''),
   description: String(draft.description || ''),
   quantity: String(draft.quantity || ''),
   unit: String(draft.unit || ''),
@@ -119,6 +121,7 @@ const draftsMatch = (left, right) => JSON.stringify(normalizeDraft(left)) === JS
 const draftFromLine = (line) => ({
   product: line.product || '',
   item_name_snapshot: line.item_name_snapshot || '',
+  brand_name_snapshot: line.brand_name_snapshot || '',
   description: line.description || '',
   quantity: line.quantity || '1',
   unit: line.unit || '',
@@ -135,6 +138,7 @@ const draftFromLine = (line) => ({
 const termsDraftFromQuote = (quote = {}) => ({
   payment_terms: quote.payment_terms || 'as_per_agreement',
   valid_until: quote.valid_until || '',
+  show_brand_column: !!quote.show_brand_column,
 });
 
 const partyDraftFromQuote = (quote = {}) => ({
@@ -144,7 +148,8 @@ const partyDraftFromQuote = (quote = {}) => ({
 
 const termsDraftsMatch = (left = {}, right = {}) => (
   String(left.payment_terms || '') === String(right.payment_terms || '') &&
-  String(left.valid_until || '') === String(right.valid_until || '')
+  String(left.valid_until || '') === String(right.valid_until || '') &&
+  !!left.show_brand_column === !!right.show_brand_column
 );
 
 const partyDraftsMatch = (left = {}, right = {}) => (
@@ -263,9 +268,22 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const contactLoadGenerationRef = useRef(0);
   const quoteRef = useRef(null);
   const quotePartyDraftRef = useRef(quotePartyDraft);
+  const quoteTermsDraftRef = useRef(quoteTermsDraft);
+  const savedQuoteTermsDraftRef = useRef(savedQuoteTermsDraft);
+  const lineDraftsRef = useRef(lineDrafts);
+  const savedLineDraftsRef = useRef(savedLineDrafts);
   quotePartyDraftRef.current = quotePartyDraft;
+  quoteTermsDraftRef.current = quoteTermsDraft;
+  savedQuoteTermsDraftRef.current = savedQuoteTermsDraft;
+  lineDraftsRef.current = lineDrafts;
+  savedLineDraftsRef.current = savedLineDrafts;
 
   const setLoadedQuote = useCallback((quoteData) => {
+    const isSameQuote = String(quoteRef.current?.id || '') === String(quoteData?.id || '');
+    const preserveTermsDraft = isSameQuote && !termsDraftsMatch(
+      quoteTermsDraftRef.current,
+      savedQuoteTermsDraftRef.current,
+    );
     quoteRef.current = quoteData;
     setQuote(quoteData);
     const nextPartyDraft = partyDraftFromQuote(quoteData);
@@ -273,11 +291,25 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setQuotePartyDraft(nextPartyDraft);
     setSavedQuotePartyDraft(nextPartyDraft);
     const nextTermsDraft = termsDraftFromQuote(quoteData);
-    setQuoteTermsDraft(nextTermsDraft);
+    const displayedTermsDraft = preserveTermsDraft ? quoteTermsDraftRef.current : nextTermsDraft;
+    quoteTermsDraftRef.current = displayedTermsDraft;
+    savedQuoteTermsDraftRef.current = nextTermsDraft;
+    setQuoteTermsDraft(displayedTermsDraft);
     setSavedQuoteTermsDraft(nextTermsDraft);
-    const drafts = Object.fromEntries((quoteData.lines || []).map((line) => [line.id, draftFromLine(line)]));
-    setLineDrafts(drafts);
-    setSavedLineDrafts(drafts);
+    const savedDrafts = Object.fromEntries((quoteData.lines || []).map((line) => [line.id, draftFromLine(line)]));
+    const displayedDrafts = Object.fromEntries((quoteData.lines || []).map((line) => {
+      const currentDraft = lineDraftsRef.current[line.id];
+      const previousSavedDraft = savedLineDraftsRef.current[line.id];
+      const preserveCurrentDraft = isSameQuote
+        && currentDraft
+        && previousSavedDraft
+        && !draftsMatch(currentDraft, previousSavedDraft);
+      return [line.id, preserveCurrentDraft ? currentDraft : savedDrafts[line.id]];
+    }));
+    lineDraftsRef.current = displayedDrafts;
+    savedLineDraftsRef.current = savedDrafts;
+    setLineDrafts(displayedDrafts);
+    setSavedLineDrafts(savedDrafts);
     setLinePriceHints({});
     setPriceContexts({});
     setPriceContextError(null);
@@ -530,6 +562,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const hasUnsavedLines = changedLineIds.length > 0;
   const hasUnsavedQuoteParty = !partyDraftsMatch(quotePartyDraft, savedQuotePartyDraft);
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
+  const hasUnsavedCustomerDocument = hasUnsavedLines || hasUnsavedQuoteParty || hasUnsavedQuoteTerms;
   const contactsForQuoteCompany = contacts;
   const referenceFailureKeys = new Set(referenceLoadFailures.map((failure) => failure.key));
   const productCatalogueUnavailable = referenceFailureKeys.has('items');
@@ -642,7 +675,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     const issues = [];
     if (!quote.lines?.length) issues.push('Add at least one quotation line.');
     if (hasUnsavedQuoteParty) issues.push('Save customer/contact before finalizing.');
-    if (hasUnsavedQuoteTerms) issues.push('Save quotation terms before finalizing.');
+    if (hasUnsavedQuoteTerms) issues.push('Save quotation terms and layout before finalizing.');
     if (hasUnsavedLines) issues.push('Save all line changes before finalizing.');
     (quote.lines || []).forEach((line, index) => {
       const draft = lineDrafts[line.id] || {};
@@ -711,6 +744,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     return {
       product: productId,
       item_name_snapshot: hasSnapshotName ? draft.item_name_snapshot : (item?.name || ''),
+      brand_name_snapshot: productId ? (item?.brand_name || '') : '',
       unit: draft.unit || sanitizeUnitText(item?.unit || ''),
       match_status: productId ? 'confirmed' : 'unresolved',
       product_image: '',
@@ -900,14 +934,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const response = await quotationAPI.quotes.update(quote.id, {
         payment_terms: quoteTermsDraft.payment_terms || 'as_per_agreement',
         valid_until: quoteTermsDraft.valid_until || null,
+        show_brand_column: !!quoteTermsDraft.show_brand_column,
       });
       setQuote(response.data);
       const nextTermsDraft = termsDraftFromQuote(response.data);
       setQuoteTermsDraft(nextTermsDraft);
       setSavedQuoteTermsDraft(nextTermsDraft);
-      setLineFeedback({ type: 'success', message: 'Quotation terms saved.' });
+      setLineFeedback({ type: 'success', message: 'Quotation terms and layout saved.' });
     } catch (error) {
-      const details = await describeQuotationError(error, 'Save quotation terms', `PATCH /quotations/quotes/${quote.id}/`);
+      const details = await describeQuotationError(error, 'Save quotation terms and layout', `PATCH /quotations/quotes/${quote.id}/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
@@ -1058,19 +1093,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       });
       const updatedLines = response.data.updated_lines || [];
       const confirmationRequired = response.data.confirmation_required || [];
-      const updatedById = Object.fromEntries(updatedLines.map((line) => [line.id, line]));
-      setQuote((current) => ({
-        ...current,
-        lines: (current.lines || []).map((line) => updatedById[line.id] || line),
-      }));
-      setLineDrafts((current) => ({
-        ...current,
-        ...Object.fromEntries(updatedLines.map((line) => [line.id, draftFromLine(line)])),
-      }));
-      setSavedLineDrafts((current) => ({
-        ...current,
-        ...Object.fromEntries(updatedLines.map((line) => [line.id, draftFromLine(line)])),
-      }));
+      applyUpdatedLines(updatedLines);
       setItems((current) => {
         const additions = updatedLines
           .filter((line) => line.product && line.product_name)
@@ -1113,10 +1136,13 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     if (!candidate?.product_id || saving || actionInFlight) return;
     const currentDraft = lineDrafts[lineId] || {};
     const hasSnapshotName = String(currentDraft.item_name_snapshot || '').trim().length > 0;
+    const selectedProduct = items.find((item) => String(item.id) === String(candidate.product_id));
+    const candidateBrand = candidate.brand_name ?? selectedProduct?.brand_name;
     const linkedDraft = {
       ...currentDraft,
       product: String(candidate.product_id),
       item_name_snapshot: hasSnapshotName ? currentDraft.item_name_snapshot : (candidate.product_name || ''),
+      brand_name_snapshot: candidateBrand || '',
       match_status: 'confirmed',
       product_image: '',
       product_image_url: '',
@@ -1128,8 +1154,12 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setProductCreateError(null);
     setLineFeedback(null);
     try {
+      const linePayload = { id: lineId, ...payloadForLine(linkedDraft) };
+      if (candidateBrand === null || candidateBrand === undefined) {
+        delete linePayload.brand_name_snapshot;
+      }
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
-        lines: [{ id: lineId, ...payloadForLine(linkedDraft) }],
+        lines: [linePayload],
       });
       mergeSavedQuote(response.data.quotation, [lineId]);
       rememberProductsInList([{
@@ -1178,6 +1208,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           unit: currentDraft.unit !== savedDraft.unit ? currentDraft.unit : nextDraft.unit,
           unit_price: currentDraft.unit_price !== savedDraft.unit_price ? currentDraft.unit_price : nextDraft.unit_price,
           vat_rate: currentDraft.vat_rate !== savedDraft.vat_rate ? currentDraft.vat_rate : nextDraft.vat_rate,
+          brand_name_snapshot: currentDraft.brand_name_snapshot !== savedDraft.brand_name_snapshot
+            ? currentDraft.brand_name_snapshot
+            : nextDraft.brand_name_snapshot,
           description: currentDraft.description !== savedDraft.description ? currentDraft.description : nextDraft.description,
           notes: currentDraft.notes !== savedDraft.notes ? currentDraft.notes : nextDraft.notes,
         }];
@@ -1319,7 +1352,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   };
 
   const downloadPdf = async () => {
-    if (downloadLoading || actionInFlight) return;
+    if (downloadLoading || actionInFlight || hasUnsavedCustomerDocument) return;
     setDownloadLoading(true);
     setErrorInfo(null);
     try {
@@ -1334,7 +1367,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   };
 
   const downloadExcel = async () => {
-    if (excelDownloadLoading || actionInFlight) return;
+    if (excelDownloadLoading || actionInFlight || hasUnsavedCustomerDocument) return;
     setExcelDownloadLoading(true);
     setErrorInfo(null);
     try {
@@ -1525,8 +1558,24 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
           {!['revised', 'cancelled'].includes(quote.status) && <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>{actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}</button>}
-          <button type="button" className="qm-secondary" disabled={downloadLoading || Boolean(actionInFlight)} onClick={downloadPdf}>{downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}</button>
-          <button type="button" className="qm-secondary" disabled={excelDownloadLoading || Boolean(actionInFlight)} onClick={downloadExcel}>{excelDownloadLoading ? 'Preparing Excel...' : 'Download Excel'}</button>
+          <button
+            type="button"
+            className="qm-secondary"
+            disabled={downloadLoading || saving || Boolean(actionInFlight) || hasUnsavedCustomerDocument}
+            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes before downloading.' : ''}
+            onClick={downloadPdf}
+          >
+            {downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}
+          </button>
+          <button
+            type="button"
+            className="qm-secondary"
+            disabled={excelDownloadLoading || saving || Boolean(actionInFlight) || hasUnsavedCustomerDocument}
+            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes before downloading.' : ''}
+            onClick={downloadExcel}
+          >
+            {excelDownloadLoading ? 'Preparing Excel...' : 'Download Excel'}
+          </button>
         </div>
       </div>
 
@@ -1547,7 +1596,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       {!isEditable && (
         <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
       )}
-      <div className="qm-helper">PDF is generated from the latest saved quotation data and current quotation settings. Save line changes before downloading or finalizing.</div>
+      <div className="qm-helper">PDF and Excel use the latest saved customer, terms, layout, and line data. Save any changes before downloading or finalizing.</div>
       {priceContextError && (
         <div className="qm-feedback warning" role="status">
           <div>
@@ -1734,8 +1783,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       </div>
       <div className="qm-panel qm-terms-panel">
         <div>
-          <h3>Quotation Terms</h3>
-          <p>Default validity is 30 days. Leave Valid Until blank to use the 30-day default in PDF/Excel.</p>
+          <h3>Quotation Terms &amp; Layout</h3>
+          <p>Choose the customer-facing terms and columns used in the saved PDF and Excel quotation.</p>
         </div>
         <label>
           <span className="qm-label-text">Payment terms</span>
@@ -1747,9 +1796,22 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           <span className="qm-label-text">Valid until</span>
           <input disabled={!isEditable || saving || Boolean(actionInFlight)} type="date" value={quoteTermsDraft.valid_until || ''} onChange={(event) => updateQuoteTermDraft({ valid_until: event.target.value })} />
         </label>
+        <label className="qm-terms-toggle">
+          <span className="qm-label-text">Optional columns</span>
+          <span className="qm-checkbox">
+            <input
+              type="checkbox"
+              aria-label="Show Brand column"
+              disabled={!isEditable || saving || Boolean(actionInFlight)}
+              checked={!!quoteTermsDraft.show_brand_column}
+              onChange={(event) => updateQuoteTermDraft({ show_brand_column: event.target.checked })}
+            />
+            Show Brand column
+          </span>
+        </label>
         {isEditable && (
           <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteTerms} onClick={saveQuoteTerms}>
-            {saving && hasUnsavedQuoteTerms ? 'Saving terms...' : hasUnsavedQuoteTerms ? 'Save Terms' : 'Terms Saved'}
+            {saving && hasUnsavedQuoteTerms ? 'Saving terms & layout...' : hasUnsavedQuoteTerms ? 'Save Terms & Layout' : 'Terms & Layout Saved'}
           </button>
         )}
       </div>
@@ -1812,7 +1874,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           <datalist id="quotation-unit-suggestions">
             {unitSuggestions.map((unit) => <option key={unit} value={unit} />)}
           </datalist>
-          <table className="qm-table line-table">
+          <table className={`qm-table line-table${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
             <thead>
               <tr>
                 <th className="qm-check-cell"><input type="checkbox" checked={filteredLines.length > 0 && filteredLines.every((line) => selectedLineIds.includes(line.id))} onChange={() => {
@@ -1820,15 +1882,16 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                   setSelectedLineIds((current) => visibleIds.every((id) => current.includes(id)) ? current.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...current, ...visibleIds])));
                 }} /></th>
                 <th className="qm-serial-cell">#</th>
-                <th>Matched Item <span className="qm-required">*</span></th>
-                <th>Snapshot Name <span className="qm-required">*</span></th>
-                <th>Qty <span className="qm-required">*</span></th>
-                <th>Unit</th>
-                <th>Unit Price <span className="qm-required">*</span></th>
-                <th>VAT % <span className="qm-required">*</span></th>
-                <th>Status</th>
-                <th>Total</th>
-                <th>Actions</th>
+                <th className="qm-line-product-cell">Matched Item <span className="qm-required">*</span></th>
+                <th className="qm-line-snapshot-cell">Snapshot Name <span className="qm-required">*</span></th>
+                {quoteTermsDraft.show_brand_column && <th className="qm-line-brand-cell">Brand</th>}
+                <th className="qm-line-quantity-cell">Qty <span className="qm-required">*</span></th>
+                <th className="qm-line-unit-cell">Unit</th>
+                <th className="qm-price-cell">Unit Price <span className="qm-required">*</span></th>
+                <th className="qm-vat-cell">VAT % <span className="qm-required">*</span></th>
+                <th className="qm-line-status-cell">Status</th>
+                <th className="qm-line-total-cell">Total</th>
+                <th className="qm-line-actions-cell">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1841,16 +1904,28 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
                     <td className="qm-serial-cell">{lineIndex + 1}</td>
-                    <td>
+                    <td className="qm-line-product-cell">
                       <select aria-label={`Product for ${lineLabel(line, draft)}`} disabled={!isEditable || productCatalogueUnavailable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>
                         {isEditable && <option value="__create__">+ Create a new Product…</option>}
                         {renderProductOptions(draft)}
                       </select>
                     </td>
-                    <td><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
-                    <td><input aria-label={`Quantity for ${lineLabel(line, draft)}`} disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
-                    <td>
+                    <td className="qm-line-snapshot-cell"><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
+                    {quoteTermsDraft.show_brand_column && (
+                      <td className="qm-line-brand-cell">
+                        <input
+                          aria-label={`Brand for ${lineLabel(line, draft)}`}
+                          disabled={!isEditable}
+                          maxLength={200}
+                          placeholder="Brand"
+                          value={draft.brand_name_snapshot || ''}
+                          onChange={(event) => updateLineDraft(line.id, { brand_name_snapshot: event.target.value })}
+                        />
+                      </td>
+                    )}
+                    <td className="qm-line-quantity-cell"><input aria-label={`Quantity for ${lineLabel(line, draft)}`} disabled={!isEditable} type="number" min="0" step="0.001" value={draft.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { quantity: event.target.value })} /></td>
+                    <td className="qm-line-unit-cell">
                       <input
                         className="qm-unit-input"
                         disabled={!isEditable}
@@ -1881,9 +1956,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                         <option value="5">5%</option>
                       </select>
                     </td>
-                    <td><span className={`qm-line-status ${statusInfo.id}`}>{statusInfo.label}</span></td>
-                    <td>{quote.currency} {lineTotalForDraft(draft).toFixed(2)}</td>
-                    <td className="qm-row-actions">
+                    <td className="qm-line-status-cell"><span className={`qm-line-status ${statusInfo.id}`}>{statusInfo.label}</span></td>
+                    <td className="qm-line-total-cell">{quote.currency} {lineTotalForDraft(draft).toFixed(2)}</td>
+                    <td className="qm-row-actions qm-line-actions-cell">
                       <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
                       <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty} onClick={() => saveLine(line.id)}>Save</button>
                       <div className="qm-line-image-tools">
@@ -1920,12 +1995,21 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         </div>
 
         {isEditable && (
-          <form onSubmit={addLine} className="qm-add-line">
+          <form onSubmit={addLine} className={`qm-add-line${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
             <select disabled={productCatalogueUnavailable} value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
               <option value="">Select item</option>
               {renderProductOptions(lineForm)}
             </select>
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
+            {quoteTermsDraft.show_brand_column && (
+              <input
+                aria-label="Brand"
+                maxLength={200}
+                placeholder="Brand"
+                value={lineForm.brand_name_snapshot}
+                onChange={(event) => setLineForm({ ...lineForm, brand_name_snapshot: event.target.value })}
+              />
+            )}
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
             <input
               placeholder="Unit"

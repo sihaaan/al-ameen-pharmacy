@@ -7,6 +7,7 @@ jest.mock('../../api/quotations', () => ({
   default: {
     quotes: {
       retrieve: jest.fn(),
+      update: jest.fn(),
       productPrices: jest.fn(),
       productPrice: jest.fn(),
       lpos: jest.fn(),
@@ -17,7 +18,7 @@ jest.mock('../../api/quotations', () => ({
     companies: { list: jest.fn(), create: jest.fn() },
     contacts: { list: jest.fn(), create: jest.fn() },
     auditLogs: { list: jest.fn() },
-    lines: { createProduct: jest.fn(), rememberAlias: jest.fn() },
+    lines: { create: jest.fn(), createProduct: jest.fn(), rememberAlias: jest.fn() },
     lpos: { update: jest.fn() },
   },
   describeQuotationError: jest.fn(async (error, action, endpoint) => ({
@@ -30,8 +31,8 @@ jest.mock('../../api/quotations', () => ({
 }));
 
 const products = [
-  { id: 11, name: 'Gloves A', unit: 'box', primary_image_url: '' },
-  { id: 12, name: 'Gloves B', unit: 'box', primary_image_url: '' },
+  { id: 11, name: 'Gloves A', brand_name: 'Medline', unit: 'box', primary_image_url: '' },
+  { id: 12, name: 'Gloves B', brand_name: 'Ansell', unit: 'box', primary_image_url: '' },
 ];
 
 const quote = {
@@ -47,6 +48,7 @@ const quote = {
   currency: 'AED',
   payment_terms: 'as_per_agreement',
   valid_until: '2026-08-01',
+  show_brand_column: false,
   subtotal: '0.00',
   total: '0.00',
   lines: [{
@@ -54,6 +56,7 @@ const quote = {
     sort_order: 0,
     product: null,
     item_name_snapshot: 'Imported gloves',
+    brand_name_snapshot: '',
     description: '',
     quantity: '1.000',
     unit: 'box',
@@ -118,6 +121,7 @@ describe('QuotationEditor Product price context', () => {
     }));
     formatQuotationError.mockImplementation(() => 'Request failed');
     quotationAPI.quotes.retrieve.mockResolvedValue({ data: quote });
+    quotationAPI.quotes.update.mockResolvedValue({ data: quote });
     quotationAPI.quotes.productPrices.mockResolvedValue({ data: { results: {} } });
     quotationAPI.quotes.lpos.mockResolvedValue({ data: [] });
     quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
@@ -126,7 +130,195 @@ describe('QuotationEditor Product price context', () => {
     quotationAPI.companies.list.mockResolvedValue({ data: [{ id: 7, name: 'Customer A' }] });
     quotationAPI.contacts.list.mockResolvedValue({ data: [] });
     quotationAPI.auditLogs.list.mockResolvedValue({ data: [] });
+    quotationAPI.lines.create.mockResolvedValue({ data: {} });
     quotationAPI.lines.rememberAlias.mockResolvedValue({ data: {} });
+  });
+
+  test('keeps the optional Brand column off by default', async () => {
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
+    expect(toggle).not.toBeChecked();
+    expect(screen.queryByRole('columnheader', { name: 'Brand' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Brand for Imported gloves')).not.toBeInTheDocument();
+  });
+
+  test('shows the saved Brand column and line snapshot when enabled', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        show_brand_column: true,
+        lines: [{ ...quote.lines[0], brand_name_snapshot: 'Customer Brand' }],
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByRole('checkbox', { name: 'Show Brand column' })).toBeChecked();
+    expect(screen.getByRole('columnheader', { name: 'Brand' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Brand for Imported gloves')).toHaveValue('Customer Brand');
+    expect(screen.getByRole('textbox', { name: 'Brand' })).toBeInTheDocument();
+  });
+
+  test('saves the Brand toggle with quotation terms and layout', async () => {
+    quotationAPI.quotes.update.mockResolvedValueOnce({
+      data: { ...quote, show_brand_column: true },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show Brand column' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.update).toHaveBeenCalledWith(21, {
+      payment_terms: 'as_per_agreement',
+      valid_until: '2026-08-01',
+      show_brand_column: true,
+    }));
+    expect(await screen.findByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled();
+  });
+
+  test('preserves an unsaved Brand layout choice when adding a line refreshes the quote', async () => {
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByPlaceholderText('Snapshot name'), { target: { value: 'New customer item' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add Line' }));
+
+    await waitFor(() => expect(quotationAPI.lines.create).toHaveBeenCalled());
+    await waitFor(() => expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2));
+    expect(toggle).toBeChecked();
+    expect(screen.getByRole('columnheader', { name: 'Brand' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save Terms & Layout' })).toBeEnabled();
+  });
+
+  test('disables customer document downloads while the Brand layout is unsaved', async () => {
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
+    const pdfButton = screen.getByRole('button', { name: 'Download Draft PDF' });
+    const excelButton = screen.getByRole('button', { name: 'Download Excel' });
+    expect(pdfButton).toBeEnabled();
+    expect(excelButton).toBeEnabled();
+
+    fireEvent.click(toggle);
+
+    expect(pdfButton).toBeDisabled();
+    expect(excelButton).toBeDisabled();
+    expect(pdfButton).toHaveAttribute('title', expect.stringMatching(/save customer, terms and layout, and line changes/i));
+  });
+
+  test('autofills Brand from the selected Product without changing the source snapshot', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: { ...quote, show_brand_column: true },
+    });
+    quotationAPI.quotes.productPrice.mockResolvedValueOnce({
+      data: {
+        product: 11,
+        product_name: 'Gloves A',
+        source: 'no_history',
+        unit_price: null,
+        history: [],
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+
+    await waitFor(() => expect(screen.getByLabelText('Brand for Imported gloves')).toHaveValue('Medline'));
+    expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
+  });
+
+  test('includes a manually edited Brand snapshot when saving a quotation line', async () => {
+    const quoteWithBrand = {
+      ...quote,
+      show_brand_column: true,
+      lines: [{
+        ...quote.lines[0],
+        product: 11,
+        product_name: 'Gloves A',
+        brand_name_snapshot: 'Medline',
+        match_status: 'confirmed',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: quoteWithBrand });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({
+      data: {
+        quotation: {
+          ...quoteWithBrand,
+          lines: [{ ...quoteWithBrand.lines[0], brand_name_snapshot: 'Medline Gulf' }],
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const brandInput = await screen.findByLabelText('Brand for Imported gloves');
+    fireEvent.change(brandInput, { target: { value: 'Medline Gulf' } });
+    const row = brandInput.closest('tr');
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      lines: [expect.objectContaining({
+        id: 31,
+        item_name_snapshot: 'Imported gloves',
+        brand_name_snapshot: 'Medline Gulf',
+      })],
+    }));
+  });
+
+  test('keeps an unsaved Brand override after bulk Product creation updates the row', async () => {
+    const quoteWithBrandColumn = {
+      ...quote,
+      show_brand_column: true,
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: quoteWithBrandColumn });
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({
+      data: {
+        updated_lines: [{
+          ...quote.lines[0],
+          product: 13,
+          product_name: 'Imported gloves',
+          brand_name_snapshot: '',
+          match_status: 'confirmed',
+        }],
+        confirmation_required: [],
+        message: 'Created and linked one Product.',
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const brandInput = await screen.findByLabelText('Brand for Imported gloves');
+    fireEvent.change(brandInput, { target: { value: 'Customer Contract Brand' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create Products from quotation lines' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Brand for Imported gloves')).toHaveValue('Customer Contract Brand');
+    expect(within(brandInput.closest('tr')).getByText('Unsaved')).toBeInTheDocument();
+  });
+
+  test('disables Brand layout and line editing on a finalized quotation', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        status: 'finalized',
+        status_display: 'Finalized',
+        show_brand_column: true,
+        lines: [{ ...quote.lines[0], brand_name_snapshot: 'Medline' }],
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByRole('checkbox', { name: 'Show Brand column' })).toBeDisabled();
+    expect(screen.getByLabelText('Brand for Imported gloves')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Save Terms & Layout' })).not.toBeInTheDocument();
   });
 
   test('shows the full catalog and ignores an older Product lookup that resolves last', async () => {

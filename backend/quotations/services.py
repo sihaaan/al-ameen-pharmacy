@@ -131,6 +131,22 @@ def _line_label(line):
     return line.item_name_snapshot or getattr(line.product, "name", "") or f"line {line.id}"
 
 
+def quotation_brand_name_for_selection(*, product=None, quote_item=None):
+    """Return the customer-facing brand for a quotation catalog selection."""
+
+    if product is not None:
+        product_brand = getattr(getattr(product, "brand", None), "name", "")
+        return str(product_brand or "").strip()[:200]
+
+    legacy_brand = getattr(quote_item, "brand_text", "")
+    if str(legacy_brand or "").strip():
+        return str(legacy_brand).strip()[:200]
+
+    linked_product = getattr(quote_item, "product", None)
+    linked_brand = getattr(getattr(linked_product, "brand", None), "name", "")
+    return str(linked_brand or "").strip()[:200]
+
+
 def _line_outcome_snapshot(line):
     return {
         "id": line.id,
@@ -1251,7 +1267,10 @@ def _snapshot_date(value):
 
 
 def build_quotation_delete_snapshot(quotation):
-    lines = quotation.lines.select_related("product", "quote_item").order_by("sort_order", "id")
+    lines = quotation.lines.select_related(
+        "product__brand",
+        "quote_item__product__brand",
+    ).order_by("sort_order", "id")
     return {
         "quotation": {
             "id": quotation.id,
@@ -1266,6 +1285,7 @@ def build_quotation_delete_snapshot(quotation):
             "valid_until": _snapshot_date(quotation.valid_until),
             "currency": quotation.currency,
             "payment_terms": quotation.payment_terms,
+            "show_brand_column": quotation.show_brand_column,
             "subtotal": _snapshot_decimal(quotation.subtotal),
             "vat_total": _snapshot_decimal(quotation.vat_total),
             "total": _snapshot_decimal(quotation.total),
@@ -1275,6 +1295,7 @@ def build_quotation_delete_snapshot(quotation):
                 "id": line.id,
                 "sort_order": line.sort_order,
                 "item_name_snapshot": line.item_name_snapshot,
+                "brand_name_snapshot": line.brand_name_snapshot,
                 "product_id": line.product_id,
                 "product_name": line.product.name if line.product_id else "",
                 "quote_item_id": line.quote_item_id,
@@ -1418,9 +1439,23 @@ def _link_quotation_line_to_product(line, product, actor, *, reason="Created/lin
     line.product = product
     line.quote_item = None
     line.item_name_snapshot = source_wording or product.name
+    line.brand_name_snapshot = quotation_brand_name_for_selection(product=product)
     line.match_status = QuotationLine.MATCH_CONFIRMED
     line.match_reason = reason
-    line.save(update_fields=["product", "quote_item", "item_name_snapshot", "match_status", "match_reason", "line_subtotal", "vat_amount", "line_total", "updated_at"])
+    line.save(
+        update_fields=[
+            "product",
+            "quote_item",
+            "item_name_snapshot",
+            "brand_name_snapshot",
+            "match_status",
+            "match_reason",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "updated_at",
+        ]
+    )
     learn_confirmed_quotation_line_alias(
         line,
         actor,
@@ -2080,6 +2115,7 @@ def commit_historical_price_import(historical_import, actor):
 
     ready_lines = list(
         historical_import.lines.select_for_update()
+        .select_related("product__brand", "quote_item__product__brand")
         .filter(status=HistoricalPriceImportLine.STATUS_READY)
         .order_by("sort_order", "id")
     )
@@ -2126,6 +2162,10 @@ def commit_historical_price_import(historical_import, actor):
             quote_item=line.quote_item,
             product=line.product,
             item_name_snapshot=line.product.name if line.product_id else line.quote_item.name,
+            brand_name_snapshot=quotation_brand_name_for_selection(
+                product=line.product,
+                quote_item=line.quote_item,
+            ),
             description=line.item_name,
             quantity=line.quantity,
             unit=line.unit,
@@ -2434,7 +2474,12 @@ def bulk_update_quotation_lines(quotation, rows, actor):
     lines = {
         line.id: line
         for line in _quotation_lines_for_update()
-        .select_related("inquiry_line", "product", "quotation__company")
+        .select_related(
+            "inquiry_line",
+            "product__brand",
+            "quote_item__product__brand",
+            "quotation__company",
+        )
         .filter(quotation=quotation, id__in=rows_by_id.keys())
     }
     updated = []
@@ -2444,6 +2489,7 @@ def bulk_update_quotation_lines(quotation, rows, actor):
         "product_image",
         "include_product_image",
         "item_name_snapshot",
+        "brand_name_snapshot",
         "description",
         "quantity",
         "unit",
@@ -2473,6 +2519,11 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             "product" in payload
             and str(requested_product_id or "") != str(line.product_id or "")
         )
+        requested_quote_item_id = payload.get("quote_item") if "quote_item" in payload else line.quote_item_id
+        quote_item_changed = (
+            "quote_item" in payload
+            and str(requested_quote_item_id or "") != str(line.quote_item_id or "")
+        )
         requested_snapshot = payload.get("item_name_snapshot", line.item_name_snapshot)
         snapshot_changed = (
             "item_name_snapshot" in payload
@@ -2483,7 +2534,7 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             "match_status" in payload
             and str(requested_match_status or "") != str(line.match_status or "")
         )
-        match_fields_changed = product_changed or snapshot_changed or match_status_changed
+        match_fields_changed = product_changed or quote_item_changed or snapshot_changed or match_status_changed
         restore_source_snapshot = bool(
             str(source_wording or "").strip()
             and requested_product_id
@@ -2511,6 +2562,11 @@ def bulk_update_quotation_lines(quotation, rows, actor):
                 if vat_rate not in {Decimal("0"), Decimal("0.00"), Decimal("5"), Decimal("5.00")}:
                     raise ValidationError("VAT must be 0% or 5% in the quotation line review workflow.")
                 line.vat_rate = vat_rate
+            elif field == "brand_name_snapshot":
+                brand_name = str(value or "").strip()
+                if len(brand_name) > 200:
+                    raise ValidationError("Brand must be 200 characters or fewer.")
+                line.brand_name_snapshot = brand_name
             else:
                 setattr(line, field, value if value != "" else "")
         if line.product_image_id:
@@ -2523,6 +2579,11 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             primary_image = Product.objects.get(pk=line.product_id).primary_image
             if primary_image:
                 line.product_image = primary_image
+        if (product_changed or quote_item_changed) and "brand_name_snapshot" not in payload:
+            line.brand_name_snapshot = quotation_brand_name_for_selection(
+                product=line.product,
+                quote_item=line.quote_item,
+            )
         if line.product_id and line.match_status == QuotationLine.MATCH_UNRESOLVED:
             line.match_status = QuotationLine.MATCH_CONFIRMED
         if not line.product_id and not line.quote_item_id and line.match_status == QuotationLine.MATCH_CONFIRMED:
@@ -2569,7 +2630,11 @@ def create_quotation_from_inquiry(inquiry, actor):
         created_by=actor if getattr(actor, "is_authenticated", False) else None,
     )
 
-    for index, line in enumerate(inquiry.lines.select_related("matched_quote_item", "matched_product").order_by("sort_order", "id")):
+    inquiry_lines = inquiry.lines.select_related(
+        "matched_quote_item__product__brand",
+        "matched_product__brand",
+    ).order_by("sort_order", "id")
+    for index, line in enumerate(inquiry_lines):
         quote_item = line.matched_quote_item
         product = line.matched_product
         item_name = line.raw_name or (product.name if product else quote_item.name if quote_item else "")
@@ -2580,6 +2645,10 @@ def create_quotation_from_inquiry(inquiry, actor):
             product=product,
             match_reason=line.match_reason,
             item_name_snapshot=item_name,
+            brand_name_snapshot=quotation_brand_name_for_selection(
+                product=product,
+                quote_item=quote_item,
+            ),
             quantity=line.quantity or Decimal("1.000"),
             unit=line.unit,
             unit_price=line.unit_price,
@@ -2618,7 +2687,10 @@ def finalize_quotation(quotation, actor):
     quotation = (
         _quotations_for_update()
         .select_related("company")
-        .prefetch_related("lines__quote_item", "lines__product")
+        .prefetch_related(
+            "lines__quote_item__product__brand",
+            "lines__product__brand",
+        )
         .get(pk=quotation.pk)
     )
     if quotation.status not in {
@@ -2628,12 +2700,25 @@ def finalize_quotation(quotation, actor):
     }:
         raise ValidationError("Only draft, pending review, or approved quotations can be finalized.")
 
-    lines = list(quotation.lines.select_related("quote_item", "product").order_by("sort_order", "id"))
+    lines = list(
+        quotation.lines.select_related(
+            "quote_item__product__brand",
+            "product__brand",
+        ).order_by("sort_order", "id")
+    )
     if not lines:
         raise ValidationError("A quotation must have at least one line before finalization.")
 
     for line in lines:
         _validate_line_for_finalization(line)
+        if not str(line.brand_name_snapshot or "").strip():
+            brand_name = quotation_brand_name_for_selection(
+                product=line.product,
+                quote_item=line.quote_item,
+            )
+            if brand_name:
+                line.brand_name_snapshot = brand_name
+                line.save(update_fields=["brand_name_snapshot", "updated_at"])
 
     recalculate_quotation_totals(quotation)
     quotation.status = Quotation.STATUS_FINALIZED
@@ -2697,6 +2782,7 @@ def revise_quotation(quotation, actor):
         valid_until=source.valid_until,
         currency=source.currency,
         payment_terms=source.payment_terms,
+        show_brand_column=source.show_brand_column,
         notes=source.notes,
         internal_notes=source.internal_notes,
         created_by=actor if getattr(actor, "is_authenticated", False) else None,
@@ -2709,6 +2795,7 @@ def revise_quotation(quotation, actor):
             product=line.product,
             match_reason=line.match_reason,
             item_name_snapshot=line.item_name_snapshot,
+            brand_name_snapshot=line.brand_name_snapshot,
             description=line.description,
             quantity=line.quantity,
             unit=line.unit,

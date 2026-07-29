@@ -536,10 +536,94 @@ def _pdf_styles(primary):
     styles.add(ParagraphStyle(name="TableCellUnit", parent=styles["TableCellCenter"], fontSize=7.5, leading=9.2, splitLongWords=False))
     styles.add(ParagraphStyle(name="TableCellMoney", parent=styles["TableCellRight"], fontSize=7.8, leading=9.4, splitLongWords=False, spaceShrinkage=0.03))
     styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading4"], fontSize=10, leading=12, textColor=primary))
+    styles.add(ParagraphStyle(name="NotesTitle", parent=styles["SectionTitle"], keepWithNext=True))
     styles.add(ParagraphStyle(name="QuoteTitle", parent=styles["Title"], alignment=TA_RIGHT, fontSize=18, leading=22, textColor=TEXT))
     styles.add(ParagraphStyle(name="QuoteTitleSmall", parent=styles["QuoteTitle"], fontSize=13.5, leading=16))
     styles.add(ParagraphStyle(name="ApprovalLine", parent=styles["SmallMuted"], alignment=TA_CENTER, fontSize=8, leading=9, textColor=MUTED))
     return styles
+
+
+def _quotation_line_column_widths(show_brand_column):
+    if show_brand_column:
+        # A4 content width is 178 mm after the 16 mm document margins.
+        return [8 * mm, 42 * mm, 25 * mm, 15 * mm, 16 * mm, 24 * mm, 24 * mm, 24 * mm]
+    return [10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm]
+
+
+def _build_quotation_line_table(quotation, styles, primary):
+    show_brand_column = bool(getattr(quotation, "show_brand_column", False))
+    headers = ["#", "Item Description"]
+    if show_brand_column:
+        headers.append("Brand")
+    headers.extend(["Qty", "Unit", "Unit Price", "VAT", "Total"])
+    table_data = [[Paragraph(header, styles["TableHeader"]) for header in headers]]
+
+    lines = (
+        quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED)
+        .select_related("product", "product_image")
+        .order_by("sort_order", "id")
+    )
+    for index, line in enumerate(lines, start=1):
+        item_text = _text(line.item_name_snapshot)
+        description = _customer_line_detail(line.description)
+        if description and description != item_text:
+            item_text = f"{item_text}<br/>{description}"
+        item_cell = [Paragraph(item_text, styles["TableCell"])]
+        if line.include_product_image:
+            selected_image = line.product_image or (line.product.primary_image if line.product_id else None)
+            image_url = getattr(getattr(selected_image, "image", None), "url", "")
+            item_image = _product_thumbnail(image_url)
+            if item_image:
+                item_cell.extend([Spacer(1, 3), item_image])
+
+        row = [
+            Paragraph(str(index), styles["TableCellCenter"]),
+            item_cell,
+        ]
+        if show_brand_column:
+            row.append(
+                Paragraph(
+                    _text(getattr(line, "brand_name_snapshot", ""), fallback="-"),
+                    styles["TableCell"],
+                )
+            )
+        row.extend(
+            [
+                _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
+                _single_line_table_cell(line.unit, styles["TableCellUnit"], h_align="CENTER"),
+                Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
+                Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
+                Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
+            ]
+        )
+        table_data.append(row)
+
+    money_start_column = 5 if show_brand_column else 4
+    line_table = Table(
+        table_data,
+        colWidths=_quotation_line_column_widths(show_brand_column),
+        repeatRows=1,
+    )
+    line_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), primary),
+                ("GRID", (0, 0), (-1, -1), 0.25, BORDER),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (money_start_column, 0), (-1, -1), 2),
+                ("RIGHTPADDING", (money_start_column, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (0, -1), 3),
+                ("RIGHTPADDING", (0, 0), (0, -1), 3),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+            ]
+        )
+    )
+    return line_table, lines
 
 
 def build_quotation_pdf(quotation):
@@ -618,69 +702,7 @@ def build_quotation_pdf(quotation):
     elements.append(meta_table)
     elements.append(Spacer(1, 8))
 
-    table_data = [
-        [
-            Paragraph("#", styles["TableHeader"]),
-            Paragraph("Item Description", styles["TableHeader"]),
-            Paragraph("Qty", styles["TableHeader"]),
-            Paragraph("Unit", styles["TableHeader"]),
-            Paragraph("Unit Price", styles["TableHeader"]),
-            Paragraph("VAT", styles["TableHeader"]),
-            Paragraph("Total", styles["TableHeader"]),
-        ]
-    ]
-    lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).select_related("product", "product_image").order_by("sort_order", "id")
-    for index, line in enumerate(lines, start=1):
-        item_text = _text(line.item_name_snapshot)
-        details = []
-        description = _customer_line_detail(line.description)
-        if description and description != item_text:
-            details.append(description)
-        if details:
-            item_text = f"{item_text}<br/>{'<br/>'.join(details)}"
-        item_cell = [Paragraph(item_text, styles["TableCell"])]
-        if line.include_product_image:
-            selected_image = line.product_image or (line.product.primary_image if line.product_id else None)
-            image_url = getattr(getattr(selected_image, "image", None), "url", "")
-            item_image = _product_thumbnail(image_url)
-            if item_image:
-                item_cell.extend([Spacer(1, 3), item_image])
-        table_data.append(
-            [
-                Paragraph(str(index), styles["TableCellCenter"]),
-                item_cell,
-                _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
-                _single_line_table_cell(line.unit, styles["TableCellUnit"], h_align="CENTER"),
-                Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
-                Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
-                Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
-            ]
-        )
-
-    line_table = Table(
-        table_data,
-        colWidths=[10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm],
-        repeatRows=1,
-    )
-    line_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), primary),
-                ("GRID", (0, 0), (-1, -1), 0.25, BORDER),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (4, 0), (-1, -1), 2),
-                ("RIGHTPADDING", (4, 0), (-1, -1), 2),
-                ("LEFTPADDING", (0, 0), (0, -1), 3),
-                ("RIGHTPADDING", (0, 0), (0, -1), 3),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ]
-        )
-    )
+    line_table, lines = _build_quotation_line_table(quotation, styles, primary)
     elements.append(line_table)
     line_count = max(lines.count(), 1)
 
@@ -712,7 +734,7 @@ def build_quotation_pdf(quotation):
 
     if quotation.notes:
         elements.append(Spacer(1, 8))
-        elements.append(Paragraph("Notes", styles["SectionTitle"]))
+        elements.append(Paragraph("Notes", styles["NotesTitle"]))
         elements.append(Paragraph(_text(quotation.notes), styles["Small"]))
 
     elements.append(Spacer(1, 20 if line_count <= 3 else 10))
@@ -849,66 +871,7 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
     elements.append(meta_table)
     elements.append(Spacer(1, 8))
 
-    table_data = [
-        [
-            Paragraph("#", styles["TableHeader"]),
-            Paragraph("Item Description", styles["TableHeader"]),
-            Paragraph("Qty", styles["TableHeader"]),
-            Paragraph("Unit", styles["TableHeader"]),
-            Paragraph("Unit Price", styles["TableHeader"]),
-            Paragraph("VAT", styles["TableHeader"]),
-            Paragraph("Total", styles["TableHeader"]),
-        ]
-    ]
-    lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).select_related("product", "product_image").order_by("sort_order", "id")
-    for index, line in enumerate(lines, start=1):
-        item_text = _text(line.item_name_snapshot)
-        description = _customer_line_detail(line.description)
-        if description and description != item_text:
-            item_text = f"{item_text}<br/>{description}"
-        item_cell = [Paragraph(item_text, styles["TableCell"])]
-        if line.include_product_image:
-            selected_image = line.product_image or (line.product.primary_image if line.product_id else None)
-            image_url = getattr(getattr(selected_image, "image", None), "url", "")
-            item_image = _product_thumbnail(image_url)
-            if item_image:
-                item_cell.extend([Spacer(1, 3), item_image])
-        table_data.append(
-            [
-                Paragraph(str(index), styles["TableCellCenter"]),
-                item_cell,
-                _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
-                _single_line_table_cell(line.unit, styles["TableCellUnit"], h_align="CENTER"),
-                Paragraph(_unit_money(quotation.currency, line.unit_price), styles["TableCellMoney"]),
-                Paragraph(_money(quotation.currency, line.vat_amount), styles["TableCellMoney"]),
-                Paragraph(_money(quotation.currency, line.line_total), styles["TableCellMoney"]),
-            ]
-        )
-
-    line_table = Table(
-        table_data,
-        colWidths=[10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm],
-        repeatRows=1,
-    )
-    line_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), primary),
-                ("GRID", (0, 0), (-1, -1), 0.25, BORDER),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LEFTPADDING", (4, 0), (-1, -1), 2),
-                ("RIGHTPADDING", (4, 0), (-1, -1), 2),
-                ("LEFTPADDING", (0, 0), (0, -1), 3),
-                ("RIGHTPADDING", (0, 0), (0, -1), 3),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ]
-        )
-    )
+    line_table, _lines = _build_quotation_line_table(quotation, styles, primary)
     elements.append(line_table)
 
     totals_table = Table(
@@ -1144,7 +1107,7 @@ def build_standalone_proforma_invoice_pdf(proforma):
 
     if proforma.notes:
         elements.append(Spacer(1, 8))
-        elements.append(Paragraph("Notes", styles["SectionTitle"]))
+        elements.append(Paragraph("Notes", styles["NotesTitle"]))
         elements.append(Paragraph(_text(proforma.notes), styles["Small"]))
 
     elements.append(Spacer(1, 12))

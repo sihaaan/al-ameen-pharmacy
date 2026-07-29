@@ -12,7 +12,7 @@ from api.serializers import ProductListSerializer
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
-from .services import learn_confirmed_inquiry_line_alias
+from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
 from .models import (
     Company,
     CompanyContact,
@@ -1661,6 +1661,7 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "include_product_image",
             "match_reason",
             "item_name_snapshot",
+            "brand_name_snapshot",
             "description",
             "quantity",
             "unit",
@@ -1723,11 +1724,19 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"quotation": "Quotation lines cannot be moved between quotations."}
             )
-        product = attrs.get("product") or getattr(self.instance, "product", None)
+        product = (
+            attrs.get("product")
+            if "product" in attrs
+            else getattr(self.instance, "product", None)
+        )
         product_image = attrs.get("product_image")
         if product_image is None and self.instance:
             product_image = self.instance.product_image
-        quote_item = attrs.get("quote_item") or getattr(self.instance, "quote_item", None)
+        quote_item = (
+            attrs.get("quote_item")
+            if "quote_item" in attrs
+            else getattr(self.instance, "quote_item", None)
+        )
         item_name = attrs.get("item_name_snapshot") or getattr(self.instance, "item_name_snapshot", "")
         if product_image and product and product_image.product_id != product.id:
             raise serializers.ValidationError({"product_image": "Selected image must belong to the matched Product."})
@@ -1737,6 +1746,28 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             attrs["item_name_snapshot"] = quote_item.name
         if not attrs.get("item_name_snapshot") and not item_name:
             raise serializers.ValidationError({"item_name_snapshot": "This field is required."})
+        product_changed = (
+            self.instance is None
+            or (
+                "product" in attrs
+                and getattr(product, "pk", None) != getattr(self.instance, "product_id", None)
+            )
+        )
+        quote_item_changed = (
+            self.instance is None
+            or (
+                "quote_item" in attrs
+                and getattr(quote_item, "pk", None) != getattr(self.instance, "quote_item_id", None)
+            )
+        )
+        if (
+            "brand_name_snapshot" not in attrs
+            and (product_changed or quote_item_changed)
+        ):
+            attrs["brand_name_snapshot"] = quotation_brand_name_for_selection(
+                product=product,
+                quote_item=quote_item,
+            )
         return attrs
 
     def get_product_image_url(self, obj):
@@ -1806,6 +1837,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "currency",
             "payment_terms",
             "payment_terms_display",
+            "show_brand_column",
             "subtotal",
             "vat_total",
             "total",

@@ -3548,7 +3548,14 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
 class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = QuotationLineSerializer
-    queryset = QuotationLine.objects.select_related("quotation", "quotation__company", "quote_item", "product", "product_image", "inquiry_line")
+    queryset = QuotationLine.objects.select_related(
+        "quotation",
+        "quotation__company",
+        "quote_item__product__brand",
+        "product__brand",
+        "product_image",
+        "inquiry_line",
+    )
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -3584,7 +3591,12 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             ensure_quotation_editable(quotation)
             line = (
                 _quotation_lines_for_update()
-                .select_related("quotation__company", "inquiry_line", "product")
+                .select_related(
+                    "quotation__company",
+                    "inquiry_line",
+                    "product__brand",
+                    "quote_item__product__brand",
+                )
                 .get(pk=serializer.instance.pk, quotation=quotation)
             )
             serializer.instance = line

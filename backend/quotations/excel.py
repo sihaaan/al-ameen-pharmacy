@@ -50,6 +50,7 @@ def build_quotation_excel(quotation):
     config = get_quotation_pdf_config()
     quote_date = _local_date(quotation.created_at)
     valid_until = _valid_until(quotation, config)
+    show_brand_column = bool(getattr(quotation, "show_brand_column", False))
 
     workbook = Workbook()
     sheet = workbook.active
@@ -93,7 +94,27 @@ def build_quotation_excel(quotation):
             value_cell.number_format = "dd/mm/yyyy"
 
     table_start = 18
-    headers = ["S. No.", "Item Description", "Qty", "Unit", "Unit Price", "VAT %", "VAT Amount", "Line Total"]
+    columns = [
+        ("serial", "S. No."),
+        ("item", "Item Description"),
+    ]
+    if show_brand_column:
+        columns.append(("brand", "Brand"))
+    columns.extend(
+        [
+            ("quantity", "Qty"),
+            ("unit", "Unit"),
+            ("unit_price", "Unit Price"),
+            ("vat_rate", "VAT %"),
+            ("vat_amount", "VAT Amount"),
+            ("line_total", "Line Total"),
+        ]
+    )
+    column_numbers = {
+        key: column
+        for column, (key, _header) in enumerate(columns, start=1)
+    }
+    headers = [header for _key, header in columns]
     for column, header in enumerate(headers, start=1):
         cell = sheet.cell(row=table_start, column=column, value=header)
         cell.fill = header_fill
@@ -106,30 +127,32 @@ def build_quotation_excel(quotation):
     lines = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).order_by("sort_order", "id")
     for index, line in enumerate(lines, start=1):
         row = table_start + index
-        values = [
-            index,
-            line.item_name_snapshot,
-            _safe_number(line.quantity),
-            line.unit or "-",
-            _safe_number(line.unit_price),
-            _safe_number(line.vat_rate),
-            _safe_number(line.vat_amount),
-            _safe_number(line.line_total),
-        ]
-        for column, value in enumerate(values, start=1):
+        values_by_key = {
+            "serial": index,
+            "item": line.item_name_snapshot,
+            "brand": str(getattr(line, "brand_name_snapshot", "") or "").strip() or "-",
+            "quantity": _safe_number(line.quantity),
+            "unit": line.unit or "-",
+            "unit_price": _safe_number(line.unit_price),
+            "vat_rate": _safe_number(line.vat_rate),
+            "vat_amount": _safe_number(line.vat_amount),
+            "line_total": _safe_number(line.line_total),
+        }
+        for column, (key, _header) in enumerate(columns, start=1):
+            value = values_by_key[key]
             cell = sheet.cell(row=row, column=column, value=value)
-            cell.alignment = Alignment(vertical="top", wrap_text=(column == 2))
-            if column == 1:
+            cell.alignment = Alignment(vertical="top", wrap_text=(key in {"item", "brand"}))
+            if key == "serial":
                 cell.alignment = Alignment(horizontal="center", vertical="top")
-            elif column in {3, 5, 6, 7, 8}:
+            elif key in {"quantity", "unit_price", "vat_rate", "vat_amount", "line_total"}:
                 cell.alignment = Alignment(horizontal="right", vertical="top")
-            if column == 3:
+            if key == "quantity":
                 cell.number_format = "#,##0.000"
-            elif column == 6:
+            elif key == "vat_rate":
                 cell.number_format = "0.00"
-            elif column == 5:
+            elif key == "unit_price":
                 cell.number_format = unit_price_format
-            elif column in {7, 8}:
+            elif key in {"vat_amount", "line_total"}:
                 cell.number_format = money_format
 
     last_line_row = table_start + max(lines.count(), 1)
@@ -139,9 +162,11 @@ def build_quotation_excel(quotation):
         ("VAT", _safe_number(quotation.vat_total)),
         ("Grand Total", _safe_number(quotation.total)),
     ]
+    totals_label_column = column_numbers["vat_amount"]
+    totals_value_column = column_numbers["line_total"]
     for row_offset, (label, value) in enumerate(totals, start=totals_start):
-        label_cell = sheet.cell(row=row_offset, column=7, value=label)
-        value_cell = sheet.cell(row=row_offset, column=8, value=value)
+        label_cell = sheet.cell(row=row_offset, column=totals_label_column, value=label)
+        value_cell = sheet.cell(row=row_offset, column=totals_value_column, value=value)
         for cell in (label_cell, value_cell):
             cell.font = Font(bold=True, color=PRIMARY if label == "Grand Total" else TEXT)
             cell.alignment = Alignment(horizontal="right")
@@ -155,16 +180,29 @@ def build_quotation_excel(quotation):
     sheet.cell(row=footer_start + 1, column=1, value="Payment Terms").font = Font(bold=True, color=MUTED)
     sheet.cell(row=footer_start + 1, column=2, value=_payment_terms(quotation, config) or "-")
 
-    widths = {
-        "A": 11,
-        "B": 48,
-        "C": 12,
-        "D": 16,
-        "E": 14,
-        "F": 10,
-        "G": 14,
-        "H": 14,
-    }
+    if show_brand_column:
+        widths = {
+            "A": 11,
+            "B": 38,
+            "C": 24,
+            "D": 12,
+            "E": 16,
+            "F": 14,
+            "G": 10,
+            "H": 14,
+            "I": 14,
+        }
+    else:
+        widths = {
+            "A": 11,
+            "B": 48,
+            "C": 12,
+            "D": 16,
+            "E": 14,
+            "F": 10,
+            "G": 14,
+            "H": 14,
+        }
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
     sheet.page_setup.orientation = "landscape"
