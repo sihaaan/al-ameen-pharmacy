@@ -138,7 +138,11 @@ describe('QuotationEditor Product price context', () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
     const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
+    const termsPanel = screen.getByRole('heading', { name: 'Quotation Terms & Layout' }).closest('.qm-terms-panel');
     expect(toggle).not.toBeChecked();
+    expect(termsPanel.querySelector('.qm-terms-heading')).toBeInTheDocument();
+    expect(termsPanel.querySelector('.qm-terms-fields')).toBeInTheDocument();
+    expect(toggle.closest('.qm-terms-toggle-control')).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'Brand' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Brand for Imported gloves')).not.toBeInTheDocument();
   });

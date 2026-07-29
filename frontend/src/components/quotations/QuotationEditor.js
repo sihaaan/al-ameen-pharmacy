@@ -1782,38 +1782,45 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         )}
       </div>
       <div className="qm-panel qm-terms-panel">
-        <div>
-          <h3>Quotation Terms &amp; Layout</h3>
-          <p>Choose the customer-facing terms and columns used in the saved PDF and Excel quotation.</p>
+        <div className="qm-panel-heading qm-terms-heading">
+          <div>
+            <h3>Quotation Terms &amp; Layout</h3>
+            <p>Choose the customer-facing terms and columns used in the saved PDF and Excel quotation.</p>
+          </div>
+          {isEditable && (
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteTerms} onClick={saveQuoteTerms}>
+              {saving && hasUnsavedQuoteTerms ? 'Saving terms & layout...' : hasUnsavedQuoteTerms ? 'Save Terms & Layout' : 'Terms & Layout Saved'}
+            </button>
+          )}
         </div>
-        <label>
-          <span className="qm-label-text">Payment terms</span>
-          <select disabled={!isEditable || saving || Boolean(actionInFlight)} value={quoteTermsDraft.payment_terms} onChange={(event) => updateQuoteTermDraft({ payment_terms: event.target.value })}>
-            {paymentTermOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-        </label>
-        <label>
-          <span className="qm-label-text">Valid until</span>
-          <input disabled={!isEditable || saving || Boolean(actionInFlight)} type="date" value={quoteTermsDraft.valid_until || ''} onChange={(event) => updateQuoteTermDraft({ valid_until: event.target.value })} />
-        </label>
-        <label className="qm-terms-toggle">
-          <span className="qm-label-text">Optional columns</span>
-          <span className="qm-checkbox">
-            <input
-              type="checkbox"
-              aria-label="Show Brand column"
-              disabled={!isEditable || saving || Boolean(actionInFlight)}
-              checked={!!quoteTermsDraft.show_brand_column}
-              onChange={(event) => updateQuoteTermDraft({ show_brand_column: event.target.checked })}
-            />
-            Show Brand column
-          </span>
-        </label>
-        {isEditable && (
-          <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteTerms} onClick={saveQuoteTerms}>
-            {saving && hasUnsavedQuoteTerms ? 'Saving terms & layout...' : hasUnsavedQuoteTerms ? 'Save Terms & Layout' : 'Terms & Layout Saved'}
-          </button>
-        )}
+        <div className="qm-terms-fields">
+          <label className="qm-terms-field">
+            <span className="qm-label-text">Payment terms</span>
+            <select disabled={!isEditable || saving || Boolean(actionInFlight)} value={quoteTermsDraft.payment_terms} onChange={(event) => updateQuoteTermDraft({ payment_terms: event.target.value })}>
+              {paymentTermOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </label>
+          <label className="qm-terms-field">
+            <span className="qm-label-text">Valid until</span>
+            <input disabled={!isEditable || saving || Boolean(actionInFlight)} type="date" value={quoteTermsDraft.valid_until || ''} onChange={(event) => updateQuoteTermDraft({ valid_until: event.target.value })} />
+          </label>
+          <label className="qm-terms-field qm-terms-toggle">
+            <span className="qm-label-text">Optional columns</span>
+            <span
+              className="qm-terms-toggle-control"
+              aria-disabled={!isEditable || saving || Boolean(actionInFlight)}
+            >
+              <input
+                type="checkbox"
+                aria-label="Show Brand column"
+                disabled={!isEditable || saving || Boolean(actionInFlight)}
+                checked={!!quoteTermsDraft.show_brand_column}
+                onChange={(event) => updateQuoteTermDraft({ show_brand_column: event.target.checked })}
+              />
+              <span>Show Brand column</span>
+            </span>
+          </label>
+        </div>
       </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
       {finalizeIssues.length > 0 && (
