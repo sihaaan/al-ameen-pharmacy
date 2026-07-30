@@ -226,6 +226,8 @@ describe('GmailInquiryReview', () => {
     expect(screen.getByText(/inquiry \| Contains the current item request\. \| 96% confidence/i)).toBeInTheDocument();
     expect(screen.getByText('buyer@example.com')).toBeInTheDocument();
     expect(screen.getByText('request.pdf | page 2')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '3. Review extracted request lines' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /attachments and source evidence/i })).not.toBeInTheDocument();
     expect(screen.queryByText('AED 5.50')).not.toBeInTheDocument();
     expect(screen.getByText('5.50 (currency not stated)')).toBeInTheDocument();
     expect(screen.getByText(/Confirming as sara/i)).toBeInTheDocument();
@@ -450,7 +452,7 @@ describe('GmailInquiryReview', () => {
     )).toBeInTheDocument();
   });
 
-  test('blocks confirmation when an included row cites unchecked evidence', async () => {
+  test('uses included rows as the source decision without a separate evidence selector', async () => {
     const conflictRecord = {
       ...reviewedRecord,
       analysis: {
@@ -471,20 +473,55 @@ describe('GmailInquiryReview', () => {
     };
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: conflictRecord });
 
-    render(<GmailInquiryReview importId="31" />);
+    const { container } = render(<GmailInquiryReview importId="31" />);
 
-    expect(await screen.findByText(/confirmation is blocked: 1 included row/i)).toBeInTheDocument();
-    expect(screen.getByText(/#1 Sterile Bandage/i)).toBeInTheDocument();
-    expect(screen.getByText(/blocked: re-select this row's evidence/i)).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /attachments and source evidence/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/confirmation is blocked/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open source request.pdf | page 2' })).toBeInTheDocument();
+    expect(container.querySelectorAll('.qm-gmail-row-evidence > *')).toHaveLength(2);
     const confirmButton = screen.getByRole('button', { name: /confirm & open quotation/i });
     fireEvent.click(screen.getByLabelText(/confirm that this inquiry belongs/i));
-    expect(confirmButton).toBeDisabled();
-    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: '8',
+      selected_source_keys: ['attachment:opaque-1', 'body:opaque-2'],
+    }));
+  });
 
-    fireEvent.click(screen.getByLabelText(/Email body/i));
-    expect(screen.queryByText(/confirmation is blocked: 1 included row/i)).not.toBeInTheDocument();
-    // Changing evidence invalidates the prior identity acknowledgement.
-    expect(screen.getByLabelText(/confirm that this inquiry belongs/i)).not.toBeChecked();
+  test('blocks an included row that has no source provenance', async () => {
+    const missingEvidenceRecord = {
+      ...reviewedRecord,
+      analysis: {
+        ...reviewedRecord.analysis,
+        preview: {
+          ...reviewedRecord.analysis.preview,
+          lines: [{
+            ...reviewedRecord.analysis.preview.lines[0],
+            _source_keys: [],
+            evidence: [],
+            source_page: null,
+          }],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: missingEvidenceRecord,
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(
+      /1 included row\(s\) have no source evidence/i
+    )).toBeInTheDocument();
+    expect(screen.getByText('Evidence link unavailable')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/confirm that this inquiry belongs/i));
+    const confirmButton = screen.getByRole('button', { name: /confirm & open quotation/i });
+    expect(confirmButton).toBeDisabled();
+    expect(screen.getByText(/reanalyze or exclude every row without source evidence/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
   });
 
   test('requires a fresh identity acknowledgement after reanalysis', async () => {
@@ -583,11 +620,13 @@ describe('GmailInquiryReview', () => {
   });
 
   test('opens an attachment using only its opaque source key', async () => {
-    const unsupportedRecord = {
+    const uncitedAttachmentRecord = {
       ...baseRecord,
       attachment_manifest: [
         ...baseRecord.attachment_manifest,
         {
+          gmail_message_id: 'm-1',
+          attachment_id: 'raw-gmail-uncited-id',
           source_key: 'attachment:opaque-unsupported',
           filename: 'scan-failed.pdf',
           mime_type: 'application/pdf',
@@ -597,7 +636,9 @@ describe('GmailInquiryReview', () => {
         },
       ],
     };
-    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unsupportedRecord });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: uncitedAttachmentRecord,
+    });
     const originalOpen = window.open;
     const originalCreateObjectURL = window.URL.createObjectURL;
     const originalRevokeObjectURL = window.URL.revokeObjectURL;
@@ -607,19 +648,19 @@ describe('GmailInquiryReview', () => {
     window.URL.revokeObjectURL = jest.fn();
 
     try {
-      const { container } = render(<GmailInquiryReview importId="31" />);
-      const unsupportedCard = (await screen.findByText('scan-failed.pdf')).closest('article');
-      expect(within(unsupportedCard).getByText(/automatic parsing failed/i)).toBeInTheDocument();
-      const sourceOptions = container.querySelector('.qm-gmail-source-options');
-      expect(within(sourceOptions).queryByText('scan-failed.pdf')).not.toBeInTheDocument();
-      fireEvent.click(within(unsupportedCard).getByRole('button', { name: /view \/ open/i }));
+      render(<GmailInquiryReview importId="31" />);
+      fireEvent.click(await screen.findByText('2 attachments'));
+      const attachmentButton = screen.getByRole('button', {
+        name: 'Open email attachment scan-failed.pdf',
+      });
+      fireEvent.click(attachmentButton);
 
       await waitFor(() => expect(quotationAPI.gmailInquiryImports.attachment).toHaveBeenCalledWith(
         31,
         'attachment:opaque-unsupported'
       ));
       expect(quotationAPI.gmailInquiryImports.attachment.mock.calls[0]).not.toContain(
-        'raw-gmail-attachment-id'
+        'raw-gmail-uncited-id'
       );
       expect(previewWindow.location.href).toBe('blob:gmail-inquiry');
     } finally {

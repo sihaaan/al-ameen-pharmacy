@@ -450,25 +450,6 @@ const sourceIdentity = (source, index = 0) => sourceKey(source) || String(firstD
   `source-${index}`
 ));
 
-const initiallySelectedSourceKeys = (record) => {
-  const explicit = asArray(firstDefined(
-    record.selected_source_keys,
-    record.analysis?.selected_source_keys,
-    record.analysis?.recommended_source_keys
-  )).map(String);
-  const evidence = asArray(record.evidence);
-  const available = new Set(evidence.map(sourceKey).filter(Boolean));
-  if (explicit.length) return explicit.filter((key) => available.has(key));
-  return evidence
-    .filter((source) => (
-      source.selected !== false
-      && source.included !== false
-      && !['excluded', 'failed', 'skipped'].includes(String(firstDefined(source.status, source.role, '')).toLowerCase())
-    ))
-    .map(sourceKey)
-    .filter((value, index, values) => value && values.indexOf(value) === index);
-};
-
 const evidenceLabel = (evidence) => {
   const name = firstDefined(
     evidence.filename,
@@ -488,37 +469,32 @@ const importAttachments = (record) => {
   const messages = importMessages(record);
   const candidates = [
     ...asArray(firstDefined(record.attachments, record.attachment_manifest, record.preview?.attachments)),
-    ...messages.flatMap((message) => asArray(firstDefined(message.attachments, message.attachment_manifest)).map((attachment) => ({
+    ...messages.flatMap((message) => asArray(firstDefined(
+      message.attachments,
+      message.attachment_manifest
+    )).map((attachment) => ({
       ...attachment,
       source_message_id: messageIdentity(message),
       source_subject: message.subject,
     }))),
   ];
-  const byKey = new Map();
+  const byIdentity = new Map();
   candidates.forEach((attachment, index) => {
-    const key = [
+    const identity = [
       firstDefined(attachment.source_message_id, attachment.gmail_message_id, ''),
       firstDefined(attachment.attachment_id, attachment.part_id, ''),
       firstDefined(attachment.filename, ''),
       index,
     ].join('::');
-    byKey.set(key, attachment);
+    byIdentity.set(identity, attachment);
   });
-  return [...byKey.values()];
+  return [...byIdentity.values()];
 };
 
 const formatDateTime = (value) => {
   if (!value) return 'Date unavailable';
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
-};
-
-const formatBytes = (value) => {
-  const bytes = Number(value || 0);
-  if (!Number.isFinite(bytes) || bytes <= 0) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
 const SAFE_INLINE_ATTACHMENT_TYPES = new Set([
@@ -573,7 +549,6 @@ const GmailInquiryReview = ({
   const [contactId, setContactId] = useState('');
   const [analysisMode, setAnalysisMode] = useState('current_message');
   const [selectedMessageIds, setSelectedMessageIds] = useState([]);
-  const [selectedSourceKeys, setSelectedSourceKeys] = useState([]);
   const [reviewLines, setReviewLines] = useState([]);
   const [reviewDirty, setReviewDirty] = useState(false);
   const [selectionDirty, setSelectionDirty] = useState(false);
@@ -623,7 +598,6 @@ const GmailInquiryReview = ({
     if (!preserveSelection) {
       setAnalysisMode(initialAnalysisMode(next));
       setSelectedMessageIds(initiallySelectedMessageIds(next));
-      setSelectedSourceKeys(initiallySelectedSourceKeys(next));
       setReviewLines(normalizeReviewLines(next));
       setReviewDirty(false);
     }
@@ -921,35 +895,96 @@ const GmailInquiryReview = ({
     });
     return [...byIdentity.values()];
   }, [record, reviewLines]);
-  const selectableSourceKeys = useMemo(
-    () => asArray(record?.evidence)
-      .map(sourceKey)
-      .filter((key, index, values) => key && values.indexOf(key) === index),
-    [record]
+  const enrichedEvidenceSources = useMemo(
+    () => evidenceSources.map((source) => {
+      const sourceMessageId = String(firstDefined(
+        source.gmail_message_id,
+        source.source_message_id,
+        ''
+      ));
+      const isAttachment = (
+        String(source.kind || '').toLowerCase() === 'attachment'
+        || sourceKey(source).startsWith('attachment:')
+      );
+      const attachment = isAttachment
+        ? attachments.find((candidate) => {
+          const candidateMessageId = String(firstDefined(
+            candidate.gmail_message_id,
+            candidate.source_message_id,
+            ''
+          ));
+          return (
+            String(candidate.filename || '') === String(source.filename || '')
+            && (
+              !sourceMessageId
+              || !candidateMessageId
+              || sourceMessageId === candidateMessageId
+            )
+          );
+        })
+        : null;
+      return {
+        ...(attachment || {}),
+        ...source,
+        gmail_message_id: firstDefined(
+          source.gmail_message_id,
+          source.source_message_id,
+          attachment?.gmail_message_id,
+          attachment?.source_message_id
+        ),
+      };
+    }),
+    [attachments, evidenceSources]
   );
   const evidenceBySourceKey = useMemo(
     () => new Map(
-      evidenceSources
+      enrichedEvidenceSources
         .filter((source) => sourceKey(source))
         .map((source) => [sourceKey(source), source])
     ),
-    [evidenceSources]
+    [enrichedEvidenceSources]
   );
-  const attachmentEvidence = useMemo(() => attachments.map((attachment) => {
-    const matchedSource = evidenceSources.find((source) => (
-      String(source.kind || '').toLowerCase() === 'attachment'
-      && String(source.filename || '') === String(attachment.filename || '')
-      && (
-        !source.gmail_message_id
-        || !attachment.gmail_message_id
-        || String(source.gmail_message_id) === String(attachment.gmail_message_id)
-      )
-    ));
-    return {
-      attachment,
-      source: matchedSource || null,
-    };
-  }), [attachments, evidenceSources]);
+  const viewableAttachmentSources = useMemo(() => {
+    const bySourceKey = new Map();
+    attachments.forEach((attachment) => {
+      const key = sourceKey(attachment);
+      if (key) bySourceKey.set(key, attachment);
+    });
+    enrichedEvidenceSources.forEach((source) => {
+      const key = sourceKey(source);
+      const isAttachment = (
+        String(source.kind || '').toLowerCase() === 'attachment'
+        || key.startsWith('attachment:')
+      );
+      if (!key || !isAttachment) return;
+      bySourceKey.set(key, {
+        ...(bySourceKey.get(key) || {}),
+        ...source,
+      });
+    });
+    return [...bySourceKey.values()];
+  }, [attachments, enrichedEvidenceSources]);
+  const attachmentSourcesByMessageId = useMemo(() => {
+    const grouped = new Map();
+    viewableAttachmentSources.forEach((source) => {
+      const key = sourceKey(source);
+      const messageId = String(firstDefined(
+        source.gmail_message_id,
+        source.source_message_id,
+        ''
+      ));
+      const isAttachment = (
+        String(source.kind || '').toLowerCase() === 'attachment'
+        || key.startsWith('attachment:')
+      );
+      if (!key || !messageId || !isAttachment) return;
+      const current = grouped.get(messageId) || [];
+      if (!current.some((candidate) => sourceKey(candidate) === key)) {
+        grouped.set(messageId, [...current, source]);
+      }
+    });
+    return grouped;
+  }, [viewableAttachmentSources]);
   const quoteId = quotationIdFromGmailImportPayload(record || {});
   const analysisActive = ACTIVE_ANALYSIS_STATUSES.has(status);
   const readOnlyImport = Boolean(quoteId || status === 'confirmed');
@@ -1057,16 +1092,6 @@ const GmailInquiryReview = ({
     if (!ANALYSIS_MODE_IDS.has(mode)) return;
     setAnalysisMode(mode);
     setSelectionDirty(true);
-    setIdentityConfirmed(false);
-  };
-
-  const toggleSource = (key) => {
-    if (!key) return;
-    setSelectedSourceKeys((current) => (
-      current.includes(key)
-        ? current.filter((candidate) => candidate !== key)
-        : [...current, key]
-    ));
     setIdentityConfirmed(false);
   };
 
@@ -1219,8 +1244,12 @@ const GmailInquiryReview = ({
         company: companyId,
         contact: contactId || null,
       };
-      if (selectableSourceKeys.length) {
-        payload.selected_source_keys = selectedSourceKeys.filter((key) => selectableSourceKeys.includes(key));
+      const includedSourceKeys = reviewLines
+        .filter((line) => line.included)
+        .flatMap(sourceKeysForLine)
+        .filter((key, index, values) => key && values.indexOf(key) === index);
+      if (includedSourceKeys.length) {
+        payload.selected_source_keys = includedSourceKeys;
       }
       const response = await quotationAPI.gmailInquiryImports.confirm(recordId, payload);
       if (!actionIsCurrent(actionGeneration)) return;
@@ -1268,25 +1297,8 @@ const GmailInquiryReview = ({
   const usableLines = reviewLines.filter((line) => line.included);
   const invalidIncludedLines = reviewLines.filter(reviewLineInvalid);
   const uncertainIncludedLines = reviewLines.filter(reviewLineUncertain);
-  const selectedSourceKeySet = new Set(selectedSourceKeys);
-  const sourceSelectionConflicts = selectableSourceKeys.length
-    ? reviewLines.flatMap((line, index) => {
-      if (!line.included) return [];
-      const rowSourceKeys = sourceKeysForLine(line);
-      const missingSourceKeys = rowSourceKeys.length
-        ? rowSourceKeys.filter((key) => !selectedSourceKeySet.has(key))
-        : ['missing-provenance'];
-      return missingSourceKeys.length
-        ? [{
-          index,
-          name: String(line.raw_name || `Row ${index + 1}`),
-          missingSourceKeys,
-        }]
-        : [];
-    })
-    : [];
-  const sourceConflictIndexes = new Set(
-    sourceSelectionConflicts.map((conflict) => conflict.index)
+  const includedLinesWithoutEvidence = usableLines.filter(
+    (line) => sourceKeysForLine(line).length === 0
   );
   const selectedCompany = companies.find((company) => String(company.id) === companyId);
   const selectedContact = contacts.find((contact) => String(contact.id) === contactId);
@@ -1315,14 +1327,6 @@ const GmailInquiryReview = ({
     analysisMode !== 'selected_messages'
     || selectedMessageIds.length > 0
   );
-  const hasSelectedSource = (
-    selectableSourceKeys.length === 0
-    || selectedSourceKeys.some((key) => selectableSourceKeys.includes(key))
-  );
-  const sourceSelectionValid = (
-    hasSelectedSource
-    && sourceSelectionConflicts.length === 0
-  );
   const confirmDisabled = Boolean(
     busyAction
     || analysisActive
@@ -1331,9 +1335,9 @@ const GmailInquiryReview = ({
     || !companyId
     || !identityConfirmed
     || !messageSelectionValid
-    || !sourceSelectionValid
     || invalidIncludedLines.length > 0
     || uncertainIncludedLines.length > 0
+    || includedLinesWithoutEvidence.length > 0
     || usableLines.length === 0
   );
 
@@ -1372,7 +1376,7 @@ const GmailInquiryReview = ({
           </div>
         </div>
         <div className="qm-helper warning">
-          Nothing is created automatically. Check the customer identity, selected messages, attachments, and extracted rows before confirming.
+          Nothing is created automatically. Check the customer identity, selected messages, and extracted rows before confirming.
         </div>
         {warnings.length > 0 && (
           <div className="qm-gmail-analysis-warnings" role="status">
@@ -1473,6 +1477,7 @@ const GmailInquiryReview = ({
             const analysisConfidenceLabel = Number.isFinite(analysisConfidence)
               ? `${Math.round(analysisConfidence <= 1 ? analysisConfidence * 100 : analysisConfidence)}% confidence`
               : '';
+            const messageAttachments = attachmentSourcesByMessageId.get(String(id)) || [];
             return (
               <article key={id} className={`qm-gmail-thread-message role-${role}`}>
                 <div className="qm-gmail-thread-marker" aria-hidden="true" />
@@ -1506,6 +1511,42 @@ const GmailInquiryReview = ({
                     <small className="qm-gmail-message-explanation">
                       {[classification, analysisReason, analysisConfidenceLabel].filter(Boolean).join(' | ')}
                     </small>
+                  )}
+                  {messageAttachments.length > 0 && (
+                    <details className="qm-gmail-message-attachments">
+                      <summary>
+                        {messageAttachments.length} attachment{messageAttachments.length === 1 ? '' : 's'}
+                      </summary>
+                      <div>
+                        {messageAttachments.map((attachment, attachmentIndex) => {
+                          const key = sourceKey(attachment);
+                          const filename = String(attachment.filename || 'Unnamed attachment');
+                          const statusLabel = String(firstDefined(
+                            attachment.status,
+                            attachment.parse_status,
+                            ''
+                          )).replaceAll('_', ' ');
+                          return (
+                            <button
+                              type="button"
+                              key={`${sourceIdentity(attachment, attachmentIndex)}-${attachmentIndex}`}
+                              aria-label={`Open email attachment ${filename}`}
+                              title={String(firstDefined(
+                                attachment.reason,
+                                attachment.parse_reason,
+                                statusLabel,
+                                `Open ${filename}`
+                              ))}
+                              disabled={Boolean(busyAction)}
+                              onClick={() => viewAttachment(attachment, attachment)}
+                            >
+                              <span>{busyAction === `attachment:${key}` ? 'Opening...' : filename}</span>
+                              {statusLabel && <small>{statusLabel}</small>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </details>
                   )}
                 </div>
               </article>
@@ -1619,120 +1660,10 @@ const GmailInquiryReview = ({
         </label>
       </div>
 
-      <div className="qm-panel qm-gmail-attachments-panel">
-        <div className="qm-panel-heading">
-          <div>
-            <h3>3. Attachments and source evidence</h3>
-            <p>Every extracted row below shows where it came from. Failed or excluded files are never silently used.</p>
-          </div>
-          <span className="qm-heading-count">{attachments.length} attachment{attachments.length === 1 ? '' : 's'}</span>
-        </div>
-        <div className="qm-evidence-attachments qm-gmail-attachments">
-          {attachmentEvidence.map(({ attachment, source }, index) => {
-            const viewSource = source || attachment;
-            const key = sourceKey(viewSource || {});
-            const attachmentStatus = String(firstDefined(
-              source?.status,
-              source?.parse_status,
-              attachment.status,
-              attachment.parse_status,
-              source ? 'available' : key ? 'unparsed' : 'unavailable'
-            )).toLowerCase();
-            const attachmentReason = firstDefined(
-              source?.reason,
-              source?.parse_reason,
-              attachment.reason,
-              attachment.parse_reason,
-              asArray(source?.warnings)[0],
-              !source
-                ? warnings.find((warning) => String(warning).includes(String(attachment.filename || '')))
-                : null,
-              !source ? 'This file was not used for row extraction. You can still inspect the original attachment.' : null
-            );
-            return (
-              <article key={`${firstDefined(attachment.attachment_id, attachment.part_id, attachment.filename, index)}-${index}`} className={`qm-evidence-attachment status-${attachmentStatus}`}>
-                <div className="qm-evidence-attachment-heading">
-                  <div>
-                    <strong>{attachment.filename || 'Unnamed attachment'}</strong>
-                    <span>{attachment.source_subject || attachment.mime_type || 'Gmail attachment'}</span>
-                  </div>
-                  <span className={`qm-evidence-attachment-status status-${attachmentStatus}`}>{attachmentStatus.replaceAll('_', ' ')}</span>
-                </div>
-                <div className="qm-evidence-attachment-meta">
-                  {attachment.mime_type && <span>{attachment.mime_type}</span>}
-                  {formatBytes(attachment.size) && <span>{formatBytes(attachment.size)}</span>}
-                  {firstDefined(source?.line_count, attachment.line_count) !== undefined && (
-                    <span>{firstDefined(source?.line_count, attachment.line_count)} extracted rows</span>
-                  )}
-                </div>
-                {attachmentReason && <p>{String(attachmentReason)}</p>}
-                {key && (
-                  <button
-                    type="button"
-                    className="qm-secondary small"
-                    disabled={Boolean(busyAction)}
-                    onClick={() => viewAttachment(attachment, viewSource)}
-                  >
-                    {busyAction === `attachment:${key}` ? 'Opening...' : 'View / Open'}
-                  </button>
-                )}
-              </article>
-            );
-          })}
-          {!attachments.length && <div className="qm-empty compact">This inquiry uses the email body and has no file attachments.</div>}
-        </div>
-        {attachmentError && <div className="qm-feedback error">{attachmentError}</div>}
-        {selectableSourceKeys.length > 0 && (
-          <div className="qm-gmail-source-selection">
-            <div>
-              <strong>Evidence to carry into the quotation</strong>
-              <span>Uncheck anything that does not belong to the customer's request.</span>
-            </div>
-            <div className="qm-gmail-source-options">
-              {evidenceSources.filter(
-                (source) => selectableSourceKeys.includes(sourceKey(source))
-              ).map((source, index) => {
-                const key = sourceKey(source);
-                return (
-                  <label key={key || sourceIdentity(source, index)}>
-                    <input
-                      type="checkbox"
-                      checked={selectedSourceKeys.includes(key)}
-                      disabled={readOnlyImport || analysisActive || Boolean(busyAction)}
-                      onChange={() => toggleSource(key)}
-                    />
-                    <span>
-                      <strong>{evidenceLabel(source)}</strong>
-                      <small>{firstDefined(source.reason, source.source_type, source.mime_type, 'Parsed source evidence')}</small>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-            {sourceSelectionConflicts.length > 0 && (
-              <div className="qm-feedback warning" role="alert">
-                <strong>
-                  Confirmation is blocked: {sourceSelectionConflicts.length} included row(s)
-                  still depend on unchecked evidence.
-                </strong>
-                <span>
-                  {' '}
-                  Re-select every cited source, or explicitly exclude the affected row:
-                  {' '}
-                  {sourceSelectionConflicts
-                    .map((conflict) => `#${conflict.index + 1} ${conflict.name}`)
-                    .join(', ')}.
-                </span>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
       <div className="qm-panel qm-gmail-lines-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>4. Review extracted request lines</h3>
+            <h3>3. Review extracted request lines</h3>
             <p>Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.</p>
           </div>
           <div className="qm-gmail-lines-actions">
@@ -1747,13 +1678,20 @@ const GmailInquiryReview = ({
             </button>
           </div>
         </div>
-        {(invalidIncludedLines.length > 0 || uncertainIncludedLines.length > 0) && (
+        {(
+          invalidIncludedLines.length > 0
+          || uncertainIncludedLines.length > 0
+          || includedLinesWithoutEvidence.length > 0
+        ) && (
           <div className="qm-feedback warning qm-gmail-line-review-warning">
             {invalidIncludedLines.length > 0
               ? `${invalidIncludedLines.length} included row(s) need a valid item name, quantity, and unit.`
-              : `${uncertainIncludedLines.length} included row(s) still need staff review. Correct them or exclude them.`}
+              : uncertainIncludedLines.length > 0
+                ? `${uncertainIncludedLines.length} included row(s) still need staff review. Correct them or exclude them.`
+                : `${includedLinesWithoutEvidence.length} included row(s) have no source evidence. Reanalyze or exclude them.`}
           </div>
         )}
+        {attachmentError && <div className="qm-feedback error" role="alert">{attachmentError}</div>}
         <div className="qm-table-wrap">
           <table className="qm-table qm-gmail-lines-table">
             <thead>
@@ -1777,7 +1715,6 @@ const GmailInquiryReview = ({
                 const operation = lineOperation(line);
                 const commercial = lineCustomerCommercialEvidence(line);
                 const confidence = confidencePercent(line);
-                const hasSourceConflict = sourceConflictIndexes.has(index);
                 const evidence = evidenceForLine(line).map((source) => ({
                   ...(evidenceBySourceKey.get(sourceKey(source)) || {}),
                   ...source,
@@ -1785,7 +1722,7 @@ const GmailInquiryReview = ({
                 return (
                   <tr
                     key={firstDefined(reviewRowKey(line), line.id, line.row_id, `${line.raw_name || 'line'}-${index}`)}
-                    className={`status-${lineStatus} operation-${operation}${line.included ? '' : ' is-excluded'}${hasSourceConflict ? ' has-source-conflict' : ''}`}
+                    className={`status-${lineStatus} operation-${operation}${line.included ? '' : ' is-excluded'}`}
                   >
                     <td data-label="Use row">
                       <label className="qm-gmail-row-include">
@@ -1878,11 +1815,6 @@ const GmailInquiryReview = ({
                     </td>
                     <td data-label="Source evidence">
                       <div className="qm-gmail-row-evidence">
-                        {hasSourceConflict && (
-                          <strong className="qm-gmail-source-conflict">
-                            Blocked: re-select this row's evidence or exclude the row
-                          </strong>
-                        )}
                         {evidence.map((source, evidenceIndex) => {
                           const message = messagesById.get(String(source.gmail_message_id || ''));
                           const enrichedSource = {
@@ -1896,17 +1828,30 @@ const GmailInquiryReview = ({
                               : null,
                             firstDefined(source.raw_text, source.extracted_text),
                           ].filter(Boolean).join(' | ');
-                          return (
+                          const key = sourceKey(enrichedSource);
+                          const label = evidenceLabel(enrichedSource);
+                          const isAttachment = (
+                            String(enrichedSource.kind || '').toLowerCase() === 'attachment'
+                            || key.startsWith('attachment:')
+                          );
+                          return isAttachment && key ? (
+                            <button
+                              type="button"
+                              className="qm-gmail-row-evidence-link"
+                              key={`${sourceIdentity(source, evidenceIndex)}-${evidenceIndex}`}
+                              title={sourceDetail}
+                              aria-label={`Open source ${label}`}
+                              disabled={Boolean(busyAction)}
+                              onClick={() => viewAttachment(enrichedSource, enrichedSource)}
+                            >
+                              {busyAction === `attachment:${key}` ? 'Opening...' : label}
+                            </button>
+                          ) : (
                             <span
                               key={`${sourceIdentity(source, evidenceIndex)}-${evidenceIndex}`}
-                              className={
-                                sourceKey(source) && !selectedSourceKeys.includes(sourceKey(source))
-                                  ? 'excluded'
-                                  : ''
-                              }
                               title={sourceDetail}
                             >
-                              {evidenceLabel(enrichedSource)}
+                              {label}
                             </span>
                           );
                         })}
@@ -1946,16 +1891,14 @@ const GmailInquiryReview = ({
                     ? 'Correct or exclude every invalid row first.'
                     : uncertainIncludedLines.length
                       ? 'Correct or exclude every uncertain row first.'
-                      : !companyId
-                        ? 'Select the customer company first.'
-                        : !identityConfirmed
-                          ? 'Confirm the customer identity first.'
+                      : includedLinesWithoutEvidence.length
+                        ? 'Reanalyze or exclude every row without source evidence.'
+                        : !companyId
+                          ? 'Select the customer company first.'
+                          : !identityConfirmed
+                            ? 'Confirm the customer identity first.'
                             : !messageSelectionValid
                               ? 'Select at least one Gmail message.'
-                            : !hasSelectedSource
-                              ? 'Keep at least one source of evidence selected.'
-                              : sourceSelectionConflicts.length
-                                ? 'Re-select every source cited by included rows, or explicitly exclude the affected rows.'
                               : !usableLines.length
                                 ? 'Analysis must return at least one usable row.'
                                 : 'Wait for the current operation to finish.'}
