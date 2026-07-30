@@ -79,6 +79,14 @@ class FailingVisionProvider:
         raise AIParseError("Vision provider could not read this screenshot.")
 
 
+class EmptyVisionProvider:
+    def clean_rows(self, **kwargs):
+        return {"rows": [], "warnings": []}, {
+            "input_tokens": 21,
+            "output_tokens": 3,
+        }
+
+
 class InquiryImageParserTests(TestCase):
     def upload(self, filename, data, content_type):
         return SimpleUploadedFile(filename, data, content_type=content_type)
@@ -253,6 +261,34 @@ class InquiryImageAITests(TestCase):
         self.assertEqual(AIParseLog.objects.filter(mode="vision", success=True).count(), 2)
         self.assertEqual(ProductAlias.objects.count(), 0)
         self.assertEqual(Quotation.objects.count(), 0)
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_empty_ai_result_retains_usage_on_failure_audit_log(self):
+        data = make_image_bytes("PNG")
+        parsed = parse_file_preview(
+            SimpleUploadedFile(
+                "empty-result.png",
+                data,
+                content_type="image/png",
+            ),
+            store_source=False,
+        )
+
+        with patch(
+            "quotations.ai_parsing.get_ai_parse_provider",
+            return_value=EmptyVisionProvider(),
+        ):
+            with self.assertRaisesMessage(
+                AIParseError,
+                "did not return any item rows",
+            ):
+                clean_image_bytes_with_ai(data, parsed, actor=self.staff)
+
+        log = AIParseLog.objects.get(success=False, mode="vision")
+        self.assertEqual(
+            log.usage,
+            {"input_tokens": 21, "output_tokens": 3},
+        )
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_private_image_preview_auto_selects_vision_mode(self):

@@ -737,9 +737,30 @@ const GmailInquiryReview = ({
         selected_message_ids: normalizedSelectedIds,
       });
       if (!actionIsCurrent(actionGeneration)) return null;
-      const selectionRecord = applyPayload(selectionResponse.data, { preserveSelection: true });
+      const currentRecord = recordRef.current || {};
+      const incomingSelectionRecord = gmailImportRecordFromPayload(selectionResponse.data);
+      const nextSelectionRecord = {
+        ...currentRecord,
+        ...incomingSelectionRecord,
+      };
+      const selectionContextChanged = Boolean(
+        String(entityId(currentRecord) || '') !== String(entityId(nextSelectionRecord) || '')
+        || initialAnalysisMode(currentRecord) !== initialAnalysisMode(nextSelectionRecord)
+        || String(currentRecord.source_fingerprint || '') !== String(nextSelectionRecord.source_fingerprint || '')
+      );
+      const selectionRecord = applyPayload(selectionResponse.data, {
+        preserveSelection: !selectionContextChanged,
+      });
+      if (selectionContextChanged) {
+        // The rows on screen belong to the previous import configuration.
+        // Never display them beneath a replacement import while its new
+        // message selection is being analyzed.
+        setReviewLines([]);
+        setReviewDirty(false);
+      }
       const effectiveImportId = entityId(selectionRecord) || targetId;
       analysisImportId = effectiveImportId;
+      autoAnalyzeImportRef.current = String(effectiveImportId);
       if (String(effectiveImportId) !== String(targetId)) {
         replacementImportId = effectiveImportId;
       }
@@ -767,31 +788,36 @@ const GmailInquiryReview = ({
     } catch (error) {
       if (!actionIsCurrent(actionGeneration)) return null;
       const recoverableRequestFailure = Boolean(
-        analysisRequested
-        && (
-          error?.code === 'ECONNABORTED'
-          || !error?.response
-          || error?.response?.status === 409
-          || Number(error?.response?.status) >= 500
-        )
+        error?.code === 'ECONNABORTED'
+        || !error?.response
+        || error?.response?.status === 409
+        || Number(error?.response?.status) >= 500
       );
-      if (recoverableRequestFailure) {
+      const shouldRefreshAnalysisState = Boolean(
+        analysisRequested
+        || error?.response?.status === 409
+      );
+      if (shouldRefreshAnalysisState) {
         try {
           const recoveryResponse = await quotationAPI.gmailInquiryImports.retrieve(analysisImportId);
           if (!actionIsCurrent(actionGeneration)) return null;
           const recoveryRecord = applyPayload(recoveryResponse.data);
           const recoveryStatus = importStatus(recoveryRecord);
-          if (ACTIVE_ANALYSIS_STATUSES.has(recoveryStatus)) {
+          if (
+            recoverableRequestFailure
+            && ACTIVE_ANALYSIS_STATUSES.has(recoveryStatus)
+          ) {
             setSelectionDirty(false);
             setErrorInfo(null);
             setNotice({
               type: 'info',
-              message: 'The browser stopped waiting, but Gmail analysis is still processing. This page will keep checking for the result.',
+              message: 'Gmail analysis is still processing. This page will keep checking for the result.',
             });
             return recoveryResponse.data;
           }
           if (
-            ['ready', 'review_required', 'confirmed'].includes(recoveryStatus)
+            recoverableRequestFailure
+            && ['ready', 'review_required', 'confirmed'].includes(recoveryStatus)
             && (importLines(recoveryRecord).length || quotationIdFromGmailImportPayload(recoveryRecord))
           ) {
             setSelectionDirty(false);
@@ -987,6 +1013,8 @@ const GmailInquiryReview = ({
   }, [viewableAttachmentSources]);
   const quoteId = quotationIdFromGmailImportPayload(record || {});
   const analysisActive = ACTIVE_ANALYSIS_STATUSES.has(status);
+  const analysisRequestPending = ['analyze', 'reanalyze'].includes(busyAction);
+  const analysisUiActive = analysisActive || analysisRequestPending;
   const readOnlyImport = Boolean(quoteId || status === 'confirmed');
 
   useEffect(() => {
@@ -1369,8 +1397,8 @@ const GmailInquiryReview = ({
             </p>
           </div>
           <div className="qm-gmail-import-heading-actions">
-            <span className={`qm-gmail-import-status status-${status || 'pending'}`}>
-              {analysisActive ? 'Analyzing' : quoteId ? 'Quotation created' : status.replaceAll('_', ' ') || 'Ready for review'}
+            <span className={`qm-gmail-import-status status-${analysisUiActive ? 'analyzing' : status || 'pending'}`}>
+              {analysisUiActive ? 'Analyzing' : quoteId ? 'Quotation created' : status.replaceAll('_', ' ') || 'Ready for review'}
             </span>
             {onBack && <button type="button" className="qm-secondary" onClick={onBack}>Back to inquiries</button>}
           </div>
@@ -1449,13 +1477,24 @@ const GmailInquiryReview = ({
             </label>
           ))}
         </fieldset>
-        {(analysisActive || progressTotal > 0) && (
-          <div className="qm-gmail-analysis-progress" role={analysisActive ? 'status' : undefined}>
+        {(analysisUiActive || progressTotal > 0) && (
+          <div className="qm-gmail-analysis-progress" role={analysisUiActive ? 'status' : undefined} aria-live="polite">
             <div>
-              <strong>{analysisActive ? 'Reading selected email evidence...' : 'Analysis progress'}</strong>
-              <span>{progressTotal ? `${progressCurrent} of ${progressTotal} messages` : 'Preparing analysis'}</span>
+              <strong>{analysisUiActive ? 'Analyzing Gmail thread and attachments...' : 'Analysis progress'}</strong>
+              <span>
+                {analysisUiActive
+                  ? 'This may take 1–2 minutes. The results will appear here automatically.'
+                  : progressTotal
+                    ? `${progressCurrent} of ${progressTotal} messages`
+                    : 'Preparing analysis'}
+              </span>
             </div>
-            <div className="qm-gmail-progress-track" aria-label={`Analysis ${progressPercent}% complete`}>
+            <div
+              className="qm-gmail-progress-track"
+              aria-label={analysisUiActive && progressCurrent === 0
+                ? 'Analysis in progress'
+                : `Analysis ${progressPercent}% complete`}
+            >
               <span style={{ width: `${progressPercent}%` }} />
             </div>
           </div>
@@ -1553,7 +1592,7 @@ const GmailInquiryReview = ({
             );
           })}
           {!messages.length && (
-            analysisActive ? (
+            analysisUiActive ? (
               <div className="qm-empty" role="status">
                 <strong>Reading the Gmail thread and attachments...</strong>
                 <span>The messages and attachment evidence will appear here automatically when analysis finishes.</span>
@@ -1863,7 +1902,16 @@ const GmailInquiryReview = ({
               })}
               {!reviewLines.length && (
                 <tr>
-                  <td colSpan="11"><div className="qm-empty">No inquiry rows have been extracted. Resume or retry analysis before confirming.</div></td>
+                  <td colSpan="11">
+                    {analysisUiActive ? (
+                      <div className="qm-empty" role="status">
+                        <strong>Analyzing the request...</strong>
+                        <span>Extracted item rows will appear here automatically when analysis finishes.</span>
+                      </div>
+                    ) : (
+                      <div className="qm-empty">No inquiry rows have been extracted. Resume or retry analysis before confirming.</div>
+                    )}
+                  </td>
                 </tr>
               )}
             </tbody>

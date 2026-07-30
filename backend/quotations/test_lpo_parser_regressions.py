@@ -17,7 +17,13 @@ from .ai_parsing import (
     clean_preview_with_ai,
     prefer_safe_ai_preview,
 )
-from .import_parsers import _parse_pdf_word_layout_item_rows, parse_pdf_preview, parse_text_preview
+from .import_parsers import (
+    _infer_headerless_pdf_header,
+    _parse_pdf_word_layout_item_rows,
+    _parse_pdfplumber_tables,
+    parse_pdf_preview,
+    parse_text_preview,
+)
 from .import_rules import parse_text_lines
 from .models import AIParseCache, Company, Quotation, QuotationLPO, QuotationLine
 from .services import (
@@ -266,6 +272,118 @@ class LPOTextParserRegressionTests(SimpleTestCase):
         self.assertEqual(preview["lines"][0]["unit"], "NO")
         self.assertEqual(preview["lines"][0]["unit_price"], "5")
         self.assertTrue(any("no plausible item rows" in warning for warning in preview["warnings"]))
+
+    def test_headerless_pdf_grid_infers_description_quantity_and_unit_columns(self):
+        page_one = SimpleNamespace(
+            extract_tables=lambda: [
+                [
+                    [
+                        None,
+                        "50501040",
+                        "768-25G, 01700",
+                        "Microwave oven - 25 L",
+                        "1",
+                        "NOS",
+                        "0.0000",
+                        None,
+                        "5.00",
+                        "0.00",
+                    ],
+                    [
+                        "2",
+                        "50501040",
+                        "768-25G, 01700",
+                        "Stethoscope Manual",
+                        "2",
+                        "NOS",
+                        "0.0000",
+                        None,
+                        "5.00",
+                        "0.00",
+                    ],
+                    [
+                        "3",
+                        "50501040",
+                        "768-25G, 01700",
+                        "First aid box kit large size",
+                        "6",
+                        "NOS",
+                        "0.0000",
+                        None,
+                        "5.00",
+                        "0.00",
+                    ],
+                ]
+            ],
+            extract_text=lambda: "headerless page one",
+        )
+        page_two = SimpleNamespace(
+            extract_tables=lambda: [
+                [
+                    [
+                        None,
+                        "50501040",
+                        "768-25G, 01700",
+                        "Govid’s clove oils 10 ml",
+                        "5",
+                        "NOS",
+                        "0.0000",
+                        None,
+                        "5.00",
+                        "0.00",
+                    ],
+                    [
+                        "23",
+                        "50501040",
+                        "768-25G, 01700",
+                        "Sterile surgical blade 11 size",
+                        "1",
+                        "PCK",
+                        "0.0000",
+                        None,
+                        "5.00",
+                        "0.00",
+                    ],
+                ]
+            ],
+            extract_text=lambda: "headerless page two",
+        )
+
+        with patch("quotations.import_parsers.pdfplumber.open") as open_pdf:
+            open_pdf.return_value.__enter__.return_value.pages = [
+                page_one,
+                page_two,
+            ]
+            lines, _metadata, rows_seen, skipped = _parse_pdfplumber_tables(
+                b"not-used-by-the-mock"
+            )
+
+        self.assertEqual(rows_seen, 5)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(
+            [
+                (line["raw_name"], line["quantity"], line["unit"])
+                for line in lines
+            ],
+            [
+                ("Microwave Oven - 25 l", "1", "NOS"),
+                ("Stethoscope Manual", "2", "NOS"),
+                ("First Aid box Kit Large Size", "6", "NOS"),
+                ("Govid’s Clove Oils 10 ml", "5", "NOS"),
+                ("Sterile Surgical Blade 11 Size", "1", "PCK"),
+            ],
+        )
+        self.assertTrue(
+            all("768-25G, 01700" not in line["raw_name"] for line in lines)
+        )
+
+    def test_headerless_pdf_grid_does_not_guess_from_one_or_two_rows(self):
+        rows = [
+            ["1", "A-100", "Gauze", "2", "PCS"],
+            ["2", "B-200", "Bandage", "4", "PCS"],
+        ]
+
+        self.assertIsNone(_infer_headerless_pdf_header(rows))
 
     def test_manual_lpo_upload_detects_intermass_number_from_filename(self):
         details = _extract_lpo_details(

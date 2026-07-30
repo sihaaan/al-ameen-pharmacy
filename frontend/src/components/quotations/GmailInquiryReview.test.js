@@ -294,6 +294,9 @@ describe('GmailInquiryReview', () => {
     // The replacement ID must be durable in the URL before the long analysis
     // response returns.
     expect(onClaimed).toHaveBeenCalledWith(44);
+    expect(screen.queryByDisplayValue('Bandage')).not.toBeInTheDocument();
+    expect(await screen.findByText('Analyzing the request...')).toBeInTheDocument();
+    expect(screen.queryByText(/no inquiry rows have been extracted/i)).not.toBeInTheDocument();
 
     await act(async () => {
       resolveAnalysis({
@@ -304,6 +307,116 @@ describe('GmailInquiryReview', () => {
         },
       });
     });
+  });
+
+  test('shows analysis immediately while the initial long request is still pending', async () => {
+    let resolveAnalysis;
+    const claimedRecord = {
+      ...baseRecord,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      message_manifest: [],
+      attachment_manifest: [],
+      evidence: [],
+      analysis: {
+        preview: {
+          warnings: [],
+          meta: {},
+          lines: [],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: claimedRecord,
+    });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
+      data: claimedRecord,
+    });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAnalysis = resolve;
+      })
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(
+      'Analyzing Gmail thread and attachments...'
+    )).toBeInTheDocument();
+    expect(screen.getByText(/this may take 1.*2 minutes/i)).toBeInTheDocument();
+    expect(screen.getByText('Reading the Gmail thread and attachments...')).toBeInTheDocument();
+    expect(screen.getByText('Analyzing the request...')).toBeInTheDocument();
+    expect(screen.queryByText('No Gmail thread messages are available.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/no inquiry rows have been extracted/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveAnalysis({
+        data: {
+          ...reviewedRecord,
+          mode: 'ai_thread',
+          selected_message_ids: ['m-1'],
+        },
+      });
+    });
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+  });
+
+  test('clears rows when the same import changes mode and source fingerprint', async () => {
+    let resolveAnalysis;
+    const selectedRecord = {
+      ...baseRecord,
+      source_fingerprint: 'selected-source-fingerprint',
+    };
+    const aiClaimedRecord = {
+      ...selectedRecord,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      source_fingerprint: 'ai-thread-source-fingerprint',
+      analysis: {
+        preview: {
+          warnings: [],
+          meta: {},
+          lines: [],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: selectedRecord,
+    });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
+      data: aiClaimedRecord,
+    });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAnalysis = resolve;
+      })
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+    await screen.findByDisplayValue('Bandage');
+    fireEvent.click(screen.getByRole('radio', { name: /ai-assisted thread/i }));
+    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      mode: 'ai_thread',
+      selected_message_ids: [],
+    }));
+    expect(screen.queryByDisplayValue('Bandage')).not.toBeInTheDocument();
+    expect(await screen.findByText('Analyzing the request...')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveAnalysis({
+        data: {
+          ...reviewedRecord,
+          mode: 'ai_thread',
+          selected_message_ids: ['m-1'],
+          source_fingerprint: 'ai-thread-source-fingerprint',
+        },
+      });
+    });
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
   });
 
   test('recovers an analysis timeout by checking server status and continuing to poll', async () => {
@@ -328,10 +441,87 @@ describe('GmailInquiryReview', () => {
       force: true,
     }));
     expect(await screen.findByText(
-      /browser stopped waiting, but gmail analysis is still processing/i
+      /gmail analysis is still processing/i
     )).toBeInTheDocument();
     expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
     expect(screen.queryByText('Request failed')).not.toBeInTheDocument();
+  });
+
+  test('resumes polling when a remounted replacement import is already analyzing', async () => {
+    const claimedRecord = {
+      ...baseRecord,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      message_manifest: [],
+      attachment_manifest: [],
+      evidence: [],
+      analysis: {
+        preview: {
+          warnings: [],
+          meta: {},
+          lines: [],
+        },
+      },
+    };
+    const analyzingRecord = {
+      ...claimedRecord,
+      status: 'analyzing',
+    };
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: claimedRecord })
+      .mockResolvedValueOnce({ data: analyzingRecord });
+    quotationAPI.gmailInquiryImports.update.mockRejectedValueOnce(
+      Object.assign(new Error('Already analyzing.'), {
+        response: { status: 409 },
+      })
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(/gmail analysis is still processing/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.gmailInquiryImports.analyze).not.toHaveBeenCalled();
+    expect(screen.getByText('Analyzing Gmail thread and attachments...')).toBeInTheDocument();
+    expect(screen.queryByText(/no inquiry rows have been extracted/i)).not.toBeInTheDocument();
+  });
+
+  test('refreshes failed server state after a nonrecoverable analysis error without auto-retrying', async () => {
+    const failedRecord = {
+      ...baseRecord,
+      status: 'failed',
+      analysis: {
+        preview: {
+          warnings: [],
+          meta: {},
+          lines: [],
+        },
+      },
+      errors: [{ message: 'Invalid analysis request.' }],
+    };
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: baseRecord })
+      .mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
+      data: {
+        ...baseRecord,
+        status: 'claimed',
+      },
+    });
+    quotationAPI.gmailInquiryImports.analyze.mockRejectedValueOnce(
+      Object.assign(new Error('Invalid analysis request.'), {
+        response: { status: 400 },
+      })
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+    await screen.findByDisplayValue('Bandage');
+    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
+
+    expect(await screen.findByText('failed')).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/no inquiry rows have been extracted/i)).toBeInTheDocument();
   });
 
   test('keeps polling after a transient refresh failure', async () => {
@@ -400,7 +590,9 @@ describe('GmailInquiryReview', () => {
     render(<GmailInquiryReview importId="31" />);
 
     expect(await screen.findByText(/reading the gmail thread and attachments/i)).toBeInTheDocument();
-    expect(screen.getByText(/will appear here automatically when analysis finishes/i)).toBeInTheDocument();
+    expect(screen.getByText(
+      'The messages and attachment evidence will appear here automatically when analysis finishes.'
+    )).toBeInTheDocument();
     expect(screen.queryByText(/no gmail thread messages are available/i)).not.toBeInTheDocument();
   });
 

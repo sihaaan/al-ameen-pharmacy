@@ -930,6 +930,7 @@ def _run_ai_cleanup(
         return {**cached.result, "cache_hit": True}
 
     provider = get_ai_parse_provider(provider_name)
+    usage = {}
     try:
         raw_result, usage = provider.clean_rows(
             mode=mode,
@@ -988,6 +989,7 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
+            usage=usage,
             success=False,
             error=str(exc),
         )

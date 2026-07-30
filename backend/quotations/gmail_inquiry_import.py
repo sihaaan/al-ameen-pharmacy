@@ -95,6 +95,15 @@ INLINE_IMAGE_HINT = re.compile(
     r"(?:^|[_\-. ])(?:logo|signature|footer|banner|icon|spacer|image00|social)(?:[_\-. ]|$)",
     re.IGNORECASE,
 )
+GENERIC_INLINE_IMAGE_FILENAME_RE = re.compile(
+    r"^(?:image|img|logo|icon|signature)[-_ ]?\d{2,}\.(?:png|jpe?g|webp)$",
+    re.IGNORECASE,
+)
+EMAIL_IMAGE_REFERENCE_RE = re.compile(
+    r"\b(?:image|images|photo|photos|picture|pictures|scan|scans|"
+    r"screenshot|screenshots)\b",
+    re.IGNORECASE,
+)
 INQUIRY_SIGNAL = re.compile(
     r"\b(?:inquiry|enquiry|rfq|request\s+for\s+quotation|please\s+quote|kindly\s+quote|"
     r"quote\s+request|send\s+(?:us\s+|me\s+)?(?:a\s+)?quotation)\b",
@@ -621,7 +630,8 @@ PLAIN_SIGNATURE_MARKER = re.compile(
     re.IGNORECASE,
 )
 EMAIL_TEAM_GREETING_RE = re.compile(
-    r"^\s*(?:dear|hello|hi)\s+(?:all|team|sales\s+team)[\s,!.:-]*$",
+    r"^\s*(?:(?:dear|hello|hi)(?:\s+(?:all|team|sales\s+team))?|"
+    r"good\s+(?:morning|afternoon|evening))[\s,!.:-]*$",
     re.IGNORECASE,
 )
 EMAIL_COURTESY_THANKS_RE = re.compile(
@@ -634,7 +644,14 @@ EMAIL_ATTACHMENT_REFERENCE_RE = re.compile(
 )
 EMAIL_SOURCE_DOCUMENT_RE = re.compile(
     r"\b(?:excel|file|inquiry|list|pdf|quotation|quote|request|rfq|"
-    r"spreadsheet|workbook|xlsx?|document)\b",
+    r"requirements?|spreadsheet|workbook|xlsx?|document)\b",
+    re.IGNORECASE,
+)
+EMAIL_GENERIC_QUOTE_REQUEST_RE = re.compile(
+    r"^\s*(?:please|kindly)\s+(?:provide|send|share|submit)\s+"
+    r"(?:us\s+|your\s+)?(?:best\s+)?(?:quotation|quote)"
+    r"(?:\s+(?:as\s+soon\s+as\s+possible|at\s+your\s+earliest\s+convenience|"
+    r"for\s+(?:the\s+)?attached(?:\s+\w+){0,4}))?[\s,!.:-]*$",
     re.IGNORECASE,
 )
 EMAIL_CID_REFERENCE_RE = re.compile(
@@ -686,6 +703,8 @@ def _is_clear_non_item_email_prose_row(row):
     text = str(
         row.get("raw_source_line")
         or row.get("raw_line")
+        or row.get("raw_name")
+        or row.get("requested_item_name")
         or ""
     ).strip()
     if not text:
@@ -708,6 +727,7 @@ def _is_clear_non_item_email_prose_row(row):
             and EMAIL_SOURCE_DOCUMENT_RE.search(text)
         )
         or EMAIL_GENERAL_QUANTITY_INSTRUCTION_RE.search(text)
+        or EMAIL_GENERIC_QUOTE_REQUEST_RE.fullmatch(text)
     )
 
 
@@ -1413,6 +1433,48 @@ def _looks_like_inline_image(attachment):
     # Small screenshots can be legitimate inquiry documents. Size alone is
     # never enough to discard an image; use explicit filename hints only.
     return bool(INLINE_IMAGE_HINT.search(filename))
+
+
+def _looks_like_signature_image_bundle_member(
+    attachment,
+    message_attachments,
+    message_text,
+):
+    """Identify generic inline images bundled beside the actual RFQ document.
+
+    Rich email signatures often arrive as several ``image001.png``-style MIME
+    parts. Do not spend vision calls on that bundle when the same message has a
+    supported document and never refers to images. A lone screenshot, an
+    image-only inquiry, or an explicitly mentioned image remains eligible.
+    """
+
+    filename = os.path.basename(
+        str((attachment or {}).get("filename") or "")
+    )
+    if (
+        not GENERIC_INLINE_IMAGE_FILENAME_RE.fullmatch(filename)
+        or EMAIL_IMAGE_REFERENCE_RE.search(str(message_text or ""))
+    ):
+        return False
+    attachments = [
+        candidate
+        for candidate in (message_attachments or [])
+        if isinstance(candidate, dict)
+    ]
+    has_supported_document = any(
+        _attachment_extension(candidate) in ALLOWED_EXTENSIONS
+        for candidate in attachments
+    )
+    generic_image_count = sum(
+        bool(
+            _attachment_extension(candidate) in IMAGE_EXTENSIONS
+            and GENERIC_INLINE_IMAGE_FILENAME_RE.fullmatch(
+                os.path.basename(str(candidate.get("filename") or ""))
+            )
+        )
+        for candidate in attachments
+    )
+    return bool(has_supported_document and generic_image_count >= 3)
 
 
 def _attachment_extension(attachment):
@@ -2432,6 +2494,10 @@ def _validate_semantic_thread_result(raw_result, messages, evidence):
             row_key in cited_row_keys
             or message_results.get(message_id, {}).get("usage") != "used"
             or str(evidence_row.get("parse_status") or "") == "ignored"
+            or (
+                str(source.get("kind") or "") == "email_body"
+                and _is_clear_non_item_email_prose_row(evidence_row)
+            )
         ):
             continue
         identity = _row_identity(evidence_row)
@@ -2588,6 +2654,7 @@ def _build_source_analysis(
     source_rows = []
     original_text_parts = []
     vision_used = 0
+    vision_attempted = 0
     max_bytes = max(
         1,
         int(
@@ -2712,9 +2779,10 @@ def _build_source_analysis(
                 f"Outbound Gmail message {message_id} was retained as context and not used as customer item evidence."
             )
 
-        for attachment in (message.get("attachment_manifest") or [])[
-            :MAX_ATTACHMENT_METADATA_PER_MESSAGE
-        ]:
+        message_attachments = (
+            message.get("attachment_manifest") or []
+        )[:MAX_ATTACHMENT_METADATA_PER_MESSAGE]
+        for attachment in message_attachments:
             if not isinstance(attachment, dict):
                 continue
             filename = os.path.basename(
@@ -2751,6 +2819,21 @@ def _build_source_analysis(
                 )
                 warnings.append(
                     f"{filename or 'Gmail attachment'}: unsupported inquiry attachment type."
+                )
+                continue
+            if _looks_like_signature_image_bundle_member(
+                attachment,
+                message_attachments,
+                body_text,
+            ):
+                manifest.update(
+                    {
+                        "parse_status": "ignored",
+                        "parse_reason": (
+                            "Likely email-signature image bundle; the attached "
+                            "inquiry document was parsed separately."
+                        ),
+                    }
                 )
                 continue
             if _looks_like_inline_image(attachment):
@@ -2790,9 +2873,14 @@ def _build_source_analysis(
             parsed_attachment_count += 1
             allow_vision = bool(
                 mailbox_vision_allowed
-                and vision_used < MAX_AI_VISION_ATTACHMENTS
+                and vision_attempted < MAX_AI_VISION_ATTACHMENTS
                 and extension in (IMAGE_EXTENSIONS | {".pdf"})
             )
+            if allow_vision:
+                # Bound provider calls, including valid responses that contain
+                # no inquiry rows. Signature/logo images commonly produce an
+                # empty result and must not bypass the per-import AI limit.
+                vision_attempted += 1
             try:
                 preview, skipped_reason = _parse_attachment(
                     connection,

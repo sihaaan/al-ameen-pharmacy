@@ -26,6 +26,7 @@ from .gmail_inquiry_import import (
     _confirmation_subject,
     _fetch_analysis_messages,
     _looks_like_inline_image,
+    _looks_like_signature_image_bundle_member,
     _row_identity,
     _semantic_context,
     _semantic_thread_instructions,
@@ -1588,6 +1589,152 @@ class GmailInquiryImportTests(TestCase):
         )
         self.assertTrue(mock_parse.call_args.kwargs["allow_ai_vision"])
 
+    @override_settings(QUOTATION_MAILBOX_AI_VISION_ENABLED=True)
+    @patch("quotations.gmail_inquiry_import._parse_attachment")
+    def test_empty_image_results_still_count_toward_vision_attempt_limit(
+        self,
+        mock_parse,
+    ):
+        mock_parse.return_value = (
+            {
+                "source_sha256": "a" * 64,
+                "parse_method": "image_deterministic_v1",
+                "result_source": "deterministic",
+                "warnings": [],
+                "lines": [],
+            },
+            "",
+        )
+        from .models import QuotationSettings
+
+        quotation_settings = QuotationSettings.get_solo()
+        quotation_settings.ai_pdf_vision_enabled = True
+        quotation_settings.save(
+            update_fields=["ai_pdf_vision_enabled", "updated_at"]
+        )
+        attachments = [
+            {
+                "filename": f"customer-image-{index}.png",
+                "mime_type": "image/png",
+                "size": 12_000,
+                "attachment_id": f"image-{index}",
+                "part_id": str(index),
+            }
+            for index in range(5)
+        ]
+        gmail_import = self.issue_and_claim(anchor="many-images")
+        message = gmail_message(
+            "many-images",
+            body="Please quote the attached screenshots.",
+            attachments=attachments,
+        )
+
+        _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertEqual(
+            [
+                call.kwargs["allow_ai_vision"]
+                for call in mock_parse.call_args_list
+            ],
+            [True, True, True, False, False],
+        )
+
+    @patch("quotations.gmail_inquiry_import._parse_attachment")
+    def test_generic_signature_image_bundle_is_skipped_beside_rfq_document(
+        self,
+        mock_parse,
+    ):
+        images = [
+            {
+                "filename": f"image00{index}.png",
+                "mime_type": "image/png",
+                "size": 12_000,
+                "attachment_id": f"signature-{index}",
+                "part_id": str(index),
+            }
+            for index in range(1, 5)
+        ]
+        document = {
+            "filename": "requirements.pdf",
+            "mime_type": "application/pdf",
+            "size": 20_000,
+            "attachment_id": "rfq-document",
+            "part_id": "5",
+        }
+        attachments = [*images, document]
+        self.assertTrue(
+            _looks_like_signature_image_bundle_member(
+                images[0],
+                attachments,
+                "Please find attached requirements.",
+            )
+        )
+        self.assertFalse(
+            _looks_like_signature_image_bundle_member(
+                images[0],
+                attachments,
+                "Please review the attached screenshot and requirements.",
+            )
+        )
+        self.assertFalse(
+            _looks_like_signature_image_bundle_member(
+                images[0],
+                images,
+                "Please quote.",
+            )
+        )
+        mock_parse.return_value = (
+            {
+                "source_sha256": "b" * 64,
+                "parse_method": "pymupdf_pdfplumber_table_v2",
+                "result_source": "deterministic",
+                "warnings": [],
+                "lines": [
+                    {
+                        "raw_name": "First Aid Kit",
+                        "quantity": "2",
+                        "unit": "NOS",
+                        "parse_status": "parsed",
+                        "parse_confidence": 0.95,
+                    }
+                ],
+            },
+            "",
+        )
+        gmail_import = self.issue_and_claim(anchor="signature-bundle")
+        message = gmail_message(
+            "signature-bundle",
+            body="Please find attached requirements.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertEqual(mock_parse.call_count, 1)
+        self.assertEqual(
+            mock_parse.call_args.args[2]["filename"],
+            "requirements.pdf",
+        )
+        self.assertEqual(
+            [
+                row["parse_status"]
+                for row in result["attachment_manifest"][:4]
+            ],
+            ["ignored", "ignored", "ignored", "ignored"],
+        )
+
     def test_signature_and_sent_alias_content_cannot_become_inquiry_rows(self):
         gmail_import = self.issue_and_claim(anchor="signature-message")
         inbound = gmail_message(
@@ -2117,6 +2264,87 @@ class GmailInquiryImportTests(TestCase):
             ["Please also quote 10 boxes gloves."],
         )
         self.assertIn(body, result["preview"]["original_text"])
+
+    def test_gmail_prose_filter_drops_generic_greeting_and_attachment_request(self):
+        body = (
+            "Dear,\n"
+            "Good morning,\n"
+            "Kindly find attached requirement for EVH Project - AL BAHIA.\n"
+            "Please provide your best quotation as soon as possible."
+        )
+        message = gmail_message(
+            "generic-rfq-prose",
+            body=body,
+        )
+        gmail_import = self.issue_and_claim(anchor="generic-rfq-prose")
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        body_evidence = next(
+            source
+            for source in result["evidence"]
+            if source["kind"] == "email_body"
+        )
+        self.assertEqual(body_evidence["line_count"], 0)
+        self.assertEqual(body_evidence["rows"], [])
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertIn(body, result["preview"]["original_text"])
+
+    def test_semantic_omission_guard_does_not_restore_clear_email_prose(self):
+        message = {
+            "gmail_message_id": "prose-message",
+            "is_outbound": False,
+            "_body_text": "",
+        }
+        evidence = [
+            {
+                "source_key": "prose-source",
+                "gmail_message_id": "prose-message",
+                "kind": "email_body",
+                "filename": "",
+                "rows": [
+                    {
+                        "_evidence_row_key": "prose-row",
+                        "raw_name": "Dear,",
+                        "raw_line": "Dear,",
+                        "raw_source_line": "Dear,",
+                        "quantity": None,
+                        "unit": "",
+                        "parse_status": "needs_review",
+                    }
+                ],
+            }
+        ]
+
+        result = _validate_semantic_thread_result(
+            {
+                "messages": [
+                    {
+                        "gmail_message_id": "prose-message",
+                        "classification": "initial_inquiry",
+                        "usage": "used",
+                        "reason": "Customer request.",
+                        "confidence": 1,
+                    }
+                ],
+                "rows": [],
+                "warnings": [],
+                "thread_summary": "",
+            },
+            [message],
+            evidence,
+        )
+
+        self.assertEqual(result["rows"], [])
+        self.assertFalse(
+            any("restored as uncertain" in warning for warning in result["warnings"])
+        )
 
     @patch("quotations.gmail_inquiry_import._parse_attachment")
     def test_attachment_manifest_is_complete_and_global_parse_cap_is_enforced(

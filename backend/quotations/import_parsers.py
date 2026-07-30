@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - libmagic is optional and platform depend
     magic = None
 
 from .import_rules import (
+    HeaderDetection,
     classify_header_cell,
     detect_header_row,
     parse_inquiry_line,
@@ -834,6 +835,115 @@ def _looks_like_pdf_metadata_table(rows):
     return metadata_hits >= max(1, len(texts) - 1)
 
 
+def _infer_headerless_pdf_header(rows):
+    """Infer a conservative Description/Quantity/Unit grid from PDF table rows.
+
+    Some report generators draw the column headings outside the ruled table.
+    ``pdfplumber`` then returns a reliable data grid with no header row.  Only
+    infer a layout when at least three rows consistently contain an alphabetic
+    description immediately followed by a numeric quantity and a short unit.
+    """
+
+    data_rows = [
+        tuple(row or [])
+        for row in rows
+        if row and any(_cell_text(cell) for cell in row)
+    ]
+    if len(data_rows) < 3:
+        return None
+
+    max_columns = max((len(row) for row in data_rows), default=0)
+    candidates = []
+    for quantity_index in range(1, max_columns - 1):
+        description_index = quantity_index - 1
+        unit_index = quantity_index + 1
+        matches = []
+        considered = 0
+        for row in data_rows:
+            if unit_index >= len(row):
+                continue
+            description = _cell_text(row[description_index])
+            quantity_text = _cell_text(row[quantity_index])
+            unit_text = _cell_text(row[unit_index])
+            if not any((description, quantity_text, unit_text)):
+                continue
+            considered += 1
+            quantity, unit = split_quantity_unit(quantity_text, unit_text)
+            short_unit = bool(
+                unit
+                and len(unit) <= 12
+                and re.fullmatch(r"[A-Za-z][A-Za-z ._-]*", unit)
+            )
+            plausible_description = bool(
+                len(re.findall(r"[A-Za-z]", description)) >= 3
+                and classify_header_cell(description) is None
+                and not is_noise_line(description)
+            )
+            if quantity is not None and short_unit and plausible_description:
+                matches.append(row)
+
+        support = len(matches)
+        ratio = support / max(considered, 1)
+        if support >= 3 and ratio >= 0.6:
+            candidates.append(
+                (
+                    ratio,
+                    support,
+                    description_index,
+                    quantity_index,
+                    unit_index,
+                    matches,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    (
+        ratio,
+        support,
+        description_index,
+        quantity_index,
+        unit_index,
+        matching_rows,
+    ) = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+    columns = {
+        "requested_item_name": description_index,
+        "quantity": quantity_index,
+        "unit": unit_index,
+    }
+
+    # Prefer the left-most consistently numeric column before the description
+    # as the line number. A dedicated serial column protects medically
+    # significant leading numbers in descriptions from being stripped.
+    for candidate_index in range(description_index):
+        serial_values = [
+            _cell_text(row[candidate_index])
+            for row in matching_rows
+            if candidate_index < len(row) and _cell_text(row[candidate_index])
+        ]
+        if (
+            serial_values
+            and len(serial_values) >= max(2, int(len(matching_rows) * 0.6))
+            and all(re.fullmatch(r"\d{1,5}", value) for value in serial_values)
+        ):
+            columns["serial_no"] = candidate_index
+            break
+
+    return HeaderDetection(
+        row_offset=-1,
+        row_number=0,
+        columns=columns,
+        score=round(8 + support + ratio, 2),
+        labels={
+            "requested_item_name": "inferred description",
+            "quantity": "inferred quantity",
+            "unit": "inferred unit",
+        },
+        data_score=float(support),
+    )
+
+
 def _parse_pdfplumber_tables(data):
     lines = []
     page_metadata = []
@@ -848,6 +958,8 @@ def _parse_pdfplumber_tables(data):
                 page_tables_seen += 1
                 rows = [(index + 1, tuple(row or [])) for index, row in enumerate(table)]
                 header = detect_header_row([row for _, row in rows], max_scan_rows=10)
+                if not header:
+                    header = _infer_headerless_pdf_header([row for _, row in rows])
                 if header and header.data_score > 0:
                     current_header = header
                     for row_number, row in rows[header.row_offset + 1 :]:
