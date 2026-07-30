@@ -223,14 +223,26 @@ class _ClipboardTableParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.rows = []
+        self.tables = []
+        self._table_stack = []
         self._in_cell = False
         self._current_row = None
+        self._current_row_table = None
         self._current_cell = []
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
-        if tag == "tr":
+        if tag == "table":
+            table_rows = []
+            self.tables.append(table_rows)
+            self._table_stack.append(table_rows)
+        elif tag == "tr":
             self._current_row = []
+            self._current_row_table = (
+                self._table_stack[-1]
+                if self._table_stack
+                else None
+            )
         elif tag in {"td", "th"} and self._current_row is not None:
             self._in_cell = True
             self._current_cell = []
@@ -248,7 +260,12 @@ class _ClipboardTableParser(HTMLParser):
         elif tag == "tr" and self._current_row is not None:
             if _meaningful_cells(self._current_row):
                 self.rows.append(self._current_row)
+                if self._current_row_table is not None:
+                    self._current_row_table.append(self._current_row)
             self._current_row = None
+            self._current_row_table = None
+        elif tag == "table" and self._table_stack:
+            self._table_stack.pop()
 
 
 def normalize_import_line(value):
@@ -1013,13 +1030,159 @@ def _parse_structured_rows(rows, **source_meta):
     return lines, skipped
 
 
-def parse_html_table_lines(raw_html, **source_meta):
+HEADERLESS_ITEM_CODE_RE = re.compile(
+    r"^(?=.{3,40}$)(?=.*\d)[A-Za-z0-9][A-Za-z0-9._/-]*$"
+)
+HEADERLESS_UOM_CODES = {
+    *(unit.upper() for unit in UNIT_WORDS),
+    "AMP",
+    "AMPS",
+    "BTL",
+    "CTN",
+    "EA",
+    "EACH",
+    "NUM",
+    "PK",
+}
+
+
+def _parse_headerless_reference_grid(rows, **source_meta):
+    """Recover item grids from ERP emails that omit their column headers.
+
+    A row is accepted only when several adjacent rows share the conservative
+    ``item code | description | reference | numeric value | UOM`` shape.
+    Requiring a repeated grid prevents ordinary signature/contact tables from
+    becoming inquiry lines.
+    """
+
+    candidate_runs = []
+    current_run = []
+    for source_row, row in enumerate(rows, start=1):
+        cells = [_cell_text(value) for value in row]
+        if len(cells) < 5:
+            if current_run:
+                candidate_runs.append(current_run)
+                current_run = []
+            continue
+        item_code, item_name = cells[0], cells[1]
+        reference_value = parse_decimal(cells[3])
+        unit = normalize_unit(cells[4])
+        if (
+            not HEADERLESS_ITEM_CODE_RE.fullmatch(item_code)
+            or reference_value is None
+            or unit.upper() not in HEADERLESS_UOM_CODES
+            or len(item_name) < 4
+            or len(item_name) > 255
+            or len(re.findall(r"[A-Za-z]", item_name)) < 3
+            or is_noise_line(item_name)
+            or is_obvious_po_metadata_item(item_name)
+        ):
+            if current_run:
+                candidate_runs.append(current_run)
+                current_run = []
+            continue
+        candidate = {
+            "source_row": source_row,
+            "row": row,
+            "width": len(cells),
+            "item_code": item_code,
+            "item_name": item_name,
+            "reference_value": reference_value,
+            "unit": unit,
+        }
+        if (
+            current_run
+            and current_run[-1]["width"] != candidate["width"]
+        ):
+            candidate_runs.append(current_run)
+            current_run = []
+        current_run.append(candidate)
+    if current_run:
+        candidate_runs.append(current_run)
+
+    candidates = [
+        candidate
+        for run in candidate_runs
+        if len(run) >= 2
+        for candidate in run
+    ]
+    if not candidates:
+        return [], 0
+
+    lines = []
+    for candidate in candidates:
+        row = candidate["row"]
+        reference_parts = []
+        if len(row) > 2 and _cell_text(row[2]):
+            reference_parts.append(f"Reference: {_cell_text(row[2])}")
+        if len(row) > 5 and _cell_text(row[5]):
+            reference_parts.append(f"Category: {_cell_text(row[5])}")
+        lines.append(
+            make_preview_line(
+                raw_line=row_to_text(row),
+                raw_source_line=row_to_text(row),
+                raw_name=candidate["item_name"],
+                quantity=None,
+                unit=candidate["unit"],
+                notes="; ".join(reference_parts),
+                parse_status=InquiryLine.PARSE_NEEDS_REVIEW,
+                parse_confidence=0.78,
+                serial_no=candidate["item_code"],
+                # With no headers the numeric column is evidence, never one
+                # of our selling prices.
+                customer_unit_price=decimal_to_preview(
+                    candidate["reference_value"]
+                ),
+                source_row=candidate["source_row"],
+                row_number=candidate["source_row"],
+                **source_meta,
+            )
+        )
+    return lines, max(0, len(rows) - len(lines))
+
+
+def parse_html_table_lines(
+    raw_html,
+    *,
+    allow_headerless_reference_grid=False,
+    **source_meta,
+):
     html = str(raw_html or "")
     if "<table" not in html.lower() and "<tr" not in html.lower():
         return [], 0
     parser = _ClipboardTableParser()
     parser.feed(html)
-    return _parse_structured_rows(parser.rows, **source_meta)
+    table_groups = [
+        table_rows
+        for table_rows in parser.tables
+        if table_rows
+    ] or [parser.rows]
+    structured_lines = []
+    structured_skipped = 0
+    for table_rows in table_groups:
+        lines, skipped = _parse_structured_rows(
+            table_rows,
+            **source_meta,
+        )
+        structured_lines.extend(lines)
+        structured_skipped += skipped
+    if structured_lines:
+        # Explicitly headed tables are authoritative. Headerless tables in
+        # the same email are commonly signatures or layout furniture.
+        return structured_lines, structured_skipped
+    if not allow_headerless_reference_grid:
+        return [], 0
+
+    headerless_lines = []
+    headerless_skipped = 0
+    for table_rows in table_groups:
+        lines, skipped = _parse_headerless_reference_grid(
+            table_rows,
+            **source_meta,
+        )
+        headerless_lines.extend(lines)
+        headerless_skipped += skipped
+    return headerless_lines, headerless_skipped
 
 
 def _split_delimited_text_rows(raw_text):

@@ -2163,7 +2163,11 @@ def _build_source_analysis(
         )
         source_key = _source_key(message_id, "body", "newest")
         if not outbound and (body_text or body_html):
-            preview = parse_text_preview(body_text, raw_html=body_html)
+            preview = parse_text_preview(
+                body_text,
+                raw_html=body_html,
+                allow_headerless_reference_grid=True,
+            )
             source = _source_evidence(
                 source_key=source_key,
                 message_id=message_id,

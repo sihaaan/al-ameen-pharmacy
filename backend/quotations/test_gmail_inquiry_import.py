@@ -1167,6 +1167,96 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(outbound_manifest["classification"], "our_reply")
         self.assertEqual(outbound_manifest["usage"], "context")
 
+    def test_headerless_erp_email_grid_keeps_products_and_drops_signature_rows(self):
+        gmail_import = self.issue_and_claim(anchor="headerless-grid")
+        html = """
+            <p>Kindly send images of first aid box for below codes.</p>
+            <table>
+              <tr>
+                <td>10103352</td>
+                <td>FIRST AID BOX 50 PERSON IN METAL BOX</td>
+                <td>AL AMEEN PHARMACY L.L.C</td>
+                <td>120.00</td>
+                <td>EA</td>
+                <td>HSE</td>
+              </tr>
+              <tr>
+                <td>10109149</td>
+                <td>FIRST AID BOX KIT WITH MEDICINE 100 - 200 PERSONS</td>
+                <td>AL AMEEN PHARMACY L.L.C</td>
+                <td>220.00</td>
+                <td>EA</td>
+                <td>HSE</td>
+              </tr>
+              <tr>
+                <td>10119116</td>
+                <td>FIRST AID BOX - CUSTOMIZE FOR HEALTH CARE</td>
+                <td>AL AMEEN PHARMACY L.L.C</td>
+                <td>340.00</td>
+                <td>EA</td>
+                <td>HSE</td>
+              </tr>
+            </table>
+            <table>
+              <tr><td>Vinod Kumar.V SR. Store Keeper</td></tr>
+              <tr><td>M +971 551004313</td></tr>
+              <tr><td>Confidentiality disclaimer</td></tr>
+            </table>
+        """
+        body = (
+            "Kindly send images of first aid box for below codes.\n"
+            "10103352\nFIRST AID BOX 50 PERSON IN METAL BOX\n"
+            "AL AMEEN PHARMACY L.L.C\n120.00\nEA\nHSE\n"
+            "10109149\nFIRST AID BOX KIT WITH MEDICINE 100 - 200 PERSONS\n"
+            "AL AMEEN PHARMACY L.L.C\n220.00\nEA\nHSE\n"
+            "10119116\nFIRST AID BOX - CUSTOMIZE FOR HEALTH CARE\n"
+            "AL AMEEN PHARMACY L.L.C\n340.00\nEA\nHSE\n"
+            "Vinod Kumar.V\nSR. Store Keeper\nConfidentiality disclaimer"
+        )
+        message = gmail_message(
+            "headerless-grid",
+            body=body,
+            html=html,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        rows = result["preview"]["lines"]
+        self.assertEqual(
+            [row["raw_name"] for row in rows],
+            [
+                "First Aid box 50 Person in Metal box",
+                "First Aid box Kit with Medicine 100 - 200 Persons",
+                "First Aid box - Customize for Health Care",
+            ],
+        )
+        self.assertEqual(
+            [row["unit"] for row in rows],
+            ["EA", "EA", "EA"],
+        )
+        self.assertEqual(
+            [
+                Decimal(str(row["customer_unit_price"]))
+                for row in rows
+            ],
+            [Decimal("120.00"), Decimal("220.00"), Decimal("340.00")],
+        )
+        self.assertTrue(all(row["unit_price"] is None for row in rows))
+        self.assertTrue(all(row["quantity"] is None for row in rows))
+        self.assertFalse(
+            any(
+                "Vinod" in row["raw_name"]
+                or "disclaimer" in row["raw_name"].lower()
+                for row in rows
+            )
+        )
+
     @override_settings(GMAIL_ADDON_MAX_THREAD_MESSAGES=3)
     @patch("quotations.gmail_inquiry_import.get_valid_access_token")
     @patch("quotations.gmail_inquiry_import._json_request")

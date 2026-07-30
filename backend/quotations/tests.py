@@ -2105,6 +2105,135 @@ class InquiryParserRuleTests(APITestCase):
         self.assertEqual(preview["lines"][0]["unit"], "NUM")
         self.assertEqual(preview["lines"][1]["raw_name"], "Glucometer")
 
+    def test_headerless_reference_grid_is_opt_in_and_never_sets_our_price(self):
+        html = """
+        <table>
+          <tr><td>10103352</td><td>FIRST AID BOX 50 PERSON</td><td>SUPPLIER</td><td>120.00</td><td>EA</td></tr>
+          <tr><td>10109149</td><td>FIRST AID BOX 100 PERSON</td><td>SUPPLIER</td><td>220.00</td><td>EA</td></tr>
+        </table>
+        """
+
+        ordinary = parse_text_preview("No item rows", raw_html=html)
+        gmail = parse_text_preview(
+            "No item rows",
+            raw_html=html,
+            allow_headerless_reference_grid=True,
+        )
+
+        self.assertFalse(
+            any(
+                line.get("serial_no") in {"10103352", "10109149"}
+                for line in ordinary["lines"]
+            )
+        )
+        self.assertEqual(
+            [line["raw_name"] for line in gmail["lines"]],
+            ["First Aid box 50 Person", "First Aid box 100 Person"],
+        )
+        self.assertTrue(
+            all(line.get("unit_price") is None for line in gmail["lines"])
+        )
+        self.assertEqual(
+            [
+                Decimal(str(line["customer_unit_price"]))
+                for line in gmail["lines"]
+            ],
+            [Decimal("120.00"), Decimal("220.00")],
+        )
+
+    def test_headerless_reference_grid_cannot_join_separate_tables(self):
+        html = """
+        <table>
+          <tr><td>10103352</td><td>FIRST AID BOX 50 PERSON</td><td>SUPPLIER</td><td>120.00</td><td>EA</td></tr>
+        </table>
+        <table>
+          <tr><td>10109149</td><td>FIRST AID BOX 100 PERSON</td><td>SUPPLIER</td><td>220.00</td><td>EA</td></tr>
+        </table>
+        """
+
+        preview = parse_text_preview(
+            "No item rows",
+            raw_html=html,
+            allow_headerless_reference_grid=True,
+        )
+
+        self.assertFalse(
+            any(
+                line.get("serial_no") in {"10103352", "10109149"}
+                for line in preview["lines"]
+            )
+        )
+
+    def test_headerless_reference_grid_rejects_non_uom_contact_rows(self):
+        html = """
+        <table>
+          <tr><td>INV-2026</td><td>ACCOUNTS PAYABLE SUMMARY</td><td>JULY</td><td>120</td><td>MANAGER</td></tr>
+          <tr><td>PO-123</td><td>PAYMENT STATUS OUTSTANDING</td><td>DUBAI</td><td>220</td><td>FINANCE</td></tr>
+        </table>
+        """
+
+        preview = parse_text_preview(
+            "No item rows",
+            raw_html=html,
+            allow_headerless_reference_grid=True,
+        )
+
+        self.assertFalse(
+            any(
+                line["raw_name"]
+                in {
+                    "Accounts Payable Summary",
+                    "Payment Status Outstanding",
+                }
+                for line in preview["lines"]
+            )
+        )
+
+    def test_headerless_reference_grid_requires_consecutive_rows(self):
+        html = """
+        <table>
+          <tr><td>10103352</td><td>FIRST AID BOX 50 PERSON</td><td>SUPPLIER</td><td>120.00</td><td>EA</td></tr>
+          <tr><td>Warehouse contact details</td></tr>
+          <tr><td>10109149</td><td>FIRST AID BOX 100 PERSON</td><td>SUPPLIER</td><td>220.00</td><td>EA</td></tr>
+        </table>
+        """
+
+        preview = parse_text_preview(
+            "No item rows",
+            raw_html=html,
+            allow_headerless_reference_grid=True,
+        )
+
+        self.assertFalse(
+            any(
+                line.get("serial_no") in {"10103352", "10109149"}
+                for line in preview["lines"]
+            )
+        )
+
+    def test_structured_html_table_wins_over_headerless_layout_tables(self):
+        html = """
+        <table>
+          <tr><th>Item Description</th><th>Qty</th><th>UOM</th></tr>
+          <tr><td>PULSE OXIMETER</td><td>2</td><td>PCS</td></tr>
+        </table>
+        <table>
+          <tr><td>10103352</td><td>FIRST AID BOX 50 PERSON</td><td>SUPPLIER</td><td>120.00</td><td>EA</td></tr>
+          <tr><td>10109149</td><td>FIRST AID BOX 100 PERSON</td><td>SUPPLIER</td><td>220.00</td><td>EA</td></tr>
+        </table>
+        """
+
+        preview = parse_text_preview(
+            "No item rows",
+            raw_html=html,
+            allow_headerless_reference_grid=True,
+        )
+
+        self.assertEqual(
+            [line["raw_name"] for line in preview["lines"]],
+            ["Pulse Oximeter"],
+        )
+
     def test_item_name_standardization_preserves_pharmacy_specs(self):
         cases = [
             ('adhesive tape 1/2" x 10 yds', 'Adhesive Tape 1/2" x 10 yds'),

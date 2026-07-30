@@ -351,12 +351,22 @@ def _preview_response(
     return payload
 
 
-def parse_text_preview(raw_text, raw_html=""):
+def parse_text_preview(
+    raw_text,
+    raw_html="",
+    *,
+    allow_headerless_reference_grid=False,
+):
     lines = []
     skipped = 0
     parse_method = "deterministic_text_v2"
     if raw_html:
-        lines, skipped = parse_html_table_lines(raw_html)
+        lines, skipped = parse_html_table_lines(
+            raw_html,
+            allow_headerless_reference_grid=(
+                allow_headerless_reference_grid
+            ),
+        )
         if lines:
             parse_method = "deterministic_clipboard_html_table_v1"
     if not lines:
