@@ -225,7 +225,8 @@ class GmailAddonEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        card = payload["renderActions"]["action"]["navigations"][0]["pushCard"]
+        self.assertEqual(set(payload), {"action"})
+        card = payload["action"]["navigations"][0]["pushCard"]
         widgets = card["sections"][0]["widgets"]
         selection = widgets[1]["selectionInput"]
         self.assertEqual(selection["name"], "message_ids")
@@ -495,7 +496,8 @@ class GmailAddonEndpointTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        card = payload["renderActions"]["action"]["navigations"][0]["pushCard"]
+        self.assertEqual(set(payload), {"action"})
+        card = payload["action"]["navigations"][0]["pushCard"]
         self.assertEqual(card["header"]["title"], "Reconnect shared Gmail")
         widgets = card["sections"][0]["widgets"]
         self.assertIn(
@@ -511,7 +513,7 @@ class GmailAddonEndpointTests(TestCase):
             ),
         )
         self.assertEqual(settings_link["openAs"], "FULL_SIZE")
-        self.assertEqual(settings_link["onClose"], "RELOAD_ADD_ON")
+        self.assertEqual(settings_link["onClose"], "RELOAD")
         self.assertEqual(
             self.verified_tokens,
             [

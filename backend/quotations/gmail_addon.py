@@ -486,11 +486,11 @@ def _contextual_card(*, summaries, anchor_message_id, action_url):
             }
         ],
     }
+    # Contextual triggers return RenderActions directly. The renderActions
+    # wrapper is reserved for SubmitFormResponse payloads from button actions.
     return {
-        "renderActions": {
-            "action": {
-                "navigations": [{"pushCard": card}],
-            }
+        "action": {
+            "navigations": [{"pushCard": card}],
         }
     }
 
@@ -544,7 +544,7 @@ def _shared_gmail_reconnect_response(*, action_callback=False):
                                         "openLink": {
                                             "url": _shared_gmail_settings_url(),
                                             "openAs": "FULL_SIZE",
-                                            "onClose": "RELOAD_ADD_ON",
+                                            "onClose": "RELOAD",
                                         }
                                     },
                                 }
@@ -562,13 +562,12 @@ def _shared_gmail_reconnect_response(*, action_callback=False):
         action["notification"] = {
             "text": "Shared Gmail must be reconnected."
         }
-    return JsonResponse(
-        {
-            "renderActions": {
-                "action": action,
-            }
-        }
-    )
+    render_actions = {"action": action}
+    if action_callback:
+        # OnClick HTTP callbacks return SubmitFormResponse.
+        return JsonResponse({"renderActions": render_actions})
+    # Gmail contextual triggers return RenderActions directly.
+    return JsonResponse(render_actions)
 
 
 def _notification_response(text, *, status=200):
