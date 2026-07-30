@@ -1,7 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import CompanyManager from './CompanyManager';
 import QuoteItemManager from './QuoteItemManager';
 import InquiryManager from './InquiryManager';
+import GmailInquiryReview from './GmailInquiryReview';
 import QuotationList from './QuotationList';
 import QuotationEditor from './QuotationEditor';
 import QuotationOutcomeReview from './QuotationOutcomeReview';
@@ -28,39 +30,142 @@ const tabs = [
   { id: 'settings', label: 'Settings' },
 ];
 
+const positiveId = (value) => {
+  const normalized = String(value ?? '').trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+export const quotationRouteFromSearch = (search) => {
+  const params = new URLSearchParams(search || '');
+  const gmailToken = params.get('gmail_import') || '';
+  const parsedGmailImportId = positiveId(params.get('gmail_import_id'));
+  const gmailImportId = parsedGmailImportId ? String(parsedGmailImportId) : '';
+  const quoteId = positiveId(params.get('quote_id'));
+  const requestedTab = params.get('quotation_tab');
+
+  if (gmailToken || gmailImportId) {
+    return {
+      activeTab: 'inquiries',
+      gmailToken,
+      gmailImportId,
+      quoteId: null,
+    };
+  }
+  if (quoteId) {
+    return {
+      activeTab: 'quotes',
+      gmailToken: '',
+      gmailImportId: '',
+      quoteId,
+    };
+  }
+  return {
+    activeTab: tabs.some((candidate) => candidate.id === requestedTab) ? requestedTab : 'dashboard',
+    gmailToken: '',
+    gmailImportId: '',
+    quoteId: null,
+  };
+};
+
 const QuotationModule = () => {
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [editingQuoteId, setEditingQuoteId] = useState(null);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const route = useMemo(() => quotationRouteFromSearch(location.search), [location.search]);
+  const [activeTab, setActiveTab] = useState(route.activeTab);
+  const [editingQuoteId, setEditingQuoteId] = useState(route.quoteId);
   const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const tab = params.get('quotation_tab');
-    if (tabs.some((candidate) => candidate.id === tab)) {
-      setActiveTab(tab);
+    setActiveTab(route.activeTab);
+    if (route.quoteId) {
+      setEditingQuoteId(route.quoteId);
+      setReviewingOutcomeQuoteId(null);
+    } else {
+      setEditingQuoteId(null);
+      setReviewingOutcomeQuoteId(null);
     }
-  }, []);
+  }, [
+    route.activeTab,
+    route.gmailImportId,
+    route.gmailToken,
+    route.quoteId,
+  ]);
 
-  const refresh = () => setRefreshKey((value) => value + 1);
+  const updateLocation = useCallback((mutate, { replace = false } = {}) => {
+    const params = new URLSearchParams(location.search);
+    params.set('admin_tab', 'quotations');
+    mutate(params);
+    const query = params.toString();
+    navigate(`${location.pathname}${query ? `?${query}` : ''}${location.hash || ''}`, { replace });
+  }, [location.hash, location.pathname, location.search, navigate]);
 
-  const openQuote = (quoteId) => {
-    setEditingQuoteId(quoteId);
+  const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
+
+  const openQuote = useCallback((quoteId) => {
+    const exactQuoteId = positiveId(quoteId);
+    if (!exactQuoteId) return;
+    setEditingQuoteId(exactQuoteId);
     setReviewingOutcomeQuoteId(null);
     setActiveTab('quotes');
-  };
+    updateLocation((params) => {
+      params.set('quotation_tab', 'quotes');
+      params.set('quote_id', String(exactQuoteId));
+      params.delete('gmail_import');
+      params.delete('gmail_import_id');
+    });
+  }, [updateLocation]);
 
-  const openOutcome = (quoteId) => {
+  const openOutcome = useCallback((quoteId) => {
     setReviewingOutcomeQuoteId(quoteId);
     setEditingQuoteId(null);
     setActiveTab('quotes');
-  };
+  }, []);
 
-  const closeQuote = () => {
+  const closeQuote = useCallback(() => {
     setEditingQuoteId(null);
     setReviewingOutcomeQuoteId(null);
     refresh();
-  };
+    updateLocation((params) => {
+      params.set('quotation_tab', 'quotes');
+      params.delete('quote_id');
+    }, { replace: true });
+  }, [refresh, updateLocation]);
+
+  const selectTab = useCallback((tabId) => {
+    setActiveTab(tabId);
+    setEditingQuoteId(null);
+    setReviewingOutcomeQuoteId(null);
+    updateLocation((params) => {
+      params.set('quotation_tab', tabId);
+      params.delete('gmail_import');
+      params.delete('gmail_import_id');
+      params.delete('quote_id');
+    });
+  }, [updateLocation]);
+
+  const rememberClaimedImport = useCallback((claimedImportId) => {
+    const normalizedId = positiveId(claimedImportId);
+    if (!normalizedId) return;
+    updateLocation((params) => {
+      params.set('quotation_tab', 'inquiries');
+      params.set('gmail_import_id', String(normalizedId));
+      params.delete('gmail_import');
+      params.delete('quote_id');
+    }, { replace: true });
+  }, [updateLocation]);
+
+  const closeGmailReview = useCallback(() => {
+    setActiveTab('inquiries');
+    updateLocation((params) => {
+      params.set('quotation_tab', 'inquiries');
+      params.delete('gmail_import');
+      params.delete('gmail_import_id');
+      params.delete('quote_id');
+    }, { replace: true });
+  }, [updateLocation]);
 
   return (
     <div className="quotation-module">
@@ -77,13 +182,7 @@ const QuotationModule = () => {
             key={tab.id}
             type="button"
             className={`qm-tab ${activeTab === tab.id ? 'active' : ''}`}
-            onClick={() => {
-              setActiveTab(tab.id);
-              if (tab.id !== 'quotes') {
-                setEditingQuoteId(null);
-                setReviewingOutcomeQuoteId(null);
-              }
-            }}
+            onClick={() => selectTab(tab.id)}
           >
             {tab.label}
           </button>
@@ -91,10 +190,23 @@ const QuotationModule = () => {
       </div>
 
       <div className="qm-body">
-        {activeTab === 'dashboard' && <QuotationDashboard key={refreshKey} onOpenQuotes={() => setActiveTab('quotes')} />}
+        {activeTab === 'dashboard' && <QuotationDashboard key={refreshKey} onOpenQuotes={() => selectTab('quotes')} />}
         {activeTab === 'companies' && <CompanyManager />}
         {activeTab === 'items' && <QuoteItemManager />}
-        {activeTab === 'inquiries' && <InquiryManager onOpenQuote={openQuote} />}
+        {activeTab === 'inquiries' && (
+          route.gmailToken || route.gmailImportId ? (
+            <GmailInquiryReview
+              key={route.gmailToken ? `token:${route.gmailToken}` : `import:${route.gmailImportId}`}
+              token={route.gmailToken}
+              importId={route.gmailImportId}
+              onClaimed={rememberClaimedImport}
+              onOpenQuote={openQuote}
+              onBack={closeGmailReview}
+            />
+          ) : (
+            <InquiryManager onOpenQuote={openQuote} />
+          )
+        )}
         {activeTab === 'quotes' && (
           reviewingOutcomeQuoteId ? (
             <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} />

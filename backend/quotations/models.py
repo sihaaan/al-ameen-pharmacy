@@ -455,6 +455,158 @@ class GmailOAuthConnection(models.Model):
         return self.email or f"Gmail connection for {self.user}"
 
 
+class GmailInquiryImport(models.Model):
+    """Durable, idempotent handoff from one Gmail thread to one quotation."""
+
+    MODE_CURRENT_MESSAGE = "current_message"
+    MODE_SELECTED_MESSAGES = "selected_messages"
+    MODE_AI_THREAD = "ai_thread"
+    MODE_CHOICES = [
+        (MODE_CURRENT_MESSAGE, "Current message"),
+        (MODE_SELECTED_MESSAGES, "Selected messages"),
+        (MODE_AI_THREAD, "AI-assisted thread"),
+    ]
+
+    STATUS_PENDING = "pending"
+    STATUS_CLAIMED = "claimed"
+    STATUS_ANALYZING = "analyzing"
+    STATUS_REVIEW_REQUIRED = "review_required"
+    STATUS_READY = "ready"
+    STATUS_CONFIRMED = "confirmed"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_CLAIMED, "Claimed"),
+        (STATUS_ANALYZING, "Analyzing"),
+        (STATUS_REVIEW_REQUIRED, "Review required"),
+        (STATUS_READY, "Ready"),
+        (STATUS_CONFIRMED, "Confirmed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inquiry_imports",
+    )
+    mailbox_email = models.EmailField(blank=True, db_index=True)
+    gmail_thread_id = models.CharField(max_length=255, blank=True, db_index=True)
+    anchor_message_id = models.CharField(max_length=255, db_index=True)
+    selected_message_ids = models.JSONField(default=list, blank=True)
+    mode = models.CharField(max_length=30, choices=MODE_CHOICES, default=MODE_CURRENT_MESSAGE)
+    source_fingerprint = models.CharField(max_length=64, blank=True, db_index=True)
+
+    # Raw handoff tokens are returned once and never persisted. Only this
+    # one-way digest is stored, so database access alone cannot replay a link.
+    handoff_token_hash = models.CharField(max_length=64, blank=True)
+    handoff_expires_at = models.DateTimeField(null=True, blank=True)
+    handoff_used_at = models.DateTimeField(null=True, blank=True)
+
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    message_manifest = models.JSONField(default=list, blank=True)
+    attachment_manifest = models.JSONField(default=list, blank=True)
+    analysis = models.JSONField(default=dict, blank=True)
+    evidence = models.JSONField(default=list, blank=True)
+    candidates = models.JSONField(default=dict, blank=True)
+    errors = models.JSONField(default=list, blank=True)
+    analysis_attempts = models.PositiveIntegerField(default=0)
+    analysis_started_at = models.DateTimeField(null=True, blank=True)
+    analyzed_at = models.DateTimeField(null=True, blank=True)
+
+    claimed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="claimed_gmail_inquiry_imports",
+    )
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    selected_company = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="selected_gmail_inquiry_imports",
+    )
+    selected_contact = models.ForeignKey(
+        CompanyContact,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="selected_gmail_inquiry_imports",
+    )
+    inquiry = models.OneToOneField(
+        "Inquiry",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="gmail_import",
+    )
+    quotation = models.OneToOneField(
+        "Quotation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="gmail_import",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["mailbox_email", "gmail_thread_id"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_fingerprint"],
+                condition=~models.Q(source_fingerprint=""),
+                name="uniq_gmail_inquiry_fingerprint",
+            ),
+            models.UniqueConstraint(
+                fields=["handoff_token_hash"],
+                condition=~models.Q(handoff_token_hash=""),
+                name="uniq_gmail_inquiry_token_hash",
+            ),
+            models.UniqueConstraint(
+                fields=["mailbox_email", "gmail_thread_id"],
+                condition=(
+                    models.Q(status="confirmed")
+                    & ~models.Q(mailbox_email="")
+                    & ~models.Q(gmail_thread_id="")
+                ),
+                name="uniq_confirmed_gmail_inquiry_thread",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Gmail inquiry {self.anchor_message_id} ({self.status})"
+
+
+class GmailInquiryHandoffToken(models.Model):
+    """One short-lived, one-way token digest for a Gmail intake handoff."""
+
+    gmail_import = models.ForeignKey(
+        GmailInquiryImport,
+        on_delete=models.CASCADE,
+        related_name="handoff_tokens",
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["gmail_import", "expires_at"]),
+        ]
+
+
 class MailboxPOAuditRun(models.Model):
     """Resumable ledger for a mailbox-wide, read-only PO inventory pass."""
 
@@ -933,12 +1085,14 @@ class Inquiry(models.Model):
     SOURCE_TYPE_EXCEL = "excel"
     SOURCE_TYPE_PDF = "pdf"
     SOURCE_TYPE_IMAGE = "image"
+    SOURCE_TYPE_GMAIL = "gmail"
     SOURCE_TYPE_CHOICES = [
         (SOURCE_TYPE_MANUAL, "Manual"),
         (SOURCE_TYPE_PASTED_TEXT, "Pasted Text"),
         (SOURCE_TYPE_EXCEL, "Excel"),
         (SOURCE_TYPE_PDF, "PDF"),
         (SOURCE_TYPE_IMAGE, "Image"),
+        (SOURCE_TYPE_GMAIL, "Gmail"),
     ]
 
     STATUS_DRAFT = "draft"

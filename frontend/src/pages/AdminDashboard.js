@@ -1,5 +1,5 @@
 // frontend/src/pages/AdminDashboard.js
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation, useNavigate } from 'react-router-dom';
 import axiosInstance from '../utils/axios';
@@ -9,11 +9,27 @@ import QuotationModule from '../components/quotations/QuotationModule';
 import AccountingModule from '../components/accounting/AccountingModule';
 import '../styles/Dashboard.css';
 
+const ADMIN_TABS = new Set(['overview', 'products', 'orders', 'quotations', 'accounting']);
+
+export const adminTabFromSearch = (search, canAccessAccounting = true) => {
+  const params = new URLSearchParams(search || '');
+  const requested = params.get('admin_tab');
+  if (!requested && ['quotation_tab', 'gmail_import', 'gmail_import_id', 'quote_id'].some((key) => params.has(key))) {
+    return 'quotations';
+  }
+  if (!ADMIN_TABS.has(requested)) return 'overview';
+  if (requested === 'accounting' && !canAccessAccounting) return 'overview';
+  return requested;
+};
+
 const AdminDashboard = () => {
   const { user, loading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [activeTab, setActiveTab] = useState('overview');
+  const canAccessAccounting = !!(user?.is_superuser || user?.can_access_accounting);
+  const [activeTab, setActiveTab] = useState(
+    () => adminTabFromSearch(location.search, canAccessAccounting)
+  );
   const [stats, setStats] = useState({
     totalProducts: 0,
     totalOrders: 0,
@@ -22,25 +38,8 @@ const AdminDashboard = () => {
   });
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState('');
-  const canAccessAccounting = !!(user?.is_superuser || user?.can_access_accounting);
 
-  // Check if user is admin
-  useEffect(() => {
-    if (loading) {
-      return;
-    }
-    if (!user) {
-      const next = `${location.pathname}${location.search}`;
-      navigate(`/login?next=${encodeURIComponent(next)}`);
-    } else if (!user.is_staff) {
-      alert('You do not have permission to access this page');
-      navigate('/');
-    } else {
-      fetchStats();
-    }
-  }, [user, loading, navigate, location.pathname, location.search]);
-
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     setStatsLoading(true);
     setStatsError('');
     try {
@@ -67,7 +66,42 @@ const AdminDashboard = () => {
     } finally {
       setStatsLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    setActiveTab(adminTabFromSearch(location.search, canAccessAccounting));
+  }, [canAccessAccounting, location.search]);
+
+  const selectAdminTab = (tab) => {
+    setActiveTab(tab);
+    const params = new URLSearchParams(location.search);
+    params.set('admin_tab', tab);
+    if (tab !== 'quotations') {
+      params.delete('quotation_tab');
+      params.delete('gmail_import');
+      params.delete('gmail_import_id');
+      params.delete('quote_id');
+    }
+    navigate(`${location.pathname}?${params.toString()}`, { replace: true });
   };
+
+  // Check if user is admin
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+    if (!user) {
+      const next = `${location.pathname}${location.search}`;
+      navigate(`/login?next=${encodeURIComponent(next)}`);
+    } else if (!user.is_staff) {
+      alert('You do not have permission to access this page');
+      navigate('/');
+    }
+  }, [user, loading, navigate, location.pathname, location.search]);
+
+  useEffect(() => {
+    if (!loading && user?.is_staff) fetchStats();
+  }, [fetchStats, loading, user?.id, user?.is_staff]);
 
   if (loading) {
     return (
@@ -75,6 +109,20 @@ const AdminDashboard = () => {
         <div className="admin-header">
           <h1>Admin Dashboard</h1>
           <p>Loading admin session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Do not mount quotation deep-link children until JWT-backed identity and
+  // staff access are known. In particular, this keeps one-time Gmail handoff
+  // claims from firing before the login redirect completes.
+  if (!user || !user.is_staff) {
+    return (
+      <div className="admin-dashboard">
+        <div className="admin-header">
+          <h1>Admin Dashboard</h1>
+          <p>{!user ? 'Redirecting to sign in...' : 'Checking staff access...'}</p>
         </div>
       </div>
     );
@@ -90,32 +138,32 @@ const AdminDashboard = () => {
       <div className="admin-tabs">
         <button
           className={`tab-button ${activeTab === 'overview' ? 'active' : ''}`}
-          onClick={() => setActiveTab('overview')}
+          onClick={() => selectAdminTab('overview')}
         >
           📊 Overview
         </button>
         <button
           className={`tab-button ${activeTab === 'products' ? 'active' : ''}`}
-          onClick={() => setActiveTab('products')}
+          onClick={() => selectAdminTab('products')}
         >
           📦 Products
         </button>
         <button
           className={`tab-button ${activeTab === 'orders' ? 'active' : ''}`}
-          onClick={() => setActiveTab('orders')}
+          onClick={() => selectAdminTab('orders')}
         >
           📋 Orders
         </button>
         <button
           className={`tab-button ${activeTab === 'quotations' ? 'active' : ''}`}
-          onClick={() => setActiveTab('quotations')}
+          onClick={() => selectAdminTab('quotations')}
         >
           Quotations
         </button>
         {canAccessAccounting && (
           <button
             className={`tab-button ${activeTab === 'accounting' ? 'active' : ''}`}
-            onClick={() => setActiveTab('accounting')}
+            onClick={() => selectAdminTab('accounting')}
           >
             Accounting
           </button>
@@ -165,21 +213,21 @@ const AdminDashboard = () => {
               <div className="action-buttons">
                 <button
                   className="action-button"
-                  onClick={() => setActiveTab('products')}
+                  onClick={() => selectAdminTab('products')}
                 >
                   <span>➕</span>
                   Manage Products
                 </button>
                 <button
                   className="action-button"
-                  onClick={() => setActiveTab('orders')}
+                  onClick={() => selectAdminTab('orders')}
                 >
                   <span>📦</span>
                   View Orders
                 </button>
                 <button
                   className="action-button"
-                  onClick={() => setActiveTab('quotations')}
+                  onClick={() => selectAdminTab('quotations')}
                 >
                   <span>QT</span>
                   Manage Quotations
@@ -187,7 +235,7 @@ const AdminDashboard = () => {
                 {canAccessAccounting && (
                   <button
                     className="action-button"
-                    onClick={() => setActiveTab('accounting')}
+                    onClick={() => selectAdminTab('accounting')}
                   >
                     <span>AC</span>
                     Prepare Statements

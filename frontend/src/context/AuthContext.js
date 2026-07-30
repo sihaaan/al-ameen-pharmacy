@@ -1,6 +1,6 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import axios from 'axios';
-import axiosInstance from '../utils/axios';
+import axiosInstance, { AUTH_SESSION_CLEARED_EVENT } from '../utils/axios';
 import { API_BASE_URL, AUTH_REQUEST_TIMEOUT_MS } from '../config';
 
 
@@ -34,6 +34,25 @@ export const AuthProvider = ({ children }) => {
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     }
     setLoading(false);
+  }, []);
+
+  // The API client owns automatic JWT refreshes. If it determines that the
+  // session has expired, keep React state in sync with the cleared token store
+  // before BrowserRouter moves to the login page.
+  useEffect(() => {
+    const handleSessionCleared = () => {
+      setUser(null);
+      setError(null);
+      setLoading(false);
+    };
+
+    window.addEventListener(AUTH_SESSION_CLEARED_EVENT, handleSessionCleared);
+    return () => {
+      window.removeEventListener(
+        AUTH_SESSION_CLEARED_EVENT,
+        handleSessionCleared
+      );
+    };
   }, []);
 
   // Login function

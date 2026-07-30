@@ -20,6 +20,7 @@ from .models import (
     ContractIntelligenceItem,
     ContractIntelligenceRun,
     ContractIntelligenceSource,
+    GmailInquiryImport,
     GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
@@ -241,6 +242,408 @@ class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
 
     def get_is_connected(self, obj):
         return obj.status == GmailOAuthConnection.STATUS_CONNECTED
+
+
+class GmailInquiryImportSerializer(serializers.ModelSerializer):
+    claimed_by_username = serializers.CharField(
+        source="claimed_by.username",
+        read_only=True,
+        allow_null=True,
+    )
+    company = serializers.PrimaryKeyRelatedField(
+        source="selected_company",
+        read_only=True,
+    )
+    contact = serializers.PrimaryKeyRelatedField(
+        source="selected_contact",
+        read_only=True,
+    )
+    company_id = serializers.SerializerMethodField()
+    contact_id = serializers.SerializerMethodField()
+    company_suggestion = serializers.SerializerMethodField()
+    contact_suggestion = serializers.SerializerMethodField()
+    subject = serializers.SerializerMethodField()
+    preview = serializers.SerializerMethodField()
+    lines = serializers.SerializerMethodField()
+    inquiry_id = serializers.IntegerField(read_only=True)
+    quotation_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = GmailInquiryImport
+        fields = [
+            "id",
+            "gmail_connection",
+            "mailbox_email",
+            "gmail_thread_id",
+            "anchor_message_id",
+            "selected_message_ids",
+            "mode",
+            "source_fingerprint",
+            "handoff_expires_at",
+            "handoff_used_at",
+            "status",
+            "message_manifest",
+            "attachment_manifest",
+            "analysis",
+            "evidence",
+            "candidates",
+            "errors",
+            "analysis_attempts",
+            "analysis_started_at",
+            "analyzed_at",
+            "claimed_by",
+            "claimed_by_username",
+            "claimed_at",
+            "selected_company",
+            "selected_contact",
+            "company",
+            "contact",
+            "inquiry",
+            "quotation",
+            "inquiry_id",
+            "quotation_id",
+            "company_id",
+            "contact_id",
+            "company_suggestion",
+            "contact_suggestion",
+            "subject",
+            "preview",
+            "lines",
+            "confirmed_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_company_id(self, obj):
+        return obj.selected_company_id or getattr(
+            getattr(obj, "inquiry", None),
+            "company_id",
+            None,
+        )
+
+    def get_contact_id(self, obj):
+        return obj.selected_contact_id or getattr(
+            getattr(obj, "inquiry", None),
+            "contact_id",
+            None,
+        )
+
+    def get_company_suggestion(self, obj):
+        recommended_id = (obj.candidates or {}).get("recommended_company_id")
+        for candidate in (obj.candidates or {}).get("companies") or []:
+            if candidate.get("company_id") == recommended_id:
+                return {
+                    "id": candidate.get("company_id"),
+                    "name": candidate.get("company_name") or "",
+                    "email": (candidate.get("emails") or [""])[0],
+                    "confidence": candidate.get("confidence"),
+                    "match_method": candidate.get("match_method") or "",
+                }
+        return None
+
+    def get_contact_suggestion(self, obj):
+        recommended_id = (obj.candidates or {}).get("recommended_contact_id")
+        for candidate in (obj.candidates or {}).get("contacts") or []:
+            if candidate.get("contact_id") == recommended_id:
+                return {
+                    "id": candidate.get("contact_id"),
+                    "name": candidate.get("contact_name") or "",
+                    "company": candidate.get("company_id"),
+                    "email": candidate.get("email") or "",
+                    "confidence": candidate.get("confidence"),
+                    "match_method": candidate.get("match_method") or "",
+                }
+        return None
+
+    def get_subject(self, obj):
+        anchor = next(
+            (
+                message
+                for message in (obj.message_manifest or [])
+                if message.get("gmail_message_id") == obj.anchor_message_id
+            ),
+            None,
+        )
+        return str((anchor or {}).get("subject") or "")
+
+    def get_preview(self, obj):
+        return (obj.analysis or {}).get("preview") or {}
+
+    def get_lines(self, obj):
+        return ((obj.analysis or {}).get("preview") or {}).get("lines") or []
+
+
+class GmailInquiryClaimSerializer(serializers.Serializer):
+    handoff_token = serializers.CharField(
+        write_only=True,
+        min_length=32,
+        max_length=512,
+        trim_whitespace=True,
+        required=False,
+    )
+    token = serializers.CharField(
+        write_only=True,
+        min_length=32,
+        max_length=512,
+        trim_whitespace=True,
+        required=False,
+    )
+
+    def validate(self, attrs):
+        handoff_token = attrs.get("handoff_token") or attrs.get("token")
+        if not handoff_token:
+            raise serializers.ValidationError(
+                {"handoff_token": "A Gmail handoff token is required."}
+            )
+        attrs["handoff_token"] = handoff_token
+        attrs.pop("token", None)
+        return attrs
+
+
+class GmailInquiryAnalyzeSerializer(serializers.Serializer):
+    force = serializers.BooleanField(required=False, default=False)
+    reanalyze = serializers.BooleanField(required=False, default=False)
+    mode = serializers.ChoiceField(
+        choices=GmailInquiryImport.MODE_CHOICES,
+        required=False,
+    )
+    selected_message_ids = serializers.ListField(
+        child=serializers.CharField(max_length=255, trim_whitespace=True),
+        required=False,
+        allow_empty=True,
+        max_length=25,
+    )
+
+    def validate(self, attrs):
+        if (
+            attrs.get("mode") == GmailInquiryImport.MODE_SELECTED_MESSAGES
+            and not attrs.get("selected_message_ids")
+        ):
+            raise serializers.ValidationError(
+                {
+                    "selected_message_ids": (
+                        "Choose at least one Gmail message for selected-message analysis."
+                    )
+                }
+            )
+        return attrs
+
+
+class GmailInquiryConfirmSerializer(serializers.Serializer):
+    company = serializers.PrimaryKeyRelatedField(
+        queryset=Company.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    company_id = serializers.PrimaryKeyRelatedField(
+        queryset=Company.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    contact = serializers.PrimaryKeyRelatedField(
+        queryset=CompanyContact.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    contact_id = serializers.PrimaryKeyRelatedField(
+        queryset=CompanyContact.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    selected_source_keys = serializers.ListField(
+        child=serializers.CharField(max_length=255),
+        required=False,
+        allow_empty=False,
+    )
+
+    def validate(self, attrs):
+        company = attrs.get("company")
+        company_alias = attrs.pop("company_id", None)
+        if company and company_alias and company.pk != company_alias.pk:
+            raise serializers.ValidationError(
+                {"company_id": "Company fields must identify the same company."}
+            )
+        company = company or company_alias
+        if not company:
+            raise serializers.ValidationError(
+                {"company": "Select and confirm the customer company."}
+            )
+
+        contact = attrs.get("contact")
+        contact_alias = attrs.pop("contact_id", None)
+        if contact and contact_alias and contact.pk != contact_alias.pk:
+            raise serializers.ValidationError(
+                {"contact_id": "Contact fields must identify the same contact."}
+            )
+        contact = contact or contact_alias
+        if contact and company and contact.company_id != company.id:
+            raise serializers.ValidationError(
+                {"contact": "Contact must belong to the selected company."}
+            )
+        attrs["company"] = company
+        attrs["contact"] = contact
+        return attrs
+
+
+class GmailInquiryReviewLineUpdateSerializer(serializers.Serializer):
+    row_key = serializers.CharField(min_length=16, max_length=64)
+    raw_name = serializers.CharField(
+        max_length=255,
+        trim_whitespace=True,
+        allow_blank=True,
+    )
+    quantity = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        allow_null=True,
+    )
+    unit = serializers.CharField(
+        max_length=50,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+    included = serializers.BooleanField()
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            unknown = set(data) - {
+                "row_key",
+                "raw_name",
+                "quantity",
+                "unit",
+                "included",
+            }
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        key: (
+                            "This field cannot be changed during Gmail row review."
+                        )
+                        for key in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
+
+
+class GmailInquiryImportUpdateSerializer(serializers.Serializer):
+    """Persist review choices and route source changes through the lock service."""
+
+    mode = serializers.ChoiceField(
+        choices=GmailInquiryImport.MODE_CHOICES,
+        required=False,
+    )
+    selected_message_ids = serializers.ListField(
+        child=serializers.CharField(max_length=255, trim_whitespace=True),
+        required=False,
+        allow_empty=True,
+        max_length=25,
+    )
+    company = serializers.PrimaryKeyRelatedField(
+        queryset=Company.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    contact = serializers.PrimaryKeyRelatedField(
+        queryset=CompanyContact.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    review_lines = GmailInquiryReviewLineUpdateSerializer(
+        many=True,
+        required=False,
+        allow_empty=False,
+    )
+
+    def validate(self, attrs):
+        instance = self.instance
+        mode = attrs.get("mode", getattr(instance, "mode", None))
+        selected = attrs.get(
+            "selected_message_ids",
+            getattr(instance, "selected_message_ids", []),
+        )
+        if mode == GmailInquiryImport.MODE_SELECTED_MESSAGES and not selected:
+            raise serializers.ValidationError(
+                {
+                    "selected_message_ids": (
+                        "Choose at least one Gmail message for selected-message analysis."
+                    )
+                }
+            )
+        company = attrs.get(
+            "company",
+            getattr(instance, "selected_company", None),
+        )
+        contact = attrs.get(
+            "contact",
+            getattr(instance, "selected_contact", None),
+        )
+        if contact and (not company or contact.company_id != company.id):
+            raise serializers.ValidationError(
+                {"contact": "Contact must belong to the selected company."}
+            )
+        if "company" in attrs and attrs["company"] is None and contact:
+            raise serializers.ValidationError(
+                {"contact": "Clear the contact when clearing the company."}
+            )
+        if (
+            "review_lines" in attrs
+            and {"mode", "selected_message_ids"}.intersection(attrs)
+        ):
+            raise serializers.ValidationError(
+                {
+                    "review_lines": (
+                        "Save the Gmail message selection and analyze it before reviewing rows."
+                    )
+                }
+            )
+        return attrs
+
+    def update(self, instance, validated_data):
+        from .gmail_inquiry_import import (
+            update_gmail_inquiry_identity,
+            update_gmail_inquiry_review_lines,
+            update_gmail_inquiry_selection,
+        )
+
+        request = self.context.get("request")
+        actor = self.context.get("actor") or getattr(request, "user", None)
+        has_message_change = bool(
+            {"mode", "selected_message_ids"}.intersection(validated_data)
+        )
+        if has_message_change:
+            instance = update_gmail_inquiry_selection(
+                instance,
+                actor,
+                mode=validated_data.pop("mode", instance.mode),
+                selected_message_ids=validated_data.pop(
+                    "selected_message_ids",
+                    instance.selected_message_ids,
+                ),
+            )
+        if {"company", "contact"}.intersection(validated_data):
+            instance = update_gmail_inquiry_identity(
+                instance,
+                actor,
+                company=validated_data.get(
+                    "company",
+                    instance.selected_company,
+                ),
+                contact=validated_data.get(
+                    "contact",
+                    instance.selected_contact,
+                ),
+            )
+        if "review_lines" in validated_data:
+            instance = update_gmail_inquiry_review_lines(
+                instance,
+                actor,
+                review_lines=validated_data["review_lines"],
+            )
+        return instance
+
+    def create(self, validated_data):
+        raise NotImplementedError
 
 
 class MailboxPOAuditRunSerializer(serializers.ModelSerializer):
@@ -1092,6 +1495,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
             Inquiry.SOURCE_TYPE_EXCEL,
             Inquiry.SOURCE_TYPE_PDF,
             Inquiry.SOURCE_TYPE_IMAGE,
+            Inquiry.SOURCE_TYPE_GMAIL,
         ]
     )
     source_filename = serializers.CharField(max_length=255, required=False, allow_blank=True)
@@ -1101,6 +1505,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
     source_file_size = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     parse_method = serializers.CharField(max_length=80, required=False, allow_blank=True)
     parse_meta = serializers.JSONField(required=False, default=dict)
+    received_at = serializers.DateTimeField(required=False)
     lines = ImportedInquiryLineSerializer(many=True, allow_empty=False)
 
     def validate_source_file_ref(self, value):

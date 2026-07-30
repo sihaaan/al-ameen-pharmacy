@@ -2221,7 +2221,7 @@ def commit_historical_price_import(historical_import, actor):
 
 
 @transaction.atomic
-def create_imported_inquiry(validated_data, actor):
+def create_imported_inquiry(validated_data, actor, *, learn_aliases=True):
     lines_data = validated_data.pop("lines")
     inquiry = Inquiry.objects.create(
         source=Inquiry.SOURCE_IMPORTED,
@@ -2247,11 +2247,12 @@ def create_imported_inquiry(validated_data, actor):
             parse_status=line_data.get("parse_status", InquiryLine.PARSE_NEEDS_REVIEW),
             parse_confidence=line_data.get("parse_confidence", 0.0),
         )
-        learn_confirmed_inquiry_line_alias(
-            line,
-            actor,
-            explicit_confirmation=explicit_confirmation,
-        )
+        if learn_aliases:
+            learn_confirmed_inquiry_line_alias(
+                line,
+                actor,
+                explicit_confirmation=explicit_confirmation,
+            )
     audit_log(
         actor,
         QuotationAuditLog.ACTION_IMPORTED,
@@ -2612,7 +2613,7 @@ def bulk_update_quotation_lines(quotation, rows, actor):
 
 
 @transaction.atomic
-def create_quotation_from_inquiry(inquiry, actor):
+def create_quotation_from_inquiry(inquiry, actor, *, learn_aliases=True):
     inquiry = Inquiry.objects.select_for_update().select_related("company").get(pk=inquiry.pk)
     existing = (
         Quotation.objects.filter(inquiry=inquiry)
@@ -2657,7 +2658,8 @@ def create_quotation_from_inquiry(inquiry, actor):
             sort_order=index,
             notes=line.notes,
         )
-        learn_confirmed_quotation_line_alias(quotation_line, actor)
+        if learn_aliases:
+            learn_confirmed_quotation_line_alias(quotation_line, actor)
 
     inquiry.status = Inquiry.STATUS_QUOTED
     inquiry.save(update_fields=["status", "updated_at"])
@@ -2674,6 +2676,10 @@ def create_quotation_from_inquiry(inquiry, actor):
 def _validate_line_for_finalization(line):
     if line.match_status == QuotationLine.MATCH_IGNORED:
         return
+    if line.match_status != QuotationLine.MATCH_CONFIRMED:
+        raise ValidationError(
+            f"Line '{line.item_name_snapshot}' must have its product/item match explicitly confirmed."
+        )
     if not line.product_id and not line.quote_item_id:
         raise ValidationError(f"Line '{line.item_name_snapshot}' must be linked to a product/item.")
     if line.quantity is None or line.quantity <= 0:

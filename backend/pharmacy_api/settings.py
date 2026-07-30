@@ -266,6 +266,44 @@ GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
 
+# ---- Gmail Google Workspace add-on for inquiry intake ----
+# Disabled by default. The add-on endpoints additionally require Google-signed
+# system and user ID tokens, so enabling the flag alone never exposes intake.
+GMAIL_ADDON_ENABLED = env_bool("GMAIL_ADDON_ENABLED", False)
+GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL = os.environ.get("GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL", "").strip().lower()
+GMAIL_ADDON_SHARED_MAILBOX_EMAIL = os.environ.get("GMAIL_ADDON_SHARED_MAILBOX_EMAIL", "").strip().lower()
+GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
+    "GMAIL_ADDON_OAUTH_CLIENT_ID",
+    "",
+).strip()
+GMAIL_ADDON_ALLOWED_AUDIENCES = env_csv("GMAIL_ADDON_ALLOWED_AUDIENCES")
+GMAIL_ADDON_CONTEXTUAL_URL = os.environ.get("GMAIL_ADDON_CONTEXTUAL_URL", "").strip()
+GMAIL_ADDON_ACTION_URL = os.environ.get("GMAIL_ADDON_ACTION_URL", "").strip()
+GMAIL_ADDON_HANDOFF_URL = os.environ.get(
+    "GMAIL_ADDON_HANDOFF_URL",
+    f"{FRONTEND_URL.rstrip('/')}/admin?admin_tab=quotations&quotation_tab=inquiries",
+).strip()
+GMAIL_ADDON_HANDOFF_TTL_SECONDS = max(
+    60,
+    min(int(os.environ.get("GMAIL_ADDON_HANDOFF_TTL_SECONDS", "1800")), 3600),
+)
+GMAIL_ADDON_MAX_THREAD_MESSAGES = max(
+    1,
+    min(int(os.environ.get("GMAIL_ADDON_MAX_THREAD_MESSAGES", "50")), 100),
+)
+GMAIL_INQUIRY_ATTACHMENT_VIEW_MAX_BYTES = max(
+    1 * 1024 * 1024,
+    min(
+        int(
+            os.environ.get(
+                "GMAIL_INQUIRY_ATTACHMENT_VIEW_MAX_BYTES",
+                str(20 * 1024 * 1024),
+            )
+        ),
+        25 * 1024 * 1024,
+    ),
+)
+
 # ---- accounting overdue statement imports ----
 ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("ACCOUNTING_IMPORT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT = int(os.environ.get("ACCOUNTING_STATEMENT_ZIP_SYNC_LIMIT", "75"))

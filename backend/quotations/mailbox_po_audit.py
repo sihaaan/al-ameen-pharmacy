@@ -290,6 +290,54 @@ def _public_headers(headers):
     ]
 
 
+def _message_html_parts(part):
+    """Return raw HTML bodies while respecting multipart/alternative.
+
+    This private value is used only by deterministic table extraction. It is
+    not persisted in mailbox manifests or returned by public serializers.
+    """
+
+    if not isinstance(part, dict) or part.get("filename"):
+        return []
+    mime_type = str(part.get("mimeType") or "").lower()
+    children = part.get("parts") or []
+    if mime_type == "multipart/alternative":
+        html_children = [
+            child
+            for child in children
+            if str(child.get("mimeType") or "").lower() == "text/html"
+        ]
+        for child in html_children:
+            selected = _message_html_parts(child)
+            if any(value.strip() for value in selected):
+                return selected
+        return []
+    if mime_type.startswith("multipart/") or children:
+        values = []
+        for child in children:
+            values.extend(_message_html_parts(child))
+        return values
+    if mime_type != "text/html":
+        return []
+    data = (part.get("body") or {}).get("data") or ""
+    if not data:
+        return []
+    return [_decode_gmail_data(data).decode("utf-8", errors="replace")]
+
+
+def _trim_quoted_html(value):
+    """Drop common quoted-thread containers without trying to sanitize for UI."""
+
+    value = str(value or "")
+    for pattern in (
+        r"(?is)<div[^>]+class=[\"'][^\"']*gmail_quote[^\"']*[\"'][^>]*>.*$",
+        r"(?is)<blockquote\b[^>]*>.*$",
+        r"(?is)<div[^>]+id=[\"']divRplyFwdMsg[\"'][^>]*>.*$",
+    ):
+        value = re.sub(pattern, "", value)
+    return value[:500_000]
+
+
 def fetch_mailbox_message(connection, message_id):
     """Fetch one full Gmail message, including every header and newest body.
 
@@ -328,6 +376,9 @@ def fetch_mailbox_message(connection, message_id):
     headers = mime_payload.get("headers") or []
     body_parts = _message_body_parts(mime_payload)
     newest_body = _trim_quoted_reply("\n".join(value for value in body_parts if value))
+    newest_body_html = _trim_quoted_html(
+        "\n".join(value for value in _message_html_parts(mime_payload) if value)
+    )
     private_attachment_refs = _attachment_refs(mime_payload, message_id, include_inline_data=True)
     public_attachment_refs = [
         {key: value for key, value in attachment.items() if key != "_inline_data"}
@@ -346,6 +397,8 @@ def fetch_mailbox_message(connection, message_id):
         "sent_at": _message_datetime(payload),
         "snippet": payload.get("snippet") or "",
         "newest_body_text": newest_body,
+        # Private parse aid: callers must hash/use this value in memory only.
+        "newest_body_html": newest_body_html,
         "attachment_manifest": public_attachment_refs,
         "_attachment_refs": private_attachment_refs,
     }

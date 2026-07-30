@@ -13,6 +13,9 @@ djangorestframework==3.16.1
 # JWT Authentication - Token-based auth for login
 djangorestframework-simplejwt==5.5.1
 PyJWT==2.10.1
+# RSA verification for Google Workspace add-on ID tokens and encrypted Gmail
+# OAuth credentials. Pin it explicitly instead of relying on a transitive extra.
+cryptography==49.0.0
 
 # CORS Headers - Allow React frontend to call API
 django-cors-headers==4.9.0

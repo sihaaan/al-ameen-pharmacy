@@ -14,7 +14,7 @@ from django.db.models.functions import RowNumber
 from django.http import HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from rest_framework import status, viewsets
+from rest_framework import mixins, status, viewsets
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from rest_framework.decorators import action
@@ -60,6 +60,13 @@ from .contract_intelligence import (
     analyze_contract_run,
 )
 from .historical_import_parsers import parse_historical_pdf_upload
+from .gmail_inquiry_import import (
+    GmailInquiryImportBusy,
+    GmailInquiryImportError,
+    analyze_gmail_inquiry_import,
+    claim_gmail_inquiry_handoff,
+    confirm_gmail_inquiry_import,
+)
 from .import_parsers import parse_file_preview, parse_text_preview
 from .mailbox_po_audit import (
     assert_mailbox_po_audit_repairable,
@@ -89,6 +96,7 @@ from .models import (
     ContractIntelligenceItem,
     ContractIntelligenceRun,
     ContractIntelligenceSource,
+    GmailInquiryImport,
     GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
@@ -129,6 +137,11 @@ from .serializers import (
     ContractIntelligenceItemSerializer,
     ContractIntelligenceRunSerializer,
     ContractIntelligenceSourceSerializer,
+    GmailInquiryAnalyzeSerializer,
+    GmailInquiryClaimSerializer,
+    GmailInquiryConfirmSerializer,
+    GmailInquiryImportSerializer,
+    GmailInquiryImportUpdateSerializer,
     GmailOAuthConnectionSerializer,
     HistoricalPriceImportLineSerializer,
     HistoricalPriceImportSerializer,
@@ -1711,6 +1724,251 @@ class ProductAliasViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return self.handle_workflow_error(exc)
         except IntegrityError as exc:
             return self.handle_safe_workflow_exception(exc, "Update product alias failed.")
+
+
+class GmailInquiryImportViewSet(
+    QuotationBaseViewSet,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Staff review API for opaque Gmail-to-quotation handoffs."""
+
+    serializer_class = GmailInquiryImportSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]
+    queryset = GmailInquiryImport.objects.select_related(
+        "gmail_connection",
+        "claimed_by",
+        "selected_company",
+        "selected_contact",
+        "inquiry",
+        "inquiry__company",
+        "inquiry__contact",
+        "quotation",
+    )
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        if getattr(user, "is_superuser", False):
+            return queryset
+        # Active reviews are private to the employee who claimed the opaque
+        # handoff. A completed thread may be reopened by any quotation staff so
+        # Gmail always leads to the existing quotation rather than a duplicate.
+        return queryset.filter(
+            Q(claimed_by=user)
+            | Q(
+                status=GmailInquiryImport.STATUS_CONFIRMED,
+                quotation__isnull=False,
+            )
+        )
+
+    def _workflow_error(self, exc):
+        response_status = (
+            status.HTTP_409_CONFLICT
+            if isinstance(exc, GmailInquiryImportBusy)
+            else status.HTTP_400_BAD_REQUEST
+        )
+        return Response(
+            serializer_error_from_django_validation(exc),
+            status=response_status,
+        )
+
+    @action(detail=False, methods=["post"])
+    def claim(self, request):
+        serializer = GmailInquiryClaimSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            gmail_import = claim_gmail_inquiry_handoff(
+                serializer.validated_data["handoff_token"],
+                request.user,
+            )
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+        return Response(
+            GmailInquiryImportSerializer(
+                gmail_import,
+                context={"request": request},
+            ).data
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        gmail_import = self.get_object()
+        serializer = GmailInquiryImportUpdateSerializer(
+            gmail_import,
+            data=request.data,
+            partial=True,
+            context={"request": request, "actor": request.user},
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            updated = serializer.save()
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+        return Response(
+            GmailInquiryImportSerializer(
+                updated,
+                context={"request": request},
+            ).data
+        )
+
+    @action(detail=True, methods=["post"])
+    def analyze(self, request, pk=None):
+        gmail_import = self.get_object()
+        serializer = GmailInquiryAnalyzeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = dict(serializer.validated_data)
+        try:
+            analyzed = analyze_gmail_inquiry_import(
+                gmail_import,
+                request.user,
+                selected_message_ids=payload.get("selected_message_ids"),
+                mode=payload.get("mode"),
+                force=payload.get("force", False),
+                reanalyze=payload.get("reanalyze", False),
+            )
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+        return Response(
+            GmailInquiryImportSerializer(
+                analyzed,
+                context={"request": request},
+            ).data
+        )
+
+    @action(detail=True, methods=["post"])
+    def confirm(self, request, pk=None):
+        gmail_import = self.get_object()
+        serializer = GmailInquiryConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = confirm_gmail_inquiry_import(
+                gmail_import,
+                request.user,
+                **serializer.validated_data,
+            )
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+        return Response(
+            GmailInquiryImportSerializer(
+                result.gmail_import,
+                context={"request": request},
+            ).data,
+            status=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"])
+    def attachment(self, request, pk=None):
+        gmail_import = self.get_object()
+        source_key = str(request.query_params.get("source_key") or "").strip()
+        if not source_key or len(source_key) > 255:
+            return Response(
+                {"detail": "Choose an attachment from the Gmail evidence list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        source = next(
+            (
+                entry
+                for entry in [
+                    *(gmail_import.evidence or []),
+                    *(gmail_import.attachment_manifest or []),
+                ]
+                if isinstance(entry, dict)
+                and str(entry.get("source_key") or "") == source_key
+            ),
+            None,
+        )
+        if not source or str(source.get("kind") or "attachment") != "attachment":
+            return Response(
+                {"detail": "That attachment does not belong to this Gmail inquiry."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        message_id = str(source.get("gmail_message_id") or "").strip()
+        allowed_message_ids = {
+            str(message.get("gmail_message_id") or "").strip()
+            for message in (gmail_import.message_manifest or [])
+            if isinstance(message, dict)
+        }
+        if not message_id or message_id not in allowed_message_ids:
+            return Response(
+                {"detail": "That attachment is not part of the reviewed Gmail thread."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        connection = resolve_gmail_connection(request.user, shared_only=True)
+        if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
+            return Response(
+                {"detail": "Reconnect the shared Gmail mailbox before opening source attachments."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if str(connection.email or "").strip().lower() != str(
+            gmail_import.mailbox_email or ""
+        ).strip().lower():
+            return Response(
+                {"detail": "This attachment is not from the designated shared Gmail mailbox."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        max_bytes = int(
+            getattr(
+                settings,
+                "GMAIL_INQUIRY_ATTACHMENT_VIEW_MAX_BYTES",
+                20 * 1024 * 1024,
+            )
+        )
+        try:
+            attachment = gmail_fetch_attachment_content(
+                connection,
+                message_id,
+                attachment_id=str(source.get("attachment_id") or ""),
+                part_id=str(source.get("part_id") or ""),
+                max_bytes=max_bytes,
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception(
+                "Could not fetch a Gmail inquiry attachment for import %s.",
+                gmail_import.pk,
+            )
+            return Response(
+                {"detail": "Could not open the Gmail attachment. Please reconnect Gmail or retry."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        filename = Path(str(attachment.get("filename") or "gmail-attachment")).name
+        filename = re.sub(
+            r"[\r\n\x00-\x1f\x7f\"\\]+",
+            "_",
+            filename,
+        )[:240] or "gmail-attachment"
+        mime_type = str(
+            attachment.get("mime_type") or "application/octet-stream"
+        ).split(";", 1)[0].strip().lower()
+        inline_types = {
+            "application/pdf",
+            "image/gif",
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "text/plain",
+        }
+        disposition = "inline" if mime_type in inline_types else "attachment"
+        response = HttpResponse(attachment["content"], content_type=mime_type)
+        response["Content-Disposition"] = (
+            f'{disposition}; filename="{filename}"'
+        )
+        response["Content-Length"] = str(
+            attachment.get("size") or len(attachment["content"])
+        )
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        response["Pragma"] = "no-cache"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; img-src data: blob:"
+        )
+        return response
 
 
 class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

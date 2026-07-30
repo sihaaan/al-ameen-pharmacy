@@ -11,6 +11,7 @@ from .models import (
     HistoricalImportBatch,
     HistoricalPriceImport,
     HistoricalPriceImportLine,
+    GmailInquiryImport,
     Inquiry,
     InquiryLine,
     MailboxPOAuditRun,
@@ -46,6 +47,30 @@ class ReadOnlyHistoryAdminMixin:
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(GmailInquiryImport)
+class GmailInquiryImportAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = [
+        "id",
+        "mailbox_email",
+        "mode",
+        "status",
+        "claimed_by",
+        "inquiry",
+        "quotation",
+        "created_at",
+    ]
+    list_filter = ["mode", "status", "created_at"]
+    search_fields = [
+        "mailbox_email",
+        "gmail_thread_id",
+        "anchor_message_id",
+        "claimed_by__username",
+        "inquiry__subject",
+        "quotation__quotation_number",
+    ]
+    readonly_fields = [field.name for field in GmailInquiryImport._meta.fields]
 
 
 @admin.register(MailboxPOAuditRun)

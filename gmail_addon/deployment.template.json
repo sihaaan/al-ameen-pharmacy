@@ -1,0 +1,27 @@
+{
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Al Ameen Quotation Assistant",
+      "logoUrl": "https://www.ameenpharmacy.ae/brand/al-ameen-pharmacy-icon.png",
+      "openLinkUrlPrefixes": [
+        "https://www.ameenpharmacy.ae/admin"
+      ]
+    },
+    "gmail": {
+      "contextualTriggers": [
+        {
+          "unconditional": {},
+          "onTriggerFunction": "https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/contextual/"
+        }
+      ]
+    },
+    "httpOptions": {
+      "granularOauthPermissionSupport": "OPT_IN"
+    }
+  }
+}

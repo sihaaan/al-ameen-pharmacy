@@ -96,6 +96,20 @@ const quotationAPI = {
     connectUrl: () => axiosInstance.post('/quotations/gmail/connection/'),
     disconnect: () => axiosInstance.delete('/quotations/gmail/connection/'),
   },
+  gmailInquiryImports: {
+    claim: (token) => axiosInstance.post('/quotations/gmail-inquiry-imports/claim/', { handoff_token: token }),
+    retrieve: (id) => axiosInstance.get(`/quotations/gmail-inquiry-imports/${id}/`),
+    update: (id, data) => axiosInstance.patch(`/quotations/gmail-inquiry-imports/${id}/`, data),
+    analyze: (id, data = {}) => axiosInstance.post(`/quotations/gmail-inquiry-imports/${id}/analyze/`, data),
+    confirm: (id, data) => axiosInstance.post(`/quotations/gmail-inquiry-imports/${id}/confirm/`, data),
+    attachment: (id, sourceKey) => axiosInstance.get(
+      `/quotations/gmail-inquiry-imports/${id}/attachment/`,
+      {
+        params: { source_key: sourceKey },
+        responseType: 'blob',
+      }
+    ),
+  },
   contractIntelligence: {
     runs: (params = {}) => axiosInstance.get('/quotations/contract-intelligence-runs/', { params }),
     createRun: (data) => axiosInstance.post('/quotations/contract-intelligence-runs/', data),

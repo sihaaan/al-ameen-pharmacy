@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import gmail_addon, views
 
 router = DefaultRouter()
 router.register(r"companies", views.CompanyViewSet, basename="quotation-company")
@@ -11,6 +11,7 @@ router.register(r"aliases", views.ProductAliasViewSet, basename="quotation-alias
 router.register(r"contract-intelligence-runs", views.ContractIntelligenceRunViewSet, basename="quotation-contract-intelligence-run")
 router.register(r"contract-intelligence-sources", views.ContractIntelligenceSourceViewSet, basename="quotation-contract-intelligence-source")
 router.register(r"contract-intelligence-items", views.ContractIntelligenceItemViewSet, basename="quotation-contract-intelligence-item")
+router.register(r"gmail-inquiry-imports", views.GmailInquiryImportViewSet, basename="quotation-gmail-inquiry-import")
 router.register(r"inquiries", views.InquiryViewSet, basename="quotation-inquiry")
 router.register(r"inquiry-lines", views.InquiryLineViewSet, basename="quotation-inquiry-line")
 router.register(r"historical-import-batches", views.HistoricalImportBatchViewSet, basename="quotation-historical-import-batch")
@@ -32,6 +33,16 @@ urlpatterns = [
     path("followups/", views.QuotationFollowupsView.as_view(), name="quotation-followups"),
     path("gmail/connection/", views.GmailConnectionView.as_view(), name="quotation-gmail-connection"),
     path("gmail/oauth/callback/", views.GmailOAuthCallbackView.as_view(), name="quotation-gmail-oauth-callback"),
+    path(
+        "gmail/addon/contextual/",
+        gmail_addon.gmail_addon_contextual,
+        name="quotation-gmail-addon-contextual",
+    ),
+    path(
+        "gmail/addon/action/",
+        gmail_addon.gmail_addon_action,
+        name="quotation-gmail-addon-action",
+    ),
     path("settings/", views.QuotationSettingsView.as_view(), name="quotation-settings"),
     path("my-signature/", views.UserQuotationProfileView.as_view(), name="quotation-my-signature"),
     path("", include(router.urls)),
