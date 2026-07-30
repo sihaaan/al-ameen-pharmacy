@@ -21,6 +21,7 @@
       ]
     },
     "httpOptions": {
+      "authorizationHeader": "SYSTEM_ID_TOKEN",
       "granularOauthPermissionSupport": "OPT_IN"
     }
   }

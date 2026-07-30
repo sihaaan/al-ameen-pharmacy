@@ -35,6 +35,11 @@ GOOGLE_ID_TOKEN_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 GOOGLE_ID_TOKEN_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 MAX_EVENT_BYTES = 256 * 1024
 MAX_SELECTED_MESSAGE_IDS = 25
+REQUIRED_GOOGLE_OAUTH_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata",
+    "https://www.googleapis.com/auth/userinfo.email",
+)
 
 MODE_CURRENT_MESSAGE = "current_message"
 MODE_SELECTED_MESSAGES = "selected_messages"
@@ -181,7 +186,9 @@ def _parse_event(request):
     return payload
 
 
-def _authenticate_event(request, event, config, *, expected_audience):
+def _authenticate_system_event(request, event, config, *, expected_audience):
+    """Authenticate Google before trusting consent or end-user event fields."""
+
     authorization = str(request.META.get("HTTP_AUTHORIZATION", "") or "")
     scheme, separator, system_token = authorization.partition(" ")
     if not separator or scheme.casefold() != "bearer":
@@ -192,7 +199,6 @@ def _authenticate_event(request, event, config, *, expected_audience):
     if not isinstance(authorization_event, dict):
         raise GmailAddonAuthenticationError()
     body_system_token = str(authorization_event.get("systemIdToken") or "").strip()
-    user_token = str(authorization_event.get("userIdToken") or "").strip()
     if (
         not system_token
         or not body_system_token
@@ -209,7 +215,39 @@ def _authenticate_event(request, event, config, *, expected_audience):
         config["service_account_email"],
     ):
         raise GmailAddonAuthenticationError()
+    return authorization_event
 
+
+def _missing_required_google_scopes(authorization_event):
+    authorized_scopes = authorization_event.get("authorizedScopes")
+    if not isinstance(authorized_scopes, list):
+        authorized_scopes = []
+    authorized = {
+        str(scope).strip()
+        for scope in authorized_scopes
+        if isinstance(scope, str) and str(scope).strip()
+    }
+    return [
+        scope
+        for scope in REQUIRED_GOOGLE_OAUTH_SCOPES
+        if scope not in authorized
+    ]
+
+
+def _requesting_google_scopes_response(scopes):
+    """Return Google's granular-consent response using its wire field names."""
+
+    return JsonResponse(
+        {
+            "requesting_google_scopes": {
+                "scopes": list(scopes),
+            }
+        }
+    )
+
+
+def _authenticate_user_event(authorization_event, config):
+    user_token = str(authorization_event.get("userIdToken") or "").strip()
     user_claims = _verify_google_id_token(
         user_token,
         audiences=[config["oauth_client_id"]],
@@ -538,12 +576,16 @@ def gmail_addon_contextual(request):
     try:
         config = _require_configuration()
         event = _parse_event(request)
-        _authenticate_event(
+        authorization_event = _authenticate_system_event(
             request,
             event,
             config,
             expected_audience=config["contextual_url"],
         )
+        missing_scopes = _missing_required_google_scopes(authorization_event)
+        if missing_scopes:
+            return _requesting_google_scopes_response(missing_scopes)
+        _authenticate_user_event(authorization_event, config)
         anchor_message_id, thread_id = _gmail_context(event)
         connection = _shared_connection(config["mailbox_email"])
         summaries = _fetch_thread_message_summaries(connection, thread_id)
@@ -569,12 +611,16 @@ def gmail_addon_action(request):
     try:
         config = _require_configuration()
         event = _parse_event(request)
-        _authenticate_event(
+        authorization_event = _authenticate_system_event(
             request,
             event,
             config,
             expected_audience=config["action_url"],
         )
+        missing_scopes = _missing_required_google_scopes(authorization_event)
+        if missing_scopes:
+            return _requesting_google_scopes_response(missing_scopes)
+        _authenticate_user_event(authorization_event, config)
         anchor_message_id, thread_id = _gmail_context(event)
         mode = _selection_mode(event)
         selected_message_ids = (

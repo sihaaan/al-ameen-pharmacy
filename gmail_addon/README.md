@@ -1,10 +1,13 @@
 # Al Ameen Gmail quotation add-on
 
 This directory contains the Google Workspace HTTP add-on deployment template.
-The add-on is intended for a **private Google Workspace organization**. It
-shows a contextual card for the message open in Gmail and lets an authorized
-shared-mailbox user import the current message, selected thread messages, or
-let the existing inquiry workflow choose relevant thread messages.
+It shows a contextual card for the message open in Gmail and lets the
+authorized shared-mailbox user import the current message, selected thread
+messages, or let the existing inquiry workflow choose relevant thread
+messages. An unpublished developer deployment can be installed on the
+configured `pharmacydxb@gmail.com` consumer account for testing and personal
+use; a private organization-wide listing would require a Google Workspace
+organization.
 
 The add-on callback only issues a short-lived website handoff. Email parsing
 and AI work happen after the browser opens the quotation inquiry page, keeping
@@ -12,19 +15,24 @@ Google's card callback below its execution limit.
 
 ## 1. Prepare the Google Cloud project
 
-1. Use a standard Google Cloud project owned by the same Workspace
-   organization as the shared mailbox.
+1. Use the existing Google Cloud project controlled by the owner of
+   `pharmacydxb@gmail.com`.
 2. Enable the Gmail API, Google Workspace Marketplace SDK, and Google
    Workspace Add-ons API.
-3. Configure the OAuth audience as **Internal**.
+3. Configure the OAuth consent audience as **External** and add
+   `pharmacydxb@gmail.com` as a test user while the app remains unpublished.
 4. Add the exact scopes from `deployment.template.json`. The
    `gmail.addons.current.message.metadata` scope provides the open-message
    context for the unconditional trigger. The add-on itself does not request
    mailbox-wide Gmail read access; the backend reads the already-connected
    shared mailbox with its existing read-only OAuth connection.
-5. Copy `deployment.template.json` to the untracked `deployment.json`. The
-   checked-in template already points to the Al Ameen production frontend,
-   Railway backend, and publicly readable brand icon.
+   Granular consent is enabled, so the backend first authenticates Google's
+   system token and then asks Gmail for any manifest scopes the user has not
+   yet granted. It validates the user identity and mailbox only after all
+   required scopes are present.
+5. Deploy `deployment.template.json` directly. The checked-in template already
+   points to the Al Ameen production frontend, Railway backend, and publicly
+   readable brand icon, and contains no secrets.
 
 The contextual endpoint is:
 
@@ -48,6 +56,13 @@ Install the unpublished deployment for a test account:
 ```text
 gcloud workspace-add-ons deployments install al-ameen-quotation
 ```
+
+Alternatively, in Google Cloud Console open **Google Workspace Marketplace
+SDK > HTTP Deployments** and click **Install** next to the unpublished
+deployment while signed in as `pharmacydxb@gmail.com`. On first use, approve
+the requested granular permissions. If any required permission is left
+unchecked, the add-on requests the missing permission again and does not read
+mail or create an import.
 
 Use this command to obtain the deployment service-account email:
 

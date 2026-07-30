@@ -19,6 +19,7 @@ HANDOFF_URL = (
 OAUTH_CLIENT_ID = "workspace-addon.apps.googleusercontent.com"
 SERVICE_ACCOUNT_EMAIL = "addon-sa@example-project.iam.gserviceaccount.com"
 MAILBOX_EMAIL = "quotes@example.com"
+REQUIRED_SCOPES = list(gmail_addon.REQUIRED_GOOGLE_OAUTH_SCOPES)
 
 ADDON_SETTINGS = {
     "GMAIL_ADDON_ENABLED": True,
@@ -142,6 +143,7 @@ class GmailAddonEndpointTests(TestCase):
         selected=None,
         system_token="system-token",
         user_token="user-token",
+        authorized_scopes=None,
     ):
         common = {
             "hostApp": "GMAIL",
@@ -161,6 +163,11 @@ class GmailAddonEndpointTests(TestCase):
             "authorizationEventObject": {
                 "systemIdToken": system_token,
                 "userIdToken": user_token,
+                "authorizedScopes": (
+                    REQUIRED_SCOPES
+                    if authorized_scopes is None
+                    else authorized_scopes
+                ),
             },
             "commonEventObject": common,
             "gmail": {
@@ -335,6 +342,94 @@ class GmailAddonEndpointTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 401)
+        mock_fetch_summaries.assert_not_called()
+
+    @patch("quotations.gmail_addon._fetch_thread_message_summaries")
+    def test_missing_scopes_are_requested_after_system_auth_before_user_auth(
+        self,
+        mock_fetch_summaries,
+    ):
+        authorized_scopes = [
+            "https://www.googleapis.com/auth/gmail.addons.execute",
+        ]
+
+        response = self._post(
+            "quotation-gmail-addon-contextual",
+            self._event(
+                authorized_scopes=authorized_scopes,
+                user_token="invalid-token",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "requesting_google_scopes": {
+                    "scopes": [
+                        (
+                            "https://www.googleapis.com/auth/"
+                            "gmail.addons.current.message.metadata"
+                        ),
+                        "https://www.googleapis.com/auth/userinfo.email",
+                    ]
+                }
+            },
+        )
+        self.assertEqual(
+            self.verified_tokens,
+            [("system-token", [CONTEXTUAL_URL])],
+        )
+        mock_fetch_summaries.assert_not_called()
+
+    @patch("quotations.gmail_addon._issue_handoff")
+    def test_action_requests_all_scopes_when_authorized_scopes_are_absent(
+        self,
+        mock_issue_handoff,
+    ):
+        event = self._event(
+            mode="current_message",
+            user_token="invalid-token",
+        )
+        event["authorizationEventObject"].pop("authorizedScopes")
+
+        response = self._post("quotation-gmail-addon-action", event)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "requesting_google_scopes": {
+                    "scopes": REQUIRED_SCOPES,
+                }
+            },
+        )
+        self.assertEqual(
+            self.verified_tokens,
+            [("system-token", [ACTION_URL])],
+        )
+        mock_issue_handoff.assert_not_called()
+
+    @patch("quotations.gmail_addon._fetch_thread_message_summaries")
+    def test_invalid_system_token_cannot_trigger_scope_consent(
+        self,
+        mock_fetch_summaries,
+    ):
+        response = self._post(
+            "quotation-gmail-addon-contextual",
+            self._event(
+                system_token="invalid-token",
+                authorized_scopes=[],
+            ),
+            bearer="invalid-token",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn("requesting_google_scopes", response.json())
+        self.assertEqual(
+            self.verified_tokens,
+            [("invalid-token", [CONTEXTUAL_URL])],
+        )
         mock_fetch_summaries.assert_not_called()
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
