@@ -39,6 +39,7 @@ from .contract_intelligence import (
     _header,
     _json_request,
     _message_datetime,
+    _trim_quoted_reply,
     get_valid_access_token,
     gmail_fetch_attachment_content,
     resolve_gmail_connection,
@@ -50,6 +51,11 @@ from .import_parsers import (
     parse_text_preview,
 )
 from .mailbox_po_audit import fetch_mailbox_message
+from .mailbox_po_matching import (
+    company_private_sender_domain_identity,
+    is_private_email_domain,
+    normalize_company_identity_text,
+)
 from .matching import apply_match_to_preview_line
 from .models import (
     Company,
@@ -614,6 +620,28 @@ PLAIN_SIGNATURE_MARKER = re.compile(
     r"regards|sincerely|sent\s+from\s+(?:my|mail\s+for))[\s,!.:-]*$",
     re.IGNORECASE,
 )
+EMAIL_TEAM_GREETING_RE = re.compile(
+    r"^\s*(?:dear|hello|hi)\s+(?:all|team|sales\s+team)[\s,!.:-]*$",
+    re.IGNORECASE,
+)
+EMAIL_COURTESY_THANKS_RE = re.compile(
+    r"^\s*(?:many\s+thanks|thanks|thank\s+you(?:\s+very\s+much)?)[\s,!.:-]*$",
+    re.IGNORECASE,
+)
+EMAIL_ATTACHMENT_REFERENCE_RE = re.compile(
+    r"\b(?:attach(?:ed|ing|ment|ments)?|enclos(?:e|ed|ing|ure|ures)?)\b",
+    re.IGNORECASE,
+)
+EMAIL_SOURCE_DOCUMENT_RE = re.compile(
+    r"\b(?:excel|file|inquiry|list|pdf|quotation|quote|request|rfq|"
+    r"spreadsheet|workbook|xlsx?|document)\b",
+    re.IGNORECASE,
+)
+EMAIL_ITEM_QUANTITY_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:ampoules?|bottles?|boxes?|cans?|cartons?|"
+    r"cases?|nos?|packs?|pcs?|pieces?|rolls?|tubes?|units?|vials?)\b",
+    re.IGNORECASE,
+)
 HTML_SIGNATURE_MARKER = re.compile(
     r"""(?is)<(?:div|table|span)\b[^>]*(?:class|id)\s*=\s*["'][^"']*
     (?:gmail_signature|email[-_ ]?signature|mail[-_ ]?signature|signature-container)
@@ -641,6 +669,30 @@ def _trim_html_signature(value):
     value = str(value or "")
     marker = HTML_SIGNATURE_MARKER.search(value)
     return value[: marker.start()] if marker else value
+
+
+def _is_clear_non_item_email_prose_row(row):
+    """Exclude narrow email courtesies while preserving typed item requests."""
+
+    text = str(
+        row.get("raw_source_line")
+        or row.get("raw_line")
+        or ""
+    ).strip()
+    if not text:
+        return True
+    if (
+        EMAIL_TEAM_GREETING_RE.fullmatch(text)
+        or EMAIL_COURTESY_THANKS_RE.fullmatch(text)
+    ):
+        return True
+    return bool(
+        row.get("quantity") in (None, "")
+        and not str(row.get("unit") or "").strip()
+        and EMAIL_ATTACHMENT_REFERENCE_RE.search(text)
+        and EMAIL_SOURCE_DOCUMENT_RE.search(text)
+        and not EMAIL_ITEM_QUANTITY_RE.search(text)
+    )
 
 
 def _public_message_manifest(message, mailbox_email):
@@ -838,42 +890,269 @@ def _fetch_analysis_messages(gmail_import, connection):
     return thread_id, messages, merged_timeline, timeline_result
 
 
+COMPANY_INFERENCE_MIN_CONFIDENCE = 0.85
+COMPANY_INFERENCE_MIN_MARGIN = 0.08
+COMPANY_IDENTITY_LEGAL_SUFFIXES = {
+    "co",
+    "company",
+    "corp",
+    "corporation",
+    "fze",
+    "fzco",
+    "inc",
+    "incorporated",
+    "limited",
+    "llc",
+    "llp",
+    "ltd",
+    "pjsc",
+    "plc",
+    "private",
+}
+COMPANY_IDENTITY_GENERIC_TOKENS = COMPANY_IDENTITY_LEGAL_SUFFIXES | {
+    "center",
+    "centre",
+    "clinic",
+    "general",
+    "group",
+    "health",
+    "hospital",
+    "medical",
+    "pharmacy",
+    "school",
+    "services",
+    "trading",
+    "university",
+}
+
+
+def _email_domain(value):
+    value = str(value or "").strip().casefold()
+    return value.rsplit("@", 1)[-1] if "@" in value else ""
+
+
+def _distinctive_company_identity_phrases(company_name):
+    tokens = normalize_company_identity_text(company_name).split()
+    significant = [
+        token
+        for token in tokens
+        if len(token) >= 3
+        and token not in COMPANY_IDENTITY_GENERIC_TOKENS
+    ]
+    if len(significant) < 2 or len("".join(significant)) < 8:
+        return ()
+    variants = []
+    full = " ".join(tokens).strip()
+    if full:
+        variants.append(full)
+    without_legal_suffix = list(tokens)
+    while (
+        without_legal_suffix
+        and without_legal_suffix[-1] in COMPANY_IDENTITY_LEGAL_SUFFIXES
+    ):
+        without_legal_suffix.pop()
+    shortened = " ".join(without_legal_suffix).strip()
+    if shortened and shortened not in variants:
+        variants.append(shortened)
+    return tuple(variants)
+
+
+def _plain_signature_identity_text(value):
+    """Return only the newest message's bounded plain-text signature tail."""
+
+    lines = str(_trim_quoted_reply(value or "") or "").splitlines()
+    if not lines:
+        return ""
+    start = max(0, len(lines) - 30)
+    for index in range(len(lines) - 1, start - 1, -1):
+        if PLAIN_SIGNATURE_MARKER.match(lines[index]):
+            return "\n".join(lines[index + 1 : index + 25]).strip()
+    return ""
+
+
+def _inbound_signature_identity_by_message(
+    messages,
+    mailbox_email,
+):
+    signatures = {}
+    for message in messages:
+        if _is_outbound_message(message, mailbox_email):
+            continue
+        message_id = str(message.get("gmail_message_id") or "")
+        if not message_id:
+            continue
+        signature = normalize_company_identity_text(
+            _plain_signature_identity_text(
+                message.get("newest_body_text") or ""
+            )
+        )
+        if signature:
+            signatures[message_id] = signature
+    return signatures
+
+
+def _company_name_signature_message_ids(
+    company_name,
+    signature_identity_by_message,
+):
+    phrases = _distinctive_company_identity_phrases(company_name)
+    if not phrases:
+        return set()
+    matches = set()
+    for message_id, signature in signature_identity_by_message.items():
+        padded_signature = f" {signature} "
+        if any(
+            f" {phrase} " in padded_signature
+            for phrase in phrases
+        ):
+            matches.add(message_id)
+    return matches
+
+
 def _company_contact_candidates(messages, mailbox_email):
+    mailbox_email = str(mailbox_email or "").strip().casefold()
     sender_evidence = {}
     for message in messages:
         if _is_outbound_message(message, mailbox_email):
             continue
         message_id = str(message.get("gmail_message_id") or "")
-        for address in (
-            _email_addresses(message.get("sender"))
-            | _email_addresses(message.get("reply_to"))
-        ):
+        # Reply-To is controlled by the sender and can point at an unrelated
+        # saved customer. Without authenticated alignment evidence it must not
+        # participate in customer identity or direct-quote readiness. V1 uses
+        # only the actual inbound From address.
+        for address in _email_addresses(message.get("sender")):
             if address == mailbox_email:
                 continue
             sender_evidence.setdefault(address, set()).add(message_id)
 
-    company_matches = {}
-    contact_matches = {}
-    for email, message_ids in sender_evidence.items():
-        for contact in CompanyContact.objects.select_related("company").filter(
+    active_companies = list(
+        Company.objects.filter(is_active=True).only(
+            "id",
+            "name",
+            "email",
+        )
+    )
+    active_contacts = list(
+        CompanyContact.objects.select_related("company")
+        .filter(
             is_active=True,
             company__is_active=True,
-            email__iexact=email,
-        ):
-            company_matches.setdefault(
-                contact.company_id,
-                {
-                    "company_id": contact.company_id,
-                    "company_name": contact.company.name,
-                    "confidence": 1.0,
-                    "match_method": "exact_contact_email",
-                    "emails": set(),
-                    "message_ids": set(),
-                },
+        )
+        .only(
+            "id",
+            "name",
+            "email",
+            "company_id",
+            "company__id",
+            "company__name",
+        )
+    )
+    companies_by_id = {
+        company.id: company
+        for company in active_companies
+    }
+    company_matches = {}
+    contact_matches = {}
+
+    def add_company_match(
+        company_id,
+        *,
+        confidence,
+        match_method,
+        reason,
+        emails=(),
+        message_ids=(),
+        evidence=None,
+        exact_email=False,
+        method_priority=0,
+    ):
+        company = companies_by_id.get(company_id)
+        if not company:
+            return
+        row = company_matches.setdefault(
+            company_id,
+            {
+                "company_id": company_id,
+                "company_name": company.name,
+                "confidence": 0.0,
+                "match_method": "",
+                "explanation": "",
+                "match_reasons": [],
+                "emails": set(),
+                "message_ids": set(),
+                "evidence": [],
+                "_evidence_keys": set(),
+                "_exact_email": False,
+                "_method_priority": -1,
+            },
+        )
+        row["emails"].update(
+            str(value or "").strip().casefold()
+            for value in emails
+            if str(value or "").strip()
+        )
+        row["message_ids"].update(
+            str(value or "").strip()
+            for value in message_ids
+            if str(value or "").strip()
+        )
+        reason = str(reason or "").strip()
+        if reason and reason not in row["match_reasons"]:
+            row["match_reasons"].append(reason)
+        evidence = dict(evidence or {})
+        if evidence:
+            evidence_key = json.dumps(
+                _json_safe(evidence),
+                sort_keys=True,
+                separators=(",", ":"),
             )
-            company_matches[contact.company_id]["emails"].add(email)
-            company_matches[contact.company_id]["message_ids"].update(message_ids)
-            contact_matches.setdefault(
+            if evidence_key not in row["_evidence_keys"]:
+                row["_evidence_keys"].add(evidence_key)
+                row["evidence"].append(evidence)
+        confidence = max(0.0, min(float(confidence or 0), 1.0))
+        if (
+            confidence > row["confidence"]
+            or (
+                confidence == row["confidence"]
+                and method_priority > row["_method_priority"]
+            )
+        ):
+            row["confidence"] = confidence
+            row["match_method"] = match_method
+            row["explanation"] = reason
+            row["_method_priority"] = method_priority
+        row["_exact_email"] = row["_exact_email"] or bool(exact_email)
+
+    normalized_contact_email = {}
+    for contact in active_contacts:
+        email = str(contact.email or "").strip().casefold()
+        if email:
+            normalized_contact_email.setdefault(email, []).append(contact)
+    normalized_company_email = {}
+    for company in active_companies:
+        email = str(company.email or "").strip().casefold()
+        if email:
+            normalized_company_email.setdefault(email, []).append(company)
+
+    for email, message_ids in sender_evidence.items():
+        for contact in normalized_contact_email.get(email, []):
+            reason = f"Exact sender email matches contact {contact.name}."
+            add_company_match(
+                contact.company_id,
+                confidence=1.0,
+                match_method="exact_contact_email",
+                reason=reason,
+                emails=[email],
+                message_ids=message_ids,
+                evidence={
+                    "signal": "exact_contact_email",
+                    "value": email,
+                    "message_ids": sorted(message_ids),
+                },
+                exact_email=True,
+                method_priority=40,
+            )
+            contact_row = contact_matches.setdefault(
                 contact.id,
                 {
                     "contact_id": contact.id,
@@ -882,32 +1161,176 @@ def _company_contact_candidates(messages, mailbox_email):
                     "email": contact.email,
                     "confidence": 1.0,
                     "match_method": "exact_sender_email",
+                    "explanation": reason,
                     "message_ids": set(),
+                    "evidence": [],
                 },
             )
-            contact_matches[contact.id]["message_ids"].update(message_ids)
-        for company in Company.objects.filter(is_active=True, email__iexact=email):
-            company_matches.setdefault(
+            contact_row["message_ids"].update(message_ids)
+            if not contact_row["evidence"]:
+                contact_row["evidence"].append(
+                    {
+                        "signal": "exact_sender_email",
+                        "value": email,
+                        "message_ids": sorted(message_ids),
+                    }
+                )
+        for company in normalized_company_email.get(email, []):
+            add_company_match(
                 company.id,
+                confidence=1.0,
+                match_method="exact_company_email",
+                reason="Exact sender email matches the company email.",
+                emails=[email],
+                message_ids=message_ids,
+                evidence={
+                    "signal": "exact_company_email",
+                    "value": email,
+                    "message_ids": sorted(message_ids),
+                },
+                exact_email=True,
+                method_priority=30,
+            )
+
+    known_domain_companies = {}
+    for company in active_companies:
+        domain = _email_domain(company.email)
+        if domain and is_private_email_domain(domain):
+            known_domain_companies.setdefault(domain, set()).add(company.id)
+    for contact in active_contacts:
+        domain = _email_domain(contact.email)
+        if domain and is_private_email_domain(domain):
+            known_domain_companies.setdefault(domain, set()).add(
+                contact.company_id
+            )
+
+    sender_domains = {}
+    for email, message_ids in sender_evidence.items():
+        domain = _email_domain(email)
+        if domain and is_private_email_domain(domain):
+            domain_row = sender_domains.setdefault(
+                domain,
                 {
-                    "company_id": company.id,
-                    "company_name": company.name,
-                    "confidence": 1.0,
-                    "match_method": "exact_company_email",
                     "emails": set(),
                     "message_ids": set(),
                 },
             )
-            company_matches[company.id]["emails"].add(email)
-            company_matches[company.id]["message_ids"].update(message_ids)
+            domain_row["emails"].add(email)
+            domain_row["message_ids"].update(message_ids)
+
+    for domain, domain_evidence in sender_domains.items():
+        company_ids = known_domain_companies.get(domain, set())
+        if not company_ids:
+            continue
+        unique = len(company_ids) == 1
+        for company_id in company_ids:
+            add_company_match(
+                company_id,
+                confidence=0.98 if unique else 0.74,
+                match_method=(
+                    "verified_email_domain"
+                    if unique
+                    else "shared_known_private_domain"
+                ),
+                reason=(
+                    f"Sender domain {domain} uniquely matches a saved customer email domain."
+                    if unique
+                    else f"Sender domain {domain} is saved against multiple companies."
+                ),
+                emails=domain_evidence["emails"],
+                message_ids=domain_evidence["message_ids"],
+                evidence={
+                    "signal": (
+                        "verified_email_domain"
+                        if unique
+                        else "shared_known_private_domain"
+                    ),
+                    "value": domain,
+                    "message_ids": sorted(domain_evidence["message_ids"]),
+                },
+                method_priority=20 if unique else 5,
+            )
+
+    sender_addresses = set(sender_evidence)
+    for company in active_companies:
+        domain, reason = company_private_sender_domain_identity(
+            company.name,
+            sender_addresses,
+        )
+        if not domain:
+            continue
+        matching_emails = {
+            email
+            for email in sender_addresses
+            if _email_domain(email) == domain
+        }
+        matching_message_ids = {
+            message_id
+            for email in matching_emails
+            for message_id in sender_evidence.get(email, set())
+        }
+        add_company_match(
+            company.id,
+            confidence=0.86,
+            match_method="company_name_domain_inference",
+            reason=reason,
+            emails=matching_emails,
+            message_ids=matching_message_ids,
+            evidence={
+                "signal": "company_name_domain_inference",
+                "value": domain,
+                "message_ids": sorted(matching_message_ids),
+            },
+            method_priority=10,
+        )
+
+    signature_identity_by_message = _inbound_signature_identity_by_message(
+        messages,
+        mailbox_email,
+    )
+    for company in active_companies:
+        matching_message_ids = _company_name_signature_message_ids(
+            company.name,
+            signature_identity_by_message,
+        )
+        if not matching_message_ids:
+            continue
+        add_company_match(
+            company.id,
+            confidence=0.90,
+            match_method="exact_company_name_signature",
+            reason=(
+                "The distinctive existing company name appears exactly in "
+                "the inbound sender's newest-message signature."
+            ),
+            message_ids=matching_message_ids,
+            evidence={
+                "signal": "exact_company_name_signature",
+                "value": company.name,
+                "message_ids": sorted(matching_message_ids),
+            },
+            method_priority=15,
+        )
 
     company_rows = []
     for row in company_matches.values():
         row = {**row}
         row["emails"] = sorted(row["emails"])
         row["message_ids"] = sorted(row["message_ids"])
+        row["evidence"] = [
+            _json_safe(value)
+            for value in row["evidence"]
+        ]
+        row.pop("_evidence_keys", None)
+        row.pop("_method_priority", None)
         company_rows.append(row)
-    company_rows.sort(key=lambda row: (row["company_name"].lower(), row["company_id"]))
+    company_rows.sort(
+        key=lambda row: (
+            -float(row["confidence"]),
+            row["company_name"].lower(),
+            row["company_id"],
+        )
+    )
 
     contact_rows = []
     for row in contact_matches.values():
@@ -916,7 +1339,34 @@ def _company_contact_candidates(messages, mailbox_email):
         contact_rows.append(row)
     contact_rows.sort(key=lambda row: (row["contact_name"].lower(), row["contact_id"]))
 
-    recommended_company_id = company_rows[0]["company_id"] if len(company_rows) == 1 else None
+    exact_company_rows = [
+        row
+        for row in company_rows
+        if row.get("_exact_email")
+    ]
+    recommended_company_id = None
+    exact_company_match = False
+    if len(exact_company_rows) == 1:
+        recommended_company_id = exact_company_rows[0]["company_id"]
+        exact_company_match = True
+    elif not exact_company_rows and company_rows:
+        top = company_rows[0]
+        runner_up_confidence = (
+            float(company_rows[1]["confidence"])
+            if len(company_rows) > 1
+            else 0.0
+        )
+        if (
+            float(top["confidence"]) >= COMPANY_INFERENCE_MIN_CONFIDENCE
+            and (
+                len(company_rows) == 1
+                or float(top["confidence"]) - runner_up_confidence
+                >= COMPANY_INFERENCE_MIN_MARGIN
+            )
+        ):
+            recommended_company_id = top["company_id"]
+    for row in company_rows:
+        row.pop("_exact_email", None)
     recommended_contacts = [
         row
         for row in contact_rows
@@ -933,7 +1383,9 @@ def _company_contact_candidates(messages, mailbox_email):
         "contacts": contact_rows,
         "recommended_company_id": recommended_company_id,
         "recommended_contact_id": recommended_contact_id,
-        "exact_company_match": bool(recommended_company_id),
+        # Inferred domains remain review-only. Direct-quote readiness is
+        # reserved for the existing exact-email identity path.
+        "exact_company_match": exact_company_match,
     }
 
 
@@ -2174,6 +2626,12 @@ def _build_source_analysis(
                 kind="email_body",
                 preview=preview,
             )
+            source["rows"] = [
+                row
+                for row in source.get("rows") or []
+                if not _is_clear_non_item_email_prose_row(row)
+            ]
+            source["line_count"] = len(source["rows"])
             source.update(
                 {
                     "message_sequence": message_sequence,
@@ -2622,9 +3080,18 @@ def _build_source_analysis(
         warnings.append(
             "Multiple Gmail sources contain different item sets. Review the intended current request."
         )
-    if not candidates.get("exact_company_match"):
+    if (
+        candidates.get("recommended_company_id")
+        and not candidates.get("exact_company_match")
+    ):
         warnings.append(
-            "No unique customer was found from an exact sender email match."
+            "A customer company was suggested from email-domain or signature "
+            "evidence. Staff must confirm it before creating the quotation."
+        )
+    elif not candidates.get("exact_company_match"):
+        warnings.append(
+            "No unique customer could be suggested from exact sender, "
+            "email-domain, or signature evidence."
         )
 
     recommended_source_keys = list(

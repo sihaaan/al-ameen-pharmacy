@@ -219,6 +219,45 @@ const suggestedCompany = (record) => {
   );
 };
 
+const companySuggestionEvidenceLabel = (suggestion) => {
+  const matchMethod = String(suggestion?.match_method || '')
+    .trim()
+    .toLowerCase()
+    .replaceAll('-', '_')
+    .replaceAll(' ', '_');
+  const matchMethodTokens = new Set(matchMethod.split('_').filter(Boolean));
+  if (
+    matchMethodTokens.has('signature')
+    && matchMethodTokens.has('domain')
+  ) {
+    return 'Suggested from email domain and signature inference';
+  }
+  if (matchMethodTokens.has('signature')) {
+    return 'Suggested from the company name in the email signature';
+  }
+  if (matchMethodTokens.has('verified') && matchMethodTokens.has('domain')) {
+    return 'Suggested from a verified company email domain';
+  }
+  if (
+    matchMethodTokens.has('exact')
+    && ['sender', 'contact', 'company', 'email'].some((hint) => matchMethodTokens.has(hint))
+  ) {
+    return 'Suggested from an exact sender email match';
+  }
+  if (
+    matchMethodTokens.has('domain')
+    && ['company', 'name', 'inferred', 'inference'].some(
+      (hint) => matchMethodTokens.has(hint)
+    )
+  ) {
+    return 'Suggested from company-name and email-domain inference';
+  }
+  if (matchMethodTokens.has('domain')) {
+    return 'Suggested from email-domain evidence';
+  }
+  return 'Suggested from customer identity evidence';
+};
+
 const suggestedContact = (record) => {
   const explicit = firstDefined(
     record.contact_suggestion,
@@ -1252,6 +1291,9 @@ const GmailInquiryReview = ({
   const selectedCompany = companies.find((company) => String(company.id) === companyId);
   const selectedContact = contacts.find((contact) => String(contact.id) === contactId);
   const companySuggestion = suggestedCompany(record || {});
+  const companySuggestionEvidence = companySuggestion
+    ? companySuggestionEvidenceLabel(companySuggestion)
+    : '';
   const anchorMessage = messages.find(
     (message, index) => messageIdentity(message, index) === String(record?.anchor_message_id || '')
   ) || messages[0];
@@ -1469,7 +1511,16 @@ const GmailInquiryReview = ({
               </article>
             );
           })}
-          {!messages.length && <div className="qm-empty">No Gmail thread messages are available yet.</div>}
+          {!messages.length && (
+            analysisActive ? (
+              <div className="qm-empty" role="status">
+                <strong>Reading the Gmail thread and attachments...</strong>
+                <span>The messages and attachment evidence will appear here automatically when analysis finishes.</span>
+              </div>
+            ) : (
+              <div className="qm-empty">No Gmail thread messages are available.</div>
+            )
+          )}
         </div>
       </div>
 
@@ -1483,11 +1534,9 @@ const GmailInquiryReview = ({
         {companySuggestion && !companyId && (
           <div className="qm-gmail-company-suggestion">
             <div>
-              <span>Suggested from exact sender evidence</span>
+              <span>{companySuggestionEvidence}</span>
               <strong>{companySuggestion.name}</strong>
-              {companySuggestion.match_method && (
-                <small>{String(companySuggestion.match_method).replaceAll('_', ' ')}</small>
-              )}
+              <small>Staff confirmation is required before creating the quotation.</small>
             </div>
             <button
               type="button"
@@ -1512,7 +1561,7 @@ const GmailInquiryReview = ({
             helperText={firstDefined(
               record?.company_match_reason,
               record?.identity?.company_reason,
-              suggestedCompany(record || {})?.match_method,
+              companySuggestionEvidence,
               ''
             )}
             onChange={selectCompany}
@@ -1554,7 +1603,7 @@ const GmailInquiryReview = ({
             <strong>{firstDefined(
               record?.company_match_reason,
               record?.identity?.company_reason,
-              suggestedCompany(record || {})?.match_method,
+              companySuggestionEvidence,
               'Manual confirmation required'
             )}</strong>
           </div>

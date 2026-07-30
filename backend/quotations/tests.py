@@ -2029,6 +2029,14 @@ class InquiryParserRuleTests(APITestCase):
         self.assertEqual(str(quantity), "5")
         self.assertEqual(unit.lower(), "nos")
 
+    def test_inferred_item_header_rejects_single_numeric_metadata_row(self):
+        rows = [
+            ("Invoice Number", "Qty"),
+            ("123456", 2),
+        ]
+
+        self.assertIsNone(detect_header_row(rows))
+
     def test_serial_prefix_is_not_part_of_item_name(self):
         parsed = parse_inquiry_line("01 - TRIANGULAR BANDAGES 5 Nos")
 
@@ -3409,6 +3417,78 @@ class InquiryImportTests(APITestCase):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+    def make_multi_section_descriptive_excel_upload(self, name="multi-section.xlsx"):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Emergency meds and supplies"
+        section_counts = [8, 40, 3, 21]
+        section_labels = [
+            "Emergency Meds",
+            "Standard Supplies",
+            "Standard Equipment",
+            "Medications",
+        ]
+        item_number = 0
+        for section_index, (section_label, section_count) in enumerate(
+            zip(section_labels, section_counts)
+        ):
+            sheet.append(["No.", section_label, "Qty"])
+            for serial in range(1, section_count + 1):
+                item_number += 1
+                if item_number <= 30:
+                    quantity = item_number
+                elif item_number == 31:
+                    quantity = "100pcs 1 box"
+                else:
+                    quantity = f"{item_number} pcs"
+                sheet.append(
+                    [
+                        serial,
+                        f"Clinical supply item {item_number}",
+                        quantity,
+                    ]
+                )
+            if section_index < len(section_counts) - 1:
+                sheet.append([])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return SimpleUploadedFile(
+            name,
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    def make_descriptive_header_quantity_upload(self, name="packed-quantity.xlsx"):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Items"
+        sheet.append(["Clinical Stock", "Qty"])
+        sheet.append(["Packed Gauze", "100pcs 1 box"])
+        sheet.append(["Ambiguous Gauze", "100pcs 1 box extra"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return SimpleUploadedFile(
+            name,
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    def make_numbered_size_item_upload(self, name="numbered-size-items.xlsx"):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Items"
+        sheet.append(["No.", "Medical Supplies", "Qty"])
+        sheet.append([33, "20 cc syringe per box", "2 box"])
+        sheet.append([34, "3 cc syringe per box", "3 box"])
+        sheet.append([35, "5 cc syringe per box", "3 box"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return SimpleUploadedFile(
+            name,
+            buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     def make_pdf_upload(self, text=True, encrypted=False, name="inquiry.pdf"):
         buffer = BytesIO()
         if text:
@@ -3647,6 +3727,113 @@ class InquiryImportTests(APITestCase):
         selected = [sheet["sheet_name"] for sheet in response.data["meta"]["selected_sheets"]]
         self.assertEqual(selected, ["Items"])
         self.assertEqual(response.data["lines"][0]["raw_name"], "Gloves Medium")
+
+    def test_multi_section_descriptive_excel_headers_preserve_all_items_and_quantities(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_multi_section_descriptive_excel_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["warnings"], [])
+        self.assertEqual(len(response.data["lines"]), 72)
+        self.assertEqual(
+            response.data["meta"]["selected_sheets"][0]["header_row"],
+            1,
+        )
+        self.assertEqual(
+            response.data["meta"]["selected_sheets"][0]["mapped_columns"],
+            {
+                "serial_no": {
+                    "index": 0,
+                    "column": "A",
+                    "label": "No.",
+                },
+                "quantity": {
+                    "index": 2,
+                    "column": "C",
+                    "label": "Qty",
+                },
+                "requested_item_name": {
+                    "index": 1,
+                    "column": "B",
+                    "label": "Emergency Meds",
+                },
+            },
+        )
+        self.assertEqual(
+            sum(not line["unit"] for line in response.data["lines"]),
+            30,
+        )
+        self.assertTrue(
+            all(line["quantity"] is not None for line in response.data["lines"])
+        )
+        self.assertFalse(
+            {
+                "Emergency Meds",
+                "Standard Supplies",
+                "Standard Equipment",
+                "Medications",
+            }
+            & {line["raw_name"] for line in response.data["lines"]}
+        )
+        packed = next(
+            line
+            for line in response.data["lines"]
+            if line["raw_name"] == "Clinical Supply Item 31"
+        )
+        self.assertEqual(packed["quantity"], "1")
+        self.assertEqual(packed["unit"], "box")
+        self.assertIn("Pack info: 100 pcs per box", packed["notes"])
+
+    def test_descriptive_header_without_serial_is_inferred_and_ambiguous_quantity_is_not_guessed(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_descriptive_header_quantity_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["warnings"], [])
+        self.assertEqual(len(response.data["lines"]), 2)
+        self.assertEqual(
+            response.data["meta"]["selected_sheets"][0]["mapped_columns"][
+                "requested_item_name"
+            ]["label"],
+            "Clinical Stock",
+        )
+        packed, ambiguous = response.data["lines"]
+        self.assertEqual((packed["quantity"], packed["unit"]), ("1", "box"))
+        self.assertIn("Pack info: 100 pcs per box", packed["notes"])
+        self.assertIsNone(ambiguous["quantity"])
+        self.assertEqual(ambiguous["unit"], "")
+        self.assertEqual(ambiguous["parse_status"], InquiryLine.PARSE_NEEDS_REVIEW)
+        self.assertIn(
+            "Quantity text requires review: 100pcs 1 box extra",
+            ambiguous["notes"],
+        )
+
+    def test_explicit_serial_column_preserves_leading_item_size(self):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_numbered_size_item_upload()},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [line["raw_name"] for line in response.data["lines"]],
+            [
+                "20 Cc Syringe per box",
+                "3 Cc Syringe per box",
+                "5 Cc Syringe per box",
+            ],
+        )
+        self.assertEqual(
+            [line["serial_no"] for line in response.data["lines"]],
+            ["33", "34", "35"],
+        )
 
     def test_pdf_parse_happy_path(self):
         response = self.client.post(

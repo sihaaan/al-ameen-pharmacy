@@ -377,6 +377,79 @@ describe('GmailInquiryReview', () => {
     }
   });
 
+  test('shows a live Gmail-reading state before the message manifest is persisted', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...baseRecord,
+        status: 'analyzing',
+        message_manifest: [],
+        attachment_manifest: [],
+        evidence: [],
+        analysis: {
+          ...baseRecord.analysis,
+          preview: {
+            ...baseRecord.analysis.preview,
+            lines: [],
+          },
+        },
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(/reading the gmail thread and attachments/i)).toBeInTheDocument();
+    expect(screen.getByText(/will appear here automatically when analysis finishes/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no gmail thread messages are available/i)).not.toBeInTheDocument();
+  });
+
+  test('keeps the true empty-thread message for completed analysis only', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...baseRecord,
+        status: 'review_required',
+        message_manifest: [],
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText('No Gmail thread messages are available.')).toBeInTheDocument();
+    expect(screen.queryByText(/reading the gmail thread and attachments/i)).not.toBeInTheDocument();
+  });
+
+  test.each([
+    ['exact_contact_email', 'Suggested from an exact sender email match'],
+    ['verified_email_domain', 'Suggested from a verified company email domain'],
+    ['company_name_domain_inference', 'Suggested from company-name and email-domain inference'],
+    ['exact_company_name_signature', 'Suggested from the company name in the email signature'],
+    ['domain_signature_inference', 'Suggested from email domain and signature inference'],
+  ])('labels a %s company suggestion and requires staff confirmation', async (matchMethod, label) => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...baseRecord,
+        company: null,
+        contact: null,
+        candidates: {
+          ...baseRecord.candidates,
+          companies: [{
+            ...baseRecord.candidates.companies[0],
+            match_method: matchMethod,
+          }],
+        },
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const suggestionButton = await screen.findByRole('button', { name: 'Use suggested company' });
+    const suggestion = suggestionButton.closest('.qm-gmail-company-suggestion');
+    expect(within(suggestion).getByText(label)).toBeInTheDocument();
+    expect(within(suggestion).getByText('Example Medical')).toBeInTheDocument();
+    expect(within(suggestion).getByText(
+      'Staff confirmation is required before creating the quotation.'
+    )).toBeInTheDocument();
+  });
+
   test('blocks confirmation when an included row cites unchecked evidence', async () => {
     const conflictRecord = {
       ...reviewedRecord,

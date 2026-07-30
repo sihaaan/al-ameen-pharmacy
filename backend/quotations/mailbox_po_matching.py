@@ -1151,7 +1151,11 @@ def _private_domain(domain: str) -> bool:
     )
 
 
-def _domain_identity_label(domain: str) -> str:
+def _domain_identity_label(
+    domain: str,
+    *,
+    allow_ac_ae: bool = False,
+) -> str:
     """Return a conservative identity label for mailbox-observed domain shapes.
 
     Without a bundled Public Suffix List, arbitrary domains must fail closed.
@@ -1168,10 +1172,25 @@ def _domain_identity_label(domain: str) -> str:
     elif (
         len(labels) == 3
         and labels[-1] == "ae"
-        and labels[-2] in {"co", "com"}
+        and (
+            labels[-2] in {"co", "com"}
+            or (allow_ac_ae and labels[-2] == "ac")
+        )
     ):
         candidate = labels[0]
     return candidate if candidate not in _DOMAIN_LABEL_NOISE else ""
+
+
+def is_private_email_domain(domain: str) -> bool:
+    """Return whether a sender domain is safe to use as private-company evidence."""
+
+    return _private_domain(str(domain or "").casefold())
+
+
+def normalize_company_identity_text(value: str) -> str:
+    """Normalize bounded company-identity phrases for exact text evidence."""
+
+    return _normalize_text(value)
 
 
 def _company_strength(company_name: str, message: CanonicalMailboxMessage) -> tuple[float, str]:
@@ -1231,7 +1250,12 @@ def _attachment_has_distinctive_exact_company_name(
     )
 
 
-def _company_acronym_domain(company_name: str, sender_domains: set[str]) -> str:
+def _company_acronym_domain(
+    company_name: str,
+    sender_domains: set[str],
+    *,
+    allow_ac_ae: bool = False,
+) -> str:
     words = [
         token
         for token in _normalize_tokens(company_name)
@@ -1243,7 +1267,10 @@ def _company_acronym_domain(company_name: str, sender_domains: set[str]) -> str:
     for domain in sender_domains:
         if not _private_domain(domain):
             continue
-        label = _domain_identity_label(domain)
+        label = _domain_identity_label(
+            domain,
+            allow_ac_ae=allow_ac_ae,
+        )
         allowed = {acronym, f"{acronym}ae", f"{acronym}uae", f"{acronym}dubai"}
         if len(acronym) >= 3:
             allowed.add(f"{acronym}group")
@@ -1272,7 +1299,12 @@ def _compact_company_candidates(company_name: str) -> set[str]:
     return candidates
 
 
-def _compact_company_sender_identity(company_name: str, senders: frozenset[str]):
+def _compact_company_sender_identity(
+    company_name: str,
+    senders: frozenset[str],
+    *,
+    allow_ac_ae: bool = False,
+):
     candidates = _compact_company_candidates(company_name)
     significant_tokens = [
         token
@@ -1290,7 +1322,14 @@ def _compact_company_sender_identity(company_name: str, senders: frozenset[str])
     for sender in senders:
         local, _separator, domain = sender.partition("@")
         private_domain = _private_domain(domain)
-        identity_label = _domain_identity_label(domain) if private_domain else ""
+        identity_label = (
+            _domain_identity_label(
+                domain,
+                allow_ac_ae=allow_ac_ae,
+            )
+            if private_domain
+            else ""
+        )
         domain_labels = [identity_label] if identity_label else []
         if private_domain:
             for label in domain_labels:
@@ -1324,6 +1363,51 @@ def _compact_company_sender_identity(company_name: str, senders: frozenset[str])
                 if len(candidate) >= 7 and candidate in compact_local:
                     return "distinctive customer company name appears in public-mail sender"
     return ""
+
+
+def company_private_sender_domain_identity(
+    company_name: str,
+    senders: Iterable[str],
+) -> tuple[str, str]:
+    """Match an existing company name to a recognized private sender domain.
+
+    This intentionally excludes public-mail local-part inference. It is used
+    where a domain match is only a review suggestion, and arbitrary suffix or
+    subdomain shapes must fail closed.
+    """
+
+    normalized_senders = _addresses(tuple(str(value or "") for value in senders))
+    private_senders = frozenset(
+        address
+        for address in normalized_senders
+        if _private_domain(_domain(address))
+        and _domain_identity_label(
+            _domain(address),
+            allow_ac_ae=True,
+        )
+    )
+    if not private_senders:
+        return "", ""
+    sender_domains = {_domain(address) for address in private_senders}
+    acronym_domain = _company_acronym_domain(
+        company_name,
+        sender_domains,
+        allow_ac_ae=True,
+    )
+    if acronym_domain:
+        return (
+            acronym_domain,
+            f"customer company acronym matches sender domain {acronym_domain}",
+        )
+    for sender in sorted(private_senders):
+        reason = _compact_company_sender_identity(
+            company_name,
+            frozenset({sender}),
+            allow_ac_ae=True,
+        )
+        if reason:
+            return _domain(sender), reason
+    return "", ""
 
 
 def _customer_component(

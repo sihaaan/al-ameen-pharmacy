@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+from io import BytesIO
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -7,6 +8,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
+from openpyxl import Workbook
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -18,6 +20,7 @@ from .gmail_inquiry_import import (
     _attachment_extension,
     _attachment_parse_filename,
     _build_source_analysis,
+    _company_contact_candidates,
     _connected_mailbox_for_import,
     _confirmation_received_at,
     _confirmation_subject,
@@ -161,6 +164,466 @@ class GmailInquiryImportTests(TestCase):
             ]
         )
         return gmail_import
+
+    def test_company_candidates_preserve_exact_email_priority(self):
+        inferred = Company.objects.create(
+            name="Buyer Example Medical",
+        )
+        message = gmail_message(
+            "identity-exact",
+            sender="Buyer <buyer@example.com>",
+            body=(
+                "Please quote.\nBest regards,\n"
+                "Buyer Example Medical"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(
+            candidates["recommended_company_id"],
+            self.company.id,
+        )
+        self.assertTrue(candidates["exact_company_match"])
+        self.assertEqual(
+            candidates["recommended_contact_id"],
+            self.contact.id,
+        )
+        exact = next(
+            row
+            for row in candidates["companies"]
+            if row["company_id"] == self.company.id
+        )
+        self.assertEqual(exact["match_method"], "exact_contact_email")
+        self.assertEqual(exact["confidence"], 1.0)
+        self.assertTrue(exact["evidence"])
+        self.assertNotEqual(
+            candidates["recommended_company_id"],
+            inferred.id,
+        )
+
+    def test_reply_to_cannot_spoof_exact_identity_or_direct_quote_readiness(self):
+        message = gmail_message(
+            "identity-spoofed-reply-to",
+            sender="Impostor <impostor@unrelated.ae>",
+            body="Please quote the requested item.",
+            html=(
+                "<table>"
+                "<tr><th>Item</th><th>Qty</th><th>Unit</th></tr>"
+                "<tr><td>Sterile Gauze</td><td>2</td><td>PCS</td></tr>"
+                "</table>"
+            ),
+        )
+        message["reply_to"] = "Buyer <buyer@example.com>"
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(
+            candidates["sender_emails"],
+            ["impostor@unrelated.ae"],
+        )
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertIsNone(candidates["recommended_contact_id"])
+        self.assertNotIn(
+            self.company.id,
+            {
+                row["company_id"]
+                for row in candidates["companies"]
+            },
+        )
+        self.assertNotIn(
+            self.contact.id,
+            {
+                row["contact_id"]
+                for row in candidates["contacts"]
+            },
+        )
+
+        gmail_import = self.issue_and_claim(
+            anchor="identity-spoofed-reply-to",
+        )
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertTrue(result["preview"]["lines"])
+        self.assertFalse(result["ready_for_direct_quote"])
+        self.assertFalse(result["candidates"]["exact_company_match"])
+        self.assertIsNone(
+            result["candidates"]["recommended_company_id"]
+        )
+
+    def test_company_candidates_infer_cud_ac_ae_as_review_only(self):
+        company = Company.objects.create(
+            name="CANADIAN UNIVERSITY DUBAI",
+        )
+        message = gmail_message(
+            "identity-cud",
+            sender="Health Center <healthcenter@cud.ac.ae>",
+            body=(
+                "Dear Team,\nPlease find attached updated quotation request.\n"
+                "Best regards,\nKim Fabillon R.N\nwww.cud.ac.ae"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(
+            candidates["recommended_company_id"],
+            company.id,
+        )
+        self.assertIsNone(candidates["recommended_contact_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        match = candidates["companies"][0]
+        self.assertEqual(match["company_id"], company.id)
+        self.assertEqual(
+            match["match_method"],
+            "company_name_domain_inference",
+        )
+        self.assertIn("acronym", match["explanation"])
+        self.assertEqual(match["evidence"][0]["value"], "cud.ac.ae")
+
+    def test_company_candidates_use_unique_saved_private_domain_as_review_only(self):
+        company = Company.objects.create(
+            name="Unique Domain Customer",
+            email="procurement@unique-customer.ae",
+        )
+        message = gmail_message(
+            "identity-known-domain",
+            sender="Clinic <clinic@unique-customer.ae>",
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(
+            candidates["recommended_company_id"],
+            company.id,
+        )
+        self.assertFalse(candidates["exact_company_match"])
+        match = next(
+            row
+            for row in candidates["companies"]
+            if row["company_id"] == company.id
+        )
+        self.assertEqual(
+            match["match_method"],
+            "verified_email_domain",
+        )
+        self.assertEqual(match["confidence"], 0.98)
+
+    def test_company_candidates_use_distinctive_inbound_signature_name(self):
+        company = Company.objects.create(
+            name="Northern Crescent Facilities LLC",
+        )
+        message = gmail_message(
+            "identity-signature",
+            sender="Procurement <buyer@customer.ae>",
+            body=(
+                "Dear Team,\nPlease quote the attached request.\n\n"
+                "Best regards,\nAisha\n"
+                "Northern Crescent Facilities LLC"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(
+            candidates["recommended_company_id"],
+            company.id,
+        )
+        self.assertFalse(candidates["exact_company_match"])
+        match = candidates["companies"][0]
+        self.assertEqual(
+            match["match_method"],
+            "exact_company_name_signature",
+        )
+        self.assertEqual(match["confidence"], 0.90)
+        self.assertIn("signature", match["explanation"])
+
+    def test_company_signature_can_suggest_existing_company_from_public_mail(self):
+        company = Company.objects.create(
+            name="Northern Crescent Facilities LLC",
+        )
+        message = gmail_message(
+            "identity-public-signature",
+            sender="Aisha <aisha@gmail.com>",
+            body=(
+                "Please quote the attached request.\n"
+                "Best regards,\nAisha\n"
+                "Northern Crescent Facilities LLC"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(
+            candidates["recommended_company_id"],
+            company.id,
+        )
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            candidates["companies"][0]["match_method"],
+            "exact_company_name_signature",
+        )
+
+    def test_company_signature_inference_ignores_company_names_in_message_body(self):
+        Company.objects.create(
+            name="Northern Crescent Facilities LLC",
+        )
+        message = gmail_message(
+            "identity-body-mention",
+            sender="Procurement <buyer@customer.ae>",
+            body=(
+                "Please prepare the delivery for Northern Crescent Facilities LLC.\n"
+                "Best regards,\nAisha\nUnrelated Procurement Services LLC"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(candidates["companies"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+
+    def test_company_signature_inference_rejects_generic_and_substring_names(self):
+        Company.objects.create(name="Health Center")
+        Company.objects.create(name="ACCOR")
+        message = gmail_message(
+            "identity-generic-substring",
+            sender="Procurement <buyer@customer.ae>",
+            body=(
+                "Please quote in accordance with the attached list.\n"
+                "Regards,\nHealth Center"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(candidates["companies"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+
+    def test_company_signature_inference_fails_closed_when_names_are_ambiguous(self):
+        first = Company.objects.create(
+            name="Northern Crescent Facilities",
+        )
+        second = Company.objects.create(
+            name="Northern Crescent Facilities LLC",
+        )
+        message = gmail_message(
+            "identity-signature-ambiguous",
+            sender="Procurement <buyer@customer.ae>",
+            body=(
+                "Please quote the attached list.\nBest regards,\n"
+                "Northern Crescent Facilities LLC"
+            ),
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            {
+                row["company_id"]
+                for row in candidates["companies"]
+            },
+            {first.id, second.id},
+        )
+
+    def test_company_signature_inference_ignores_quoted_and_outbound_text(self):
+        Company.objects.create(
+            name="Northern Crescent Facilities LLC",
+        )
+        quoted = gmail_message(
+            "identity-signature-quoted",
+            sender="Procurement <buyer@customer.ae>",
+            body=(
+                "Any update?\n"
+                "On Tue, Jul 28, 2026 at 9:00 AM Someone wrote:\n"
+                "Northern Crescent Facilities LLC"
+            ),
+        )
+        outbound = gmail_message(
+            "identity-signature-outbound",
+            sender="Procurement <buyer@customer.ae>",
+            body=(
+                "Please quote.\nBest regards,\n"
+                "Northern Crescent Facilities LLC"
+            ),
+        )
+        outbound["label_ids"] = ["SENT"]
+
+        for message in (quoted, outbound):
+            with self.subTest(message_id=message["gmail_message_id"]):
+                candidates = _company_contact_candidates(
+                    [message],
+                    MAILBOX_EMAIL,
+                )
+                self.assertEqual(candidates["companies"], [])
+                self.assertIsNone(
+                    candidates["recommended_company_id"]
+                )
+
+    def test_company_candidates_fail_closed_for_shared_saved_domain(self):
+        first = Company.objects.create(
+            name="First Shared Customer",
+            email="buyer@shared-customer.ae",
+        )
+        second = Company.objects.create(
+            name="Second Shared Customer",
+        )
+        CompanyContact.objects.create(
+            company=second,
+            name="Second Buyer",
+            email="second@shared-customer.ae",
+        )
+        message = gmail_message(
+            "identity-shared-domain",
+            sender="Clinic <clinic@shared-customer.ae>",
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            {
+                row["company_id"]
+                for row in candidates["companies"]
+            },
+            {first.id, second.id},
+        )
+
+    def test_company_candidates_fail_closed_for_acronym_ambiguity(self):
+        first = Company.objects.create(
+            name="Canadian University Dubai",
+        )
+        second = Company.objects.create(
+            name="Clinical Unit Dubai",
+        )
+        message = gmail_message(
+            "identity-ambiguous-acronym",
+            sender="Health Center <healthcenter@cud.ac.ae>",
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            {
+                row["company_id"]
+                for row in candidates["companies"]
+            },
+            {first.id, second.id},
+        )
+
+    def test_company_candidates_reject_public_mail_and_attacker_subdomains(self):
+        Company.objects.create(
+            name="Canadian University Dubai",
+        )
+        messages = [
+            gmail_message(
+                "identity-public-mail",
+                sender="Health Center <cud.healthcenter@gmail.com>",
+            ),
+            gmail_message(
+                "identity-attacker-subdomain",
+                sender="Health Center <healthcenter@cud.ac.ae.attacker.com>",
+            ),
+            gmail_message(
+                "identity-arbitrary-suffix",
+                sender="Health Center <healthcenter@cud.attacker.biz>",
+            ),
+        ]
+
+        for message in messages:
+            with self.subTest(sender=message["sender"]):
+                candidates = _company_contact_candidates(
+                    [message],
+                    MAILBOX_EMAIL,
+                )
+                self.assertEqual(candidates["companies"], [])
+                self.assertIsNone(
+                    candidates["recommended_company_id"]
+                )
+                self.assertFalse(candidates["exact_company_match"])
+
+    def test_company_candidates_ignore_outbound_domain_identity(self):
+        Company.objects.create(
+            name="Canadian University Dubai",
+        )
+        message = gmail_message(
+            "identity-outbound",
+            sender="Health Center <healthcenter@cud.ac.ae>",
+        )
+        message["label_ids"] = ["SENT"]
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(candidates["sender_emails"], [])
+        self.assertEqual(candidates["companies"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+
+    def test_company_candidates_do_not_expand_public_mail_saved_domains(self):
+        Company.objects.create(
+            name="Public Mail Customer",
+            email="known@gmail.com",
+        )
+        message = gmail_message(
+            "identity-public-domain",
+            sender="Other Person <other@gmail.com>",
+        )
+
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertEqual(candidates["companies"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
 
     def test_handoff_token_is_hashed_and_claim_alias_serializer_is_supported(self):
         gmail_import, token = issue_gmail_inquiry_handoff(
@@ -374,6 +837,7 @@ class GmailInquiryImportTests(TestCase):
             analyzed.candidates["recommended_company_id"],
             self.company.pk,
         )
+        self.assertIsNone(analyzed.selected_company_id)
 
     @patch("quotations.gmail_inquiry_import._build_source_analysis")
     @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
@@ -1503,6 +1967,154 @@ class GmailInquiryImportTests(TestCase):
             {"canonical-old-anchor", "canonical-latest"},
         )
         self.assertTrue(timeline_meta["truncated"])
+
+    @patch(
+        "quotations.gmail_inquiry_import.gmail_fetch_attachment_content"
+    )
+    def test_gmail_xlsx_attachment_uses_real_parser_and_preserves_all_rows(
+        self,
+        mock_fetch_attachment,
+    ):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Emergency meds and supplies"
+        sections = [
+            ("Emergency Meds", 8),
+            ("Standard Supplies", 40),
+            ("Standard Equipment", 3),
+            ("Medications", 21),
+        ]
+        for section_index, (section_name, line_count) in enumerate(sections):
+            sheet.append(["No.", section_name, "Qty"])
+            for serial in range(1, line_count + 1):
+                item_name = f"{section_name} item {serial}"
+                quantity = "1 pcs"
+                if section_name == "Standard Supplies":
+                    if serial == 21:
+                        quantity = "100pcs 1 box"
+                    elif serial == 33:
+                        item_name, quantity = "20 cc syringe per box", "2 box"
+                    elif serial == 34:
+                        item_name, quantity = "3 cc syringe per box", "3 box"
+                    elif serial == 35:
+                        item_name, quantity = "5 cc syringe per box", "3 box"
+                sheet.append([serial, item_name, quantity])
+            if section_index < len(sections) - 1:
+                sheet.append([])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+        content = output.getvalue()
+        filename = (
+            "Quotation Request Emergency Meds and Supplies Jul 2026-27.xlsx"
+        )
+        mime_type = (
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        )
+        mock_fetch_attachment.return_value = {
+            "content": content,
+            "filename": filename,
+            "mime_type": mime_type,
+        }
+        attachment = {
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": len(content),
+            "attachment_id": "emergency-supplies-xlsx",
+            "part_id": "2",
+        }
+        message = gmail_message(
+            "xlsx-message",
+            body=(
+                "Dear Team,\n\n"
+                "Please find attached updated quotation request.\n\n"
+                "Thank you"
+            ),
+            attachments=[attachment],
+        )
+        gmail_import = self.issue_and_claim(anchor="xlsx-message")
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        manifest = result["attachment_manifest"][0]
+        self.assertEqual(manifest["filename"], filename)
+        self.assertEqual(manifest["parse_status"], "parsed")
+        self.assertEqual(manifest["line_count"], 72)
+        rows = result["preview"]["lines"]
+        self.assertEqual(len(rows), 72)
+        body_evidence = next(
+            source
+            for source in result["evidence"]
+            if source["kind"] == "email_body"
+        )
+        self.assertEqual(body_evidence["line_count"], 0)
+        self.assertEqual(body_evidence["rows"], [])
+        self.assertIn(
+            "Please find attached updated quotation request.",
+            result["preview"]["original_text"],
+        )
+        self.assertEqual(
+            [
+                row["raw_name"]
+                for row in rows
+                if "Syringe per box" in row["raw_name"]
+            ],
+            [
+                "20 Cc Syringe per box",
+                "3 Cc Syringe per box",
+                "5 Cc Syringe per box",
+            ],
+        )
+        packed = next(
+            row
+            for row in rows
+            if row["raw_name"] == "Standard Supplies Item 21"
+        )
+        self.assertEqual((packed["quantity"], packed["unit"]), ("1", "box"))
+        self.assertIn("Pack info: 100 pcs per box", packed["notes"])
+
+    def test_gmail_prose_filter_retains_typed_item_request(self):
+        body = (
+            "Dear Team,\n"
+            "Please also quote 10 boxes gloves.\n"
+            "Thank you"
+        )
+        message = gmail_message(
+            "typed-item-message",
+            body=body,
+        )
+        gmail_import = self.issue_and_claim(anchor="typed-item-message")
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        body_evidence = next(
+            source
+            for source in result["evidence"]
+            if source["kind"] == "email_body"
+        )
+        self.assertEqual(body_evidence["line_count"], 1)
+        self.assertEqual(
+            body_evidence["rows"][0]["raw_source_line"],
+            "Please also quote 10 boxes gloves.",
+        )
+        self.assertEqual(
+            [row["raw_source_line"] for row in result["preview"]["lines"]],
+            ["Please also quote 10 boxes gloves."],
+        )
+        self.assertIn(body, result["preview"]["original_text"])
 
     @patch("quotations.gmail_inquiry_import._parse_attachment")
     def test_attachment_manifest_is_complete_and_global_parse_cap_is_enforced(

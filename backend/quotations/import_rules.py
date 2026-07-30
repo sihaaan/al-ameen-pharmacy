@@ -60,6 +60,7 @@ UNIT_PATTERN = r"(?:{})".format("|".join(re.escape(unit) for unit in sorted(UNIT
 HEADER_ALIASES = {
     "serial_no": {
         "#",
+        "no",
         "s no",
         "s/no",
         "sl no",
@@ -342,6 +343,35 @@ def classify_header_cell(value):
     return None
 
 
+NON_ITEM_HEADER_LABELS = {
+    "address",
+    "buyer",
+    "company",
+    "contact",
+    "customer",
+    "date",
+    "email",
+    "from",
+    "phone",
+    "seller",
+    "supplier",
+    "to",
+}
+
+
+def _is_plausible_inferred_item_header(value):
+    normalized = normalize_header(value)
+    if (
+        not normalized
+        or len(normalized) > 120
+        or normalized in NON_ITEM_HEADER_LABELS
+        or not re.search(r"[a-z]", normalized)
+        or re.fullmatch(r"[\d\s./-]+", normalized)
+    ):
+        return False
+    return True
+
+
 def _row_roles(row):
     roles = {}
     labels = {}
@@ -350,6 +380,22 @@ def _row_roles(row):
         if role and role not in roles:
             roles[role] = index
             labels[role] = _cell_text(value)
+    if "requested_item_name" not in roles and "quantity" in roles:
+        occupied_indexes = set(roles.values())
+        inferred_candidates = [
+            (index, _cell_text(value))
+            for index, value in enumerate(row)
+            if (
+                index not in occupied_indexes
+                and _cell_text(value)
+                and classify_header_cell(value) is None
+                and _is_plausible_inferred_item_header(value)
+            )
+        ]
+        if len(inferred_candidates) == 1:
+            index, label = inferred_candidates[0]
+            roles["requested_item_name"] = index
+            labels["requested_item_name"] = label
     return roles, labels
 
 
@@ -408,6 +454,50 @@ def split_quantity_unit(quantity_value, unit_value=""):
         return quantity, normalize_unit(unit_match.group("unit"))
 
     return quantity, unit_text
+
+
+PACK_CONTENT_UNIT_PATTERN = r"(?:pc|pcs|piece|pieces)"
+PACK_ORDER_UNIT_PATTERN = r"(?:box|boxes|pack|packs|pkt|pkts|carton|cartons|case|cases)"
+STRUCTURED_PACKED_QUANTITY_RE = re.compile(
+    rf"^\s*(?P<pack_qty>\d+(?:[.,]\d+)?)\s*(?P<pack_unit>{PACK_CONTENT_UNIT_PATTERN})"
+    rf"\s+(?P<qty>\d+(?:[.,]\d+)?)\s*(?P<unit>{PACK_ORDER_UNIT_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+
+
+def split_structured_quantity_unit(quantity_value, unit_value=""):
+    """Parse a structured quantity cell without choosing among ambiguous numbers.
+
+    A customer may write a pack description and the requested outer quantity in
+    one cell, for example ``100pcs 1 box``. Only that complete two-pair shape is
+    reinterpreted; other multi-number cells remain unresolved for staff review.
+    """
+
+    quantity_text = _cell_text(quantity_value)
+    unit_text = normalize_unit(_cell_text(unit_value))
+    packed_match = (
+        STRUCTURED_PACKED_QUANTITY_RE.fullmatch(quantity_text)
+        if not unit_text
+        else None
+    )
+    if packed_match:
+        pack_quantity = decimal_to_preview(packed_match.group("pack_qty"))
+        pack_unit = normalize_unit(packed_match.group("pack_unit"))
+        requested_quantity = parse_decimal(packed_match.group("qty"))
+        requested_unit = normalize_unit(packed_match.group("unit"))
+        return (
+            requested_quantity,
+            requested_unit,
+            f"{pack_quantity} {pack_unit} per {requested_unit}",
+            False,
+        )
+
+    numeric_values = re.findall(r"\d+(?:[.,]\d+)?", quantity_text)
+    if len(numeric_values) > 1:
+        return None, unit_text, "", True
+
+    quantity, unit = split_quantity_unit(quantity_text, unit_text)
+    return quantity, unit, "", False
 
 
 def strip_serial_prefix(value):
@@ -572,8 +662,9 @@ def preserve_specific_item_details(cleaned_name, original_name):
     return cleaned[:255]
 
 
-def clean_item_name(value):
-    value, _, _ = strip_serial_prefix(value)
+def clean_item_name(value, *, strip_serial=True):
+    if strip_serial:
+        value, _, _ = strip_serial_prefix(value)
     return standardize_item_display_name(value)[:255]
 
 
@@ -618,6 +709,10 @@ def detect_header_row(rows, *, start_row_number=1, max_scan_rows=20):
         if not bool({"quantity", "unit", "serial_no", "unit_price", "amount", "vat_rate", "vat_amount", "line_total"} & set(roles)):
             continue
 
+        item_index = roles["requested_item_name"]
+        inferred_item_header = (
+            classify_header_cell(row[item_index]) is None
+        )
         base_score = 0
         if "serial_no" in roles:
             base_score += 1
@@ -639,9 +734,26 @@ def detect_header_row(rows, *, start_row_number=1, max_scan_rows=20):
             base_score += 2
 
         lookahead = rows[offset + 1 : offset + 6]
-        data_scores = [_data_row_score(candidate, roles) for candidate in lookahead]
+        data_scores = []
+        for candidate in lookahead:
+            score = _data_row_score(candidate, roles)
+            if inferred_item_header:
+                item_value = (
+                    _cell_text(candidate[item_index])
+                    if item_index < len(candidate)
+                    else ""
+                )
+                if not re.search(r"[A-Za-z]", item_value):
+                    score = 0
+            data_scores.append(score)
         data_score = sum(1 for score in data_scores if score >= 1)
         strong_data_score = sum(data_scores)
+        if (
+            inferred_item_header
+            and "serial_no" not in roles
+            and data_score < 2
+        ):
+            continue
         if data_score == 0:
             base_score -= 2
         else:
@@ -679,11 +791,15 @@ def make_preview_line(
     parse_confidence=0.3,
     notes="",
     raw_source_line=None,
+    preserve_leading_number=False,
     **source_meta,
 ):
     quantity = parse_decimal(quantity)
     raw_line = normalize_import_line(raw_line)
-    raw_name = clean_item_name(raw_name or raw_line)
+    raw_name = clean_item_name(
+        raw_name or raw_line,
+        strip_serial=not preserve_leading_number,
+    )
     if not raw_name:
         raw_name = raw_line[:255]
     confidence = max(0, min(1, round(float(parse_confidence), 2)))
@@ -752,13 +868,30 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
     if not item_value:
         return None, "skipped"
 
-    item_name, serial_from_item, stripped_serial = strip_serial_prefix(item_value)
     serial_index = columns.get("serial_no")
-    serial_no = _cell_text(row[serial_index]) if serial_index is not None and serial_index < len(row) else serial_from_item
+    if serial_index is None:
+        item_name, serial_from_item, stripped_serial = strip_serial_prefix(
+            item_value
+        )
+    else:
+        # A dedicated serial column is authoritative. Leading numbers in the
+        # item cell can be medically/materially significant specifications
+        # such as "20 cc syringe" and must never be stripped as row numbers.
+        item_name = item_value
+        serial_from_item = ""
+        stripped_serial = False
+    serial_no = (
+        _cell_text(row[serial_index])
+        if serial_index is not None and serial_index < len(row)
+        else serial_from_item
+    )
 
     quantity_value = _cell_by_role(row, columns, "quantity")
     unit_value = _cell_by_role(row, columns, "unit")
-    quantity, unit = split_quantity_unit(quantity_value, unit_value)
+    quantity, unit, pack_info, ambiguous_quantity = split_structured_quantity_unit(
+        quantity_value,
+        unit_value,
+    )
     unit = normalize_unit(unit)
     unit_price = parse_decimal(_cell_by_role(row, columns, "unit_price"))
     amount = parse_decimal(_cell_by_role(row, columns, "amount"))
@@ -781,6 +914,8 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         confidence -= 0.10
     if not unit:
         confidence -= 0.04
+    if ambiguous_quantity:
+        confidence -= 0.10
     if item_name != item_value:
         confidence -= 0.02
 
@@ -789,9 +924,28 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         raw_line=raw_line,
         raw_source_line=raw_line,
         raw_name=item_name,
+        preserve_leading_number=serial_index is not None,
         quantity=quantity,
         unit=unit,
-        notes=_price_notes(unit_price=unit_price, amount=amount, vat_rate=vat_rate, vat_amount=vat_amount, line_total=line_total),
+        notes="; ".join(
+            value
+            for value in [
+                _price_notes(
+                    unit_price=unit_price,
+                    amount=amount,
+                    vat_rate=vat_rate,
+                    vat_amount=vat_amount,
+                    line_total=line_total,
+                    pack_info=pack_info,
+                ),
+                (
+                    f"Quantity text requires review: {quantity_value}"
+                    if ambiguous_quantity
+                    else ""
+                ),
+            ]
+            if value
+        ),
         parse_status=confidence_status(confidence),
         parse_confidence=confidence,
         unit_price=decimal_to_preview(unit_price),
