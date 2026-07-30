@@ -29,6 +29,7 @@ from .contract_intelligence import (
     get_valid_access_token,
     resolve_gmail_connection,
 )
+from .models import GmailOAuthConnection
 
 
 GOOGLE_ID_TOKEN_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
@@ -73,6 +74,12 @@ class GmailAddonPermissionError(GmailAddonError):
 class GmailAddonConfigurationError(GmailAddonError):
     status_code = 503
     public_message = "The quotation Gmail add-on is not fully configured."
+
+
+class GmailAddonSharedConnectionUnavailable(GmailAddonError):
+    """The authenticated add-on user must reconnect the website mailbox."""
+
+    public_message = "Shared Gmail must be reconnected."
 
 
 class GmailAddonInputError(GmailAddonError):
@@ -258,11 +265,16 @@ def _authenticate_user_event(authorization_event, config):
 
 
 def _shared_connection(mailbox_email):
-    connection = resolve_gmail_connection(None, shared_only=True)
-    if connection is None:
-        raise GmailAddonConfigurationError(
-            "Connect the configured shared Gmail mailbox before importing inquiries."
-        )
+    connection = resolve_gmail_connection(
+        None,
+        connected_only=False,
+        shared_only=True,
+    )
+    if (
+        connection is None
+        or getattr(connection, "status", "") != GmailOAuthConnection.STATUS_CONNECTED
+    ):
+        raise GmailAddonSharedConnectionUnavailable()
     if not _constant_time_equal(
         _normalized_email(getattr(connection, "email", "")),
         _normalized_email(mailbox_email),
@@ -271,6 +283,14 @@ def _shared_connection(mailbox_email):
             "The connected shared Gmail mailbox does not match the add-on configuration."
         )
     return connection
+
+
+def _shared_access_token(connection):
+    try:
+        return get_valid_access_token(connection)
+    except RuntimeError as exc:
+        # OAuth/token internals must never enter an add-on card or notification.
+        raise GmailAddonSharedConnectionUnavailable() from exc
 
 
 def _valid_gmail_id(value, *, field_label):
@@ -323,7 +343,7 @@ def _attachment_filenames(payload):
 def _fetch_thread_message_summaries(connection, thread_id):
     """Fetch safe snippets and MIME names, but no body or attachment bytes."""
 
-    token = get_valid_access_token(connection)
+    token = _shared_access_token(connection)
     params = [
         ("format", "full"),
         (
@@ -475,6 +495,82 @@ def _contextual_card(*, summaries, anchor_message_id, action_url):
     }
 
 
+def _shared_gmail_settings_url():
+    """Build the quotation settings URL from the trusted handoff origin/path."""
+
+    base_url = _configured_https_url("GMAIL_ADDON_HANDOFF_URL")
+    parsed = urllib.parse.urlsplit(base_url)
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urllib.parse.urlencode(
+                [
+                    ("admin_tab", "quotations"),
+                    ("quotation_tab", "contract-intelligence"),
+                ]
+            ),
+            "",
+        )
+    )
+
+
+def _shared_gmail_reconnect_response(*, action_callback=False):
+    card = {
+        "name": "quotation-shared-gmail-reconnect",
+        "header": {
+            "title": "Reconnect shared Gmail",
+            "subtitle": "Quotation inquiry imports are temporarily paused",
+        },
+        "sections": [
+            {
+                "widgets": [
+                    {
+                        "textParagraph": {
+                            "text": (
+                                "Shared Gmail must be reconnected in the Al Ameen "
+                                "quotation settings before email inquiries can be "
+                                "imported."
+                            )
+                        }
+                    },
+                    {
+                        "buttonList": {
+                            "buttons": [
+                                {
+                                    "text": "Open Gmail settings",
+                                    "onClick": {
+                                        "openLink": {
+                                            "url": _shared_gmail_settings_url(),
+                                            "openAs": "FULL_SIZE",
+                                            "onClose": "RELOAD_ADD_ON",
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                ]
+            }
+        ],
+    }
+    action = {
+        "navigations": [{"pushCard": card}],
+    }
+    if action_callback:
+        action["notification"] = {
+            "text": "Shared Gmail must be reconnected."
+        }
+    return JsonResponse(
+        {
+            "renderActions": {
+                "action": action,
+            }
+        }
+    )
+
+
 def _notification_response(text, *, status=200):
     return JsonResponse(
         {
@@ -587,8 +683,11 @@ def gmail_addon_contextual(request):
             return _requesting_google_scopes_response(missing_scopes)
         _authenticate_user_event(authorization_event, config)
         anchor_message_id, thread_id = _gmail_context(event)
-        connection = _shared_connection(config["mailbox_email"])
-        summaries = _fetch_thread_message_summaries(connection, thread_id)
+        try:
+            connection = _shared_connection(config["mailbox_email"])
+            summaries = _fetch_thread_message_summaries(connection, thread_id)
+        except GmailAddonSharedConnectionUnavailable:
+            return _shared_gmail_reconnect_response()
         return JsonResponse(
             _contextual_card(
                 summaries=summaries,
@@ -631,16 +730,24 @@ def gmail_addon_action(request):
                 "Select at least one message, then choose Import selected."
             )
 
-        connection = _shared_connection(config["mailbox_email"])
-        if mode == MODE_SELECTED_MESSAGES:
-            thread_message_ids = {
-                item["message_id"]
-                for item in _fetch_thread_message_summaries(connection, thread_id)
-            }
-            if any(message_id not in thread_message_ids for message_id in selected_message_ids):
-                return _notification_response(
-                    "The thread changed. Reopen the add-on and select the messages again."
-                )
+        try:
+            connection = _shared_connection(config["mailbox_email"])
+            _shared_access_token(connection)
+            if mode == MODE_SELECTED_MESSAGES:
+                thread_message_ids = {
+                    item["message_id"]
+                    for item in _fetch_thread_message_summaries(connection, thread_id)
+                }
+                if any(
+                    message_id not in thread_message_ids
+                    for message_id in selected_message_ids
+                ):
+                    return _notification_response(
+                        "The thread changed. Reopen the add-on and select the "
+                        "messages again."
+                    )
+        except GmailAddonSharedConnectionUnavailable:
+            return _shared_gmail_reconnect_response(action_callback=True)
         _import_record, raw_token = _issue_handoff(
             connection,
             anchor_message_id=anchor_message_id,

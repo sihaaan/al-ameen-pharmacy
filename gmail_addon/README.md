@@ -102,6 +102,12 @@ Marketplace SDK HTTP deployment's **Authorization Resource**. It is not the
 website Gmail OAuth client ID, and the backend intentionally has no fallback
 between the two.
 
+If the shared website Gmail authorization is missing, disconnected, expired,
+or revoked, authenticated add-on requests receive a normal reconnect card
+instead of a raw service error. **Open Gmail settings** takes the employee to
+the website's Contract Intelligence Gmail settings; an authorized website
+administrator must complete **Connect Gmail**, then reopen the Gmail add-on.
+
 Keep `GMAIL_ADDON_ENABLED=0` until the deployment and environment values match.
 
 ## 4. Private release

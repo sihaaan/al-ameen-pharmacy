@@ -1,12 +1,15 @@
 import json
+from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import ANY, patch
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 
 from . import gmail_addon
+from .contract_intelligence import encrypt_token
 from .models import GmailOAuthConnection
 
 
@@ -104,6 +107,8 @@ class GmailAddonEndpointTests(TestCase):
             is_shared=True,
             email=MAILBOX_EMAIL,
             status=GmailOAuthConnection.STATUS_CONNECTED,
+            access_token_encrypted=encrypt_token("stored-access-token"),
+            token_expiry=timezone.now() + timedelta(hours=1),
         )
         self.system_email = SERVICE_ACCOUNT_EMAIL
         self.user_email = MAILBOX_EMAIL
@@ -475,6 +480,129 @@ class GmailAddonEndpointTests(TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertNotIn("different-mailbox", response.content.decode("utf-8"))
         mock_fetch_summaries.assert_not_called()
+
+    @patch("quotations.gmail_addon._fetch_thread_message_summaries")
+    def test_missing_shared_connection_returns_authenticated_reconnect_card(
+        self,
+        mock_fetch_summaries,
+    ):
+        self.connection.delete()
+
+        response = self._post(
+            "quotation-gmail-addon-contextual",
+            self._event(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        card = payload["renderActions"]["action"]["navigations"][0]["pushCard"]
+        self.assertEqual(card["header"]["title"], "Reconnect shared Gmail")
+        widgets = card["sections"][0]["widgets"]
+        self.assertIn(
+            "Shared Gmail must be reconnected",
+            widgets[0]["textParagraph"]["text"],
+        )
+        settings_link = widgets[1]["buttonList"]["buttons"][0]["onClick"]["openLink"]
+        self.assertEqual(
+            settings_link["url"],
+            (
+                "https://app.example.com/admin"
+                "?admin_tab=quotations&quotation_tab=contract-intelligence"
+            ),
+        )
+        self.assertEqual(settings_link["openAs"], "FULL_SIZE")
+        self.assertEqual(settings_link["onClose"], "RELOAD_ADD_ON")
+        self.assertEqual(
+            self.verified_tokens,
+            [
+                ("system-token", [CONTEXTUAL_URL]),
+                ("user-token", [OAUTH_CLIENT_ID]),
+            ],
+        )
+        mock_fetch_summaries.assert_not_called()
+
+    @patch("quotations.gmail_addon._issue_handoff")
+    def test_disconnected_shared_connection_returns_action_reconnect_card(
+        self,
+        mock_issue_handoff,
+    ):
+        self.connection.status = GmailOAuthConnection.STATUS_DISCONNECTED
+        self.connection.save(update_fields=["status"])
+
+        response = self._post(
+            "quotation-gmail-addon-action",
+            self._event(mode="current_message"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        action = response.json()["renderActions"]["action"]
+        self.assertIn("navigations", action)
+        self.assertIn(
+            "must be reconnected",
+            action["notification"]["text"].lower(),
+        )
+        self.assertEqual(
+            action["navigations"][0]["pushCard"]["header"]["title"],
+            "Reconnect shared Gmail",
+        )
+        mock_issue_handoff.assert_not_called()
+
+    @patch(
+        "quotations.contract_intelligence._form_request",
+        side_effect=RuntimeError(
+            'Google OAuth request failed with HTTP 400: {"error":"invalid_grant"}'
+        ),
+    )
+    def test_invalid_grant_returns_reconnect_card_and_revokes_saved_tokens(
+        self,
+        _mock_form_request,
+    ):
+        self.connection.access_token_encrypted = ""
+        self.connection.refresh_token_encrypted = encrypt_token("expired-refresh-token")
+        self.connection.token_expiry = None
+        self.connection.save(
+            update_fields=[
+                "access_token_encrypted",
+                "refresh_token_encrypted",
+                "token_expiry",
+            ]
+        )
+
+        response = self._post(
+            "quotation-gmail-addon-contextual",
+            self._event(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        response_text = response.content.decode("utf-8")
+        self.assertIn("Reconnect shared Gmail", response_text)
+        self.assertNotIn("invalid_grant", response_text)
+        self.assertNotIn("expired-refresh-token", response_text)
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.status, GmailOAuthConnection.STATUS_ERROR)
+        self.assertEqual(self.connection.access_token_encrypted, "")
+        self.assertEqual(self.connection.refresh_token_encrypted, "")
+
+    @patch(
+        "quotations.gmail_addon.get_valid_access_token",
+        side_effect=RuntimeError("token refresh failed: private provider detail"),
+    )
+    @patch("quotations.gmail_addon._issue_handoff")
+    def test_action_token_refresh_failure_returns_sanitized_reconnect_card(
+        self,
+        mock_issue_handoff,
+        _mock_access_token,
+    ):
+        response = self._post(
+            "quotation-gmail-addon-action",
+            self._event(mode="ai_thread"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        response_text = response.content.decode("utf-8")
+        self.assertIn("Shared Gmail must be reconnected", response_text)
+        self.assertNotIn("private provider detail", response_text)
+        mock_issue_handoff.assert_not_called()
 
     @patch("quotations.gmail_addon._issue_handoff")
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
