@@ -5,24 +5,8 @@ import QuotationErrorNotice from './QuotationErrorNotice';
 
 const ACTIVE_ANALYSIS_STATUSES = new Set(['analyzing', 'processing', 'queued', 'running']);
 const AUTO_ANALYZE_STATUSES = new Set(['claimed', 'new', 'pending', 'ready_to_analyze']);
-const ANALYSIS_MODES = [
-  {
-    id: 'current_message',
-    label: 'Open message only',
-    description: 'Use only the email that was open when the Gmail action was clicked.',
-  },
-  {
-    id: 'selected_messages',
-    label: 'Chosen messages',
-    description: 'Use only the thread messages checked below.',
-  },
-  {
-    id: 'ai_thread',
-    label: 'AI-assisted thread',
-    description: 'Let the analyzer choose relevant inquiry evidence from the conversation.',
-  },
-];
-const ANALYSIS_MODE_IDS = new Set(ANALYSIS_MODES.map((mode) => mode.id));
+const RECOVERABLE_ANALYSIS_STATUSES = new Set(['failed', 'paused']);
+const ANALYSIS_MODE_IDS = new Set(['current_message', 'selected_messages', 'ai_thread']);
 
 const firstDefined = (...values) => values.find((value) => value !== undefined && value !== null);
 const asArray = (value) => (Array.isArray(value) ? value : []);
@@ -558,7 +542,6 @@ const GmailInquiryReview = ({
   const [selectedMessageIds, setSelectedMessageIds] = useState([]);
   const [reviewLines, setReviewLines] = useState([]);
   const [reviewDirty, setReviewDirty] = useState(false);
-  const [selectionDirty, setSelectionDirty] = useState(false);
   const [identityConfirmed, setIdentityConfirmed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [companiesLoading, setCompaniesLoading] = useState(true);
@@ -726,7 +709,7 @@ const GmailInquiryReview = ({
     if (normalizedMode === 'selected_messages' && normalizedSelectedIds.length === 0) {
       setNotice({
         type: 'warning',
-        message: 'Choose at least one thread message before analyzing selected messages.',
+        message: 'This Gmail import has no usable source messages. Return to Gmail and import the relevant email again.',
       });
       return null;
     }
@@ -784,11 +767,10 @@ const GmailInquiryReview = ({
       const response = await analysisRequest;
       if (!actionIsCurrent(actionGeneration)) return response.data;
       applyPayload(response.data);
-      setSelectionDirty(false);
       setNotice({
         type: 'success',
         message: reanalyze
-          ? 'The selected Gmail messages were analyzed again. Review the updated evidence below.'
+          ? 'The Gmail inquiry was analyzed again. Review the updated evidence below.'
           : 'Gmail inquiry analysis is ready for review.',
       });
       return response.data;
@@ -814,7 +796,6 @@ const GmailInquiryReview = ({
             recoverableRequestFailure
             && ACTIVE_ANALYSIS_STATUSES.has(recoveryStatus)
           ) {
-            setSelectionDirty(false);
             setErrorInfo(null);
             setNotice({
               type: 'info',
@@ -827,7 +808,6 @@ const GmailInquiryReview = ({
             && ['ready', 'review_required', 'confirmed'].includes(recoveryStatus)
             && (importLines(recoveryRecord).length || quotationIdFromGmailImportPayload(recoveryRecord))
           ) {
-            setSelectionDirty(false);
             setErrorInfo(null);
             setNotice({
               type: 'success',
@@ -977,52 +957,23 @@ const GmailInquiryReview = ({
     ),
     [enrichedEvidenceSources]
   );
-  const viewableAttachmentSources = useMemo(() => {
-    const bySourceKey = new Map();
-    attachments.forEach((attachment) => {
-      const key = sourceKey(attachment);
-      if (key) bySourceKey.set(key, attachment);
-    });
-    enrichedEvidenceSources.forEach((source) => {
-      const key = sourceKey(source);
-      const isAttachment = (
-        String(source.kind || '').toLowerCase() === 'attachment'
-        || key.startsWith('attachment:')
-      );
-      if (!key || !isAttachment) return;
-      bySourceKey.set(key, {
-        ...(bySourceKey.get(key) || {}),
-        ...source,
-      });
-    });
-    return [...bySourceKey.values()];
-  }, [attachments, enrichedEvidenceSources]);
-  const attachmentSourcesByMessageId = useMemo(() => {
-    const grouped = new Map();
-    viewableAttachmentSources.forEach((source) => {
-      const key = sourceKey(source);
-      const messageId = String(firstDefined(
-        source.gmail_message_id,
-        source.source_message_id,
-        ''
-      ));
-      const isAttachment = (
-        String(source.kind || '').toLowerCase() === 'attachment'
-        || key.startsWith('attachment:')
-      );
-      if (!key || !messageId || !isAttachment) return;
-      const current = grouped.get(messageId) || [];
-      if (!current.some((candidate) => sourceKey(candidate) === key)) {
-        grouped.set(messageId, [...current, source]);
-      }
-    });
-    return grouped;
-  }, [viewableAttachmentSources]);
   const quoteId = quotationIdFromGmailImportPayload(record || {});
   const analysisActive = ACTIVE_ANALYSIS_STATUSES.has(status);
   const analysisRequestPending = ['analyze', 'reanalyze'].includes(busyAction);
   const analysisUiActive = analysisActive || analysisRequestPending;
   const readOnlyImport = Boolean(quoteId || status === 'confirmed');
+  const analysisNeedsRecovery = Boolean(
+    recordId
+    && !readOnlyImport
+    && !analysisUiActive
+    && (
+      RECOVERABLE_ANALYSIS_STATUSES.has(status)
+      || (
+        reviewLines.length === 0
+        && (!AUTO_ANALYZE_STATUSES.has(status) || Boolean(errorInfo))
+      )
+    )
+  );
 
   useEffect(() => {
     if (
@@ -1113,23 +1064,6 @@ const GmailInquiryReview = ({
     patchIdentity({ company: companyId || null, contact: normalized || null });
   };
 
-  const toggleMessage = (messageId) => {
-    setSelectedMessageIds((current) => (
-      current.includes(messageId)
-        ? current.filter((candidate) => candidate !== messageId)
-        : [...current, messageId]
-    ));
-    setSelectionDirty(true);
-    setIdentityConfirmed(false);
-  };
-
-  const changeAnalysisMode = (mode) => {
-    if (!ANALYSIS_MODE_IDS.has(mode)) return;
-    setAnalysisMode(mode);
-    setSelectionDirty(true);
-    setIdentityConfirmed(false);
-  };
-
   const updateReviewLine = (index, field, value) => {
     setReviewLines((current) => current.map((line, candidateIndex) => (
       candidateIndex === index
@@ -1157,7 +1091,7 @@ const GmailInquiryReview = ({
     if (missingStableKeys) {
       setNotice({
         type: 'error',
-        message: 'These rows do not yet have stable review keys. Reanalyze the Gmail inquiry, then try again.',
+        message: 'These rows do not yet have stable review keys. Import the email again from Gmail, then try again.',
       });
       return;
     }
@@ -1307,28 +1241,6 @@ const GmailInquiryReview = ({
     }
   };
 
-  const progressCurrent = Number(firstDefined(
-    record?.analysis_progress?.current,
-    record?.analysis?.processed_messages,
-    record?.processed_messages,
-    0
-  ));
-  const progressTotal = Number(firstDefined(
-    record?.analysis_progress?.total,
-    record?.analysis?.total_messages,
-    record?.total_messages,
-    messages.length,
-    0
-  ));
-  const progressPercent = progressTotal > 0
-    ? Math.max(0, Math.min(100, Math.round((progressCurrent / progressTotal) * 100)))
-    : 0;
-  const canResumeAnalysis = Boolean(
-    record?.can_resume
-    || record?.analysis_has_more
-    || record?.analysis?.has_more
-    || ['failed', 'paused', 'partial'].includes(status)
-  );
   const usableLines = reviewLines.filter((line) => line.included);
   const invalidIncludedLines = reviewLines.filter(reviewLineInvalid);
   const uncertainIncludedLines = reviewLines.filter(reviewLineUncertain);
@@ -1365,7 +1277,6 @@ const GmailInquiryReview = ({
   const confirmDisabled = Boolean(
     busyAction
     || analysisActive
-    || selectionDirty
     || reviewDirty
     || !companyId
     || !identityConfirmed
@@ -1411,8 +1322,30 @@ const GmailInquiryReview = ({
           </div>
         </div>
         <div className="qm-helper warning">
-          Nothing is created automatically. Check the customer identity, selected messages, and extracted rows before confirming.
+          Nothing is created automatically. Check the customer identity, extracted rows, and source evidence before confirming.
         </div>
+        {analysisUiActive && (
+          <div className="qm-feedback info" role="status" aria-live="polite">
+            Analyzing the Gmail inquiry and supported documents. This usually takes 15–30 seconds; larger documents can take longer.
+          </div>
+        )}
+        {analysisNeedsRecovery && (
+          <div className="qm-feedback warning">
+            <span>
+              {RECOVERABLE_ANALYSIS_STATUSES.has(status) || errorInfo
+                ? 'The analysis did not finish. You can safely retry it without creating a duplicate.'
+                : 'No request items were found. Continue analysis to try the same Gmail import again.'}
+            </span>
+            <button
+              type="button"
+              className="qm-secondary"
+              disabled={!messageSelectionValid || Boolean(busyAction)}
+              onClick={() => runAnalysis(recordId, { reanalyze: true })}
+            >
+              {RECOVERABLE_ANALYSIS_STATUSES.has(status) || errorInfo ? 'Retry analysis' : 'Continue analysis'}
+            </button>
+          </div>
+        )}
         {warnings.length > 0 && (
           <div className="qm-gmail-analysis-warnings" role="status">
             <strong>Review warnings</strong>
@@ -1445,176 +1378,10 @@ const GmailInquiryReview = ({
         )}
       </div>
 
-      <div className="qm-panel qm-gmail-analysis-panel">
-        <div className="qm-panel-heading">
-          <div>
-            <h3>1. Thread and analysis</h3>
-            <p>Select the messages that belong to this request. Reanalyzing replaces the rows below with evidence from that selection.</p>
-          </div>
-          <button
-            type="button"
-            className="qm-secondary"
-            disabled={
-              !recordId
-              || readOnlyImport
-              || analysisActive
-              || Boolean(busyAction)
-              || (analysisMode === 'selected_messages' && !selectedMessageIds.length)
-            }
-            onClick={() => runAnalysis(recordId, { reanalyze: true })}
-          >
-            {busyAction === 'reanalyze' ? 'Reanalyzing...' : canResumeAnalysis ? 'Continue analysis' : 'Reanalyze selection'}
-          </button>
-        </div>
-        <fieldset className="qm-gmail-analysis-modes" disabled={readOnlyImport || analysisActive || Boolean(busyAction)}>
-          <legend>Messages to analyze</legend>
-          {ANALYSIS_MODES.map((mode) => (
-            <label key={mode.id} className={analysisMode === mode.id ? 'selected' : ''}>
-              <input
-                type="radio"
-                name="gmail-analysis-mode"
-                value={mode.id}
-                checked={analysisMode === mode.id}
-                onChange={(event) => changeAnalysisMode(event.target.value)}
-              />
-              <span>
-                <strong>{mode.label}</strong>
-                <small>{mode.description}</small>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-        {(analysisUiActive || progressTotal > 0) && (
-          <div className="qm-gmail-analysis-progress" role={analysisUiActive ? 'status' : undefined} aria-live="polite">
-            <div>
-              <strong>{analysisUiActive ? 'Analyzing Gmail thread and attachments...' : 'Analysis progress'}</strong>
-              <span>
-                {analysisUiActive
-                  ? 'This may take 1–2 minutes. The results will appear here automatically.'
-                  : progressTotal
-                    ? `${progressCurrent} of ${progressTotal} messages`
-                    : 'Preparing analysis'}
-              </span>
-            </div>
-            <div
-              className="qm-gmail-progress-track"
-              aria-label={analysisUiActive && progressCurrent === 0
-                ? 'Analysis in progress'
-                : `Analysis ${progressPercent}% complete`}
-            >
-              <span style={{ width: `${progressPercent}%` }} />
-            </div>
-          </div>
-        )}
-        {selectionDirty && (
-          <div className="qm-feedback warning">
-            Message selection changed. Reanalyze the selection before confirming so every row remains tied to the correct evidence.
-          </div>
-        )}
-        <div className="qm-gmail-thread-timeline">
-          {messages.map((message, index) => {
-            const id = messageIdentity(message, index);
-            const role = normalizedRole(message);
-            const isAnchor = String(id) === String(record?.anchor_message_id || '');
-            const classification = String(firstDefined(message.classification, message.analysis_classification, ''))
-              .replaceAll('_', ' ');
-            const analysisReason = firstDefined(message.analysis_reason, message.reason, '');
-            const analysisConfidence = Number(firstDefined(message.analysis_confidence, message.confidence));
-            const analysisConfidenceLabel = Number.isFinite(analysisConfidence)
-              ? `${Math.round(analysisConfidence <= 1 ? analysisConfidence * 100 : analysisConfidence)}% confidence`
-              : '';
-            const messageAttachments = attachmentSourcesByMessageId.get(String(id)) || [];
-            return (
-              <article key={id} className={`qm-gmail-thread-message role-${role}`}>
-                <div className="qm-gmail-thread-marker" aria-hidden="true" />
-                <div className="qm-gmail-thread-card">
-                  <div className="qm-gmail-thread-heading">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={selectedMessageIds.includes(id)}
-                        disabled={
-                          analysisMode !== 'selected_messages'
-                          || readOnlyImport
-                          || analysisActive
-                          || Boolean(busyAction)
-                        }
-                        onChange={() => toggleMessage(id)}
-                      />
-                      Use when "Chosen messages" is selected
-                    </label>
-                    <div className="qm-gmail-message-badges">
-                      {isAnchor && <span className="qm-gmail-anchor-badge">Open email / Anchor</span>}
-                      <span className={`qm-gmail-message-role role-${role}`}>
-                        {role === 'used' ? 'Used' : role === 'excluded' ? 'Excluded' : 'Context'}
-                      </span>
-                    </div>
-                  </div>
-                  <strong>{message.subject || '(No subject)'}</strong>
-                  <span>{firstDefined(message.sender, message.from, 'Unknown sender')} | {formatDateTime(firstDefined(message.received_at, message.sent_at))}</span>
-                  <p>{firstDefined(message.snippet, message.body_preview, 'No preview available.')}</p>
-                  {(classification || analysisReason || analysisConfidenceLabel) && (
-                    <small className="qm-gmail-message-explanation">
-                      {[classification, analysisReason, analysisConfidenceLabel].filter(Boolean).join(' | ')}
-                    </small>
-                  )}
-                  {messageAttachments.length > 0 && (
-                    <details className="qm-gmail-message-attachments">
-                      <summary>
-                        {messageAttachments.length} attachment{messageAttachments.length === 1 ? '' : 's'}
-                      </summary>
-                      <div>
-                        {messageAttachments.map((attachment, attachmentIndex) => {
-                          const key = sourceKey(attachment);
-                          const filename = String(attachment.filename || 'Unnamed attachment');
-                          const statusLabel = String(firstDefined(
-                            attachment.status,
-                            attachment.parse_status,
-                            ''
-                          )).replaceAll('_', ' ');
-                          return (
-                            <button
-                              type="button"
-                              key={`${sourceIdentity(attachment, attachmentIndex)}-${attachmentIndex}`}
-                              aria-label={`Open email attachment ${filename}`}
-                              title={String(firstDefined(
-                                attachment.reason,
-                                attachment.parse_reason,
-                                statusLabel,
-                                `Open ${filename}`
-                              ))}
-                              disabled={Boolean(busyAction)}
-                              onClick={() => viewAttachment(attachment, attachment)}
-                            >
-                              <span>{busyAction === `attachment:${key}` ? 'Opening...' : filename}</span>
-                              {statusLabel && <small>{statusLabel}</small>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              </article>
-            );
-          })}
-          {!messages.length && (
-            analysisUiActive ? (
-              <div className="qm-empty" role="status">
-                <strong>Reading the Gmail thread and attachments...</strong>
-                <span>The messages and attachment evidence will appear here automatically when analysis finishes.</span>
-              </div>
-            ) : (
-              <div className="qm-empty">No Gmail thread messages are available.</div>
-            )
-          )}
-        </div>
-      </div>
-
       <div className="qm-panel qm-gmail-identity-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>2. Confirm customer identity</h3>
+            <h3>1. Confirm customer identity</h3>
             <p>Sender matching is a suggestion. Confirm the company and purchaser yourself before creating the quotation.</p>
           </div>
         </div>
@@ -1709,7 +1476,7 @@ const GmailInquiryReview = ({
       <div className="qm-panel qm-gmail-lines-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>3. Review extracted request lines</h3>
+            <h3>2. Review extracted request lines</h3>
             <p>Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.</p>
           </div>
           <div className="qm-gmail-lines-actions">
@@ -1734,7 +1501,7 @@ const GmailInquiryReview = ({
               ? `${invalidIncludedLines.length} included row(s) need a valid item name, quantity, and unit.`
               : uncertainIncludedLines.length > 0
                 ? `${uncertainIncludedLines.length} included row(s) still need staff review. Correct them or exclude them.`
-                : `${includedLinesWithoutEvidence.length} included row(s) have no source evidence. Reanalyze or exclude them.`}
+                : `${includedLinesWithoutEvidence.length} included row(s) have no source evidence. Retry analysis above or exclude them.`}
           </div>
         )}
         {attachmentError && <div className="qm-feedback error" role="alert">{attachmentError}</div>}
@@ -1922,7 +1689,9 @@ const GmailInquiryReview = ({
                         <span>Extracted item rows will appear here automatically when analysis finishes.</span>
                       </div>
                     ) : (
-                      <div className="qm-empty">No inquiry rows have been extracted. Resume or retry analysis before confirming.</div>
+                      <div className="qm-empty">
+                        No inquiry rows were extracted. Use the analysis action above to try again, or import the relevant email again from Gmail.
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -1936,7 +1705,7 @@ const GmailInquiryReview = ({
         <div className="qm-panel qm-gmail-confirm-panel">
           <div>
             <h3>Ready to create the draft quotation?</h3>
-            <p>The reviewed company, message selection, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.</p>
+            <p>The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.</p>
             <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
           </div>
           <button type="button" className="qm-primary" disabled={confirmDisabled} onClick={confirmImport}>
@@ -1944,22 +1713,20 @@ const GmailInquiryReview = ({
           </button>
           {confirmDisabled && (
             <small>
-              {selectionDirty
-                ? 'Reanalyze the changed message selection first.'
-                : reviewDirty
-                  ? 'Save the reviewed rows before confirming.'
+              {reviewDirty
+                ? 'Save the reviewed rows before confirming.'
                   : invalidIncludedLines.length
                     ? 'Correct or exclude every invalid row first.'
                     : uncertainIncludedLines.length
                       ? 'Correct or exclude every uncertain row first.'
                       : includedLinesWithoutEvidence.length
-                        ? 'Reanalyze or exclude every row without source evidence.'
+                        ? 'Retry analysis above or exclude every row without source evidence.'
                         : !companyId
                           ? 'Select the customer company first.'
                           : !identityConfirmed
                             ? 'Confirm the customer identity first.'
                             : !messageSelectionValid
-                              ? 'Select at least one Gmail message.'
+                              ? 'This Gmail import has no usable source messages. Return to Gmail and import it again.'
                               : !usableLines.length
                                 ? 'Analysis must return at least one usable row.'
                                 : 'Wait for the current operation to finish.'}

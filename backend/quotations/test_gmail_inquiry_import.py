@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from django.db import connection as django_connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from openpyxl import Workbook
@@ -35,6 +37,8 @@ from .gmail_inquiry_import import (
     _thread_message_metadata,
     _native_thread_context,
     _native_thread_instructions,
+    _native_thread_schema,
+    _rows_for_company,
     _run_native_thread_analysis,
     _validate_native_thread_result,
     analyze_gmail_inquiry_import,
@@ -48,10 +52,13 @@ from .models import (
     AIParseLog,
     Company,
     CompanyContact,
+    CompanyPriceHistory,
     GmailInquiryHandoffToken,
     GmailInquiryImport,
     GmailOAuthConnection,
     ProductAlias,
+    Quotation,
+    QuotationLine,
 )
 from .serializers import (
     GmailInquiryClaimSerializer,
@@ -128,10 +135,8 @@ def native_row(
     confidence=0.99,
     parse_status="parsed",
     reason="Read directly from the customer evidence.",
-    extra_source_keys=None,
     extra_citations=None,
 ):
-    source_keys = [source_key, *(extra_source_keys or [])]
     citations = [
         {
             "source_key": source_key,
@@ -150,7 +155,6 @@ def native_row(
         "customer_line_total": str(customer_line_total),
         "customer_vat": str(customer_vat),
         "operation": operation,
-        "source_keys": source_keys,
         "citations": citations,
         "confidence": confidence,
         "parse_status": parse_status,
@@ -288,6 +292,65 @@ class GmailInquiryImportTests(TestCase):
             ]
         )
         return gmail_import
+
+    def test_multiple_gmail_rows_share_one_company_history_query(self):
+        quotation = Quotation.objects.create(
+            company=self.company,
+            created_by=self.staff,
+        )
+        products = []
+        for index in range(4):
+            product = Product.objects.create(
+                name=f"Gmail History Product {index}",
+                price=Decimal("1.00"),
+                status="draft",
+            )
+            line = QuotationLine.objects.create(
+                quotation=quotation,
+                product=product,
+                item_name_snapshot=product.name,
+                quantity=Decimal("1.000"),
+                unit_price=Decimal("2.00"),
+                match_status=QuotationLine.MATCH_CONFIRMED,
+                sort_order=index,
+            )
+            CompanyPriceHistory.objects.create(
+                company=self.company,
+                product=product,
+                quotation=quotation,
+                quotation_line=line,
+                unit_price=Decimal("2.00"),
+                quoted_at=timezone.now() - timedelta(minutes=index),
+                created_by=self.staff,
+            )
+            products.append(product)
+        source_rows = [
+            {
+                "raw_name": product.name,
+                "quantity": "1",
+                "unit": "PCS",
+            }
+            for product in products
+        ]
+
+        with CaptureQueriesContext(django_connection) as captured:
+            matched_rows = _rows_for_company(source_rows, self.company)
+
+        history_table = CompanyPriceHistory._meta.db_table.lower()
+        history_queries = [
+            query
+            for query in captured.captured_queries
+            if history_table in str(query.get("sql") or "").lower()
+        ]
+        self.assertEqual(len(history_queries), 1)
+        self.assertEqual(
+            [row["matched_product"] for row in matched_rows],
+            [product.id for product in products],
+        )
+        self.assertEqual(
+            {row["match_method"] for row in matched_rows},
+            {"company_price_history"},
+        )
 
     def test_company_candidates_preserve_exact_email_priority(self):
         inferred = Company.objects.create(
@@ -1343,7 +1406,6 @@ class GmailInquiryImportTests(TestCase):
                         "PCS",
                         operation="changed",
                         raw_source_text="Gloves | 10 | PCS",
-                        extra_source_keys=[revision_source],
                         extra_citations=[
                             {
                                 "source_key": revision_source,
@@ -1362,7 +1424,6 @@ class GmailInquiryImportTests(TestCase):
                         "PCS",
                         operation="unchanged",
                         raw_source_text="Masks | 5 | PCS",
-                        extra_source_keys=[revision_source],
                         extra_citations=[
                             {
                                 "source_key": revision_source,
@@ -1461,6 +1522,98 @@ class GmailInquiryImportTests(TestCase):
         )
         with self.assertRaisesRegex(AIParseError, "unknown source"):
             _validate_native_thread_result(invalid, [message], evidence)
+
+    def test_native_schema_uses_citations_as_the_row_source_list(self):
+        schema = _native_thread_schema(
+            ["message-1"],
+            ["body-source", "attachment-source"],
+        )
+        row_schema = schema["properties"]["rows"]["items"]
+
+        self.assertNotIn("source_keys", row_schema["properties"])
+        self.assertNotIn("source_keys", row_schema["required"])
+        self.assertIn("citations", row_schema["required"])
+        self.assertIn(
+            "source_keys",
+            schema["properties"]["customer_identity"]["properties"],
+        )
+        self.assertIn(
+            "citations are the row's authoritative source list",
+            _native_thread_instructions(GmailInquiryImport.MODE_AI_THREAD),
+        )
+
+    def test_native_result_derives_ordered_unique_sources_from_citations(self):
+        message = {
+            "gmail_message_id": "multi-source",
+            "is_outbound": False,
+            "newest_body_text": "Please quote the attached request.",
+            "newest_body_html": "",
+        }
+        evidence = [
+            {
+                "source_key": "first-source",
+                "gmail_message_id": "multi-source",
+                "kind": "attachment",
+                "filename": "first.pdf",
+                "mime_type": "application/pdf",
+                "rows": [],
+            },
+            {
+                "source_key": "second-source",
+                "gmail_message_id": "multi-source",
+                "kind": "attachment",
+                "filename": "second.xlsx",
+                "mime_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "rows": [],
+            },
+        ]
+        row = native_row(
+            "second-source",
+            "Sterile gauze",
+            "10",
+            "BOX",
+            raw_source_text="Sterile gauze | 10 | BOX",
+            sheet_name="Request",
+            cell_range="B4:D4",
+            extra_citations=[
+                {
+                    "source_key": "first-source",
+                    "page_number": "2",
+                    "sheet_name": "",
+                    "cell_range": "",
+                    "raw_source_text": "Sterile gauze, 10 boxes",
+                },
+                {
+                    "source_key": "second-source",
+                    "page_number": "",
+                    "sheet_name": "Notes",
+                    "cell_range": "A2",
+                    "raw_source_text": "Urgent sterile gauze",
+                },
+            ],
+        )
+
+        result = _validate_native_thread_result(
+            native_analysis_result(
+                [native_message_result("multi-source")],
+                [row],
+            ),
+            [message],
+            evidence,
+        )
+
+        self.assertNotIn("source_keys", row)
+        self.assertEqual(
+            result["rows"][0]["_source_keys"],
+            ["second-source", "first-source"],
+        )
+        self.assertEqual(len(result["rows"][0]["evidence"]), 3)
+        self.assertEqual(len(result["rows"][0]["_evidence_row_keys"]), 3)
+        self.assertEqual(evidence[0]["line_count"], 1)
+        self.assertEqual(evidence[1]["line_count"], 1)
 
     def test_native_result_preserves_item_level_pdf_and_sheet_citations(self):
         message = {

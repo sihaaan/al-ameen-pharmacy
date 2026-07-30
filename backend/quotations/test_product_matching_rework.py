@@ -1,5 +1,5 @@
 from decimal import Decimal
-from datetime import date
+from datetime import date, timedelta
 from queue import Queue
 from threading import Barrier, Event, Thread
 from types import SimpleNamespace
@@ -12,6 +12,7 @@ from django.db import close_old_connections, connection
 from django.db.backends.postgresql.base import DatabaseWrapper
 from django.test import SimpleTestCase, TransactionTestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
@@ -22,6 +23,7 @@ from .matching import (
     create_or_reuse_product,
     create_product_alias,
     learn_confirmed_product_alias,
+    preload_company_history_match_context,
     suggest_product_for_text,
 )
 from .models import (
@@ -502,6 +504,82 @@ class ProductMatchingReworkTests(APITestCase):
 
         self.assertEqual(history_match.product, historical_product)
         self.assertEqual(history_match.method, "company_price_history")
+
+    def test_preloaded_company_history_preserves_live_match_semantics(self):
+        preferred = self.product(
+            "History Gauze 10cm",
+            sku="HIST-PREFERRED",
+        )
+        older = self.product(
+            "History Gauze 10cm",
+            sku="HIST-OLDER",
+        )
+        archived = self.product("History Gauze 10cm")
+        archived.status = "archived"
+        archived.save(update_fields=["status"])
+        quotation = Quotation.objects.create(
+            company=self.company,
+            created_by=self.staff,
+        )
+        now = timezone.now()
+
+        def add_history(product, quoted_at, sort_order):
+            line = QuotationLine.objects.create(
+                quotation=quotation,
+                product=product,
+                item_name_snapshot=product.name,
+                quantity=Decimal("1.000"),
+                unit_price=Decimal("3.00"),
+                match_status=QuotationLine.MATCH_CONFIRMED,
+                sort_order=sort_order,
+            )
+            return CompanyPriceHistory.objects.create(
+                company=self.company,
+                product=product,
+                quotation=quotation,
+                quotation_line=line,
+                unit_price=Decimal("3.00"),
+                quoted_at=quoted_at,
+                created_by=self.staff,
+            )
+
+        add_history(archived, now + timedelta(minutes=2), 1)
+        add_history(preferred, now + timedelta(minutes=1), 2)
+        add_history(preferred, now - timedelta(minutes=1), 3)
+        add_history(older, now - timedelta(minutes=2), 4)
+
+        live_identity = suggest_product_for_text(
+            "History Gauze 10cm",
+            self.company,
+        )
+        live_identifier = suggest_product_for_text(
+            "unrelated wording",
+            self.company,
+            sku="HIST-OLDER",
+        )
+        history_context = preload_company_history_match_context(self.company)
+        preloaded_identity = suggest_product_for_text(
+            "History Gauze 10cm",
+            self.company,
+            history_context=history_context,
+        )
+        preloaded_identifier = suggest_product_for_text(
+            "unrelated wording",
+            self.company,
+            sku="HIST-OLDER",
+            history_context=history_context,
+        )
+
+        self.assertEqual(live_identity.product, preferred)
+        self.assertEqual(live_identifier.product, older)
+        self.assertEqual(
+            preloaded_identity.as_preview(),
+            live_identity.as_preview(),
+        )
+        self.assertEqual(
+            preloaded_identifier.as_preview(),
+            live_identifier.as_preview(),
+        )
 
     def test_alias_lookup_includes_normalized_unit_token_variants(self):
         product = self.product("Customer Piece Dressing")

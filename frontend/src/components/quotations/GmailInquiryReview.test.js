@@ -223,14 +223,15 @@ describe('GmailInquiryReview', () => {
     render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
 
     expect(await screen.findByDisplayValue('Bandage')).toBeInTheDocument();
-    expect(screen.getByText('Used')).toBeInTheDocument();
-    expect(screen.getByText('Context')).toBeInTheDocument();
-    expect(screen.getByText('Excluded')).toBeInTheDocument();
-    expect(screen.getByText('Open email / Anchor')).toBeInTheDocument();
-    expect(screen.getByText(/inquiry \| Contains the current item request\. \| 96% confidence/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '1. Confirm customer identity' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '2. Review extracted request lines' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /thread and analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reanalyze selection/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByText('Context reply')).not.toBeInTheDocument();
+    expect(screen.queryByText('Old unrelated request')).not.toBeInTheDocument();
     expect(screen.getByText('buyer@example.com')).toBeInTheDocument();
     expect(screen.getByText('request.pdf | page 2 | sheet Items | cells B4:D4')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: '3. Review extracted request lines' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /attachments and source evidence/i })).not.toBeInTheDocument();
     expect(screen.queryByText('AED 5.50')).not.toBeInTheDocument();
     expect(screen.getByText('5.50 (currency not stated)')).toBeInTheDocument();
@@ -267,14 +268,27 @@ describe('GmailInquiryReview', () => {
     expect(onOpenQuote).toHaveBeenCalledWith(99);
   });
 
-  test('reanalyzes the chosen messages against a deduplicated import ID', async () => {
+  test('automatically analyzes the existing Gmail selection against a deduplicated import ID', async () => {
     const onClaimed = jest.fn();
     let resolveAnalysis;
+    const claimedRecord = {
+      ...baseRecord,
+      status: 'claimed',
+      analysis: {
+        ...baseRecord.analysis,
+        preview: {
+          ...baseRecord.analysis.preview,
+          lines: [],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: claimedRecord,
+    });
     quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
       data: {
-        ...baseRecord,
+        ...claimedRecord,
         id: 44,
-        selected_message_ids: ['m-1'],
       },
     });
     quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(
@@ -284,30 +298,30 @@ describe('GmailInquiryReview', () => {
     );
 
     render(<GmailInquiryReview importId="31" onClaimed={onClaimed} />);
-    const contextMessage = (await screen.findByText('Context reply')).closest('article');
-    fireEvent.click(within(contextMessage).getByRole('checkbox'));
-    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
 
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
       mode: 'selected_messages',
-      selected_message_ids: ['m-1'],
+      selected_message_ids: ['m-1', 'm-2'],
     }));
     expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledWith(44, {
-      force: true,
+      force: false,
     });
     // The replacement ID must be durable in the URL before the long analysis
     // response returns.
     expect(onClaimed).toHaveBeenCalledWith(44);
     expect(screen.queryByDisplayValue('Bandage')).not.toBeInTheDocument();
+    expect(screen.getByText(/usually takes 15.*30 seconds/i)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /thread and analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
     expect(await screen.findByText('Analyzing the request...')).toBeInTheDocument();
-    expect(screen.queryByText(/no inquiry rows have been extracted/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no inquiry rows were extracted/i)).not.toBeInTheDocument();
 
     await act(async () => {
       resolveAnalysis({
         data: {
           ...reviewedRecord,
           id: 44,
-          selected_message_ids: ['m-1'],
+          selected_message_ids: ['m-1', 'm-2'],
         },
       });
     });
@@ -346,13 +360,14 @@ describe('GmailInquiryReview', () => {
     render(<GmailInquiryReview importId="31" />);
 
     expect(await screen.findByText(
-      'Analyzing Gmail thread and attachments...'
+      /analyzing the gmail inquiry and supported documents/i
     )).toBeInTheDocument();
-    expect(screen.getByText(/this may take 1.*2 minutes/i)).toBeInTheDocument();
-    expect(screen.getByText('Reading the Gmail thread and attachments...')).toBeInTheDocument();
+    expect(screen.getByText(/usually takes 15.*30 seconds/i)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /thread and analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /reanalyze selection/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
     expect(screen.getByText('Analyzing the request...')).toBeInTheDocument();
-    expect(screen.queryByText('No Gmail thread messages are available.')).not.toBeInTheDocument();
-    expect(screen.queryByText(/no inquiry rows have been extracted/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no inquiry rows were extracted/i)).not.toBeInTheDocument();
 
     await act(async () => {
       resolveAnalysis({
@@ -366,18 +381,17 @@ describe('GmailInquiryReview', () => {
     expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
   });
 
-  test('clears rows when the same import changes mode and source fingerprint', async () => {
+  test('clears stale rows when retry returns a replacement source fingerprint', async () => {
     let resolveAnalysis;
-    const selectedRecord = {
+    const failedSelectedRecord = {
       ...baseRecord,
+      status: 'failed',
       source_fingerprint: 'selected-source-fingerprint',
     };
-    const aiClaimedRecord = {
-      ...selectedRecord,
+    const replacementClaimedRecord = {
+      ...failedSelectedRecord,
       status: 'claimed',
-      mode: 'ai_thread',
-      selected_message_ids: [],
-      source_fingerprint: 'ai-thread-source-fingerprint',
+      source_fingerprint: 'replacement-source-fingerprint',
       analysis: {
         preview: {
           warnings: [],
@@ -387,10 +401,10 @@ describe('GmailInquiryReview', () => {
       },
     };
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
-      data: selectedRecord,
+      data: failedSelectedRecord,
     });
     quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
-      data: aiClaimedRecord,
+      data: replacementClaimedRecord,
     });
     quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(
       new Promise((resolve) => {
@@ -400,12 +414,11 @@ describe('GmailInquiryReview', () => {
 
     render(<GmailInquiryReview importId="31" />);
     await screen.findByDisplayValue('Bandage');
-    fireEvent.click(screen.getByRole('radio', { name: /ai-assisted thread/i }));
-    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
+    fireEvent.click(screen.getByRole('button', { name: /retry analysis/i }));
 
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
-      mode: 'ai_thread',
-      selected_message_ids: [],
+      mode: 'selected_messages',
+      selected_message_ids: ['m-1', 'm-2'],
     }));
     expect(screen.queryByDisplayValue('Bandage')).not.toBeInTheDocument();
     expect(await screen.findByText('Analyzing the request...')).toBeInTheDocument();
@@ -414,9 +427,7 @@ describe('GmailInquiryReview', () => {
       resolveAnalysis({
         data: {
           ...reviewedRecord,
-          mode: 'ai_thread',
-          selected_message_ids: ['m-1'],
-          source_fingerprint: 'ai-thread-source-fingerprint',
+          source_fingerprint: 'replacement-source-fingerprint',
         },
       });
     });
@@ -424,8 +435,12 @@ describe('GmailInquiryReview', () => {
   });
 
   test('recovers an analysis timeout by checking server status and continuing to poll', async () => {
+    const failedRecord = {
+      ...baseRecord,
+      status: 'failed',
+    };
     quotationAPI.gmailInquiryImports.retrieve
-      .mockResolvedValueOnce({ data: baseRecord })
+      .mockResolvedValueOnce({ data: failedRecord })
       .mockResolvedValueOnce({
         data: {
           ...baseRecord,
@@ -439,7 +454,7 @@ describe('GmailInquiryReview', () => {
 
     render(<GmailInquiryReview importId="31" />);
     await screen.findByDisplayValue('Bandage');
-    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
+    fireEvent.click(screen.getByRole('button', { name: /retry analysis/i }));
 
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledWith(31, {
       force: true,
@@ -486,11 +501,16 @@ describe('GmailInquiryReview', () => {
     expect(await screen.findByText(/gmail analysis is still processing/i)).toBeInTheDocument();
     expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
     expect(quotationAPI.gmailInquiryImports.analyze).not.toHaveBeenCalled();
-    expect(screen.getByText('Analyzing Gmail thread and attachments...')).toBeInTheDocument();
-    expect(screen.queryByText(/no inquiry rows have been extracted/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/analyzing the gmail inquiry and supported documents/i)).toBeInTheDocument();
+    expect(screen.getByText(/usually takes 15.*30 seconds/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no inquiry rows were extracted/i)).not.toBeInTheDocument();
   });
 
   test('refreshes failed server state after a nonrecoverable analysis error without auto-retrying', async () => {
+    const retryableFailedRecord = {
+      ...baseRecord,
+      status: 'failed',
+    };
     const failedRecord = {
       ...baseRecord,
       status: 'failed',
@@ -504,7 +524,7 @@ describe('GmailInquiryReview', () => {
       errors: [{ message: 'Invalid analysis request.' }],
     };
     quotationAPI.gmailInquiryImports.retrieve
-      .mockResolvedValueOnce({ data: baseRecord })
+      .mockResolvedValueOnce({ data: retryableFailedRecord })
       .mockResolvedValueOnce({ data: failedRecord });
     quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
       data: {
@@ -520,12 +540,13 @@ describe('GmailInquiryReview', () => {
 
     render(<GmailInquiryReview importId="31" />);
     await screen.findByDisplayValue('Bandage');
-    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
+    fireEvent.click(screen.getByRole('button', { name: /retry analysis/i }));
 
     expect(await screen.findByText('failed')).toBeInTheDocument();
     expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
     expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1);
-    expect(screen.getByText(/no inquiry rows have been extracted/i)).toBeInTheDocument();
+    expect(screen.getByText(/no inquiry rows were extracted/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /retry analysis/i })).toBeInTheDocument();
   });
 
   test('keeps polling after a transient refresh failure', async () => {
@@ -573,7 +594,7 @@ describe('GmailInquiryReview', () => {
     }
   });
 
-  test('shows a live Gmail-reading state before the message manifest is persisted', async () => {
+  test('shows a compact hero analysis state before results are persisted', async () => {
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
       data: {
         ...baseRecord,
@@ -593,26 +614,34 @@ describe('GmailInquiryReview', () => {
 
     render(<GmailInquiryReview importId="31" />);
 
-    expect(await screen.findByText(/reading the gmail thread and attachments/i)).toBeInTheDocument();
-    expect(screen.getByText(
-      'The messages and attachment evidence will appear here automatically when analysis finishes.'
-    )).toBeInTheDocument();
+    expect(await screen.findByText(/analyzing the gmail inquiry and supported documents/i)).toBeInTheDocument();
+    expect(screen.getByText(/usually takes 15.*30 seconds/i)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /thread and analysis/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/no gmail thread messages are available/i)).not.toBeInTheDocument();
   });
 
-  test('keeps the true empty-thread message for completed analysis only', async () => {
+  test('offers a compact continue action when completed analysis has no rows', async () => {
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
       data: {
         ...baseRecord,
         status: 'review_required',
         message_manifest: [],
+        analysis: {
+          ...baseRecord.analysis,
+          preview: {
+            ...baseRecord.analysis.preview,
+            lines: [],
+          },
+        },
       },
     });
 
     render(<GmailInquiryReview importId="31" />);
 
-    expect(await screen.findByText('No Gmail thread messages are available.')).toBeInTheDocument();
-    expect(screen.queryByText(/reading the gmail thread and attachments/i)).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /continue analysis/i })).toBeInTheDocument();
+    expect(screen.getByText(/no inquiry rows were extracted/i)).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /thread and analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/no gmail thread messages are available/i)).not.toBeInTheDocument();
   });
 
   test.each([
@@ -716,11 +745,17 @@ describe('GmailInquiryReview', () => {
     fireEvent.click(screen.getByLabelText(/confirm that this inquiry belongs/i));
     const confirmButton = screen.getByRole('button', { name: /confirm & open quotation/i });
     expect(confirmButton).toBeDisabled();
-    expect(screen.getByText(/reanalyze or exclude every row without source evidence/i)).toBeInTheDocument();
+    expect(screen.getByText(/retry analysis above or exclude every row without source evidence/i)).toBeInTheDocument();
     expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
   });
 
-  test('requires a fresh identity acknowledgement after reanalysis', async () => {
+  test('requires a fresh identity acknowledgement after retrying failed analysis', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...baseRecord,
+        status: 'failed',
+      },
+    });
     render(<GmailInquiryReview importId="31" />);
 
     await screen.findByDisplayValue('Bandage');
@@ -728,7 +763,7 @@ describe('GmailInquiryReview', () => {
     fireEvent.click(identityCheckbox);
     expect(identityCheckbox).toBeChecked();
 
-    fireEvent.click(screen.getByRole('button', { name: /reanalyze selection/i }));
+    fireEvent.click(screen.getByRole('button', { name: /retry analysis/i }));
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalled());
     expect(identityCheckbox).not.toBeChecked();
     expect(screen.getByRole('button', { name: /confirm & open quotation/i })).toBeDisabled();
@@ -815,26 +850,7 @@ describe('GmailInquiryReview', () => {
     }));
   });
 
-  test('opens an attachment using only its opaque source key', async () => {
-    const uncitedAttachmentRecord = {
-      ...baseRecord,
-      attachment_manifest: [
-        ...baseRecord.attachment_manifest,
-        {
-          gmail_message_id: 'm-1',
-          attachment_id: 'raw-gmail-uncited-id',
-          source_key: 'attachment:opaque-unsupported',
-          filename: 'scan-failed.pdf',
-          mime_type: 'application/pdf',
-          size: 1000000,
-          status: 'failed',
-          reason: 'Automatic parsing failed.',
-        },
-      ],
-    };
-    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
-      data: uncitedAttachmentRecord,
-    });
+  test('opens cited source evidence using only its opaque source key', async () => {
     const originalOpen = window.open;
     const originalCreateObjectURL = window.URL.createObjectURL;
     const originalRevokeObjectURL = window.URL.revokeObjectURL;
@@ -845,18 +861,17 @@ describe('GmailInquiryReview', () => {
 
     try {
       render(<GmailInquiryReview importId="31" />);
-      fireEvent.click(await screen.findByText('2 attachments'));
-      const attachmentButton = screen.getByRole('button', {
-        name: 'Open email attachment scan-failed.pdf',
+      const attachmentButton = await screen.findByRole('button', {
+        name: /open source request\.pdf \| page 2/i,
       });
       fireEvent.click(attachmentButton);
 
       await waitFor(() => expect(quotationAPI.gmailInquiryImports.attachment).toHaveBeenCalledWith(
         31,
-        'attachment:opaque-unsupported'
+        'attachment:opaque-1'
       ));
       expect(quotationAPI.gmailInquiryImports.attachment.mock.calls[0]).not.toContain(
-        'raw-gmail-uncited-id'
+        'raw-gmail-attachment-id'
       );
       expect(previewWindow.location.href).toBe('blob:gmail-inquiry');
     } finally {

@@ -306,6 +306,14 @@ class ProductCreationResult:
         }
 
 
+@dataclass(frozen=True)
+class CompanyHistoryMatchContext:
+    """Request-scoped snapshot of the existing company-history match window."""
+
+    company_id: int | None
+    entries: tuple[CompanyPriceHistory, ...] = ()
+
+
 def product_catalog_queryset():
     return Product.objects.exclude(status="archived").select_related("brand", "category")
 
@@ -505,16 +513,47 @@ def _alias_match(raw_text, company, scope_label):
     return ProductMatch(alias.product, candidate.score, candidate.method, candidate.reason, [candidate])
 
 
-def _company_history_product_match(raw_text, requested, company, *, sku="", barcode=""):
+def _company_history_queryset(company):
+    return (
+        CompanyPriceHistory.objects.filter(company=company)
+        .select_related("product")
+        .order_by("-quoted_at", "-id")[:1000]
+    )
+
+
+def preload_company_history_match_context(company):
+    """Evaluate the normal latest-1000 history window once for one request."""
+
+    if not company:
+        return CompanyHistoryMatchContext(company_id=None)
+    return CompanyHistoryMatchContext(
+        company_id=company.pk,
+        entries=tuple(_company_history_queryset(company)),
+    )
+
+
+def _company_history_product_match(
+    raw_text,
+    requested,
+    company,
+    *,
+    sku="",
+    barcode="",
+    history_context=None,
+):
     if not company:
         return None
     identifiers = {str(value).strip().lower() for value in [raw_text, sku, barcode] if str(value or "").strip()}
     seen = set()
-    for history in (
-        CompanyPriceHistory.objects.filter(company=company)
-        .select_related("product")
-        .order_by("-quoted_at", "-id")[:1000]
-    ):
+    history_entries = (
+        history_context.entries
+        if (
+            isinstance(history_context, CompanyHistoryMatchContext)
+            and history_context.company_id == company.pk
+        )
+        else _company_history_queryset(company)
+    )
+    for history in history_entries:
         product = history.product
         if not product or product.id in seen or product.status == "archived":
             continue
@@ -647,6 +686,7 @@ def suggest_product_for_text(
     pack_size="",
     unit="",
     limit=MAX_MATCH_CANDIDATES,
+    history_context=None,
 ):
     # company_only is retained as a compatibility keyword, but deliberately no
     # longer short-circuits global aliases and the master catalog.
@@ -667,6 +707,7 @@ def suggest_product_for_text(
             company,
             sku=sku,
             barcode=barcode,
+            history_context=history_context,
         )
         if history_product:
             reason = f"Matched Product previously quoted to {company.name}."
@@ -726,7 +767,7 @@ def suggest_product_for_text(
     return ProductMatch(None, 0.0, "unmatched", "No compatible Product candidate found.")
 
 
-def apply_match_to_preview_line(line, company=None):
+def apply_match_to_preview_line(line, company=None, *, history_context=None):
     match = suggest_product_for_text(
         line.get("raw_name") or line.get("item_name") or line.get("raw_line") or "",
         company,
@@ -735,6 +776,7 @@ def apply_match_to_preview_line(line, company=None):
         dosage=line.get("dosage") or line.get("strength") or "",
         pack_size=line.get("pack_size") or line.get("pack_info") or "",
         unit=line.get("unit") or "",
+        history_context=history_context,
     )
     line.update(match.as_preview())
     if match.product and match.confidence >= AUTO_MATCH_CONFIDENCE:

@@ -53,7 +53,10 @@ from .mailbox_po_matching import (
     is_private_email_domain,
     normalize_company_identity_text,
 )
-from .matching import apply_match_to_preview_line
+from .matching import (
+    apply_match_to_preview_line,
+    preload_company_history_match_context,
+)
 from .models import (
     AIParseLog,
     Company,
@@ -1797,14 +1800,6 @@ def _native_thread_schema(message_ids, source_keys):
                             "type": "string",
                             "enum": sorted(THREAD_ROW_OPERATIONS),
                         },
-                        "source_keys": {
-                            "type": "array",
-                            "minItems": 1,
-                            "items": {
-                                "type": "string",
-                                "enum": list(source_keys),
-                            },
-                        },
                         "citations": {
                             "type": "array",
                             "minItems": 1,
@@ -1825,7 +1820,6 @@ def _native_thread_schema(message_ids, source_keys):
                         "customer_line_total",
                         "customer_vat",
                         "operation",
-                        "source_keys",
                         "citations",
                         "confidence",
                         "parse_status",
@@ -1905,7 +1899,7 @@ def _native_thread_instructions(mode):
             "Do not silently spell-correct even an obvious customer typo, expand an abbreviation, improve grammar, or replace wording with a known catalog/product name. If wording looks misspelled or OCR-affected, preserve it in item_name and mark needs_review. Before returning, cross-check every item_name against the original description cell for accidental spelling changes.",
             "Return every quantity as a positive plain decimal string without thousands separators (for example 1000 or 12.5), and copy the customer's unit in at most 50 characters. If either is absent or genuinely unclear, leave it blank and mark needs_review; never guess.",
             "Customer prices or budgets belong only in customer_unit_price, customer_line_total, or customer_vat. They are evidence and never our quotation selling price.",
-            "Every row must cite one or more supplied source_keys. Each citation must include an exact short source excerpt and, where available, PDF page or Excel sheet/cell location.",
+            "Every row must include one or more citations using supplied source_keys. Those citations are the row's authoritative source list; do not return a separate row-level source_keys list. Each citation must include an exact short source excerpt and, where available, PDF page or Excel sheet/cell location.",
             "Use text signatures to identify the customer/contact, but never turn signature text into requested items. Ignore graphical logos and signature images.",
             "Do not create products, aliases, companies, contacts, quotations, revisions, replies, or any external action. This is review-only structured extraction.",
         ]
@@ -2176,17 +2170,22 @@ def _validate_native_thread_result(raw_result, messages, evidence):
             raise AIParseError(
                 f"Gmail AI row {result_index} has no requested item name."
             )
-        source_keys = list(
-            dict.fromkeys(
-                str(value or "").strip()
-                for value in result.get("source_keys") or []
-                if str(value or "").strip()
-            )
-        )
-        if not source_keys or any(key not in sources for key in source_keys):
+        raw_citations = list(result.get("citations") or [])
+        if not raw_citations:
             raise AIParseError(
-                f"Gmail AI row {result_index} cites an unknown source."
+                f"Gmail AI row {result_index} has no source citation."
             )
+        source_keys = []
+        seen_source_keys = set()
+        for raw_citation in raw_citations:
+            source_key = str(raw_citation.get("source_key") or "").strip()
+            if source_key not in sources:
+                raise AIParseError(
+                    f"Gmail AI row {result_index} cites an unknown source."
+                )
+            if source_key not in seen_source_keys:
+                seen_source_keys.add(source_key)
+                source_keys.append(source_key)
         cited_message_ids = {
             str(sources[key].get("gmail_message_id") or "")
             for key in source_keys
@@ -2201,17 +2200,11 @@ def _validate_native_thread_result(raw_result, messages, evidence):
 
         citations = []
         evidence_row_keys = []
-        cited_source_keys = set()
         for citation_index, raw_citation in enumerate(
-            result.get("citations") or [],
+            raw_citations,
             start=1,
         ):
             source_key = str(raw_citation.get("source_key") or "").strip()
-            if source_key not in sources or source_key not in source_keys:
-                raise AIParseError(
-                    f"Gmail AI row {result_index} has an invalid citation."
-                )
-            cited_source_keys.add(source_key)
             citation = {
                 "source_key": source_key,
                 "page_number": str(
@@ -2276,10 +2269,6 @@ def _validate_native_thread_result(raw_result, messages, evidence):
                     ),
                 }
             )
-        if not citations:
-            raise AIParseError(
-                f"Gmail AI row {result_index} has no source citation."
-            )
         if not any(
             str(citation.get("raw_text") or "").strip()
             for citation in citations
@@ -2287,11 +2276,6 @@ def _validate_native_thread_result(raw_result, messages, evidence):
             raise AIParseError(
                 f"Gmail AI row {result_index} has no source evidence excerpt."
             )
-        if cited_source_keys != set(source_keys):
-            raise AIParseError(
-                f"Gmail AI row {result_index} has an uncited source dependency."
-            )
-
         operation = str(result.get("operation") or "uncertain")
         parse_status = str(
             result.get("parse_status") or "needs_review"
@@ -2970,10 +2954,17 @@ def _build_source_analysis(
             pk=candidates["recommended_company_id"],
             is_active=True,
         ).first()
+    history_context = preload_company_history_match_context(
+        recommended_company
+    )
     matched_rows = []
     for row_index, line in enumerate(semantic_result["rows"], start=1):
         matched = {**line}
-        apply_match_to_preview_line(matched, recommended_company)
+        apply_match_to_preview_line(
+            matched,
+            recommended_company,
+            history_context=history_context,
+        )
         if matched.get("matched_product") or matched.get("matched_quote_item"):
             suggested_reason = str(matched.get("match_reason") or "").strip()
             matched["match_reason"] = (
@@ -3712,6 +3703,7 @@ def _selected_analysis_rows(gmail_import, selected_source_keys=None):
 
 
 def _rows_for_company(rows, company):
+    history_context = preload_company_history_match_context(company)
     matched_rows = []
     for line in rows:
         cleaned = {
@@ -3730,7 +3722,11 @@ def _rows_for_company(rows, company):
                 "match_status",
             }
         }
-        apply_match_to_preview_line(cleaned, company)
+        apply_match_to_preview_line(
+            cleaned,
+            company,
+            history_context=history_context,
+        )
         if cleaned.get("matched_product") or cleaned.get("matched_quote_item"):
             suggested_reason = str(cleaned.get("match_reason") or "").strip()
             cleaned["match_reason"] = (
