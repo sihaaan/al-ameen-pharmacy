@@ -462,7 +462,14 @@ const evidenceLabel = (evidence) => {
     'Email evidence'
   );
   const page = firstDefined(evidence.page, evidence.page_number, evidence.source_page);
-  return page ? `${name} | page ${page}` : String(name);
+  const sheet = firstDefined(evidence.sheet_name, evidence.sheet);
+  const cells = firstDefined(evidence.cell_range, evidence.cells);
+  return [
+    String(name),
+    page ? `page ${page}` : null,
+    sheet ? `sheet ${sheet}` : null,
+    cells ? `cells ${cells}` : null,
+  ].filter(Boolean).join(' | ');
 };
 
 const importAttachments = (record) => {
@@ -1864,6 +1871,12 @@ const GmailInquiryReview = ({
                             firstDefined(message?.sender, message?.from),
                             firstDefined(message?.received_at, message?.sent_at)
                               ? formatDateTime(firstDefined(message?.received_at, message?.sent_at))
+                              : null,
+                            firstDefined(source.sheet_name, source.sheet)
+                              ? `Sheet ${firstDefined(source.sheet_name, source.sheet)}`
+                              : null,
+                            firstDefined(source.cell_range, source.cells)
+                              ? `Cells ${firstDefined(source.cell_range, source.cells)}`
                               : null,
                             firstDefined(source.raw_text, source.extracted_text),
                           ].filter(Boolean).join(' | ');

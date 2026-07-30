@@ -159,7 +159,11 @@ const baseRecord = {
         customer_unit_price: '5.50',
         customer_line_total: '55.00',
         _source_keys: ['attachment:opaque-1'],
-        evidence: [{ source_key: 'attachment:opaque-1' }],
+        evidence: [{
+          source_key: 'attachment:opaque-1',
+          sheet_name: 'Items',
+          cell_range: 'B4:D4',
+        }],
         source_page: 2,
       }],
     },
@@ -225,7 +229,7 @@ describe('GmailInquiryReview', () => {
     expect(screen.getByText('Open email / Anchor')).toBeInTheDocument();
     expect(screen.getByText(/inquiry \| Contains the current item request\. \| 96% confidence/i)).toBeInTheDocument();
     expect(screen.getByText('buyer@example.com')).toBeInTheDocument();
-    expect(screen.getByText('request.pdf | page 2')).toBeInTheDocument();
+    expect(screen.getByText('request.pdf | page 2 | sheet Items | cells B4:D4')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '3. Review extracted request lines' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /attachments and source evidence/i })).not.toBeInTheDocument();
     expect(screen.queryByText('AED 5.50')).not.toBeInTheDocument();

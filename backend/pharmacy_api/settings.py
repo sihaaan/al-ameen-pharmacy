@@ -256,9 +256,30 @@ QUOTATION_AI_PARSE_MAX_RENDERED_PAGES = int(os.environ.get("QUOTATION_AI_PARSE_M
 QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION = int(os.environ.get("QUOTATION_AI_PARSE_IMAGE_MAX_DIMENSION", "1400"))
 QUOTATION_AI_PARSE_IMAGE_SCALE = float(os.environ.get("QUOTATION_AI_PARSE_IMAGE_SCALE", "1.4"))
 QUOTATION_AI_PARSE_TIMEOUT_SECONDS = int(os.environ.get("QUOTATION_AI_PARSE_TIMEOUT_SECONDS", "60"))
-# Separate privacy consent for sending Gmail attachment page images to the
-# configured cloud vision provider. Generic AI cleanup toggles alone do not
-# enable mailbox vision; production must opt in explicitly.
+# Native PDF/Excel analysis is slower than text cleanup because the provider
+# reads the original document. Keep a separate bounded timeout and payload cap
+# for this synchronous, review-only Gmail flow.
+QUOTATION_AI_NATIVE_TIMEOUT_SECONDS = int(
+    os.environ.get("QUOTATION_AI_NATIVE_TIMEOUT_SECONDS", "180")
+)
+QUOTATION_AI_NATIVE_MAX_FILES = int(
+    os.environ.get("QUOTATION_AI_NATIVE_MAX_FILES", "12")
+)
+QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES = int(
+    os.environ.get("QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES", str(20 * 1024 * 1024))
+)
+QUOTATION_AI_NATIVE_MAX_PDF_PAGES = int(
+    os.environ.get("QUOTATION_AI_NATIVE_MAX_PDF_PAGES", "25")
+)
+QUOTATION_AI_NATIVE_MAX_SPREADSHEET_ROWS_PER_SHEET = int(
+    os.environ.get(
+        "QUOTATION_AI_NATIVE_MAX_SPREADSHEET_ROWS_PER_SHEET",
+        "1000",
+    )
+)
+# Separate privacy consent for sending original Gmail PDF/Excel attachments to
+# the configured AI provider. Generic AI cleanup toggles alone do not enable
+# mailbox file processing; production must opt in explicitly.
 QUOTATION_MAILBOX_AI_VISION_ENABLED = env_bool("QUOTATION_MAILBOX_AI_VISION_ENABLED", False)
 
 # ---- Gmail read-only OAuth for quotation contract intelligence ----
