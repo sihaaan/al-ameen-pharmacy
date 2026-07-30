@@ -637,6 +637,15 @@ EMAIL_SOURCE_DOCUMENT_RE = re.compile(
     r"spreadsheet|workbook|xlsx?|document)\b",
     re.IGNORECASE,
 )
+EMAIL_CID_REFERENCE_RE = re.compile(
+    r"^\s*\[?\s*cid:[^\]\s<>]+\s*\]?\s*$",
+    re.IGNORECASE,
+)
+EMAIL_GENERAL_QUANTITY_INSTRUCTION_RE = re.compile(
+    r"\b(?:change|convert|update|revise)\s+(?:the\s+)?"
+    r"(?:quantity|quantities|unit|units)\b",
+    re.IGNORECASE,
+)
 EMAIL_ITEM_QUANTITY_RE = re.compile(
     r"\b\d+(?:[.,]\d+)?\s*(?:ampoules?|bottles?|boxes?|cans?|cartons?|"
     r"cases?|nos?|packs?|pcs?|pieces?|rolls?|tubes?|units?|vials?)\b",
@@ -682,16 +691,23 @@ def _is_clear_non_item_email_prose_row(row):
     if not text:
         return True
     if (
-        EMAIL_TEAM_GREETING_RE.fullmatch(text)
+        EMAIL_CID_REFERENCE_RE.fullmatch(text)
+        or EMAIL_TEAM_GREETING_RE.fullmatch(text)
         or EMAIL_COURTESY_THANKS_RE.fullmatch(text)
     ):
         return True
-    return bool(
+    lacks_structured_item_values = bool(
         row.get("quantity") in (None, "")
         and not str(row.get("unit") or "").strip()
-        and EMAIL_ATTACHMENT_REFERENCE_RE.search(text)
-        and EMAIL_SOURCE_DOCUMENT_RE.search(text)
-        and not EMAIL_ITEM_QUANTITY_RE.search(text)
+    )
+    if not lacks_structured_item_values or EMAIL_ITEM_QUANTITY_RE.search(text):
+        return False
+    return bool(
+        (
+            EMAIL_ATTACHMENT_REFERENCE_RE.search(text)
+            and EMAIL_SOURCE_DOCUMENT_RE.search(text)
+        )
+        or EMAIL_GENERAL_QUANTITY_INSTRUCTION_RE.search(text)
     )
 
 

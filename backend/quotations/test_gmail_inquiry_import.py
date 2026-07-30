@@ -2084,6 +2084,8 @@ class GmailInquiryImportTests(TestCase):
         body = (
             "Dear Team,\n"
             "Please also quote 10 boxes gloves.\n"
+            "Can you please change the quantity into box or pack not per piece.\n"
+            "[cid:image001.png@01DD1DAC.AA75F320]\n"
             "Thank you"
         )
         message = gmail_message(
