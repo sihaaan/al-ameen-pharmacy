@@ -22,7 +22,7 @@ from email.utils import getaddresses
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from .ai_parsing import (
@@ -349,19 +349,34 @@ def issue_gmail_inquiry_handoff(
         )
         gmail_import = _record_for_update(gmail_import)
         if gmail_import.status != GmailInquiryImport.STATUS_CONFIRMED:
-            configuration_changed = (
+            anchor_changed = (
                 gmail_import.anchor_message_id != anchor_message_id
-                or gmail_import.mode != mode
-                or list(gmail_import.selected_message_ids or []) != selected
-                or (
-                    gmail_thread_id
-                    and gmail_import.gmail_thread_id
-                    and gmail_import.gmail_thread_id != gmail_thread_id
-                )
+            )
+            mode_changed = gmail_import.mode != mode
+            thread_changed = bool(
+                gmail_thread_id
+                and gmail_import.gmail_thread_id
+                and gmail_import.gmail_thread_id != gmail_thread_id
+            )
+            selection_changed = bool(
+                mode == GmailInquiryImport.MODE_SELECTED_MESSAGES
+                and list(gmail_import.selected_message_ids or []) != selected
+            )
+            configuration_changed = (
+                anchor_changed
+                or mode_changed
+                or thread_changed
+                or selection_changed
             )
             gmail_import.anchor_message_id = anchor_message_id
             gmail_import.mode = mode
-            gmail_import.selected_message_ids = selected
+            if (
+                mode == GmailInquiryImport.MODE_SELECTED_MESSAGES
+                or anchor_changed
+                or mode_changed
+                or thread_changed
+            ):
+                gmail_import.selected_message_ids = selected
             if gmail_thread_id:
                 gmail_import.gmail_thread_id = gmail_thread_id
             if configuration_changed:
@@ -510,17 +525,33 @@ def _thread_message_metadata(connection, thread_id):
         f"{GMAIL_API_BASE}/threads/{urllib.parse.quote(str(thread_id))}?{query}",
         token=token,
     )
-    entries = payload.get("messages") or []
-    entries = sorted(
-        entries,
+    all_entries = sorted(
+        payload.get("messages") or [],
         key=lambda entry: (
             int(entry.get("internalDate") or 0),
             str(entry.get("id") or ""),
         ),
     )
-    total_count = len(entries)
+    canonical_thread_id = str(payload.get("id") or "").strip()
+    if not canonical_thread_id:
+        canonical_thread_id = next(
+            (
+                str(entry.get("threadId") or "").strip()
+                for entry in all_entries
+                if str(entry.get("threadId") or "").strip()
+            ),
+            str(thread_id or "").strip(),
+        )
+    canonical_thread_id = _normalize_gmail_id(canonical_thread_id)
+    all_message_ids = [
+        _normalize_gmail_id(entry.get("id"))
+        for entry in all_entries
+        if entry.get("id")
+    ]
+    total_count = len(all_entries)
     limit = _max_thread_messages()
     truncated = total_count > limit
+    entries = all_entries
     if truncated:
         entries = entries[-limit:]
     metadata = []
@@ -531,7 +562,9 @@ def _thread_message_metadata(connection, thread_id):
         metadata.append(
             {
                 "gmail_message_id": _normalize_gmail_id(entry.get("id")),
-                "gmail_thread_id": str(entry.get("threadId") or thread_id or ""),
+                "gmail_thread_id": _normalize_gmail_id(
+                    entry.get("threadId") or canonical_thread_id
+                ),
                 "label_ids": list(entry.get("labelIds") or []),
                 "subject": _header(headers, "Subject"),
                 "sender": _header(headers, "From"),
@@ -552,6 +585,8 @@ def _thread_message_metadata(connection, thread_id):
         "returned_count": len(metadata),
         "limit": limit,
         "truncated": truncated,
+        "gmail_thread_id": canonical_thread_id,
+        "message_ids": all_message_ids,
     }
 
 
@@ -678,37 +713,60 @@ def _public_attachment_manifest(message):
 
 def _fetch_analysis_messages(gmail_import, connection):
     anchor = fetch_mailbox_message(connection, gmail_import.anchor_message_id)
-    anchor_thread_id = str(anchor.get("gmail_thread_id") or "")
+    canonical_anchor_id = _normalize_gmail_id(
+        anchor.get("gmail_message_id") or gmail_import.anchor_message_id
+    )
+    anchor_thread_id = str(anchor.get("gmail_thread_id") or "").strip()
     configured_thread_id = str(gmail_import.gmail_thread_id or "")
-    if configured_thread_id and anchor_thread_id and configured_thread_id != anchor_thread_id:
-        raise GmailInquiryImportError(
-            "The Gmail handoff thread does not match the selected message."
+    lookup_thread_id = configured_thread_id or anchor_thread_id
+    if lookup_thread_id:
+        timeline_result = _thread_message_metadata(
+            connection,
+            lookup_thread_id,
         )
-    thread_id = configured_thread_id or anchor_thread_id
-
-    timeline_result = (
-        _thread_message_metadata(connection, thread_id)
-        if thread_id
-        else {
+        canonical_thread_id = str(
+            timeline_result.get("gmail_thread_id") or ""
+        ).strip()
+        all_thread_message_ids = {
+            str(message_id or "")
+            for message_id in timeline_result.get("message_ids") or []
+        }
+        if (
+            canonical_anchor_id not in all_thread_message_ids
+            or (
+                anchor_thread_id
+                and canonical_thread_id
+                and anchor_thread_id != canonical_thread_id
+            )
+        ):
+            raise GmailInquiryImportError(
+                "The Gmail handoff thread does not match the selected message."
+            )
+        thread_id = anchor_thread_id or canonical_thread_id
+    else:
+        thread_id = ""
+        timeline_result = {
             "messages": [],
             "total_count": 1,
             "returned_count": 1,
             "limit": _max_thread_messages(),
             "truncated": False,
+            "gmail_thread_id": "",
+            "message_ids": [canonical_anchor_id],
         }
-    )
+
     timeline_messages = list(timeline_result["messages"])
     timeline_ids = {
         str(message.get("gmail_message_id") or "")
         for message in timeline_messages
     }
-    if gmail_import.anchor_message_id not in timeline_ids:
+    if canonical_anchor_id not in timeline_ids:
         timeline_messages.append(anchor)
 
     if gmail_import.mode == GmailInquiryImport.MODE_CURRENT_MESSAGE:
-        message_ids = [gmail_import.anchor_message_id]
+        requested_message_ids = [gmail_import.anchor_message_id]
     elif gmail_import.mode == GmailInquiryImport.MODE_SELECTED_MESSAGES:
-        message_ids = _normalize_message_ids(
+        requested_message_ids = _normalize_message_ids(
             gmail_import.selected_message_ids,
             fallback=gmail_import.anchor_message_id,
         )
@@ -717,25 +775,40 @@ def _fetch_analysis_messages(gmail_import, connection):
             raise GmailInquiryImportError(
                 "Gmail did not provide a thread for AI-assisted analysis."
             )
-        message_ids = [
+        requested_message_ids = [
             str(message.get("gmail_message_id") or "")
             for message in timeline_messages
             if message.get("gmail_message_id")
         ]
-        if gmail_import.anchor_message_id not in message_ids:
-            message_ids.append(gmail_import.anchor_message_id)
+        if canonical_anchor_id not in requested_message_ids:
+            requested_message_ids.append(canonical_anchor_id)
 
     messages = []
-    for message_id in message_ids:
-        message = anchor if message_id == gmail_import.anchor_message_id else fetch_mailbox_message(
-            connection,
-            message_id,
+    seen_message_ids = set()
+    for requested_message_id in requested_message_ids:
+        message = (
+            anchor
+            if requested_message_id
+            in {
+                gmail_import.anchor_message_id,
+                canonical_anchor_id,
+            }
+            else fetch_mailbox_message(
+                connection,
+                requested_message_id,
+            )
         )
+        canonical_message_id = _normalize_gmail_id(
+            message.get("gmail_message_id") or requested_message_id
+        )
+        if canonical_message_id in seen_message_ids:
+            continue
         message_thread_id = str(message.get("gmail_thread_id") or "")
-        if thread_id and message_thread_id and message_thread_id != thread_id:
+        if thread_id and message_thread_id != thread_id:
             raise GmailInquiryImportError(
                 "Every selected Gmail message must belong to the same thread."
             )
+        seen_message_ids.add(canonical_message_id)
         messages.append(message)
     full_by_id = {
         str(message.get("gmail_message_id") or ""): message
@@ -761,6 +834,7 @@ def _fetch_analysis_messages(gmail_import, connection):
         )
     )
     timeline_result["returned_count"] = len(merged_timeline)
+    timeline_result["canonical_anchor_message_id"] = canonical_anchor_id
     return thread_id, messages, merged_timeline, timeline_result
 
 
@@ -3002,6 +3076,21 @@ def analyze_gmail_inquiry_import(
             thread_id, messages, timeline_messages, timeline_meta = fetched
         if not messages:
             raise GmailInquiryImportError("No Gmail messages were available for analysis.")
+        canonical_anchor_message_id = str(
+            timeline_meta.get("canonical_anchor_message_id")
+            or locked.anchor_message_id
+        )
+        message_ids = [
+            str(message.get("gmail_message_id") or "")
+            for message in messages
+        ]
+        # Build and persist provenance with Gmail REST's canonical IDs. Google
+        # Workspace add-on events can use msg-f:/thread-f: aliases for these
+        # same objects, so retaining the event aliases would split one source
+        # into two apparent messages.
+        locked.anchor_message_id = canonical_anchor_message_id
+        locked.gmail_thread_id = thread_id
+        locked.selected_message_ids = message_ids
         result = _build_source_analysis(
             messages,
             connection,
@@ -3010,10 +3099,6 @@ def analyze_gmail_inquiry_import(
             timeline_messages=timeline_messages,
             timeline_meta=timeline_meta,
         )
-        message_ids = [
-            str(message.get("gmail_message_id") or "")
-            for message in messages
-        ]
         content_fingerprint = _content_fingerprint(
             connection.email,
             thread_id,
@@ -3021,6 +3106,13 @@ def analyze_gmail_inquiry_import(
             message_ids,
             result["message_manifest"],
             result["attachment_manifest"],
+        )
+        canonical_selection_fingerprint = gmail_inquiry_selection_fingerprint(
+            mailbox_email=locked.mailbox_email,
+            gmail_thread_id=thread_id,
+            anchor_message_id=canonical_anchor_message_id,
+            mode=locked.mode,
+            selected_message_ids=message_ids,
         )
     except Exception as exc:
         marked_failed = _mark_analysis_failed(
@@ -3049,6 +3141,7 @@ def analyze_gmail_inquiry_import(
             return _record(locked)
         locked.gmail_connection = connection
         locked.gmail_thread_id = thread_id
+        locked.anchor_message_id = canonical_anchor_message_id
         locked.selected_message_ids = message_ids
         locked.message_manifest = _json_safe(result["message_manifest"])
         locked.attachment_manifest = _json_safe(result["attachment_manifest"])
@@ -3075,6 +3168,24 @@ def analyze_gmail_inquiry_import(
         )
         locked.analyzed_at = timezone.now()
         locked.save()
+        if canonical_selection_fingerprint != locked.source_fingerprint:
+            previous_fingerprint = locked.source_fingerprint
+            try:
+                # A savepoint keeps a concurrent canonical handoff from
+                # rolling back the completed analysis. In that rare race the
+                # older alias fingerprint remains valid and confirmation's
+                # per-thread uniqueness still prevents duplicate quotations.
+                with transaction.atomic():
+                    updated = GmailInquiryImport.objects.filter(
+                        pk=locked.pk,
+                        source_fingerprint=previous_fingerprint,
+                    ).update(
+                        source_fingerprint=canonical_selection_fingerprint,
+                    )
+            except IntegrityError:
+                updated = 0
+            if updated:
+                locked.source_fingerprint = canonical_selection_fingerprint
     return _record(locked)
 
 

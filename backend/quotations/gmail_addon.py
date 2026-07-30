@@ -340,7 +340,42 @@ def _attachment_filenames(payload):
     return filenames
 
 
-def _fetch_thread_message_summaries(connection, thread_id):
+def _fetch_message_identity(connection, message_id):
+    """Resolve an add-on event alias to Gmail REST's canonical identifiers."""
+
+    token = _shared_access_token(connection)
+    query = urllib.parse.urlencode(
+        [
+            ("format", "metadata"),
+            ("fields", "id,threadId"),
+        ]
+    )
+    payload = _json_request(
+        (
+            f"{GMAIL_API_BASE}/messages/"
+            f"{urllib.parse.quote(str(message_id))}?{query}"
+        ),
+        token=token,
+        timeout=10,
+    )
+    canonical_message_id = _valid_gmail_id(
+        payload.get("id"),
+        field_label="message",
+    )
+    canonical_thread_id = _valid_gmail_id(
+        payload.get("threadId"),
+        field_label="thread",
+    )
+    return canonical_message_id, canonical_thread_id
+
+
+def _fetch_thread_message_summaries(
+    connection,
+    thread_id,
+    *,
+    required_message_id="",
+    required_thread_id="",
+):
     """Fetch safe snippets and MIME names, but no body or attachment bytes."""
 
     token = _shared_access_token(connection)
@@ -349,7 +384,7 @@ def _fetch_thread_message_summaries(connection, thread_id):
         (
             "fields",
             (
-                "messages(id,internalDate,snippet,"
+                "id,messages(id,threadId,internalDate,snippet,"
                 "payload(headers(name,value),filename,"
                 "parts(filename,parts(filename,parts(filename,parts(filename))))))"
             ),
@@ -363,6 +398,29 @@ def _fetch_thread_message_summaries(connection, thread_id):
         token=token,
         timeout=10,
     )
+    canonical_thread_id = str(payload.get("id") or "").strip()
+    if not canonical_thread_id:
+        canonical_thread_id = next(
+            (
+                str(message.get("threadId") or "").strip()
+                for message in payload.get("messages") or []
+                if str(message.get("threadId") or "").strip()
+            ),
+            str(thread_id or "").strip(),
+        )
+    canonical_thread_id = _valid_gmail_id(
+        canonical_thread_id,
+        field_label="thread",
+    )
+    if (
+        required_thread_id
+        and canonical_thread_id != str(required_thread_id)
+    ):
+        raise GmailAddonInputError(
+            "The open Gmail message no longer belongs to this thread. "
+            "Close and reopen the add-on."
+        )
+
     summaries = []
     for message in payload.get("messages") or []:
         try:
@@ -399,8 +457,53 @@ def _fetch_thread_message_summaries(connection, thread_id):
                 "label": _safe_card_text(label, maximum=240),
             }
         )
-    maximum = int(getattr(settings, "GMAIL_ADDON_MAX_THREAD_MESSAGES", 50) or 50)
-    return summaries[-maximum:]
+    required_message_id = str(required_message_id or "")
+    if required_message_id and not any(
+        item["message_id"] == required_message_id
+        for item in summaries
+    ):
+        raise GmailAddonInputError(
+            "The open Gmail message no longer belongs to this thread. "
+            "Close and reopen the add-on."
+        )
+
+    maximum = max(
+        1,
+        int(getattr(settings, "GMAIL_ADDON_MAX_THREAD_MESSAGES", 50) or 50),
+    )
+    all_summaries = summaries
+    summaries = all_summaries[-maximum:]
+    if required_message_id and not any(
+        item["message_id"] == required_message_id
+        for item in summaries
+    ):
+        anchor_summary = next(
+            item
+            for item in all_summaries
+            if item["message_id"] == required_message_id
+        )
+        summaries = (
+            [anchor_summary]
+            if maximum == 1
+            else [anchor_summary, *summaries[-(maximum - 1):]]
+        )
+    return summaries
+
+
+def _canonical_gmail_context(connection, message_id, thread_id):
+    """Resolve and verify the signed event aliases against Gmail itself."""
+
+    canonical_message_id, canonical_thread_id = _fetch_message_identity(
+        connection,
+        message_id,
+    )
+    summaries = _fetch_thread_message_summaries(
+        connection,
+        thread_id,
+        required_message_id=canonical_message_id,
+        required_thread_id=canonical_thread_id,
+    )
+    return canonical_message_id, canonical_thread_id, summaries
 
 
 def _action_button(text, mode, action_url, *, primary=False):
@@ -681,10 +784,18 @@ def gmail_addon_contextual(request):
         if missing_scopes:
             return _requesting_google_scopes_response(missing_scopes)
         _authenticate_user_event(authorization_event, config)
-        anchor_message_id, thread_id = _gmail_context(event)
+        event_message_id, event_thread_id = _gmail_context(event)
         try:
             connection = _shared_connection(config["mailbox_email"])
-            summaries = _fetch_thread_message_summaries(connection, thread_id)
+            (
+                anchor_message_id,
+                _thread_id,
+                summaries,
+            ) = _canonical_gmail_context(
+                connection,
+                event_message_id,
+                event_thread_id,
+            )
         except GmailAddonSharedConnectionUnavailable:
             return _shared_gmail_reconnect_response()
         return JsonResponse(
@@ -719,7 +830,7 @@ def gmail_addon_action(request):
         if missing_scopes:
             return _requesting_google_scopes_response(missing_scopes)
         _authenticate_user_event(authorization_event, config)
-        anchor_message_id, thread_id = _gmail_context(event)
+        event_message_id, event_thread_id = _gmail_context(event)
         mode = _selection_mode(event)
         selected_message_ids = (
             _selected_message_ids(event) if mode == MODE_SELECTED_MESSAGES else []
@@ -731,11 +842,19 @@ def gmail_addon_action(request):
 
         try:
             connection = _shared_connection(config["mailbox_email"])
-            _shared_access_token(connection)
+            (
+                anchor_message_id,
+                thread_id,
+                summaries,
+            ) = _canonical_gmail_context(
+                connection,
+                event_message_id,
+                event_thread_id,
+            )
             if mode == MODE_SELECTED_MESSAGES:
                 thread_message_ids = {
                     item["message_id"]
-                    for item in _fetch_thread_message_summaries(connection, thread_id)
+                    for item in summaries
                 }
                 if any(
                     message_id not in thread_message_ids

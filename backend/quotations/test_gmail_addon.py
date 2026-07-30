@@ -22,6 +22,8 @@ HANDOFF_URL = (
 OAUTH_CLIENT_ID = "workspace-addon.apps.googleusercontent.com"
 SERVICE_ACCOUNT_EMAIL = "addon-sa@example-project.iam.gserviceaccount.com"
 MAILBOX_EMAIL = "quotes@example.com"
+CANONICAL_MESSAGE_ID = "19fb2da13e1adcfa"
+CANONICAL_THREAD_ID = "19fb2da13e1adcfb"
 REQUIRED_SCOPES = list(gmail_addon.REQUIRED_GOOGLE_OAUTH_SCOPES)
 
 ADDON_SETTINGS = {
@@ -113,12 +115,28 @@ class GmailAddonEndpointTests(TestCase):
         self.system_email = SERVICE_ACCOUNT_EMAIL
         self.user_email = MAILBOX_EMAIL
         self.verified_tokens = []
+        self.real_fetch_message_identity = gmail_addon._fetch_message_identity
         self.token_patcher = patch(
             "quotations.gmail_addon._verify_google_id_token",
             side_effect=self._verified_claims,
         )
         self.mock_verify_token = self.token_patcher.start()
         self.addCleanup(self.token_patcher.stop)
+        self.identity_patcher = patch(
+            "quotations.gmail_addon._fetch_message_identity",
+            side_effect=self._same_id_identity,
+        )
+        self.mock_fetch_identity = self.identity_patcher.start()
+        self.addCleanup(self.identity_patcher.stop)
+
+    @staticmethod
+    def _same_id_identity(_connection, message_id):
+        thread_id = (
+            "thread-f:2345678"
+            if message_id == "msg-f:1234567"
+            else "thread-f:one"
+        )
+        return message_id, thread_id
 
     def _verified_claims(self, token, *, audiences):
         self.verified_tokens.append((token, list(audiences)))
@@ -260,6 +278,8 @@ class GmailAddonEndpointTests(TestCase):
         mock_fetch_summaries.assert_called_once_with(
             self.connection,
             "thread-f:one",
+            required_message_id="msg-f:current",
+            required_thread_id="thread-f:one",
         )
         self.assertEqual(
             self.verified_tokens,
@@ -323,6 +343,57 @@ class GmailAddonEndpointTests(TestCase):
             token="stored-token",
             timeout=10,
         )
+
+    @patch("quotations.gmail_addon._json_request")
+    @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
+    def test_event_message_alias_resolves_to_canonical_gmail_identity(
+        self,
+        _mock_access_token,
+        mock_json_request,
+    ):
+        mock_json_request.return_value = {
+            "id": CANONICAL_MESSAGE_ID,
+            "threadId": CANONICAL_THREAD_ID,
+        }
+
+        identity = self.real_fetch_message_identity(
+            self.connection,
+            "msg-f:14399576835632390395",
+        )
+
+        self.assertEqual(
+            identity,
+            (CANONICAL_MESSAGE_ID, CANONICAL_THREAD_ID),
+        )
+        request_url = mock_json_request.call_args.args[0]
+        self.assertIn("msg-f%3A14399576835632390395", request_url)
+        self.assertIn("fields=id%2CthreadId", request_url)
+
+    @patch("quotations.gmail_addon._json_request")
+    @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
+    def test_thread_summary_rejects_a_different_canonical_thread(
+        self,
+        _mock_access_token,
+        mock_json_request,
+    ):
+        mock_json_request.return_value = {
+            "id": "canonical-other-thread",
+            "messages": [
+                {
+                    "id": "canonical-message",
+                    "threadId": "canonical-other-thread",
+                    "payload": {"headers": []},
+                }
+            ],
+        }
+
+        with self.assertRaises(gmail_addon.GmailAddonInputError):
+            gmail_addon._fetch_thread_message_summaries(
+                self.connection,
+                "thread-f:event-alias",
+                required_message_id="canonical-message",
+                required_thread_id="canonical-expected-thread",
+            )
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
     def test_header_and_event_system_tokens_must_match(
@@ -613,9 +684,15 @@ class GmailAddonEndpointTests(TestCase):
         mock_fetch_summaries,
         mock_issue_handoff,
     ):
+        canonical_older_id = "19fb2da13e1adcf9"
+        self.mock_fetch_identity.side_effect = None
+        self.mock_fetch_identity.return_value = (
+            CANONICAL_MESSAGE_ID,
+            CANONICAL_THREAD_ID,
+        )
         mock_fetch_summaries.return_value = [
-            {"message_id": "msg-f:older", "label": "Older"},
-            {"message_id": "msg-f:current", "label": "Current"},
+            {"message_id": canonical_older_id, "label": "Older"},
+            {"message_id": CANONICAL_MESSAGE_ID, "label": "Current"},
         ]
         mock_issue_handoff.return_value = (object(), "opaque-handoff-token")
 
@@ -623,7 +700,11 @@ class GmailAddonEndpointTests(TestCase):
             "quotation-gmail-addon-action",
             self._event(
                 mode="selected_messages",
-                selected=["msg-f:older", "msg-f:current", "msg-f:older"],
+                selected=[
+                    canonical_older_id,
+                    CANONICAL_MESSAGE_ID,
+                    canonical_older_id,
+                ],
             ),
         )
 
@@ -645,10 +726,13 @@ class GmailAddonEndpointTests(TestCase):
         self.assertNotIn("user-token", link["url"])
         mock_issue_handoff.assert_called_once_with(
             self.connection,
-            anchor_message_id="msg-f:current",
-            gmail_thread_id="thread-f:one",
+            anchor_message_id=CANONICAL_MESSAGE_ID,
+            gmail_thread_id=CANONICAL_THREAD_ID,
             mode="selected_messages",
-            selected_message_ids=["msg-f:older", "msg-f:current"],
+            selected_message_ids=[
+                canonical_older_id,
+                CANONICAL_MESSAGE_ID,
+            ],
             ttl_seconds=1800,
         )
         self.assertEqual(
@@ -729,6 +813,14 @@ class GmailAddonEndpointTests(TestCase):
         mock_issue_handoff,
         mock_fetch_summaries,
     ):
+        self.mock_fetch_identity.side_effect = None
+        self.mock_fetch_identity.return_value = (
+            CANONICAL_MESSAGE_ID,
+            CANONICAL_THREAD_ID,
+        )
+        mock_fetch_summaries.return_value = [
+            {"message_id": CANONICAL_MESSAGE_ID, "label": "Current"}
+        ]
         mock_issue_handoff.side_effect = [
             (object(), "current-handoff"),
             (object(), "ai-handoff"),
@@ -749,8 +841,8 @@ class GmailAddonEndpointTests(TestCase):
         self.assertEqual(
             mock_issue_handoff.call_args_list[0].kwargs,
             {
-                "anchor_message_id": "msg-f:current",
-                "gmail_thread_id": "thread-f:one",
+                "anchor_message_id": CANONICAL_MESSAGE_ID,
+                "gmail_thread_id": CANONICAL_THREAD_ID,
                 "mode": "current_message",
                 "selected_message_ids": [],
                 "ttl_seconds": 1800,
@@ -759,14 +851,48 @@ class GmailAddonEndpointTests(TestCase):
         self.assertEqual(
             mock_issue_handoff.call_args_list[1].kwargs,
             {
-                "anchor_message_id": "msg-f:current",
-                "gmail_thread_id": "thread-f:one",
+                "anchor_message_id": CANONICAL_MESSAGE_ID,
+                "gmail_thread_id": CANONICAL_THREAD_ID,
                 "mode": "ai_thread",
                 "selected_message_ids": [],
                 "ttl_seconds": 1800,
             },
         )
-        mock_fetch_summaries.assert_not_called()
+        self.assertEqual(mock_fetch_summaries.call_count, 2)
+
+    @patch("quotations.gmail_addon._fetch_thread_message_summaries")
+    def test_event_aliases_render_as_one_canonical_message(
+        self,
+        mock_fetch_summaries,
+    ):
+        self.mock_fetch_identity.side_effect = None
+        self.mock_fetch_identity.return_value = (
+            CANONICAL_MESSAGE_ID,
+            CANONICAL_THREAD_ID,
+        )
+        mock_fetch_summaries.return_value = [
+            {
+                "message_id": CANONICAL_MESSAGE_ID,
+                "label": "30 Jul 2026 | Buyer | RFQ",
+            }
+        ]
+
+        response = self._post(
+            "quotation-gmail-addon-contextual",
+            self._event(
+                message_id="msg-f:14399576835632390395",
+                thread_id="thread-f:14399576835632390395",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        card = response.json()["action"]["navigations"][0]["pushCard"]
+        selection = card["sections"][0]["widgets"][1]["selectionInput"]
+        self.assertEqual(
+            [item["value"] for item in selection["items"]],
+            [CANONICAL_MESSAGE_ID],
+        )
+        self.assertTrue(selection["items"][0]["selected"])
 
     @patch(
         "quotations.gmail_addon._issue_handoff",
@@ -817,6 +943,8 @@ class GmailAddonEndpointTests(TestCase):
         mock_fetch_summaries.assert_called_once_with(
             self.connection,
             "thread-f:2345678",
+            required_message_id="msg-f:1234567",
+            required_thread_id="thread-f:2345678",
         )
 
     @override_settings(

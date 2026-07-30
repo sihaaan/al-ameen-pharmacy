@@ -19,6 +19,9 @@ from .gmail_inquiry_import import (
     _attachment_parse_filename,
     _build_source_analysis,
     _connected_mailbox_for_import,
+    _confirmation_received_at,
+    _confirmation_subject,
+    _fetch_analysis_messages,
     _looks_like_inline_image,
     _row_identity,
     _semantic_context,
@@ -50,6 +53,8 @@ from .services import bulk_update_quotation_lines, finalize_quotation
 
 
 MAILBOX_EMAIL = "quotes@example.com"
+CANONICAL_MESSAGE_ID = "19fb2da13e1adcfa"
+CANONICAL_THREAD_ID = "19fb2da13e1adcfb"
 
 
 def gmail_message(
@@ -368,6 +373,168 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(
             analyzed.candidates["recommended_company_id"],
             self.company.pk,
+        )
+
+    @patch("quotations.gmail_inquiry_import._build_source_analysis")
+    @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
+    @patch("quotations.gmail_inquiry_import._connected_mailbox_for_import")
+    def test_analysis_persists_canonical_ids_for_a_legacy_alias_handoff(
+        self,
+        mock_connection,
+        mock_fetch,
+        mock_build,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="msg-f:14399576835632390395",
+            thread="thread-f:14399576835632390395",
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        message = gmail_message(
+            CANONICAL_MESSAGE_ID,
+            thread_id=CANONICAL_THREAD_ID,
+            body="Please quote first aid boxes.",
+        )
+        mock_connection.return_value = self.connection
+        mock_fetch.return_value = (
+            CANONICAL_THREAD_ID,
+            [message],
+            [message],
+            {
+                "total_count": 1,
+                "returned_count": 1,
+                "limit": 50,
+                "truncated": False,
+                "canonical_anchor_message_id": CANONICAL_MESSAGE_ID,
+            },
+        )
+        mock_build.return_value = {
+            "message_manifest": [
+                {
+                    "gmail_message_id": CANONICAL_MESSAGE_ID,
+                    "gmail_thread_id": CANONICAL_THREAD_ID,
+                    "subject": "Photos / Required",
+                    "sent_at": message["sent_at"].isoformat(),
+                }
+            ],
+            "attachment_manifest": [],
+            "evidence": [],
+            "candidates": {},
+            "preview": {"lines": [], "warnings": [], "meta": {}},
+            "ready_for_direct_quote": False,
+            "warnings": [],
+            "recommended_source_keys": [],
+            "thread_analysis": {},
+        }
+
+        analyzed = analyze_gmail_inquiry_import(gmail_import, self.staff)
+
+        self.assertEqual(
+            analyzed.anchor_message_id,
+            CANONICAL_MESSAGE_ID,
+        )
+        self.assertEqual(analyzed.gmail_thread_id, CANONICAL_THREAD_ID)
+        self.assertEqual(
+            analyzed.selected_message_ids,
+            [CANONICAL_MESSAGE_ID],
+        )
+        self.assertEqual(_confirmation_subject(analyzed), "Photos / Required")
+        self.assertEqual(
+            _confirmation_received_at(analyzed),
+            message["sent_at"].isoformat(),
+        )
+        self.assertEqual(
+            analyzed.source_fingerprint,
+            gmail_inquiry_selection_fingerprint(
+                mailbox_email=MAILBOX_EMAIL,
+                gmail_thread_id=CANONICAL_THREAD_ID,
+                anchor_message_id=CANONICAL_MESSAGE_ID,
+                mode=GmailInquiryImport.MODE_AI_THREAD,
+                selected_message_ids=[CANONICAL_MESSAGE_ID],
+            ),
+        )
+        reopened, _token = issue_gmail_inquiry_handoff(
+            self.connection,
+            anchor_message_id=CANONICAL_MESSAGE_ID,
+            gmail_thread_id=CANONICAL_THREAD_ID,
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        self.assertEqual(reopened.pk, analyzed.pk)
+        self.assertEqual(
+            reopened.status,
+            GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+        )
+        self.assertEqual(
+            reopened.selected_message_ids,
+            [CANONICAL_MESSAGE_ID],
+        )
+        self.assertTrue(reopened.analysis)
+
+    @patch("quotations.gmail_inquiry_import._build_source_analysis")
+    @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
+    @patch("quotations.gmail_inquiry_import._connected_mailbox_for_import")
+    def test_canonical_fingerprint_collision_does_not_discard_analysis(
+        self,
+        mock_connection,
+        mock_fetch,
+        mock_build,
+    ):
+        canonical_owner, _token = issue_gmail_inquiry_handoff(
+            self.connection,
+            anchor_message_id=CANONICAL_MESSAGE_ID,
+            gmail_thread_id=CANONICAL_THREAD_ID,
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        legacy = self.issue_and_claim(
+            anchor="msg-f:legacy",
+            thread="thread-f:legacy",
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        legacy_fingerprint = legacy.source_fingerprint
+        message = gmail_message(
+            CANONICAL_MESSAGE_ID,
+            thread_id=CANONICAL_THREAD_ID,
+        )
+        mock_connection.return_value = self.connection
+        mock_fetch.return_value = (
+            CANONICAL_THREAD_ID,
+            [message],
+            [message],
+            {
+                "total_count": 1,
+                "returned_count": 1,
+                "limit": 50,
+                "truncated": False,
+                "canonical_anchor_message_id": CANONICAL_MESSAGE_ID,
+            },
+        )
+        mock_build.return_value = {
+            "message_manifest": [
+                {
+                    "gmail_message_id": CANONICAL_MESSAGE_ID,
+                    "gmail_thread_id": CANONICAL_THREAD_ID,
+                }
+            ],
+            "attachment_manifest": [],
+            "evidence": [],
+            "candidates": {},
+            "preview": {"lines": [], "warnings": [], "meta": {}},
+            "ready_for_direct_quote": False,
+            "warnings": [],
+            "recommended_source_keys": [],
+            "thread_analysis": {},
+        }
+
+        analyzed = analyze_gmail_inquiry_import(legacy, self.staff)
+
+        self.assertEqual(
+            analyzed.status,
+            GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+        )
+        self.assertEqual(analyzed.source_fingerprint, legacy_fingerprint)
+        canonical_owner.refresh_from_db()
+        self.assertNotEqual(
+            canonical_owner.source_fingerprint,
+            legacy_fingerprint,
         )
 
     @patch("quotations.gmail_inquiry_import._build_source_analysis")
@@ -1010,10 +1177,11 @@ class GmailInquiryImportTests(TestCase):
     ):
         mock_token.return_value = "token"
         mock_json.return_value = {
+            "id": "canonical-long-thread",
             "messages": [
                 {
                     "id": f"message-{index}",
-                    "threadId": "long-thread",
+                    "threadId": "canonical-long-thread",
                     "internalDate": str(1_000 + index),
                     "payload": {"headers": []},
                 }
@@ -1021,7 +1189,10 @@ class GmailInquiryImportTests(TestCase):
             ]
         }
 
-        result = _thread_message_metadata(self.connection, "long-thread")
+        result = _thread_message_metadata(
+            self.connection,
+            "thread-f:long-thread",
+        )
 
         self.assertTrue(result["truncated"])
         self.assertEqual(result["total_count"], 5)
@@ -1030,6 +1201,218 @@ class GmailInquiryImportTests(TestCase):
             [row["gmail_message_id"] for row in result["messages"]],
             ["message-2", "message-3", "message-4"],
         )
+        self.assertEqual(
+            result["gmail_thread_id"],
+            "canonical-long-thread",
+        )
+        self.assertEqual(
+            result["message_ids"],
+            [
+                "message-0",
+                "message-1",
+                "message-2",
+                "message-3",
+                "message-4",
+            ],
+        )
+
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_legacy_addon_aliases_resolve_to_one_canonical_ai_message(
+        self,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="msg-f:14399576835632390395",
+            thread="thread-f:14399576835632390395",
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        full_message = gmail_message(
+            CANONICAL_MESSAGE_ID,
+            thread_id=CANONICAL_THREAD_ID,
+            body="Please quote first aid box.",
+        )
+        metadata_message = {
+            **full_message,
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "attachment_manifest": [],
+            "_metadata_only": True,
+        }
+        mock_fetch_message.return_value = full_message
+        mock_thread_metadata.return_value = {
+            "messages": [metadata_message],
+            "total_count": 1,
+            "returned_count": 1,
+            "limit": 50,
+            "truncated": False,
+            "gmail_thread_id": CANONICAL_THREAD_ID,
+            "message_ids": [CANONICAL_MESSAGE_ID],
+        }
+
+        (
+            thread_id,
+            messages,
+            timeline,
+            timeline_meta,
+        ) = _fetch_analysis_messages(gmail_import, self.connection)
+
+        self.assertEqual(thread_id, CANONICAL_THREAD_ID)
+        self.assertEqual(
+            [message["gmail_message_id"] for message in messages],
+            [CANONICAL_MESSAGE_ID],
+        )
+        self.assertEqual(
+            [message["gmail_message_id"] for message in timeline],
+            [CANONICAL_MESSAGE_ID],
+        )
+        self.assertEqual(
+            timeline_meta["canonical_anchor_message_id"],
+            CANONICAL_MESSAGE_ID,
+        )
+        mock_fetch_message.assert_called_once_with(
+            self.connection,
+            gmail_import.anchor_message_id,
+        )
+        mock_thread_metadata.assert_called_once_with(
+            self.connection,
+            gmail_import.gmail_thread_id,
+        )
+
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_legacy_alias_thread_still_rejects_wrong_canonical_membership(
+        self,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="msg-f:anchor",
+            thread="thread-f:forged",
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        mock_fetch_message.return_value = gmail_message(
+            "canonical-anchor",
+            thread_id="canonical-correct-thread",
+        )
+        mock_thread_metadata.return_value = {
+            "messages": [],
+            "total_count": 1,
+            "returned_count": 0,
+            "limit": 50,
+            "truncated": False,
+            "gmail_thread_id": "canonical-forged-thread",
+            "message_ids": ["different-message"],
+        }
+
+        with self.assertRaisesMessage(
+            GmailInquiryImportError,
+            "The Gmail handoff thread does not match the selected message.",
+        ):
+            _fetch_analysis_messages(gmail_import, self.connection)
+
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_selected_message_without_verified_thread_identity_is_rejected(
+        self,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="msg-f:anchor",
+            thread="canonical-thread",
+            mode=GmailInquiryImport.MODE_SELECTED_MESSAGES,
+            selected=["msg-f:anchor", "canonical-second"],
+        )
+        anchor = gmail_message(
+            "canonical-anchor",
+            thread_id="canonical-thread",
+        )
+        second = gmail_message(
+            "canonical-second",
+            thread_id="",
+        )
+        mock_fetch_message.side_effect = [anchor, second]
+        mock_thread_metadata.return_value = {
+            "messages": [anchor, second],
+            "total_count": 2,
+            "returned_count": 2,
+            "limit": 50,
+            "truncated": False,
+            "gmail_thread_id": "canonical-thread",
+            "message_ids": ["canonical-anchor", "canonical-second"],
+        }
+
+        with self.assertRaisesMessage(
+            GmailInquiryImportError,
+            "Every selected Gmail message must belong to the same thread.",
+        ):
+            _fetch_analysis_messages(gmail_import, self.connection)
+
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_truncated_legacy_selection_verifies_old_anchor_from_full_membership(
+        self,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="msg-f:old-anchor",
+            thread="thread-f:long-thread",
+            mode=GmailInquiryImport.MODE_SELECTED_MESSAGES,
+            selected=["msg-f:old-anchor", "msg-f:latest"],
+        )
+        old_anchor = gmail_message(
+            "canonical-old-anchor",
+            thread_id=CANONICAL_THREAD_ID,
+            body="Original request",
+        )
+        latest = gmail_message(
+            "canonical-latest",
+            thread_id=CANONICAL_THREAD_ID,
+            body="Latest clarification",
+        )
+        latest_metadata = {
+            **latest,
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "_metadata_only": True,
+        }
+        mock_fetch_message.side_effect = [old_anchor, latest]
+        mock_thread_metadata.return_value = {
+            "messages": [latest_metadata],
+            "total_count": 75,
+            "returned_count": 1,
+            "limit": 50,
+            "truncated": True,
+            "gmail_thread_id": CANONICAL_THREAD_ID,
+            "message_ids": [
+                "canonical-old-anchor",
+                "canonical-latest",
+            ],
+        }
+
+        thread_id, messages, timeline, timeline_meta = (
+            _fetch_analysis_messages(gmail_import, self.connection)
+        )
+
+        self.assertEqual(thread_id, CANONICAL_THREAD_ID)
+        self.assertEqual(
+            {
+                message["gmail_message_id"]
+                for message in messages
+            },
+            {"canonical-old-anchor", "canonical-latest"},
+        )
+        self.assertEqual(
+            {
+                message["gmail_message_id"]
+                for message in timeline
+            },
+            {"canonical-old-anchor", "canonical-latest"},
+        )
+        self.assertTrue(timeline_meta["truncated"])
 
     @patch("quotations.gmail_inquiry_import._parse_attachment")
     def test_attachment_manifest_is_complete_and_global_parse_cap_is_enforced(
