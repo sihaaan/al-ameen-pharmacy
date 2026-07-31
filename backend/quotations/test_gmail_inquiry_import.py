@@ -23,6 +23,7 @@ from api.models import Product
 from .ai_parsing import AIParseError
 from .gmail_inquiry_import import (
     GmailInquiryImportError,
+    _apply_ai_identity_candidates,
     _attachment_extension,
     _attachment_parse_filename,
     _build_source_analysis,
@@ -46,6 +47,7 @@ from .gmail_inquiry_import import (
     confirm_gmail_inquiry_import,
     gmail_inquiry_selection_fingerprint,
     issue_gmail_inquiry_handoff,
+    refresh_gmail_inquiry_identity_candidates,
     update_gmail_inquiry_review_lines,
 )
 from .models import (
@@ -838,6 +840,701 @@ class GmailInquiryImportTests(TestCase):
         self.assertIsNone(candidates["recommended_company_id"])
         self.assertFalse(candidates["exact_company_match"])
 
+    def test_ai_identity_matches_legal_name_variants_and_legacy_contact_email(self):
+        company = Company.objects.create(
+            name="RAQ Contracting Company LLC",
+        )
+        contact = CompanyContact.objects.create(
+            company=company,
+            name=(
+                "Akbar Asharaf | Procurement | "
+                "akbar.a@raqcontracting.com"
+            ),
+            email="",
+        )
+        candidates = {
+            "sender_emails": ["akbar.a@raqcontracting.com"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "RAQ Contracting Co L.L.C",
+                "contact_name": "Akbar Asharaf",
+                "contact_email": "akbar.a@raqcontracting.com",
+                "source_keys": ["email-body-1"],
+                "confidence": 0.98,
+                "reason": "Read from the inbound signature.",
+            },
+        )
+
+        self.assertEqual(ranked["recommended_company_id"], company.id)
+        self.assertEqual(ranked["recommended_contact_id"], contact.id)
+        match = next(
+            row
+            for row in ranked["companies"]
+            if row["company_id"] == company.id
+        )
+        self.assertEqual(match["match_method"], "ai_saved_company_name")
+        self.assertEqual(match["evidence"][0]["score"], 96)
+        self.assertFalse(ranked["exact_company_match"])
+
+    def test_ai_identity_suppresses_wrong_unique_domain_property_match(self):
+        company = Company.objects.create(
+            name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
+        )
+        contact = CompanyContact.objects.create(
+            company=company,
+            name=(
+                "FIAZ AHMAD | Purchasing | "
+                "Fiaz.Ahmad@hilton.com"
+            ),
+            email="",
+        )
+        message = gmail_message(
+            "identity-hilton-property-conflict",
+            sender="Fiaz Ahmad <Fiaz.Ahmad@hilton.com>",
+            body=(
+                "Please quote the attached request.\n\n"
+                "Best regards,\nFiaz Ahmad\n"
+                "HILTON DUBAI PALM JUMEIRAH"
+            ),
+        )
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertIsNone(candidates["recommended_contact_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            candidates["companies"][0]["match_method"],
+            "legacy_contact_label_email",
+        )
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "HILTON DUBAI PALM JUMEIRAH",
+                "contact_name": "Fiaz Ahmad",
+                "contact_email": "fiaz.ahmad@hilton.com",
+                "source_keys": ["email-body-hilton"],
+                "confidence": 0.99,
+                "reason": "Read from the current inbound signature.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        self.assertIsNone(ranked["recommended_contact_id"])
+        self.assertEqual(
+            {
+                row["company_id"]
+                for row in ranked["companies"]
+            },
+            {company.id},
+        )
+
+    def test_ai_property_conflict_suppresses_stale_exact_contact_company(self):
+        company = Company.objects.create(
+            name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
+        )
+        CompanyContact.objects.create(
+            company=company,
+            name="Fiaz Ahmad",
+            email="fiaz.ahmad@hilton.com",
+        )
+        message = gmail_message(
+            "identity-hilton-stale-contact",
+            sender="Fiaz Ahmad <fiaz.ahmad@hilton.com>",
+            body=(
+                "Please quote the attached request.\n\n"
+                "Best regards,\nFiaz Ahmad\n"
+                "HILTON DUBAI PALM JUMEIRAH"
+            ),
+        )
+        candidates = _company_contact_candidates(
+            [message],
+            MAILBOX_EMAIL,
+        )
+        self.assertEqual(
+            candidates["recommended_company_id"],
+            company.id,
+        )
+        self.assertTrue(candidates["exact_company_match"])
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "HILTON DUBAI PALM JUMEIRAH",
+                "contact_name": "Fiaz Ahmad",
+                "contact_email": "fiaz.ahmad@hilton.com",
+                "source_keys": ["email-body-hilton-stale"],
+                "confidence": 0.99,
+                "reason": "The current property is explicit in the signature.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        self.assertIsNone(ranked["recommended_contact_id"])
+        self.assertEqual(
+            ranked["identity_conflict"]["conflicting_company_id"],
+            company.id,
+        )
+
+    def test_ai_identity_can_recommend_long_brand_with_generic_group_suffix(self):
+        company = Company.objects.create(name="EMRILL")
+        candidates = {
+            "sender_emails": ["buyer@mplus.ae"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "Emrill Group",
+                "contact_name": "",
+                "contact_email": "buyer@mplus.ae",
+                "source_keys": ["email-body-emrill"],
+                "confidence": 0.98,
+                "reason": "Company name appears in the signature.",
+            },
+        )
+
+        self.assertEqual(ranked["recommended_company_id"], company.id)
+        match = next(
+            row
+            for row in ranked["companies"]
+            if row["company_id"] == company.id
+        )
+        self.assertEqual(match["evidence"][0]["score"], 84)
+
+    def test_ai_identity_fails_closed_for_close_saved_company_names(self):
+        first = Company.objects.create(
+            name="RAQ Contracting Company LLC",
+        )
+        second = Company.objects.create(
+            name="RAQ Contracting Co LLC",
+        )
+        candidates = {
+            "sender_emails": ["buyer@unknown.ae"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "RAQ Contracting Co L.L.C",
+                "contact_name": "",
+                "contact_email": "",
+                "source_keys": ["email-body-ambiguous"],
+                "confidence": 0.99,
+                "reason": "Read from the signature.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        self.assertEqual(
+            {
+                row["company_id"]
+                for row in ranked["companies"]
+            },
+            {first.id, second.id},
+        )
+
+    def test_ai_identity_does_not_collapse_specific_property_to_parent_name(self):
+        company = Company.objects.create(name="HILTON DUBAI")
+        candidates = {
+            "sender_emails": ["buyer@hilton.com"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "HILTON DUBAI PALM JUMEIRAH",
+                "contact_name": "",
+                "contact_email": "buyer@hilton.com",
+                "source_keys": ["email-body-hilton-specific"],
+                "confidence": 0.99,
+                "reason": "The property is explicit in the signature.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        matches = [
+            row
+            for row in ranked["companies"]
+            if row["company_id"] == company.id
+        ]
+        if matches:
+            self.assertTrue(
+                matches[0]["evidence"][0]["specificity_conflict"]
+            )
+
+    def test_ai_identity_does_not_expand_parent_name_to_saved_property(self):
+        company = Company.objects.create(
+            name="HILTON DUBAI PALM JUMEIRAH",
+        )
+        candidates = {
+            "sender_emails": ["buyer@hilton.com"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "HILTON DUBAI",
+                "contact_name": "",
+                "contact_email": "buyer@hilton.com",
+                "source_keys": ["email-body-hilton-parent"],
+                "confidence": 0.99,
+                "reason": "Only the parent brand is present.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        matches = [
+            row
+            for row in ranked["companies"]
+            if row["company_id"] == company.id
+        ]
+        if matches:
+            self.assertTrue(
+                matches[0]["evidence"][0]["specificity_conflict"]
+            )
+
+    def test_ai_identity_does_not_cross_match_sibling_properties(self):
+        company = Company.objects.create(
+            name="HILTON DUBAI CREEK RESORT",
+        )
+        candidates = {
+            "sender_emails": ["buyer@hilton.com"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "HILTON DUBAI PALM JUMEIRAH RESORT",
+                "contact_name": "",
+                "contact_email": "buyer@hilton.com",
+                "source_keys": ["email-body-hilton-sibling"],
+                "confidence": 0.99,
+                "reason": "The Palm property is explicit.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        matches = [
+            row
+            for row in ranked["companies"]
+            if row["company_id"] == company.id
+        ]
+        if matches:
+            self.assertTrue(
+                matches[0]["evidence"][0]["specificity_conflict"]
+            )
+
+    def test_ai_signature_email_alone_cannot_select_saved_company(self):
+        company = Company.objects.create(name="Unrelated Saved Customer")
+        CompanyContact.objects.create(
+            company=company,
+            name="Signature Person",
+            email="signature.person@customer.ae",
+        )
+        candidates = {
+            "sender_emails": ["forwarder@unrelated.ae"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "",
+                "contact_name": "Signature Person",
+                "contact_email": "signature.person@customer.ae",
+                "source_keys": ["email-body-forwarded"],
+                "confidence": 0.99,
+                "reason": "The address occurs only in message text.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        self.assertIsNone(ranked["recommended_contact_id"])
+
+    def test_ai_identity_does_not_fuzzy_replace_short_company_acronym(self):
+        company = Company.objects.create(
+            name="RAK General Contracting",
+        )
+        candidates = {
+            "sender_emails": ["buyer@unknown.ae"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "RAQ General Contracting",
+                "contact_name": "",
+                "contact_email": "",
+                "source_keys": ["email-body-raq"],
+                "confidence": 0.99,
+                "reason": "RAQ is explicit in the signature.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        match = next(
+            row
+            for row in ranked["companies"]
+            if row["company_id"] == company.id
+        )
+        self.assertTrue(
+            match["evidence"][0]["specificity_conflict"]
+        )
+
+    def test_ai_identity_does_not_match_different_generic_short_brand(self):
+        Company.objects.create(name="ABD Medical")
+        candidates = {
+            "sender_emails": ["buyer@unknown.ae"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "ABC Medical",
+                "contact_name": "",
+                "contact_email": "",
+                "source_keys": ["email-body-abc"],
+                "confidence": 0.99,
+                "reason": "ABC is explicit in the signature.",
+            },
+        )
+
+        self.assertIsNone(ranked["recommended_company_id"])
+        self.assertEqual(ranked["companies"], [])
+
+    def test_ai_identity_allows_unique_long_token_spelling_variants(self):
+        cases = [
+            (
+                "HILTON DUBAI JUMEIRAH",
+                "HILTON DUBAI JUMERIAH",
+            ),
+            (
+                "Canadian University Dubai",
+                "Canadian Univeristy Dubai",
+            ),
+            (
+                "Tornado General Contracting",
+                "Tornado General Contractng",
+            ),
+            (
+                "Al Futtaim Healthcare",
+                "Al Futtaim Health Care",
+            ),
+        ]
+        companies = {
+            saved_name: Company.objects.create(name=saved_name)
+            for saved_name, _identity_name in cases
+        }
+
+        for saved_name, identity_name in cases:
+            with self.subTest(identity_name=identity_name):
+                ranked = _apply_ai_identity_candidates(
+                    {
+                        "sender_emails": ["buyer@customer.ae"],
+                        "companies": [],
+                        "contacts": [],
+                        "recommended_company_id": None,
+                        "recommended_contact_id": None,
+                        "exact_company_match": False,
+                    },
+                    {
+                        "company_name": identity_name,
+                        "contact_name": "",
+                        "contact_email": "",
+                        "source_keys": ["email-body-spelling"],
+                        "confidence": 0.99,
+                        "reason": "Read from the customer signature.",
+                    },
+                )
+
+                company = companies[saved_name]
+                self.assertEqual(
+                    ranked["recommended_company_id"],
+                    company.id,
+                )
+                match = next(
+                    row
+                    for row in ranked["companies"]
+                    if row["company_id"] == company.id
+                )
+                self.assertFalse(
+                    match["evidence"][0]["specificity_conflict"]
+                )
+
+    def test_stored_gmail_identity_is_reranked_once_without_another_ai_call(self):
+        company = Company.objects.create(
+            name="RAQ Contracting Company LLC",
+        )
+        gmail_import = self.issue_and_claim(
+            anchor="stored-identity-raq",
+        )
+        gmail_import.analysis = {
+            "thread_analysis": {
+                "customer_identity": {
+                    "company_name": "RAQ Contracting Co L.L.C",
+                    "contact_name": "Akbar Asharaf",
+                    "contact_email": "akbar.a@raqcontracting.com",
+                    "source_keys": ["stored-email-body"],
+                    "confidence": 0.98,
+                    "reason": "Read from the original signature.",
+                }
+            }
+        }
+        gmail_import.candidates = {
+            "sender_emails": ["akbar.a@raqcontracting.com"],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.save(
+            update_fields=["analysis", "candidates", "status"]
+        )
+
+        refreshed = refresh_gmail_inquiry_identity_candidates(
+            gmail_import
+        )
+
+        self.assertEqual(
+            refreshed.candidates["recommended_company_id"],
+            company.id,
+        )
+        self.assertEqual(
+            refreshed.candidates["identity_match_version"],
+            "gmail_identity_v3",
+        )
+        gmail_import.refresh_from_db()
+        self.assertEqual(
+            gmail_import.candidates["recommended_company_id"],
+            company.id,
+        )
+        with CaptureQueriesContext(django_connection) as captured:
+            same = refresh_gmail_inquiry_identity_candidates(
+                gmail_import
+            )
+        self.assertEqual(len(captured), 0)
+        self.assertEqual(
+            same.candidates["recommended_company_id"],
+            company.id,
+        )
+
+    def test_stored_wrong_domain_suggestion_is_cleared_on_refresh(self):
+        company = Company.objects.create(
+            name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
+        )
+        gmail_import = self.issue_and_claim(
+            anchor="stored-identity-hilton",
+        )
+        gmail_import.analysis = {
+            "thread_analysis": {
+                "customer_identity": {
+                    "company_name": "HILTON DUBAI PALM JUMEIRAH",
+                    "contact_name": "Fiaz Ahmad",
+                    "contact_email": "fiaz.ahmad@hilton.com",
+                    "source_keys": ["stored-hilton-body"],
+                    "confidence": 0.99,
+                    "reason": "The Palm property is explicit.",
+                }
+            }
+        }
+        gmail_import.candidates = {
+            "sender_emails": ["fiaz.ahmad@hilton.com"],
+            "companies": [
+                {
+                    "company_id": company.id,
+                    "company_name": company.name,
+                    "confidence": 0.98,
+                    "match_method": "verified_email_domain",
+                    "explanation": "Unique saved domain.",
+                    "match_reasons": ["Unique saved domain."],
+                    "emails": ["fiaz.ahmad@hilton.com"],
+                    "message_ids": ["stored-identity-hilton"],
+                    "evidence": [],
+                }
+            ],
+            "contacts": [],
+            "recommended_company_id": company.id,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.save(
+            update_fields=["analysis", "candidates", "status"]
+        )
+
+        refreshed = refresh_gmail_inquiry_identity_candidates(
+            gmail_import
+        )
+
+        self.assertIsNone(
+            refreshed.candidates["recommended_company_id"]
+        )
+        self.assertEqual(
+            refreshed.candidates["identity_conflict"][
+                "conflicting_company_id"
+            ],
+            company.id,
+        )
+
+    def test_identity_refresh_is_query_free_before_ai_identity_exists(self):
+        gmail_import = self.issue_and_claim(
+            anchor="identity-not-analyzed",
+        )
+
+        with CaptureQueriesContext(django_connection) as captured:
+            same = refresh_gmail_inquiry_identity_candidates(
+                gmail_import
+            )
+
+        self.assertIs(same, gmail_import)
+        self.assertEqual(len(captured), 0)
+        self.assertNotIn(
+            "identity_match_version",
+            same.candidates,
+        )
+
+    def test_identity_refresh_never_mutates_confirmed_import(self):
+        gmail_import = self.issue_and_claim(
+            anchor="identity-confirmed-history",
+        )
+        gmail_import.status = GmailInquiryImport.STATUS_CONFIRMED
+        gmail_import.analysis = {
+            "thread_analysis": {
+                "customer_identity": {
+                    "company_name": "RAQ Contracting Co L.L.C",
+                    "contact_name": "Akbar Asharaf",
+                    "contact_email": "akbar.a@raqcontracting.com",
+                    "source_keys": ["confirmed-body"],
+                    "confidence": 0.99,
+                    "reason": "Stored historical identity.",
+                }
+            }
+        }
+        gmail_import.candidates = {
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+        gmail_import.save(
+            update_fields=["status", "analysis", "candidates"]
+        )
+        original_candidates = json.loads(
+            json.dumps(gmail_import.candidates)
+        )
+
+        with CaptureQueriesContext(django_connection) as captured:
+            same = refresh_gmail_inquiry_identity_candidates(
+                gmail_import
+            )
+
+        self.assertIs(same, gmail_import)
+        self.assertEqual(len(captured), 0)
+        self.assertEqual(same.candidates, original_candidates)
+        gmail_import.refresh_from_db()
+        self.assertEqual(
+            gmail_import.candidates,
+            original_candidates,
+        )
+
+    def test_identity_refresh_returns_fresh_row_after_concurrent_status_change(self):
+        gmail_import = self.issue_and_claim(
+            anchor="identity-concurrent-confirm",
+        )
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.analysis = {
+            "thread_analysis": {
+                "customer_identity": {
+                    "company_name": "RAQ Contracting Co L.L.C",
+                    "contact_name": "",
+                    "contact_email": "",
+                    "source_keys": ["concurrent-body"],
+                    "confidence": 0.99,
+                    "reason": "Stored identity.",
+                }
+            }
+        }
+        gmail_import.candidates = {
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+        gmail_import.save(
+            update_fields=["status", "analysis", "candidates"]
+        )
+
+        GmailInquiryImport.objects.filter(pk=gmail_import.pk).update(
+            status=GmailInquiryImport.STATUS_CONFIRMED
+        )
+
+        refreshed = refresh_gmail_inquiry_identity_candidates(
+            gmail_import
+        )
+
+        self.assertEqual(
+            refreshed.status,
+            GmailInquiryImport.STATUS_CONFIRMED,
+        )
+        self.assertNotIn(
+            "identity_match_version",
+            refreshed.candidates,
+        )
+
     def test_handoff_token_is_hashed_and_claim_alias_serializer_is_supported(self):
         gmail_import, token = issue_gmail_inquiry_handoff(
             self.connection,
@@ -1082,6 +1779,20 @@ class GmailInquiryImportTests(TestCase):
             self.company.pk,
         )
         self.assertIsNone(analyzed.selected_company_id)
+        self.assertEqual(
+            set(analyzed.analysis["timings_ms"]),
+            {
+                "gmail_thread_fetch",
+                "source_preparation",
+                "post_ai_matching",
+                "result_persistence",
+                "total",
+            },
+        )
+        self.assertGreaterEqual(
+            analyzed.analysis["timings_ms"]["total"],
+            analyzed.analysis["timings_ms"]["result_persistence"],
+        )
 
     @patch("quotations.gmail_inquiry_import._build_source_analysis")
     @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
@@ -1782,6 +2493,20 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(success_log.source_type, "gmail")
         self.assertEqual(success_log.usage["gmail_import_id"], gmail_import.pk)
         self.assertEqual(success_log.usage["input_tokens"], 120)
+        self.assertEqual(
+            set(success_log.usage["timings_ms"]),
+            {"ai_provider", "ai_validation", "ai_analysis"},
+        )
+        self.assertEqual(
+            parsed["_timings_ms"],
+            success_log.usage["timings_ms"],
+        )
+        self.assertTrue(
+            all(
+                value >= 0
+                for value in success_log.usage["timings_ms"].values()
+            )
+        )
 
         invalid_result = native_analysis_result([], [])
         with (
@@ -1813,6 +2538,10 @@ class GmailInquiryImportTests(TestCase):
         failed_log = AIParseLog.objects.get(success=False)
         self.assertEqual(failed_log.actor, self.staff)
         self.assertIn("classify every selected message", failed_log.error)
+        self.assertEqual(
+            set(failed_log.usage["timings_ms"]),
+            {"ai_provider", "ai_validation", "ai_analysis"},
+        )
 
     @override_settings(
         QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
@@ -1972,12 +2701,14 @@ class GmailInquiryImportTests(TestCase):
             attachments=attachments,
         )
 
+        stage_timings = {}
         result = _build_source_analysis(
             [message],
             self.connection,
             gmail_import,
             self.staff,
             timeline_messages=[message],
+            analysis_timings=stage_timings,
         )
 
         mock_parse_file.assert_not_called()
@@ -2001,6 +2732,11 @@ class GmailInquiryImportTests(TestCase):
         )
         self.assertEqual(result["preview"]["meta"]["native_file_count"], 2)
         self.assertEqual(result["preview"]["original_text"], "")
+        self.assertEqual(
+            set(result["timings_ms"]),
+            {"source_preparation", "post_ai_matching"},
+        )
+        self.assertEqual(result["timings_ms"], stage_timings)
 
         def assert_no_binary(value):
             self.assertNotIsInstance(value, (bytes, bytearray))

@@ -66,6 +66,7 @@ from .gmail_inquiry_import import (
     analyze_gmail_inquiry_import,
     claim_gmail_inquiry_handoff,
     confirm_gmail_inquiry_import,
+    refresh_gmail_inquiry_identity_candidates,
 )
 from .import_parsers import parse_file_preview, parse_text_preview
 from .mailbox_po_audit import (
@@ -1771,6 +1772,14 @@ class GmailInquiryImportViewSet(
         return Response(
             serializer_error_from_django_validation(exc),
             status=response_status,
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        gmail_import = refresh_gmail_inquiry_identity_candidates(
+            self.get_object()
+        )
+        return Response(
+            self.get_serializer(gmail_import).data
         )
 
     @action(detail=False, methods=["post"])

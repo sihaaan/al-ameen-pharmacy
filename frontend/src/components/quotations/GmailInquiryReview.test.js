@@ -236,6 +236,8 @@ describe('GmailInquiryReview', () => {
     expect(screen.queryByText('AED 5.50')).not.toBeInTheDocument();
     expect(screen.getByText('5.50 (currency not stated)')).toBeInTheDocument();
     expect(screen.getByText(/Confirming as sara/i)).toBeInTheDocument();
+    const contactSelect = screen.getByLabelText('Contact / Purchaser');
+    expect(contactSelect.closest('label')).toHaveClass('qm-gmail-contact-picker');
 
     const confirmButton = screen.getByRole('button', { name: /confirm & open quotation/i });
     expect(confirmButton).toBeDisabled();
@@ -243,7 +245,11 @@ describe('GmailInquiryReview', () => {
     fireEvent.change(screen.getByLabelText('Requested item row 1'), {
       target: { value: 'Sterile Bandage' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /save reviewed rows/i }));
+    const saveButton = screen.getByRole('button', { name: /save reviewed rows/i });
+    expect(saveButton).toHaveClass('qm-primary');
+    expect(screen.getByText(/unsaved row changes.*unlock confirmation/i)).toBeInTheDocument();
+    expect(confirmButton).toBeDisabled();
+    fireEvent.click(saveButton);
 
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
       review_lines: [{
@@ -256,6 +262,7 @@ describe('GmailInquiryReview', () => {
     }));
 
     await screen.findByText('staff reviewed');
+    expect(screen.queryByText(/unsaved row changes.*unlock confirmation/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/confirm that this inquiry belongs/i));
     await waitFor(() => expect(confirmButton).toBeEnabled());
     fireEvent.click(confirmButton);
@@ -674,6 +681,55 @@ describe('GmailInquiryReview', () => {
     expect(within(suggestion).getByText('Example Medical')).toBeInTheDocument();
     expect(within(suggestion).getByText(
       'Staff confirmation is required before creating the quotation.'
+    )).toBeInTheDocument();
+  });
+
+  test('does not promote a sole candidate when the backend deliberately recommends none', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...baseRecord,
+        company: null,
+        contact: null,
+        candidates: {
+          ...baseRecord.candidates,
+          recommended_company_id: null,
+          recommended_contact_id: null,
+        },
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByRole('option', { name: 'Example Medical' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Use suggested company' })).not.toBeInTheDocument();
+  });
+
+  test('shows the AI-read signature identity separately from the selected saved records', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...reviewedRecord,
+        candidates: {
+          ...reviewedRecord.candidates,
+          ai_identity: {
+            company_name: 'HILTON DUBAI PALM JUMEIRAH',
+            contact_name: 'Faiza Ahmad',
+            contact_email: 'faiza.ahmad@hilton.com',
+            confidence: 0.94,
+            reason: 'The company and purchaser appear in the email signature.',
+          },
+        },
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const aiIdentityPanel = await screen.findByLabelText('AI-detected customer identity');
+    expect(within(aiIdentityPanel).getByText('HILTON DUBAI PALM JUMEIRAH')).toBeInTheDocument();
+    expect(within(aiIdentityPanel).getByText('Faiza Ahmad')).toBeInTheDocument();
+    expect(within(aiIdentityPanel).getByText('faiza.ahmad@hilton.com')).toBeInTheDocument();
+    expect(within(aiIdentityPanel).getByText('94% confidence')).toBeInTheDocument();
+    expect(within(aiIdentityPanel).getByText(
+      /evidence only.*compare this with the selected saved company and purchaser/i
     )).toBeInTheDocument();
   });
 

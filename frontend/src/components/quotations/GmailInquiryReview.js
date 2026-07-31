@@ -197,10 +197,9 @@ const suggestedCompany = (record) => {
     record.recommended_company_id,
     record.candidates?.recommended_company_id
   );
-  return (
-    candidates.find((candidate) => String(candidate.id) === String(recommendedId))
-    || (candidates.length === 1 ? candidates[0] : null)
-  );
+  return candidates.find(
+    (candidate) => String(candidate.id) === String(recommendedId)
+  ) || null;
 };
 
 const companySuggestionEvidenceLabel = (suggestion) => {
@@ -255,10 +254,9 @@ const suggestedContact = (record) => {
     record.recommended_contact_id,
     record.candidates?.recommended_contact_id
   );
-  return (
-    candidates.find((candidate) => String(candidate.id) === String(recommendedId))
-    || (candidates.length === 1 ? candidates[0] : null)
-  );
+  return candidates.find(
+    (candidate) => String(candidate.id) === String(recommendedId)
+  ) || null;
 };
 
 const evidenceForLine = (line) => {
@@ -1249,6 +1247,17 @@ const GmailInquiryReview = ({
   );
   const selectedCompany = companies.find((company) => String(company.id) === companyId);
   const selectedContact = contacts.find((contact) => String(contact.id) === contactId);
+  const aiIdentity = record?.candidates?.ai_identity || {};
+  const aiIdentityCompany = String(aiIdentity.company_name || '').trim();
+  const aiIdentityContact = String(aiIdentity.contact_name || '').trim();
+  const aiIdentityEmail = String(aiIdentity.contact_email || '').trim();
+  const aiIdentityReason = String(aiIdentity.reason || '').trim();
+  const aiIdentityConfidence = confidencePercent(aiIdentity);
+  const hasAiIdentity = Boolean(
+    aiIdentityCompany
+    || aiIdentityContact
+    || aiIdentityEmail
+  );
   const companySuggestion = suggestedCompany(record || {});
   const companySuggestionEvidence = companySuggestion
     ? companySuggestionEvidenceLabel(companySuggestion)
@@ -1423,7 +1432,7 @@ const GmailInquiryReview = ({
               setCompanies((current) => mergeEntities(current, [company]));
             }}
           />
-          <label>
+          <label className="qm-gmail-contact-picker">
             <span className="qm-label-text">Contact / Purchaser</span>
             <select
               disabled={readOnlyImport || !companyId || contactsLoading || analysisActive || Boolean(busyAction)}
@@ -1439,6 +1448,38 @@ const GmailInquiryReview = ({
             </select>
           </label>
         </div>
+        {hasAiIdentity && (
+          <section className="qm-gmail-ai-identity" aria-label="AI-detected customer identity">
+            <div className="qm-gmail-ai-identity-heading">
+              <div>
+                <span>AI-detected identity</span>
+                <small>Read from the customer email and signature</small>
+              </div>
+              {aiIdentityConfidence !== null && (
+                <strong>{aiIdentityConfidence}% confidence</strong>
+              )}
+            </div>
+            <div className="qm-gmail-ai-identity-details">
+              {aiIdentityCompany && (
+                <div>
+                  <span>Company stated in email</span>
+                  <strong>{aiIdentityCompany}</strong>
+                </div>
+              )}
+              {(aiIdentityContact || aiIdentityEmail) && (
+                <div>
+                  <span>Purchaser stated in email</span>
+                  <strong>{aiIdentityContact || 'Name not stated'}</strong>
+                  {aiIdentityEmail && <small>{aiIdentityEmail}</small>}
+                </div>
+              )}
+            </div>
+            <p>
+              Evidence only — compare this with the selected saved company and purchaser.
+              {aiIdentityReason && ` ${aiIdentityReason}`}
+            </p>
+          </section>
+        )}
         <div className="qm-gmail-identity-evidence">
           <div>
             <span>Detected sender</span>
@@ -1479,11 +1520,18 @@ const GmailInquiryReview = ({
             <h3>2. Review extracted request lines</h3>
             <p>Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.</p>
           </div>
-          <div className="qm-gmail-lines-actions">
-            <span className="qm-heading-count">{usableLines.length} included row{usableLines.length === 1 ? '' : 's'}</span>
+          <div className={`qm-gmail-lines-actions${reviewDirty ? ' is-dirty' : ''}`}>
+            <div className="qm-gmail-lines-save-state">
+              <span className="qm-heading-count">{usableLines.length} included row{usableLines.length === 1 ? '' : 's'}</span>
+              {reviewDirty && (
+                <span className="qm-gmail-unsaved-label" role="status" aria-live="polite">
+                  Unsaved row changes — save them to unlock confirmation.
+                </span>
+              )}
+            </div>
             <button
               type="button"
-              className="qm-secondary"
+              className={reviewDirty ? 'qm-primary qm-gmail-save-review-button' : 'qm-secondary'}
               disabled={readOnlyImport || !reviewDirty || Boolean(busyAction) || analysisActive}
               onClick={saveReviewLines}
             >

@@ -13,10 +13,12 @@ import json
 import os
 import re
 import secrets
+import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
+from difflib import SequenceMatcher
 from email.utils import getaddresses
 from io import BytesIO
 
@@ -43,6 +45,7 @@ from .contract_intelligence import (
     get_valid_access_token,
     resolve_gmail_connection,
 )
+from .company_matching import score_company_name
 from .import_parsers import (
     ALLOWED_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -89,6 +92,16 @@ SUPPORTED_GMAIL_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
 # tables. Images commonly embedded in email signatures are never submitted.
 # Manual inquiry image upload remains supported by the existing vision flow.
 NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
+ANALYSIS_TIMING_KEYS = (
+    "gmail_thread_fetch",
+    "source_preparation",
+    "ai_provider",
+    "ai_validation",
+    "ai_analysis",
+    "post_ai_matching",
+    "result_persistence",
+    "total",
+)
 GMAIL_MIME_EXTENSION_MAP = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
@@ -107,6 +120,26 @@ INLINE_IMAGE_HINT = re.compile(
     r"(?:^|[_\-. ])(?:logo|signature|footer|banner|icon|spacer|image00|social)(?:[_\-. ]|$)",
     re.IGNORECASE,
 )
+
+
+def _elapsed_ms(started_at):
+    """Return a bounded, log-safe monotonic duration in milliseconds."""
+
+    return round(max(0.0, time.perf_counter() - started_at) * 1000, 1)
+
+
+def _analysis_timing_snapshot(values):
+    """Keep only named numeric stages; timings must never carry source data."""
+
+    values = values if isinstance(values, dict) else {}
+    snapshot = {}
+    for key in ANALYSIS_TIMING_KEYS:
+        try:
+            value = float(values[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        snapshot[key] = round(max(0.0, value), 1)
+    return snapshot
 GENERIC_INLINE_IMAGE_FILENAME_RE = re.compile(
     r"^(?:image|img|logo|icon|signature)[-_ ]?\d{2,}\.(?:png|jpe?g|webp)$",
     re.IGNORECASE,
@@ -948,6 +981,12 @@ def _fetch_analysis_messages(gmail_import, connection):
 
 COMPANY_INFERENCE_MIN_CONFIDENCE = 0.85
 COMPANY_INFERENCE_MIN_MARGIN = 0.08
+AI_COMPANY_NAME_CANDIDATE_SCORE = 84
+AI_COMPANY_NAME_STRONG_SCORE = 88
+AI_COMPANY_NAME_MIN_MARGIN = 8
+AI_IDENTITY_MIN_CONFIDENCE = 0.65
+AI_IDENTITY_STRONG_CONFIDENCE = 0.85
+GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v3"
 COMPANY_IDENTITY_LEGAL_SUFFIXES = {
     "co",
     "company",
@@ -980,11 +1019,215 @@ COMPANY_IDENTITY_GENERIC_TOKENS = COMPANY_IDENTITY_LEGAL_SUFFIXES | {
     "trading",
     "university",
 }
+SAVED_CONTACT_EMAIL_RE = re.compile(
+    r"(?<![A-Z0-9._%+\-])"
+    r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"
+    r"(?![A-Z0-9._%+\-])",
+    re.IGNORECASE,
+)
+CONTACT_NAME_NOISE = {
+    "buyer",
+    "dr",
+    "eng",
+    "engr",
+    "manager",
+    "miss",
+    "mr",
+    "mrs",
+    "ms",
+    "officer",
+    "procurement",
+    "purchaser",
+    "rn",
+    "sales",
+}
 
 
 def _email_domain(value):
     value = str(value or "").strip().casefold()
     return value.rsplit("@", 1)[-1] if "@" in value else ""
+
+
+def _saved_contact_emails(contact):
+    """Return structured and legacy emails stored inside a contact name.
+
+    Some production contacts predate the dedicated email field and contain a
+    pasted signature in ``name``. Treat those addresses as saved, trusted
+    identity evidence without mutating the contact record.
+    """
+
+    values = {
+        str(contact.email or "").strip().casefold(),
+        *(
+            match.group(0).strip().casefold()
+            for match in SAVED_CONTACT_EMAIL_RE.finditer(
+                str(contact.name or "")
+            )
+        ),
+    }
+    return {value for value in values if value}
+
+
+def _identity_name_tokens(value, *, contact=False):
+    tokens = normalize_company_identity_text(value).split()
+    if contact:
+        tokens = [
+            token
+            for token in tokens
+            if token not in CONTACT_NAME_NOISE
+            and "@" not in token
+            and not token.isdigit()
+        ]
+    return tokens
+
+
+def _contact_name_match_score(source_name, saved_name):
+    """Conservatively match an AI-read person to a saved contact label."""
+
+    source_tokens = _identity_name_tokens(source_name, contact=True)
+    saved_tokens = _identity_name_tokens(saved_name, contact=True)
+    if not source_tokens or not saved_tokens:
+        return 0
+    source_phrase = " ".join(source_tokens)
+    saved_phrase = " ".join(saved_tokens)
+    if source_phrase == saved_phrase:
+        return 100
+    # Legacy contact names may contain a complete pasted signature. A
+    # multi-token person name occurring verbatim is still strong evidence.
+    if (
+        len(source_tokens) >= 2
+        and f" {source_phrase} " in f" {saved_phrase} "
+    ):
+        return 96
+    source_set = set(source_tokens)
+    saved_set = set(saved_tokens)
+    if (
+        len(source_set) >= 2
+        and source_set.issubset(saved_set)
+    ):
+        return 92
+    return 0
+
+
+def _company_identity_name_matches(company_name, companies):
+    """Rank saved companies against the company name read from evidence."""
+
+    if not _has_distinctive_ai_company_name(company_name):
+        return []
+    matches = []
+    for company in companies:
+        score, reason = score_company_name(company_name, company.name)
+        if score < AI_COMPANY_NAME_CANDIDATE_SCORE:
+            continue
+        matches.append(
+            {
+                "company": company,
+                "score": score,
+                "reason": reason,
+                "specificity_conflict": (
+                    _company_identity_has_unrepresented_specific_tokens(
+                        company_name,
+                        company.name,
+                    )
+                ),
+            }
+        )
+    return sorted(
+        matches,
+        key=lambda row: (
+            -row["score"],
+            row["company"].name.casefold(),
+            row["company"].id,
+        ),
+    )
+
+
+def _has_distinctive_ai_company_name(value):
+    """Allow strong multi-token identities and established long brand names."""
+
+    tokens = [
+        token
+        for token in normalize_company_identity_text(value).split()
+        if len(token) >= 3
+        and token not in COMPANY_IDENTITY_GENERIC_TOKENS
+    ]
+    return bool(
+        (len(tokens) >= 2 and len("".join(tokens)) >= 8)
+        or (len(tokens) == 1 and len(tokens[0]) >= 6)
+    )
+
+
+def _company_identity_has_unrepresented_specific_tokens(
+    identity_name,
+    saved_name,
+):
+    """Detect branch/property differences while allowing long OCR typos."""
+
+    def significant_tokens(value):
+        tokens = normalize_company_identity_text(value).split()
+        collapsed = []
+        index = 0
+        while index < len(tokens):
+            if (
+                index + 1 < len(tokens)
+                and tokens[index : index + 2] == ["health", "care"]
+            ):
+                collapsed.append("healthcare")
+                index += 2
+                continue
+            collapsed.append(tokens[index])
+            index += 1
+        canonical = []
+        for token in collapsed:
+            if len(token) >= 7:
+                generic_typo = next(
+                    (
+                        generic
+                        for generic in COMPANY_IDENTITY_GENERIC_TOKENS
+                        if len(generic) >= 7
+                        and SequenceMatcher(
+                            None,
+                            token,
+                            generic,
+                        ).ratio() >= 0.86
+                    ),
+                    "",
+                )
+                if generic_typo:
+                    token = generic_typo
+            if (
+                len(token) >= 3
+                and token not in COMPANY_IDENTITY_GENERIC_TOKENS
+            ):
+                canonical.append(token)
+        return canonical
+
+    identity_tokens = significant_tokens(identity_name)
+    saved_tokens = significant_tokens(saved_name)
+    if not identity_tokens or not saved_tokens:
+        return False
+    if sorted(identity_tokens) == sorted(saved_tokens):
+        return False
+
+    unmatched_identity = list(identity_tokens)
+    unmatched_saved = list(saved_tokens)
+    for token in tuple(unmatched_identity):
+        if token in unmatched_saved:
+            unmatched_identity.remove(token)
+            unmatched_saved.remove(token)
+    if len(unmatched_identity) == len(unmatched_saved) == 1:
+        identity_token = unmatched_identity[0]
+        saved_token = unmatched_saved[0]
+        if (
+            min(len(identity_token), len(saved_token)) >= 7
+            and SequenceMatcher(
+                None,
+                identity_token,
+                saved_token,
+            ).ratio() >= 0.84
+        ):
+            return False
+    return True
 
 
 def _distinctive_company_identity_phrases(company_name):
@@ -1065,7 +1308,40 @@ def _company_name_signature_message_ids(
     return matches
 
 
-def _company_contact_candidates(messages, mailbox_email):
+def _active_customer_identity_records():
+    return (
+        list(
+            Company.objects.filter(is_active=True).only(
+                "id",
+                "name",
+                "email",
+            )
+        ),
+        list(
+            CompanyContact.objects.select_related("company")
+            .filter(
+                is_active=True,
+                company__is_active=True,
+            )
+            .only(
+                "id",
+                "name",
+                "email",
+                "company_id",
+                "company__id",
+                "company__name",
+            )
+        ),
+    )
+
+
+def _company_contact_candidates(
+    messages,
+    mailbox_email,
+    *,
+    active_companies=None,
+    active_contacts=None,
+):
     mailbox_email = str(mailbox_email or "").strip().casefold()
     sender_evidence = {}
     for message in messages:
@@ -1081,28 +1357,10 @@ def _company_contact_candidates(messages, mailbox_email):
                 continue
             sender_evidence.setdefault(address, set()).add(message_id)
 
-    active_companies = list(
-        Company.objects.filter(is_active=True).only(
-            "id",
-            "name",
-            "email",
+    if active_companies is None or active_contacts is None:
+        active_companies, active_contacts = (
+            _active_customer_identity_records()
         )
-    )
-    active_contacts = list(
-        CompanyContact.objects.select_related("company")
-        .filter(
-            is_active=True,
-            company__is_active=True,
-        )
-        .only(
-            "id",
-            "name",
-            "email",
-            "company_id",
-            "company__id",
-            "company__name",
-        )
-    )
     companies_by_id = {
         company.id: company
         for company in active_companies
@@ -1181,9 +1439,11 @@ def _company_contact_candidates(messages, mailbox_email):
 
     normalized_contact_email = {}
     for contact in active_contacts:
-        email = str(contact.email or "").strip().casefold()
-        if email:
-            normalized_contact_email.setdefault(email, []).append(contact)
+        structured_email = str(contact.email or "").strip().casefold()
+        for email in _saved_contact_emails(contact):
+            normalized_contact_email.setdefault(email, []).append(
+                (contact, bool(structured_email and email == structured_email))
+            )
     normalized_company_email = {}
     for company in active_companies:
         email = str(company.email or "").strip().casefold()
@@ -1191,22 +1451,37 @@ def _company_contact_candidates(messages, mailbox_email):
             normalized_company_email.setdefault(email, []).append(company)
 
     for email, message_ids in sender_evidence.items():
-        for contact in normalized_contact_email.get(email, []):
-            reason = f"Exact sender email matches contact {contact.name}."
+        for contact, structured_email in normalized_contact_email.get(email, []):
+            reason = (
+                f"Exact sender email matches contact {contact.name}."
+                if structured_email
+                else (
+                    "Sender email matches an address stored inside the "
+                    f"legacy contact label for {contact.name}."
+                )
+            )
             add_company_match(
                 contact.company_id,
-                confidence=1.0,
-                match_method="exact_contact_email",
+                confidence=1.0 if structured_email else 0.84,
+                match_method=(
+                    "exact_contact_email"
+                    if structured_email
+                    else "legacy_contact_label_email"
+                ),
                 reason=reason,
                 emails=[email],
                 message_ids=message_ids,
                 evidence={
-                    "signal": "exact_contact_email",
+                    "signal": (
+                        "exact_contact_email"
+                        if structured_email
+                        else "legacy_contact_label_email"
+                    ),
                     "value": email,
                     "message_ids": sorted(message_ids),
                 },
-                exact_email=True,
-                method_priority=40,
+                exact_email=structured_email,
+                method_priority=40 if structured_email else 12,
             )
             contact_row = contact_matches.setdefault(
                 contact.id,
@@ -1214,9 +1489,13 @@ def _company_contact_candidates(messages, mailbox_email):
                     "contact_id": contact.id,
                     "contact_name": contact.name,
                     "company_id": contact.company_id,
-                    "email": contact.email,
-                    "confidence": 1.0,
-                    "match_method": "exact_sender_email",
+                    "email": contact.email or email,
+                    "confidence": 1.0 if structured_email else 0.90,
+                    "match_method": (
+                        "exact_sender_email"
+                        if structured_email
+                        else "legacy_contact_label_email"
+                    ),
                     "explanation": reason,
                     "message_ids": set(),
                     "evidence": [],
@@ -1226,7 +1505,11 @@ def _company_contact_candidates(messages, mailbox_email):
             if not contact_row["evidence"]:
                 contact_row["evidence"].append(
                     {
-                        "signal": "exact_sender_email",
+                        "signal": (
+                            "exact_sender_email"
+                            if structured_email
+                            else "legacy_contact_label_email"
+                        ),
                         "value": email,
                         "message_ids": sorted(message_ids),
                     }
@@ -1254,6 +1537,8 @@ def _company_contact_candidates(messages, mailbox_email):
         if domain and is_private_email_domain(domain):
             known_domain_companies.setdefault(domain, set()).add(company.id)
     for contact in active_contacts:
+        # A pasted legacy signature address is useful candidate evidence, but
+        # only the dedicated email field may establish a verified domain.
         domain = _email_domain(contact.email)
         if domain and is_private_email_domain(domain):
             known_domain_companies.setdefault(domain, set()).add(
@@ -1967,7 +2252,12 @@ def _run_native_thread_analysis(
     file_inputs,
     gmail_import,
     actor,
+    *,
+    analysis_timings=None,
 ):
+    analysis_timings = (
+        analysis_timings if isinstance(analysis_timings, dict) else {}
+    )
     message_ids = [
         str(message.get("gmail_message_id") or "")
         for message in messages
@@ -2033,6 +2323,10 @@ def _run_native_thread_analysis(
             for file_input in file_inputs
         ),
     }
+    usage = {}
+    ai_started = time.perf_counter()
+    provider_started = ai_started
+    validation_started = None
     try:
         result, usage = provider.clean_rows(
             mode="gmail_native_thread",
@@ -2044,6 +2338,8 @@ def _run_native_thread_analysis(
             json_schema=_native_thread_schema(message_ids, source_keys),
             schema_name="gmail_inquiry_native_v2",
         )
+        analysis_timings["ai_provider"] = _elapsed_ms(provider_started)
+        validation_started = time.perf_counter()
         if not isinstance(result, dict):
             raise AIParseError("Gmail AI analysis returned an invalid object.")
         result["_usage"] = usage or {}
@@ -2052,7 +2348,20 @@ def _run_native_thread_analysis(
             messages,
             sources,
         )
+        analysis_timings["ai_validation"] = _elapsed_ms(
+            validation_started
+        )
+        analysis_timings["ai_analysis"] = _elapsed_ms(ai_started)
     except Exception as exc:
+        if "ai_provider" not in analysis_timings:
+            analysis_timings["ai_provider"] = _elapsed_ms(
+                provider_started
+            )
+        if validation_started is not None:
+            analysis_timings["ai_validation"] = _elapsed_ms(
+                validation_started
+            )
+        analysis_timings["ai_analysis"] = _elapsed_ms(ai_started)
         AIParseLog.objects.create(
             actor=actor if getattr(actor, "is_authenticated", False) else None,
             provider=provider_name,
@@ -2064,7 +2373,12 @@ def _run_native_thread_analysis(
             text_length=len(text_context),
             page_count=audit_usage["native_pdf_pages"],
             image_count=0,
-            usage=audit_usage,
+            usage={
+                **audit_usage,
+                "timings_ms": _analysis_timing_snapshot(
+                    analysis_timings
+                ),
+            },
             success=False,
             error=str(exc)[:1000],
         )
@@ -2080,8 +2394,17 @@ def _run_native_thread_analysis(
         text_length=len(text_context),
         page_count=audit_usage["native_pdf_pages"],
         image_count=0,
-        usage={**audit_usage, **(usage or {})},
+        usage={
+            **audit_usage,
+            **(usage or {}),
+            "timings_ms": _analysis_timing_snapshot(
+                analysis_timings
+            ),
+        },
         success=True,
+    )
+    validated_result["_timings_ms"] = _analysis_timing_snapshot(
+        analysis_timings
     )
     return validated_result
 
@@ -2414,146 +2737,424 @@ def _validate_native_thread_result(raw_result, messages, evidence):
     }
 
 
-def _apply_ai_identity_candidates(candidates, identity):
-    """Add review-only saved customer suggestions from the AI-read signature."""
+def _apply_ai_identity_candidates(
+    candidates,
+    identity,
+    *,
+    active_companies=None,
+    active_contacts=None,
+):
+    """Rank AI-read signature identity against saved customer records.
+
+    The AI transcribes identity evidence; deterministic matching decides
+    whether an existing record is a safe review suggestion. Legal suffix and
+    spelling variants can match, while a high-confidence branch/property
+    conflict suppresses weaker domain inference.
+    """
 
     candidates = {**(candidates or {})}
+    candidates["companies"] = [
+        {**row}
+        for row in candidates.get("companies") or []
+    ]
+    candidates["contacts"] = [
+        {**row}
+        for row in candidates.get("contacts") or []
+    ]
     candidates["ai_identity"] = _json_safe(identity or {})
     identity = identity or {}
     confidence = max(
         0.0,
         min(float(identity.get("confidence") or 0), 1.0),
     )
-    if confidence < 0.65:
+    if confidence < AI_IDENTITY_MIN_CONFIDENCE:
         return candidates
 
     company_name = str(identity.get("company_name") or "").strip()
     contact_name = str(identity.get("contact_name") or "").strip()
     contact_email = str(identity.get("contact_email") or "").strip().casefold()
-    company_ids = set()
-    matched_contacts = []
+    source_keys = list(identity.get("source_keys") or [])
+    ai_reason = (
+        str(identity.get("reason") or "").strip()
+        or "AI read this identity from the selected customer evidence."
+    )
+    if active_companies is None or active_contacts is None:
+        active_companies, active_contacts = (
+            _active_customer_identity_records()
+        )
+    companies_by_id = {
+        company.id: company
+        for company in active_companies
+    }
+    company_rows_by_id = {
+        row.get("company_id"): row
+        for row in candidates["companies"]
+    }
+
+    name_matches = _company_identity_name_matches(
+        company_name,
+        active_companies,
+    ) if company_name else []
+    name_scores = {
+        row["company"].id: (
+            0 if row["specificity_conflict"] else row["score"]
+        )
+        for row in name_matches
+    }
+    top_name_match = name_matches[0] if name_matches else None
+    runner_up_score = (
+        name_matches[1]["score"]
+        if len(name_matches) > 1
+        else 0
+    )
+    unique_name_match = bool(
+        top_name_match
+        and (
+            len(name_matches) == 1
+            or top_name_match["score"] - runner_up_score
+            >= AI_COMPANY_NAME_MIN_MARGIN
+        )
+    )
+
+    legacy_email_contacts = []
+    structured_email_contacts = []
     if contact_email:
-        matched_contacts = list(
-            CompanyContact.objects.select_related("company").filter(
-                is_active=True,
-                company__is_active=True,
-                email__iexact=contact_email,
+        for contact in active_contacts:
+            saved_emails = _saved_contact_emails(contact)
+            if contact_email not in saved_emails:
+                continue
+            structured_email = str(contact.email or "").strip().casefold()
+            if structured_email and structured_email == contact_email:
+                structured_email_contacts.append(contact)
+            else:
+                legacy_email_contacts.append(contact)
+
+    # Actual From-address matches were already verified by
+    # _company_contact_candidates. An AI-transcribed signature email is useful
+    # only for contact corroboration and never selects a company by itself.
+    target_company_id = None
+    target_name_score = 0
+    if unique_name_match and not top_name_match["specificity_conflict"]:
+        top_score = top_name_match["score"]
+        strong_enough = bool(
+            (
+                top_score >= 96
+                and confidence >= 0.75
+            )
+            or (
+                top_score >= AI_COMPANY_NAME_STRONG_SCORE
+                and confidence >= AI_IDENTITY_STRONG_CONFIDENCE
+            )
+            or (
+                top_score >= AI_COMPANY_NAME_CANDIDATE_SCORE
+                and confidence >= 0.90
             )
         )
-        company_ids.update(contact.company_id for contact in matched_contacts)
-        company_ids.update(
-            Company.objects.filter(
-                is_active=True,
-                email__iexact=contact_email,
-            ).values_list("id", flat=True)
+        if strong_enough:
+            target_company_id = top_name_match["company"].id
+            target_name_score = top_score
+
+    # Add the strongest name-ranked alternatives for transparent review.
+    for name_match in name_matches[:5]:
+        company = name_match["company"]
+        score = name_match["score"]
+        explanation = (
+            f"{ai_reason} Saved company-name comparison: "
+            f"{name_match['reason']}"
         )
-    if company_name:
-        normalized_name = normalize_label(company_name)
-        company_ids.update(
-            company.id
-            for company in Company.objects.filter(is_active=True).only(
-                "id",
-                "name",
-            )
-            if normalize_label(company.name) == normalized_name
+        name_confidence = min(
+            confidence,
+            0.94 if score >= 96 else (0.90 if score >= 88 else 0.84),
         )
-    if len(company_ids) != 1:
+        row = company_rows_by_id.get(company.id)
+        evidence = {
+            "signal": "ai_saved_company_name",
+            "value": company_name,
+            "score": score,
+            "specificity_conflict": name_match["specificity_conflict"],
+            "source_keys": source_keys,
+        }
+        if row:
+            reasons = list(row.get("match_reasons") or [])
+            if explanation not in reasons:
+                reasons.append(explanation)
+            row["match_reasons"] = reasons
+            row["evidence"] = list(row.get("evidence") or []) + [evidence]
+            # Preserve stronger exact/domain evidence as the displayed method,
+            # but retain the AI comparison in reasons/evidence.
+            if name_confidence > float(row.get("confidence") or 0):
+                row["confidence"] = name_confidence
+                row["match_method"] = "ai_saved_company_name"
+                row["explanation"] = explanation
+        else:
+            row = {
+                "company_id": company.id,
+                "company_name": company.name,
+                "confidence": name_confidence,
+                "match_method": "ai_saved_company_name",
+                "explanation": explanation,
+                "match_reasons": [explanation],
+                "emails": [contact_email] if contact_email else [],
+                "message_ids": [],
+                "evidence": [evidence],
+            }
+            candidates["companies"].append(row)
+            company_rows_by_id[company.id] = row
+
+    existing_recommendation = candidates.get("recommended_company_id")
+    exact_company_match = bool(candidates.get("exact_company_match"))
+    identity_is_distinctive = bool(
+        company_name
+        and _has_distinctive_ai_company_name(company_name)
+    )
+    if (
+        existing_recommendation
+        and identity_is_distinctive
+        and confidence >= AI_IDENTITY_STRONG_CONFIDENCE
+        and name_scores.get(existing_recommendation, 0)
+        < AI_COMPANY_NAME_CANDIDATE_SCORE
+    ):
+        existing_company = companies_by_id.get(existing_recommendation)
+        candidates["identity_conflict"] = {
+            "company_name": company_name,
+            "conflicting_company_id": existing_recommendation,
+            "conflicting_company_name": (
+                existing_company.name if existing_company else ""
+            ),
+            "reason": (
+                "The AI-read signature company does not match the company "
+                "suggested from the sender domain. Select the customer manually."
+            ),
+            "source_keys": source_keys,
+        }
+        candidates["recommended_company_id"] = None
+        candidates["recommended_contact_id"] = None
+        existing_recommendation = None
+
+    if target_company_id and not exact_company_match:
+        current_recommendation = candidates.get("recommended_company_id")
+        if (
+            not current_recommendation
+            or current_recommendation == target_company_id
+        ):
+            candidates["recommended_company_id"] = target_company_id
+            candidates.pop("identity_conflict", None)
+        elif target_name_score >= AI_COMPANY_NAME_STRONG_SCORE:
+            # A strong, unique signature-name match can disambiguate a weaker
+            # inferred domain suggestion. It never overrides an exact sender
+            # email match.
+            candidates["recommended_company_id"] = target_company_id
+            candidates["recommended_contact_id"] = None
+            candidates.pop("identity_conflict", None)
+
+    # A unique legacy email is corroboration only. Attach it to the candidate
+    # selected by the independently read company name.
+    if (
+        target_company_id
+        and len(legacy_email_contacts) == 1
+        and legacy_email_contacts[0].company_id == target_company_id
+    ):
+        row = company_rows_by_id.get(target_company_id)
+        if row:
+            row["evidence"] = list(row.get("evidence") or []) + [
+                {
+                    "signal": "ai_legacy_contact_email",
+                    "value": contact_email,
+                    "source_keys": source_keys,
+                }
+            ]
+
+    candidates["companies"].sort(
+        key=lambda row: (
+            -float(row.get("confidence") or 0),
+            str(row.get("company_name") or "").casefold(),
+            int(row.get("company_id") or 0),
+        )
+    )
+
+    recommended_company_id = candidates.get("recommended_company_id")
+    if not recommended_company_id:
         return candidates
 
-    company_id = next(iter(company_ids))
-    company = Company.objects.filter(pk=company_id, is_active=True).first()
-    if not company:
+    company_contacts = [
+        contact
+        for contact in active_contacts
+        if contact.company_id == recommended_company_id
+    ]
+    contact_candidates = [
+        contact
+        for contact in structured_email_contacts + legacy_email_contacts
+        if contact.company_id == recommended_company_id
+    ]
+    contact_method = (
+        "ai_saved_contact_email"
+        if contact_candidates
+        else "ai_saved_contact_name"
+    )
+    if not contact_candidates and contact_name:
+        scored_contacts = sorted(
+            (
+                (_contact_name_match_score(contact_name, contact.name), contact)
+                for contact in company_contacts
+            ),
+            key=lambda pair: (
+                -pair[0],
+                pair[1].name.casefold(),
+                pair[1].id,
+            ),
+        )
+        if scored_contacts and scored_contacts[0][0] >= 92:
+            top_score = scored_contacts[0][0]
+            runner_score = (
+                scored_contacts[1][0]
+                if len(scored_contacts) > 1
+                else 0
+            )
+            if top_score - runner_score >= 8:
+                contact_candidates = [scored_contacts[0][1]]
+
+    unique_contacts = {
+        contact.id: contact
+        for contact in contact_candidates
+    }
+    if len(unique_contacts) != 1:
         return candidates
-    companies = list(candidates.get("companies") or [])
-    if not any(row.get("company_id") == company_id for row in companies):
-        companies.append(
+
+    contact = next(iter(unique_contacts.values()))
+    if not any(
+        row.get("contact_id") == contact.id
+        for row in candidates["contacts"]
+    ):
+        saved_emails = _saved_contact_emails(contact)
+        candidates["contacts"].append(
             {
-                "company_id": company_id,
-                "company_name": company.name,
-                "confidence": min(confidence, 0.92),
-                "match_method": "ai_email_identity",
-                "explanation": (
-                    str(identity.get("reason") or "").strip()
-                    or "AI identified this saved company from the selected email text."
+                "contact_id": contact.id,
+                "contact_name": contact.name,
+                "company_id": recommended_company_id,
+                "email": contact.email or (
+                    sorted(saved_emails)[0] if saved_emails else ""
                 ),
-                "match_reasons": [
-                    "AI identified the saved company from the selected email text."
-                ],
-                "emails": [contact_email] if contact_email else [],
+                "confidence": min(confidence, 0.95),
+                "match_method": contact_method,
+                "explanation": (
+                    "AI identity matches this saved contact within the "
+                    "suggested company."
+                ),
                 "message_ids": [],
                 "evidence": [
                     {
-                        "signal": "ai_email_identity",
-                        "value": company_name or contact_email,
-                        "source_keys": list(identity.get("source_keys") or []),
+                        "signal": contact_method,
+                        "value": contact_email or contact_name,
+                        "source_keys": source_keys,
                     }
                 ],
             }
         )
-        companies.sort(
-            key=lambda row: (
-                -float(row.get("confidence") or 0),
-                str(row.get("company_name") or "").casefold(),
-            )
-        )
-    candidates["companies"] = companies
-    if (
-        not candidates.get("recommended_company_id")
-        and confidence >= COMPANY_INFERENCE_MIN_CONFIDENCE
-    ):
-        candidates["recommended_company_id"] = company_id
+    if not candidates.get("recommended_contact_id"):
+        candidates["recommended_contact_id"] = contact.id
+    return candidates
 
-    contacts = list(candidates.get("contacts") or [])
-    contact_candidates = [
-        contact
-        for contact in matched_contacts
-        if contact.company_id == company_id
-    ]
-    if not contact_candidates and contact_name:
-        normalized_contact = normalize_label(contact_name)
-        contact_candidates = [
-            contact
-            for contact in CompanyContact.objects.filter(
-                company_id=company_id,
-                is_active=True,
-            )
-            if normalize_label(contact.name) == normalized_contact
-        ]
-    if len(contact_candidates) == 1:
-        contact = contact_candidates[0]
-        if not any(
-            row.get("contact_id") == contact.id for row in contacts
+
+def refresh_gmail_inquiry_identity_candidates(gmail_import):
+    """Apply the current zero-AI identity ranker once to a stored analysis.
+
+    This makes already-analyzed reviews benefit from matcher fixes without
+    resending customer content to the AI. The version marker keeps normal
+    polling reads query-free after the one-time refresh.
+    """
+
+    refreshable_statuses = {
+        GmailInquiryImport.STATUS_READY,
+        GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+    }
+    if gmail_import.status not in refreshable_statuses:
+        return gmail_import
+
+    current_candidates = dict(gmail_import.candidates or {})
+    if (
+        current_candidates.get("identity_match_version")
+        == GMAIL_IDENTITY_MATCH_VERSION
+    ):
+        return gmail_import
+    current_identity = dict(
+        current_candidates.get("ai_identity")
+        or (
+            (gmail_import.analysis or {}).get("thread_analysis") or {}
+        ).get("customer_identity")
+        or {}
+    )
+    if not current_identity:
+        return gmail_import
+
+    with transaction.atomic():
+        locked = GmailInquiryImport.objects.select_for_update().get(
+            pk=gmail_import.pk
+        )
+        if locked.status not in refreshable_statuses:
+            return locked
+        candidates = dict(locked.candidates or {})
+        if (
+            candidates.get("identity_match_version")
+            == GMAIL_IDENTITY_MATCH_VERSION
         ):
-            contacts.append(
-                {
-                    "contact_id": contact.id,
-                    "contact_name": contact.name,
-                    "company_id": company_id,
-                    "email": contact.email,
-                    "confidence": min(confidence, 0.95),
-                    "match_method": "ai_email_identity",
-                    "explanation": (
-                        "AI identified this saved contact from the selected email text."
-                    ),
-                    "message_ids": [],
-                    "evidence": [
-                        {
-                            "signal": "ai_email_identity",
-                            "value": contact_email or contact_name,
-                            "source_keys": list(
-                                identity.get("source_keys") or []
-                            ),
-                        }
-                    ],
-                }
-            )
+            return locked
+
+        identity = dict(
+            candidates.get("ai_identity")
+            or (
+                (locked.analysis or {}).get("thread_analysis") or {}
+            ).get("customer_identity")
+            or {}
+        )
+        if not identity:
+            return locked
+        companies = [
+            {**row}
+            for row in candidates.get("companies") or []
+            if not str(row.get("match_method") or "").startswith("ai_")
+        ]
+        contacts = [
+            {**row}
+            for row in candidates.get("contacts") or []
+            if not str(row.get("match_method") or "").startswith("ai_")
+        ]
+        retained_company_ids = {
+            row.get("company_id")
+            for row in companies
+        }
+        retained_contact_ids = {
+            row.get("contact_id")
+            for row in contacts
+        }
+        candidates["companies"] = companies
         candidates["contacts"] = contacts
         if (
-            candidates.get("recommended_company_id") == company_id
-            and not candidates.get("recommended_contact_id")
+            candidates.get("recommended_company_id")
+            not in retained_company_ids
         ):
-            candidates["recommended_contact_id"] = contact.id
-    return candidates
+            candidates["recommended_company_id"] = None
+        if (
+            candidates.get("recommended_contact_id")
+            not in retained_contact_ids
+        ):
+            candidates["recommended_contact_id"] = None
+        candidates.pop("identity_conflict", None)
+
+        active_companies, active_contacts = (
+            _active_customer_identity_records()
+        )
+        candidates = _apply_ai_identity_candidates(
+            candidates,
+            identity,
+            active_companies=active_companies,
+            active_contacts=active_contacts,
+        )
+        candidates["identity_match_version"] = (
+            GMAIL_IDENTITY_MATCH_VERSION
+        )
+        locked.candidates = _json_safe(candidates)
+        locked.save(update_fields=["candidates"])
+        return locked
 
 
 def _build_source_analysis(
@@ -2564,9 +3165,14 @@ def _build_source_analysis(
     *,
     timeline_messages=None,
     timeline_meta=None,
+    analysis_timings=None,
 ):
     """Analyze complete selected bodies and original attachments in one AI pass."""
 
+    analysis_timings = (
+        analysis_timings if isinstance(analysis_timings, dict) else {}
+    )
+    preparation_started = time.perf_counter()
     mailbox_email = str(connection.email or "").strip().lower()
     timeline_messages = list(timeline_messages or messages)
     timeline_meta = dict(timeline_meta or {})
@@ -2901,6 +3507,9 @@ def _build_source_analysis(
                 }
             )
 
+    analysis_timings["source_preparation"] = _elapsed_ms(
+        preparation_started
+    )
     semantic_result = _run_native_thread_analysis(
         semantic_messages,
         evidence,
@@ -2908,6 +3517,8 @@ def _build_source_analysis(
         gmail_import,
         actor,
     )
+    analysis_timings.update(semantic_result.pop("_timings_ms", {}) or {})
+    post_ai_started = time.perf_counter()
     warnings.extend(semantic_result["warnings"])
     message_semantics = semantic_result["messages"]
     for message_id, semantics in message_semantics.items():
@@ -2944,10 +3555,19 @@ def _build_source_analysis(
             }
         )
 
+    active_companies, active_contacts = _active_customer_identity_records()
     candidates = _apply_ai_identity_candidates(
-        _company_contact_candidates(messages, mailbox_email),
+        _company_contact_candidates(
+            messages,
+            mailbox_email,
+            active_companies=active_companies,
+            active_contacts=active_contacts,
+        ),
         semantic_result.get("customer_identity") or {},
+        active_companies=active_companies,
+        active_contacts=active_contacts,
     )
+    candidates["identity_match_version"] = GMAIL_IDENTITY_MATCH_VERSION
     recommended_company = None
     if candidates.get("recommended_company_id"):
         recommended_company = Company.objects.filter(
@@ -3032,7 +3652,10 @@ def _build_source_analysis(
             "A customer company was suggested from email/domain/signature "
             "evidence. Staff must confirm it before creating the quotation."
         )
-    elif not candidates.get("exact_company_match"):
+    elif (
+        not candidates.get("recommended_company_id")
+        or not candidates.get("exact_company_match")
+    ):
         warnings.append(
             "No unique customer could be suggested from sender, domain, "
             "signature, or AI-read identity evidence."
@@ -3089,6 +3712,7 @@ def _build_source_analysis(
             "thread_truncated": bool(timeline_meta.get("truncated")),
         },
     }
+    analysis_timings["post_ai_matching"] = _elapsed_ms(post_ai_started)
     return {
         "message_manifest": message_manifest,
         "attachment_manifest": attachment_manifest,
@@ -3105,6 +3729,7 @@ def _build_source_analysis(
             "ai_usage": semantic_result.get("usage") or {},
             "customer_identity": semantic_result.get("customer_identity") or {},
         },
+        "timings_ms": _analysis_timing_snapshot(analysis_timings),
     }
 
 
@@ -3130,6 +3755,7 @@ def _mark_analysis_failed(
     *,
     expected_attempt=None,
     expected_fingerprint=None,
+    timings_ms=None,
 ):
     with transaction.atomic():
         gmail_import = _record_for_update(import_id)
@@ -3147,12 +3773,14 @@ def _mark_analysis_failed(
         ):
             return False
         errors = list(gmail_import.errors or [])
-        errors.append(
-            {
-                "at": timezone.now().isoformat(),
-                "message": str(exc)[:1000],
-            }
-        )
+        error_entry = {
+            "at": timezone.now().isoformat(),
+            "message": str(exc)[:1000],
+        }
+        safe_timings = _analysis_timing_snapshot(timings_ms)
+        if safe_timings:
+            error_entry["timings_ms"] = safe_timings
+        errors.append(error_entry)
         gmail_import.errors = errors[-20:]
         gmail_import.status = GmailInquiryImport.STATUS_FAILED
         gmail_import.analyzed_at = timezone.now()
@@ -3427,6 +4055,8 @@ def analyze_gmail_inquiry_import(
 ):
     """Fetch, parse, and cache one claimed Gmail intake without creating data."""
 
+    total_started = time.perf_counter()
+    analysis_timings = {}
     if selected_message_ids is not None or mode is not None:
         gmail_import = update_gmail_inquiry_selection(
             gmail_import,
@@ -3481,8 +4111,10 @@ def analyze_gmail_inquiry_import(
         analysis_fingerprint = locked.source_fingerprint
 
     try:
+        fetch_started = time.perf_counter()
         connection = _connected_mailbox_for_import(locked, actor)
         fetched = _fetch_analysis_messages(locked, connection)
+        analysis_timings["gmail_thread_fetch"] = _elapsed_ms(fetch_started)
         if len(fetched) == 3:
             thread_id, messages, timeline_messages = fetched
             timeline_meta = {
@@ -3517,6 +4149,7 @@ def analyze_gmail_inquiry_import(
             actor,
             timeline_messages=timeline_messages,
             timeline_meta=timeline_meta,
+            analysis_timings=analysis_timings,
         )
         content_fingerprint = _content_fingerprint(
             connection.email,
@@ -3534,11 +4167,17 @@ def analyze_gmail_inquiry_import(
             selected_message_ids=message_ids,
         )
     except Exception as exc:
+        if "gmail_thread_fetch" not in analysis_timings:
+            analysis_timings["gmail_thread_fetch"] = _elapsed_ms(
+                fetch_started
+            )
+        analysis_timings["total"] = _elapsed_ms(total_started)
         marked_failed = _mark_analysis_failed(
             locked.pk,
             exc,
             expected_attempt=analysis_attempt,
             expected_fingerprint=analysis_fingerprint,
+            timings_ms=analysis_timings,
         )
         if not marked_failed:
             return _record(locked)
@@ -3548,6 +4187,7 @@ def analyze_gmail_inquiry_import(
             f"Gmail inquiry analysis failed. {str(exc)[:300]}"
         ) from exc
 
+    persistence_started = time.perf_counter()
     with transaction.atomic():
         locked = _record_for_update(locked)
         if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
@@ -3575,6 +4215,7 @@ def analyze_gmail_inquiry_import(
                 "selected_message_ids": message_ids,
                 "recommended_source_keys": result["recommended_source_keys"],
                 "thread_analysis": result["thread_analysis"],
+                "timings_ms": _analysis_timing_snapshot(analysis_timings),
             }
         )
         locked.evidence = _json_safe(result["evidence"])
@@ -3605,6 +4246,15 @@ def analyze_gmail_inquiry_import(
                 updated = 0
             if updated:
                 locked.source_fingerprint = canonical_selection_fingerprint
+        analysis_timings["result_persistence"] = _elapsed_ms(
+            persistence_started
+        )
+        analysis_timings["total"] = _elapsed_ms(total_started)
+        locked.analysis = {
+            **(locked.analysis or {}),
+            "timings_ms": _analysis_timing_snapshot(analysis_timings),
+        }
+        locked.save(update_fields=["analysis", "updated_at"])
     return _record(locked)
 
 
