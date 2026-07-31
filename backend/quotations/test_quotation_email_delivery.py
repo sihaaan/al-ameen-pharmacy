@@ -104,11 +104,12 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         subject="RFQ medical supplies",
         rfc_message_id="<customer-1@example.com>",
         references="<older@example.com>",
+        label_ids=None,
     ):
         return {
             "gmail_message_id": message_id,
             "gmail_thread_id": thread_id,
-            "label_ids": ["INBOX"],
+            "label_ids": ["INBOX"] if label_ids is None else list(label_ids),
             "subject": subject,
             "sender": sender,
             "reply_to": reply_to,
@@ -709,7 +710,9 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         fetch.return_value = self.source_metadata(
             message_id="gmail-reconciled",
             thread_id="gmail-reconciled-thread",
+            sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
             rfc_message_id=delivery.outbound_rfc_message_id,
+            label_ids=["SENT"],
         )
 
         response = self.client.post(
@@ -722,6 +725,10 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertTrue(response.data["reconciled"])
         self.assertEqual(response.data["delivery"]["status"], "sent")
         self.assertEqual(response.data["quote"]["status"], Quotation.STATUS_SENT)
+        query = search.call_args.args[1]
+        self.assertIn("in:sent", query)
+        self.assertIn("from:pharmacydxb@gmail.com", query)
+        self.assertIn("rfc822msgid:", query)
         send.assert_not_called()
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
@@ -757,6 +764,444 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(response.data["delivery"]["status"], "unknown")
         self.assertEqual(response.data["quote"]["status"], Quotation.STATUS_FINALIZED)
         send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconcile_rejects_candidates_without_all_trust_signals(
+        self,
+        search,
+        fetch,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {"messages": [{"id": "gmail-candidate"}]}
+        trusted = {
+            "message_id": "gmail-candidate",
+            "thread_id": "gmail-reconciled-thread",
+            "sender": "Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+            "rfc_message_id": delivery.outbound_rfc_message_id,
+            "label_ids": ["SENT"],
+        }
+        variants = [
+            {**trusted, "label_ids": ["INBOX"]},
+            {**trusted, "sender": "Attacker <attacker@example.com>"},
+            {**trusted, "rfc_message_id": "<wrong-message@example.com>"},
+            {**trusted, "thread_id": ""},
+        ]
+
+        for metadata in variants:
+            with self.subTest(metadata=metadata):
+                fetch.return_value = self.source_metadata(**metadata)
+                response = self.client.post(
+                    reverse("quotation-reconcile-email", args=[quotation.id]),
+                    {},
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertFalse(response.data["reconciled"])
+                delivery.refresh_from_db()
+                quotation.refresh_from_db()
+                self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+                self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_gmail_reply_reconciliation_requires_expected_thread(
+        self,
+        search,
+        fetch,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_GMAIL_REPLY,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["orders@example.com"],
+            subject="RFQ medical supplies",
+            body="Attached.",
+            gmail_thread_id="expected-thread",
+            source_gmail_message_id="source-message",
+            source_rfc_message_id="<source@example.com>",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {"messages": [{"id": "gmail-candidate"}]}
+        fetch.return_value = self.source_metadata(
+            message_id="gmail-candidate",
+            thread_id="wrong-thread",
+            sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+            rfc_message_id=delivery.outbound_rfc_message_id,
+            label_ids=["SENT"],
+        )
+
+        mismatch = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+        self.assertEqual(mismatch.status_code, status.HTTP_200_OK)
+        self.assertFalse(mismatch.data["reconciled"])
+
+        fetch.return_value = self.source_metadata(
+            message_id="gmail-candidate",
+            thread_id="expected-thread",
+            sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+            rfc_message_id=delivery.outbound_rfc_message_id,
+            label_ids=["SENT"],
+        )
+        matched = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(matched.status_code, status.HTTP_200_OK)
+        self.assertTrue(matched.data["reconciled"])
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_gmail_reply_reconciliation_rejects_missing_expected_thread(
+        self,
+        search,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_GMAIL_REPLY,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["orders@example.com"],
+            subject="RFQ medical supplies",
+            body="Attached.",
+            gmail_thread_id="",
+            source_gmail_message_id="source-message",
+            source_rfc_message_id="<source@example.com>",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "delivery_reconciliation_invalid")
+        self.assertFalse(response.data["retryable"])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        search.assert_not_called()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconciliation_requires_the_shared_mailbox_connection(
+        self,
+        search,
+        send,
+    ):
+        self.connection.is_shared = False
+        self.connection.save(update_fields=["is_shared", "updated_at"])
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "gmail_reconnect_required")
+        self.assertFalse(response.data["retryable"])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        search.assert_not_called()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconciliation_rejects_malformed_stored_message_id(
+        self,
+        search,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        QuotationEmailDelivery.objects.filter(pk=delivery.pk).update(
+            outbound_rfc_message_id="invalid id from legacy data"
+        )
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "delivery_reconciliation_invalid")
+        self.assertFalse(response.data["retryable"])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        search.assert_not_called()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconciliation_rejects_multiple_fully_verified_candidates(
+        self,
+        search,
+        fetch,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_GMAIL_REPLY,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            gmail_thread_id="expected-thread",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {
+            "messages": [{"id": "gmail-candidate-1"}, {"id": "gmail-candidate-2"}]
+        }
+        fetch.side_effect = [
+            self.source_metadata(
+                message_id=candidate_id,
+                thread_id="expected-thread",
+                sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+                rfc_message_id=delivery.outbound_rfc_message_id,
+                label_ids=["SENT"],
+            )
+            for candidate_id in ("gmail-candidate-1", "gmail-candidate-2")
+        ]
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "delivery_reconciliation_ambiguous")
+        self.assertFalse(response.data["retryable"])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        self.assertEqual(fetch.call_count, 2)
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconciliation_does_not_accept_ambiguous_from_header(
+        self,
+        search,
+        fetch,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {"messages": [{"id": "gmail-candidate"}]}
+        fetch.return_value = self.source_metadata(
+            message_id="gmail-candidate",
+            thread_id="gmail-thread",
+            sender=(
+                "Al Ameen Pharmacy <pharmacydxb@gmail.com>, "
+                "Attacker <attacker@example.com>"
+            ),
+            rfc_message_id=delivery.outbound_rfc_message_id,
+            label_ids=["SENT"],
+        )
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["code"], "gmail_reconciliation_unavailable")
+        self.assertFalse(response.data["retryable"])
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        fetch.assert_called_once()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_search_messages",
+        side_effect=RuntimeError("Google API request failed with HTTP 503: unavailable"),
+    )
+    def test_reconcile_api_failure_is_not_reported_as_not_found(self, search, send):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["code"], "gmail_reconciliation_unavailable")
+        self.assertFalse(response.data["retryable"])
+        self.assertNotIn("reconciled", response.data)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        search.assert_called_once()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_fetch_reply_metadata",
+        side_effect=RuntimeError("Google API request failed with HTTP 503: unavailable"),
+    )
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconcile_metadata_failure_is_not_reported_as_not_found(
+        self,
+        search,
+        fetch,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {"messages": [{"id": "gmail-candidate"}]}
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["code"], "gmail_reconciliation_unavailable")
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        fetch.assert_called_once()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_search_messages",
+        side_effect=RuntimeError("Google API request failed with HTTP 503: unavailable"),
+    )
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=urllib.error.URLError("timeout"),
+    )
+    def test_ambiguous_send_with_reconciliation_failure_stays_locked_unknown(
+        self,
+        send,
+        _pdf,
+        search,
+        fetch,
+    ):
+        quotation = self.create_quote()
+        url = reverse("quotation-finalize-and-send", args=[quotation.id])
+
+        first = self.client.post(url, self.manual_payload(), format="json")
+        second = self.client.post(
+            reverse("quotation-send-email", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(first.data["code"], "gmail_reconciliation_unavailable")
+        self.assertEqual(second.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(second.data["code"], "gmail_reconciliation_unavailable")
+        self.assertFalse(first.data["retryable"])
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(search.call_count, 2)
+        fetch.assert_not_called()
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     @patch("quotations.quotation_email_delivery.build_quotation_pdf")

@@ -914,42 +914,203 @@ def _record_successful_delivery(delivery_id, gmail_message_id, sent_thread_id, a
 
 
 def _reconcile_delivery_with_gmail(delivery, actor):
-    """Find an ambiguously acknowledged send by its stable RFC Message-ID."""
+    """Find a strictly verified sent message for an ambiguous delivery.
+
+    ``None`` means Gmail was checked successfully and no qualifying sent
+    message exists. Gmail/API failures raise a distinct error so callers never
+    misreport an unavailable check as a genuine not-found result.
+    """
 
     connection = delivery.gmail_connection
-    if not connection or connection.status != connection.STATUS_CONNECTED:
-        return None
-    message_id = str(delivery.outbound_rfc_message_id or "").strip().strip("<>")
-    if not message_id:
-        return None
+    if (
+        not connection
+        or not connection.is_shared
+        or connection.status != connection.STATUS_CONNECTED
+    ):
+        raise QuotationEmailError(
+            "Reconnect the shared Gmail mailbox before reconciling this delivery.",
+            code="gmail_reconnect_required",
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        )
+    mailbox_email = str(connection.email or "").strip().lower()
+    if not mailbox_email:
+        raise QuotationEmailError(
+            "The connected shared Gmail mailbox has no verified email identity.",
+            code="gmail_reconnect_required",
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        )
+    outbound_message_id = str(delivery.outbound_rfc_message_id or "").strip()
+    if not re.fullmatch(r"<[^<>\r\n]+>", outbound_message_id):
+        raise QuotationEmailError(
+            "This delivery has no valid stable Message-ID and cannot be reconciled safely.",
+            code="delivery_reconciliation_invalid",
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        )
+    message_id = outbound_message_id[1:-1]
+    if (
+        delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
+        and not str(delivery.gmail_thread_id or "").strip()
+    ):
+        raise QuotationEmailError(
+            "This Gmail reply delivery has no expected source thread and cannot be reconciled safely.",
+            code="delivery_reconciliation_invalid",
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        )
     try:
         result = gmail_search_messages(
             connection,
-            f"rfc822msgid:{message_id}",
+            f"in:sent from:{mailbox_email} rfc822msgid:{message_id}",
             max_messages=10,
         )
-        for candidate in result.get("messages") or []:
-            candidate_id = str(candidate.get("id") or "")
-            if not candidate_id:
-                continue
+    except Exception as exc:
+        base_error = _gmail_read_error(
+            exc,
+            operation="check the Sent mailbox for this delivery",
+        )
+        raise QuotationEmailError(
+            base_error.message,
+            code=(
+                base_error.code
+                if base_error.code == "gmail_reconnect_required"
+                else "gmail_reconciliation_unavailable"
+            ),
+            http_status=(
+                base_error.http_status
+                if base_error.code == "gmail_reconnect_required"
+                else 503
+            ),
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        ) from exc
+
+    metadata_errors = []
+    verified_matches = []
+    for candidate in result.get("messages") or []:
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id:
+            metadata_errors.append(ValueError("Gmail returned a message without an ID."))
+            continue
+        try:
             metadata = gmail_fetch_reply_metadata(connection, candidate_id)
-            if str(metadata.get("rfc_message_id") or "").strip() != delivery.outbound_rfc_message_id:
-                continue
-            thread_id = str(metadata.get("gmail_thread_id") or "")
-            if (
-                delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
-                and thread_id != delivery.gmail_thread_id
-            ):
-                continue
-            return _record_successful_delivery(
-                delivery.id,
-                candidate_id,
-                thread_id,
-                actor,
+        except Exception as exc:
+            metadata_errors.append(exc)
+            continue
+
+        label_ids = {
+            str(value or "").strip().upper()
+            for value in (metadata.get("label_ids") or [])
+        }
+        if "SENT" not in label_ids:
+            continue
+        try:
+            sender_email = _one_header_address(
+                metadata.get("sender"),
+                label="From",
             )
-    except Exception:
-        return None
+        except QuotationEmailError as exc:
+            metadata_errors.append(exc)
+            continue
+        if sender_email != mailbox_email:
+            continue
+        if (
+            str(metadata.get("rfc_message_id") or "").strip()
+            != delivery.outbound_rfc_message_id
+        ):
+            continue
+        thread_id = str(metadata.get("gmail_thread_id") or "").strip()
+        if not thread_id:
+            continue
+        expected_thread_id = str(
+            delivery.gmail_thread_id
+            if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
+            else delivery.sent_gmail_thread_id
+            or ""
+        ).strip()
+        if expected_thread_id and thread_id != expected_thread_id:
+            continue
+        verified_matches.append((candidate_id, thread_id))
+
+    if metadata_errors:
+        base_error = _gmail_read_error(
+            metadata_errors[-1],
+            operation="verify the matching Sent message",
+        )
+        raise QuotationEmailError(
+            base_error.message,
+            code=(
+                base_error.code
+                if base_error.code == "gmail_reconnect_required"
+                else "gmail_reconciliation_unavailable"
+            ),
+            http_status=(
+                base_error.http_status
+                if base_error.code == "gmail_reconnect_required"
+                else 503
+            ),
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        ) from metadata_errors[-1]
+    if len(verified_matches) > 1:
+        raise QuotationEmailError(
+            "Gmail returned more than one fully verified sent message for this delivery.",
+            code="delivery_reconciliation_ambiguous",
+            http_status=409,
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        )
+    if verified_matches:
+        candidate_id, thread_id = verified_matches[0]
+        return _record_successful_delivery(
+            delivery.id,
+            candidate_id,
+            thread_id,
+            actor,
+        )
     return None
+
+
+def _reconcile_after_ambiguous_outcome(delivery, actor):
+    """Reconcile or preserve the delivery's non-retryable ambiguous state."""
+
+    try:
+        return _reconcile_delivery_with_gmail(delivery, actor)
+    except QuotationEmailError as exc:
+        current = QuotationEmailDelivery.objects.select_related(
+            "quotation", "gmail_connection"
+        ).get(pk=delivery.pk)
+        if current.status == QuotationEmailDelivery.STATUS_SENT:
+            return current.quotation, current
+        if current.status == QuotationEmailDelivery.STATUS_SENDING:
+            current = _mark_delivery_failure(
+                current.id,
+                unknown=True,
+                message=(
+                    "Gmail reconciliation could not be completed. The delivery remains unknown; "
+                    "do not resend it blindly."
+                ),
+                actor=actor,
+            )
+            if current.status == QuotationEmailDelivery.STATUS_SENT:
+                return current.quotation, current
+        raise QuotationEmailError(
+            f"{exc.message} The delivery remains locked as unknown; do not resend it.",
+            code=exc.code,
+            http_status=exc.http_status,
+            retryable=False,
+            quote_finalized=True,
+            delivery=current,
+        ) from exc
 
 
 def _stale_sending(delivery):
@@ -995,7 +1156,7 @@ def reconcile_quotation_email(quotation, actor):
             code="delivery_not_ambiguous",
             delivery=delivery,
         )
-    reconciled = _reconcile_delivery_with_gmail(delivery, actor)
+    reconciled = _reconcile_after_ambiguous_outcome(delivery, actor)
     if reconciled:
         quote, sent_delivery = reconciled
         return quote, sent_delivery, True
@@ -1088,12 +1249,12 @@ def send_quotation_email(
     else:
         preview = preflight
     if preview.status == QuotationEmailDelivery.STATUS_UNKNOWN:
-        reconciled = _reconcile_delivery_with_gmail(preview, actor)
+        reconciled = _reconcile_after_ambiguous_outcome(preview, actor)
         if reconciled:
             reconciled_quote, reconciled_delivery = reconciled
             return reconciled_quote, reconciled_delivery, True
     if preview.status == QuotationEmailDelivery.STATUS_SENDING and _stale_sending(preview):
-        reconciled = _reconcile_delivery_with_gmail(preview, actor)
+        reconciled = _reconcile_after_ambiguous_outcome(preview, actor)
         if reconciled:
             reconciled_quote, reconciled_delivery = reconciled
             return reconciled_quote, reconciled_delivery, True
@@ -1333,7 +1494,7 @@ def send_quotation_email(
             current = QuotationEmailDelivery.objects.select_related(
                 "gmail_connection", "quotation"
             ).get(pk=delivery_id)
-            reconciled = _reconcile_delivery_with_gmail(current, actor)
+            reconciled = _reconcile_after_ambiguous_outcome(current, actor)
             if reconciled:
                 reconciled_quote, reconciled_delivery = reconciled
                 return reconciled_quote, reconciled_delivery, False
@@ -1381,7 +1542,7 @@ def send_quotation_email(
             current = QuotationEmailDelivery.objects.select_related(
                 "gmail_connection", "quotation"
             ).get(pk=delivery_id)
-            reconciled = _reconcile_delivery_with_gmail(current, actor)
+            reconciled = _reconcile_after_ambiguous_outcome(current, actor)
             if reconciled:
                 reconciled_quote, reconciled_delivery = reconciled
                 return reconciled_quote, reconciled_delivery, False
@@ -1411,7 +1572,7 @@ def send_quotation_email(
             current = QuotationEmailDelivery.objects.select_related(
                 "gmail_connection", "quotation"
             ).get(pk=delivery_id)
-            reconciled = _reconcile_delivery_with_gmail(current, actor)
+            reconciled = _reconcile_after_ambiguous_outcome(current, actor)
             if reconciled:
                 reconciled_quote, reconciled_delivery = reconciled
                 return reconciled_quote, reconciled_delivery, False
@@ -1446,7 +1607,7 @@ def send_quotation_email(
         current = QuotationEmailDelivery.objects.select_related(
             "gmail_connection", "quotation"
         ).get(pk=delivery_id)
-        reconciled = _reconcile_delivery_with_gmail(current, actor)
+        reconciled = _reconcile_after_ambiguous_outcome(current, actor)
         if reconciled:
             reconciled_quote, reconciled_delivery = reconciled
             return reconciled_quote, reconciled_delivery, False
