@@ -228,7 +228,7 @@
 ### 1.5 — Fix manual AI cache provenance and sensitive-content persistence
 
 - Status: completed.
-- Commit: this task checkpoint (`fix: bind AI cache hits to current uploads`).
+- Commit: `a6548aa` (`fix: bind AI cache hits to current uploads`).
 - Files changed:
   - `backend/quotations/ai_parsing.py`
   - `backend/quotations/test_inquiry_image_import.py`
@@ -292,6 +292,74 @@
   cache still retains semantic item text and row evidence by design.
 - Rollback: revert the task 1.5 commit. No database rollback is required; cache
   rows written in the source-neutral format remain valid reusable results.
+
+### 1.6 — Add a privacy-safe golden quotation-intake evaluation corpus
+
+- Status: completed.
+- Commit: this task checkpoint (`test: add synthetic quotation intake evaluation`).
+- Files changed:
+  - `backend/quotations/evaluation_corpus/quotation_intake_v1.json`
+  - `backend/quotations/evaluation_corpus/README.md`
+  - `backend/quotations/golden_evaluation.py`
+  - `backend/quotations/management/commands/evaluate_quotation_intake.py`
+  - `backend/quotations/test_golden_evaluation.py`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added a versioned seed corpus of 30 fully invented cases: 13 manual and 17
+    Gmail cases across clean and messy Excel, selectable and scanned PDF,
+    email-body tables, follow-ups, partial and full revisions, conflicting
+    documents, and similar company branches.
+  - Corpus validation rejects undeclared or customer-derived provenance,
+    non-`.test` email addresses, malformed source/message contracts, incomplete
+    message classification, nonblank selling prices, unknown evidence sources,
+    and evidence excerpts that are absent from their source.
+  - Cases exercise `used`, `context`, and `excluded` message decisions,
+    exact customer snapshot names, quantities and units, revision operations,
+    uncertainty, customer budget evidence, prompt-injection text, outbound
+    quotation context, complete row-level evidence, and an unresolved sibling-
+    branch identity that must not be guessed.
+  - Added a deterministic offline scorer for strict row precision/recall,
+    exact names, quantities, units, revision operations, parse status, customer
+    price evidence, complete citation sets, message selection, identity and
+    identity evidence, ambiguity handling, and blank selling prices. Duplicate,
+    unnamed, malformed, or unsupported output rows cannot bypass scoring.
+  - Reports separate missing and invalid predictions, aggregate and route-
+    stratified quality, p50/p90/p95 latency, separate latency/token sample
+    counts, and token totals as a historical cost basis.
+  - Added `evaluate_quotation_intake`: with no prediction file it performs a
+    concise corpus validation; with an explicitly supplied JSON result file it
+    scores predictions entirely offline. It does not call Gmail, an AI provider,
+    or the database.
+- Tests run:
+  - `python manage.py test quotations.test_golden_evaluation --noinput --verbosity 1`
+    — 16/16 passed.
+  - `python manage.py test quotations.tests.InquiryParserRuleTests quotations.tests.InquiryImportTests quotations.tests.AIImportParsingTests quotations.test_gmail_inquiry_import quotations.test_inquiry_image_import --noinput --verbosity 1`
+    — 142/142 passed.
+  - `python manage.py evaluate_quotation_intake` — validation passed for 30/30
+    cases, both routes, and all ten case families.
+  - `python manage.py makemigrations --check --dry-run` — no changes detected.
+  - `python manage.py check` — no issues.
+  - Python compilation and `git diff --check` — passed.
+  - Independent review identified six scoring/coverage edge cases; each was
+    corrected and the final re-review found no remaining actionable issue.
+- Migrations: none.
+- API changes: none. The evaluator is a local management command and library;
+  production endpoints do not import it.
+- Frontend changes: none.
+- Accuracy/security impact: no production extraction model, prompt, schema,
+  cache, matching, review, evidence, blank-price, OAuth, or delivery behavior
+  changed. All cases use invented people, companies, identifiers, values, and
+  reserved `.test` domains. The scorer makes later experiments measurable
+  without weakening employee review or exposing production content.
+- Remaining risks: this is a synthetic semantic seed, not a representative
+  production benchmark or a claim of production accuracy. Scanned-document
+  cases are auditable transcripts rather than opaque binary fidelity fixtures.
+  No release threshold, reviewer-agreement sample, confidence interval, or
+  live-provider baseline is established yet. Future versions require privacy
+  review and independent adjudication before admitting any de-identified real
+  case.
+- Rollback: revert the task 1.6 commit. No database, API, or deployment rollback
+  is required.
 
 ## Phase 2
 
