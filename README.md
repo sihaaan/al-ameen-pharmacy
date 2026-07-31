@@ -327,11 +327,16 @@ CORS_ALLOWED_ORIGINS=http://localhost:3000
 CLOUDINARY_URL=cloudinary://...
 EMAIL_HOST_USER=...
 EMAIL_HOST_PASSWORD=...
-# Optional read-only Gmail OAuth for quotation/LPO discovery:
+# Optional shared Gmail OAuth for quotation/LPO discovery and reviewed quotation delivery:
 GOOGLE_OAUTH_CLIENT_ID=...
 GOOGLE_OAUTH_CLIENT_SECRET=...
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/quotations/gmail/oauth/callback/
 ```
+
+The website connection requests `gmail.readonly` and `gmail.send`. Existing
+read-only connections must be reconnected once after quotation-email delivery
+is deployed. Finalizing a quotation opens a preview; no customer email is sent
+without an explicit staff Send action.
 
 **Database safety:** Do not point local `backend/.env` at the production Neon
 `DATABASE_URL`. Local testing writes to whichever database is in `DATABASE_URL`.

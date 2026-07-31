@@ -26,6 +26,7 @@ from .models import (
     normalize_label,
     Quotation,
     QuotationAuditLog,
+    QuotationEmailDelivery,
     QuotationLine,
     QuotationOutcomePOImport,
 )
@@ -54,6 +55,25 @@ def audit_log(actor, action, target, message="", changes=None, company=None, quo
 def ensure_quotation_editable(quotation):
     if not quotation.is_editable:
         raise ValidationError("Finalized, sent, revised, and cancelled quotations cannot be edited directly.")
+
+
+def _assert_no_unresolved_email_delivery(quotation):
+    delivery = (
+        QuotationEmailDelivery.objects.select_for_update()
+        .filter(
+            quotation=quotation,
+            status__in=[
+                QuotationEmailDelivery.STATUS_SENDING,
+                QuotationEmailDelivery.STATUS_UNKNOWN,
+            ],
+        )
+        .first()
+    )
+    if delivery:
+        raise ValidationError(
+            "This quotation has an email delivery in progress or awaiting Gmail reconciliation. "
+            "Check the shared Sent mailbox and resolve that delivery before cancelling, revising, or changing its status."
+        )
 
 
 def _quotation_lines_for_update():
@@ -2768,6 +2788,7 @@ def revise_quotation(quotation, actor):
         .prefetch_related("lines")
         .get(pk=quotation.pk)
     )
+    _assert_no_unresolved_email_delivery(source)
     if source.status not in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
         raise ValidationError("Only finalized or sent quotations can be revised.")
 
@@ -2841,6 +2862,7 @@ def models_parent_or_self(root):
 @transaction.atomic
 def transition_quotation_status(quotation, actor, target_status):
     quotation = Quotation.objects.select_for_update().get(pk=quotation.pk)
+    _assert_no_unresolved_email_delivery(quotation)
     old_status = quotation.status
 
     allowed = {

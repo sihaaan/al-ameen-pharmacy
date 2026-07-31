@@ -595,7 +595,7 @@ const ContractIntelligenceManager = () => {
 
       <section className="qm-panel qm-contract-hero">
         <div>
-          <span className="qm-step-kicker">Gmail Read-Only + AI</span>
+          <span className="qm-step-kicker">Gmail Intake + Quotation Delivery</span>
           <h3>ALEC Yearly Contract Intelligence</h3>
           <p>
             Search old pharmacy emails, extract inquiry/quotation/LPO product demand, and export the item intelligence Dad needs for yearly contract pricing.
@@ -605,7 +605,7 @@ const ContractIntelligenceManager = () => {
           <span>Shared Gmail mailbox</span>
           <strong>{gmailConnected ? gmail.connection.email : gmailConfigured ? 'Ready to connect' : 'Not configured'}</strong>
           <small>
-            Scope: gmail.readonly. AI suggestions are review-only.
+            Scope: Gmail read + send. AI suggestions remain review-only; quotation emails always require a staff preview and explicit Send click.
             {gmail?.connection?.credential_owner_username ? ` Credential owner: ${gmail.connection.credential_owner_username}.` : ''}
           </small>
           <div className="qm-actions">
@@ -620,6 +620,11 @@ const ContractIntelligenceManager = () => {
             )}
           </div>
           {!gmailCanManage && <p className="qm-field-warning">Only the credential owner or a superuser can replace or disconnect this shared mailbox.</p>}
+          {gmail?.reconnect_required && (
+            <p className="qm-field-warning">
+              Reconnect this mailbox once to approve the new Gmail send permission.
+            </p>
+          )}
           {!gmailConfigured && (
             <p className="qm-field-warning">
               Add GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI on the Railway backend.

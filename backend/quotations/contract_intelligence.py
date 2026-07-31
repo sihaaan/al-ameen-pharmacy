@@ -50,6 +50,8 @@ except ImportError:  # pragma: no cover - production installs this transitively;
 
 
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+GMAIL_REQUIRED_SCOPES = (GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE)
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -155,11 +157,53 @@ def gmail_oauth_redirect_uri(request=None):
     return ""
 
 
-def gmail_frontend_redirect_url(status="connected"):
+GMAIL_OAUTH_STATE_SALT = "quotation-gmail-oauth"
+GMAIL_DEFAULT_RETURN_PATH = "/admin?quotation_tab=contract-intelligence"
+GMAIL_RETURN_PATH_MAX_LENGTH = 2048
+
+
+def normalize_gmail_oauth_return_path(return_path):
+    """Allow only a same-site admin route to leave and return through OAuth."""
+
+    value = str(return_path or "").strip()
+    if not value:
+        return ""
+    if (
+        len(value) > GMAIL_RETURN_PATH_MAX_LENGTH
+        or "\\" in value
+        or any(ord(character) < 32 for character in value)
+    ):
+        return ""
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.fragment
+        or parsed.path != "/admin"
+        or not value.startswith("/admin")
+    ):
+        return ""
+    return urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
+
+
+def gmail_frontend_redirect_url(status="connected", return_path=""):
     base = getattr(settings, "FRONTEND_URL", "") or getattr(settings, "SITE_URL", "")
+    safe_return_path = normalize_gmail_oauth_return_path(return_path)
+    if not safe_return_path:
+        safe_return_path = GMAIL_DEFAULT_RETURN_PATH
+    parsed = urllib.parse.urlsplit(safe_return_path)
+    query = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "gmail"
+    ]
+    query.append(("gmail", str(status)))
+    destination = urllib.parse.urlunsplit(
+        ("", "", parsed.path, urllib.parse.urlencode(query, doseq=True), "")
+    )
     if base:
-        return f"{base.rstrip('/')}/admin?quotation_tab=contract-intelligence&gmail={urllib.parse.quote(status)}"
-    return f"/admin?quotation_tab=contract-intelligence&gmail={urllib.parse.quote(status)}"
+        return f"{base.rstrip('/')}{destination}"
+    return destination
 
 
 def _fernet():
@@ -194,16 +238,20 @@ def decrypt_token(value):
         return ""
 
 
-def build_gmail_auth_url(user, request=None):
+def build_gmail_auth_url(user, request=None, *, return_path=""):
     if not gmail_oauth_configured():
         raise ValueError("Gmail OAuth is not configured. Add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.")
-    signer = TimestampSigner(salt="quotation-gmail-oauth")
-    state = signer.sign(str(user.id))
+    signer = TimestampSigner(salt=GMAIL_OAUTH_STATE_SALT)
+    state_payload = {"version": 2, "user_id": int(user.id)}
+    safe_return_path = normalize_gmail_oauth_return_path(return_path)
+    if safe_return_path:
+        state_payload["return_path"] = safe_return_path
+    state = signer.sign_object(state_payload, compress=True)
     params = {
         "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
         "redirect_uri": gmail_oauth_redirect_uri(request),
         "response_type": "code",
-        "scope": GMAIL_READONLY_SCOPE,
+        "scope": " ".join(GMAIL_REQUIRED_SCOPES),
         "access_type": "offline",
         "prompt": "consent",
         "include_granted_scopes": "true",
@@ -212,12 +260,32 @@ def build_gmail_auth_url(user, request=None):
     return f"{GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def parse_gmail_oauth_state(state, max_age=600):
-    signer = TimestampSigner(salt="quotation-gmail-oauth")
+def parse_gmail_oauth_state(state, max_age=600, *, include_return_path=False):
+    """Read current structured states and legacy signed integer states."""
+
+    signer = TimestampSigner(salt=GMAIL_OAUTH_STATE_SALT)
+    user_id = None
+    return_path = ""
     try:
-        return int(signer.unsign(state, max_age=max_age))
+        payload = signer.unsign_object(state, max_age=max_age)
+        if isinstance(payload, dict):
+            user_id = int(payload.get("user_id"))
+            return_path = normalize_gmail_oauth_return_path(
+                payload.get("return_path")
+            )
     except (BadSignature, SignatureExpired, TypeError, ValueError):
+        # States issued before return-path support signed the integer user id
+        # directly. Keep accepting them for the normal ten-minute OAuth window.
+        try:
+            user_id = int(signer.unsign(state, max_age=max_age))
+            return_path = ""
+        except (BadSignature, SignatureExpired, TypeError, ValueError):
+            return None
+    if not user_id:
         return None
+    if include_return_path:
+        return user_id, return_path
+    return user_id
 
 
 def _json_request(url, *, method="GET", data=None, token=None, timeout=60):
@@ -291,7 +359,15 @@ def exchange_gmail_code(user, code, request=None):
     connection.access_token_encrypted = encrypt_token(access_token)
     connection.refresh_token_encrypted = encrypt_token(refresh_token)
     connection.token_expiry = timezone.now() + timedelta(seconds=max(expires_in - 60, 60))
-    connection.scopes = token_payload.get("scope", GMAIL_READONLY_SCOPE).split()
+    returned_scope = str(token_payload.get("scope") or "").strip()
+    # Never infer write/send authority when Google omits the granted-scope
+    # field. Read-only is the compatibility floor; the UI will require a
+    # reconnect until gmail.send is explicitly present in a token response.
+    connection.scopes = (
+        returned_scope.split()
+        if returned_scope
+        else [GMAIL_READONLY_SCOPE]
+    )
     # Connecting Gmail from quotation settings designates the one company
     # mailbox used by every staff member. Clear the previous designation first
     # so the conditional database constraint is never raced by normal saves.
@@ -372,6 +448,17 @@ def can_manage_shared_gmail(user, connection=None):
     if connection is None:
         return True
     return connection.user_id == user.id
+
+
+def gmail_send_scope_granted(connection):
+    if not connection:
+        return False
+    scopes = {
+        str(scope or "").strip()
+        for scope in (connection.scopes or [])
+        if str(scope or "").strip()
+    }
+    return GMAIL_SEND_SCOPE in scopes
 
 
 def disconnect_gmail(connection):
@@ -742,6 +829,57 @@ def gmail_fetch_message_metadata(connection, message_id):
         "snippet": payload.get("snippet", ""),
         "attachments": attachment_refs,
     }
+
+
+def gmail_fetch_reply_metadata(connection, message_id):
+    """Fetch only the immutable Gmail/RFC fields needed for a safe reply."""
+
+    token = get_valid_access_token(connection)
+    payload = _json_request(
+        f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(str(message_id))}?format=metadata",
+        token=token,
+    )
+    headers = payload.get("payload", {}).get("headers") or []
+    return {
+        "gmail_message_id": str(payload.get("id") or message_id),
+        "gmail_thread_id": str(payload.get("threadId") or ""),
+        "label_ids": list(payload.get("labelIds") or []),
+        "subject": _header(headers, "Subject"),
+        "sender": _header(headers, "From"),
+        "reply_to": _header(headers, "Reply-To"),
+        "recipients": _header(headers, "To"),
+        "cc": _header(headers, "Cc"),
+        "rfc_message_id": _header(headers, "Message-ID"),
+        "references": _header(headers, "References"),
+        "in_reply_to": _header(headers, "In-Reply-To"),
+        "sent_at": _message_datetime(payload),
+        "snippet": str(payload.get("snippet") or ""),
+    }
+
+
+def gmail_send_raw_message(
+    connection,
+    raw_message,
+    *,
+    thread_id="",
+    access_token=None,
+):
+    """Send one RFC 2822 message through the connected shared mailbox."""
+
+    if not gmail_send_scope_granted(connection):
+        raise PermissionError(
+            "Gmail send permission is missing. Reconnect the shared Gmail mailbox and approve sending."
+        )
+    token = access_token or get_valid_access_token(connection)
+    payload = {"raw": str(raw_message or "")}
+    if thread_id:
+        payload["threadId"] = str(thread_id)
+    return _json_request(
+        f"{GMAIL_API_BASE}/messages/send",
+        method="POST",
+        data=payload,
+        token=token,
+    )
 
 
 def gmail_fetch_attachment_content(

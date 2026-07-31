@@ -93,7 +93,10 @@ const quotationAPI = {
   },
   gmail: {
     status: () => axiosInstance.get('/quotations/gmail/connection/'),
-    connectUrl: () => axiosInstance.post('/quotations/gmail/connection/'),
+    connectUrl: (returnPath = '') => axiosInstance.post(
+      '/quotations/gmail/connection/',
+      returnPath ? { return_path: returnPath } : {}
+    ),
     disconnect: () => axiosInstance.delete('/quotations/gmail/connection/'),
   },
   gmailInquiryImports: {
@@ -194,6 +197,14 @@ const quotationAPI = {
     submitReview: (id) => axiosInstance.post(`/quotations/quotes/${id}/submit_review/`),
     approve: (id) => axiosInstance.post(`/quotations/quotes/${id}/approve/`),
     finalize: (id) => axiosInstance.post(`/quotations/quotes/${id}/finalize/`),
+    emailPreview: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/email_preview/`, { params }),
+    emailThreadCandidates: (id, recipient, limit = 10) => axiosInstance.get(
+      `/quotations/quotes/${id}/email_thread_candidates/`,
+      { params: { recipient, limit } }
+    ),
+    finalizeAndSend: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/finalize_and_send/`, data),
+    sendEmail: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/send_email/`, data),
+    reconcileEmail: (id) => axiosInstance.post(`/quotations/quotes/${id}/reconcile_email/`),
     bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_update_lines/`, data),
     bulkCreateProductsForLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_create_products_for_lines/`, data),
     productPrice: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_price/`, { params }),

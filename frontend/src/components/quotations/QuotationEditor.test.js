@@ -13,6 +13,13 @@ jest.mock('../../api/quotations', () => ({
       lpos: jest.fn(),
       bulkUpdateLines: jest.fn(),
       bulkCreateProductsForLines: jest.fn(),
+      emailPreview: jest.fn(),
+      emailThreadCandidates: jest.fn(),
+      finalizeAndSend: jest.fn(),
+      sendEmail: jest.fn(),
+      reconcileEmail: jest.fn(),
+      finalize: jest.fn(),
+      pdf: jest.fn(),
     },
     items: { list: jest.fn() },
     companies: { list: jest.fn(), create: jest.fn() },
@@ -20,6 +27,7 @@ jest.mock('../../api/quotations', () => ({
     auditLogs: { list: jest.fn() },
     lines: { create: jest.fn(), createProduct: jest.fn(), rememberAlias: jest.fn() },
     lpos: { update: jest.fn() },
+    gmail: { connectUrl: jest.fn() },
   },
   describeQuotationError: jest.fn(async (error, action, endpoint) => ({
     action,
@@ -64,6 +72,19 @@ const quote = {
     vat_rate: '0.000',
     match_status: 'unresolved',
     notes: '',
+  }],
+};
+
+const readyQuote = {
+  ...quote,
+  subtotal: '10.00',
+  total: '10.00',
+  lines: [{
+    ...quote.lines[0],
+    product: 11,
+    product_name: 'Gloves A',
+    unit_price: '10.00',
+    match_status: 'confirmed',
   }],
 };
 
@@ -124,6 +145,30 @@ describe('QuotationEditor Product price context', () => {
     quotationAPI.quotes.update.mockResolvedValue({ data: quote });
     quotationAPI.quotes.productPrices.mockResolvedValue({ data: { results: {} } });
     quotationAPI.quotes.lpos.mockResolvedValue({ data: [] });
+    quotationAPI.quotes.emailPreview.mockResolvedValue({
+      data: {
+        delivery_mode: 'gmail_reply',
+        to: ['buyer@example.com'],
+        cc: [],
+        subject: 'Re: RFQ',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+        trusted_source: { sender_email: 'buyer@example.com', subject: 'RFQ' },
+      },
+    });
+    quotationAPI.quotes.emailThreadCandidates.mockResolvedValue({ data: { recipient: 'buyer@example.com', candidates: [] } });
+    quotationAPI.quotes.finalizeAndSend.mockResolvedValue({ data: { message: 'Quotation emailed.' } });
+    quotationAPI.quotes.sendEmail.mockResolvedValue({ data: { message: 'Quotation emailed.' } });
+    quotationAPI.quotes.reconcileEmail.mockResolvedValue({
+      data: {
+        reconciled: false,
+        detail: 'No matching sent message was found yet.',
+        delivery: { status: 'unknown' },
+      },
+    });
+    quotationAPI.quotes.finalize.mockResolvedValue({ data: { ...quote, status: 'finalized', status_display: 'Finalized' } });
+    quotationAPI.quotes.pdf.mockResolvedValue({ data: new Blob(['pdf']) });
+    quotationAPI.gmail.connectUrl.mockResolvedValue({ data: {} });
     quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
       data: params?.company_used ? [products[0]] : products,
     }));
@@ -323,6 +368,420 @@ describe('QuotationEditor Product price context', () => {
     expect(await screen.findByRole('checkbox', { name: 'Show Brand column' })).toBeDisabled();
     expect(screen.getByLabelText('Brand for Imported gloves')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Save Terms & Layout' })).not.toBeInTheDocument();
+  });
+
+  test('opens a verified Gmail preview before finalizing and sends only after explicit confirmation', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const finalizeButtons = await screen.findAllByRole('button', { name: 'Finalize' });
+    fireEvent.click(finalizeButtons[0]);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21);
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    expect(within(dialog).getByDisplayValue('buyer@example.com')).toHaveAttribute('readonly');
+    fireEvent.change(within(dialog).getByLabelText(/Message/), {
+      target: { value: 'Dear Buyer,\n\nPlease find attached quotation Q-0021.' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledWith(21, {
+      to: ['buyer@example.com'],
+      cc: [],
+      subject: 'Re: RFQ',
+      body: 'Dear Buyer,\n\nPlease find attached quotation Q-0021.',
+      confirm_recipient: true,
+      delivery_mode: 'gmail_reply',
+    }));
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+  });
+
+  test('requires staff to enter and confirm a recipient for a manual quotation', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+    quotationAPI.quotes.emailPreview.mockResolvedValueOnce({
+      data: {
+        delivery_mode: 'new_email',
+        to: [],
+        cc: [],
+        subject: 'Quotation Q-0021',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(within(dialog).getByText('Sending a new email')).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText(/To/), { target: { value: 'purchasing@example.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(within(dialog).getByText(/Confirm the manually entered recipient/)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I checked this address/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledWith(
+      21,
+      expect.objectContaining({
+        to: ['purchasing@example.com'],
+        confirm_recipient: true,
+        delivery_mode: 'new_email',
+      })
+    ));
+  });
+
+  test('keeps a correctable backend validation error editable and clears it after a field change', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: {
+          code: 'email_delivery_error',
+          detail: 'Enter a valid email body.',
+          quote_finalized: false,
+          retryable: false,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    expect(await screen.findByText('Check the email details and try again.')).toBeInTheDocument();
+    dialog = screen.getByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' })).toBeEnabled();
+    expect(screen.queryByText(/Delivery status is unknown/)).not.toBeInTheDocument();
+
+    fireEvent.change(within(dialog).getByLabelText(/Message/), {
+      target: { value: 'Corrected customer-facing message.' },
+    });
+    expect(screen.queryByText('Check the email details and try again.')).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(2));
+    consoleError.mockRestore();
+  });
+
+  test('keeps an attachment snapshot mismatch hard-blocked after email field edits', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.emailPreview.mockResolvedValueOnce({
+      data: {
+        delivery_mode: 'gmail_reply',
+        status: 'failed',
+        to: ['buyer@example.com'],
+        cc: [],
+        subject: 'Re: RFQ',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      },
+    });
+    quotationAPI.quotes.sendEmail.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'attachment_snapshot_mismatch',
+          detail: 'The regenerated quotation PDF differs from the reviewed attachment.',
+          quote_finalized: true,
+          retryable: false,
+          quote: finalizedQuote,
+          delivery: { status: 'failed' },
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Email Quotation' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Review and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send Quotation' }));
+
+    expect(await screen.findByText('The regenerated quotation PDF differs from the reviewed attachment.')).toBeInTheDocument();
+    dialog = screen.getByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    fireEvent.change(within(dialog).getByLabelText(/Message/), {
+      target: { value: 'This edit must not clear the snapshot mismatch.' },
+    });
+    expect(screen.getByText('The regenerated quotation PDF differs from the reviewed attachment.')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    expect(quotationAPI.quotes.sendEmail).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
+  });
+
+  test('starts Gmail reconnect with the exact quotation return path', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+    quotationAPI.quotes.emailPreview.mockResolvedValueOnce({
+      data: {
+        delivery_mode: 'gmail_reply',
+        to: ['buyer@example.com'],
+        cc: [],
+        subject: 'Re: RFQ',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+        gmail_connected: true,
+        gmail_send_authorized: false,
+        gmail_can_manage: true,
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reconnect Gmail' }));
+
+    await waitFor(() => expect(quotationAPI.gmail.connectUrl).toHaveBeenCalledWith(
+      '/admin?quotation_tab=quotes&quote_id=21'
+    ));
+  });
+
+  test('lets staff explicitly link a manual quotation to an exact verified Gmail message', async () => {
+    const threadCandidate = {
+      selection_token: 'signed-thread-token',
+      gmail_message_id: 'message-1',
+      gmail_thread_id: 'thread-1',
+      sender_name: 'Maria Buyer',
+      sender_email: 'buyer@example.com',
+      subject: 'RFQ - Clinic supplies',
+      received_at: '31 Jul 2026, 10:30',
+      snippet: 'Please quote the attached list.',
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+    quotationAPI.quotes.emailPreview
+      .mockResolvedValueOnce({
+        data: {
+          delivery_mode: 'new_email',
+          to: [],
+          subject: 'Quotation Q-0021',
+          body: 'Please find attached our quotation.',
+          attachment_filename: 'CUSTOMER-Q-0021.pdf',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          delivery_mode: 'gmail_reply',
+          to: ['buyer@example.com'],
+          cc: [],
+          subject: 'Re: RFQ - Clinic supplies',
+          body: 'Dear Maria,\n\nPlease find attached our quotation.',
+          attachment_filename: 'CUSTOMER-Q-0021.pdf',
+          trusted_source: {
+            sender_name: 'Maria Buyer',
+            sender_email: 'buyer@example.com',
+            subject: 'RFQ - Clinic supplies',
+          },
+        },
+      });
+    quotationAPI.quotes.emailThreadCandidates.mockResolvedValueOnce({
+      data: { recipient: 'buyer@example.com', candidates: [threadCandidate] },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.change(within(dialog).getByLabelText(/To/), { target: { value: 'buyer@example.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Find original Gmail thread' }));
+
+    expect(await screen.findByText('RFQ - Clinic supplies')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailThreadCandidates).toHaveBeenCalledWith(21, 'buyer@example.com', 10);
+    fireEvent.click(screen.getByRole('button', { name: 'Reply to this thread' }));
+
+    dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(await within(dialog).findByText('Replying in the verified Gmail thread')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenLastCalledWith(21, {
+      thread_selection_token: 'signed-thread-token',
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledWith(
+      21,
+      expect.objectContaining({
+        to: ['buyer@example.com'],
+        delivery_mode: 'gmail_reply',
+        thread_selection_token: 'signed-thread-token',
+      })
+    ));
+  });
+
+  test('retries only the email when finalization succeeded but a definite delivery failure occurred', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 503,
+        data: {
+          detail: 'Gmail temporarily rejected the message.',
+          quote_finalized: true,
+          retryable: true,
+          delivery_status: 'failed',
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    expect(await screen.findByText('The quotation is finalized, but the email was not sent.')).toBeInTheDocument();
+    const retryDialog = screen.getByRole('dialog', { name: 'Review and send quotation' });
+    fireEvent.click(within(retryDialog).getByRole('button', { name: 'Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.sendEmail).toHaveBeenCalledTimes(1));
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('does not offer a resend when Gmail delivery status is unknown', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 504,
+        data: {
+          detail: 'Gmail delivery acknowledgement timed out.',
+          quote_finalized: true,
+          retryable: false,
+          delivery_status: 'unknown',
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    expect(await screen.findByText(/Check the Sent mailbox/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('reconciles a reopened unknown delivery as sent without invoking a send endpoint', async () => {
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    const sentQuote = { ...readyQuote, status: 'sent', status_display: 'Sent' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.emailPreview.mockResolvedValueOnce({
+      data: {
+        delivery_mode: 'gmail_reply',
+        status: 'unknown',
+        can_reconcile: true,
+        to: ['buyer@example.com'],
+        cc: [],
+        subject: 'Re: RFQ',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      },
+    });
+    quotationAPI.quotes.reconcileEmail.mockResolvedValueOnce({
+      data: {
+        reconciled: true,
+        detail: 'Gmail confirmed the previously attempted message.',
+        quote: sentQuote,
+        delivery: { status: 'sent' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Email Quotation' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check Gmail status' }));
+
+    expect(await screen.findByText('Gmail confirmed the previously attempted message.')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Review and send quotation' })).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.reconcileEmail).toHaveBeenCalledWith(21);
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('keeps a reopened unknown delivery blocked when reconciliation finds no sent message', async () => {
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.emailPreview.mockResolvedValueOnce({
+      data: {
+        delivery_mode: 'gmail_reply',
+        status: 'unknown',
+        can_reconcile: true,
+        to: ['buyer@example.com'],
+        cc: [],
+        subject: 'Re: RFQ',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      },
+    });
+    quotationAPI.quotes.reconcileEmail.mockResolvedValueOnce({
+      data: {
+        reconciled: false,
+        detail: 'No matching sent message was found. Check again later.',
+        quote: finalizedQuote,
+        delivery: { status: 'unknown' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Email Quotation' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Review and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check Gmail status' }));
+
+    expect(await screen.findByText('No matching sent message was found. Check again later.')).toBeInTheDocument();
+    dialog = screen.getByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByRole('button', { name: 'Check Gmail before resending' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Check Gmail status' })).toBeEnabled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('keeps a fresh persisted sending delivery blocked when reconciliation says it is still running', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.emailPreview.mockResolvedValueOnce({
+      data: {
+        delivery_mode: 'gmail_reply',
+        status: 'sending',
+        can_reconcile: true,
+        to: ['buyer@example.com'],
+        cc: [],
+        subject: 'Re: RFQ',
+        body: 'Please find attached our quotation.',
+        attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      },
+    });
+    quotationAPI.quotes.reconcileEmail.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          detail: 'The Gmail delivery is still in progress. Check again later.',
+          quote: finalizedQuote,
+          delivery: { status: 'sending', can_reconcile: true },
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Email Quotation' }));
+    let dialog = await screen.findByRole('dialog', { name: 'Review and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check Gmail status' }));
+
+    expect(await screen.findByText('The Gmail delivery is still in progress. Check again later.')).toBeInTheDocument();
+    dialog = screen.getByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByRole('button', { name: 'Sending in progress' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Check Gmail status' })).toBeEnabled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 
   test('shows the full catalog and ignores an older Product lookup that resolves last', async () => {

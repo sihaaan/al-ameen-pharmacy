@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 from decimal import Decimal
 
 from django.conf import settings
@@ -29,6 +30,12 @@ CONFIRMED_LPO_QUOTATION_DELETE_ERROR = (
 
 def normalize_label(value):
     return " ".join((value or "").strip().lower().split())
+
+
+def quotation_delivery_message_id():
+    """Return a stable, globally unique RFC Message-ID for one delivery."""
+
+    return f"<quotation-{uuid.uuid4().hex}@ameenpharmacy.ae>"
 
 
 class Company(models.Model):
@@ -1756,6 +1763,150 @@ class Quotation(models.Model):
         return candidate
 
 
+class QuotationEmailDelivery(models.Model):
+    """Durable ledger for the one customer-facing email for a quotation.
+
+    Preview GETs remain read-only. The row is created only when staff confirm
+    the preview and start a send. A one-to-one quotation relationship is the
+    primary idempotency boundary; ``outbound_rfc_message_id`` stays unchanged
+    across a known-safe retry and can be searched in Gmail when a network
+    response is ambiguous.
+    """
+
+    MODE_GMAIL_REPLY = "gmail_reply"
+    MODE_NEW_EMAIL = "new_email"
+    MODE_CHOICES = [
+        (MODE_GMAIL_REPLY, "Reply in Gmail thread"),
+        (MODE_NEW_EMAIL, "New Gmail email"),
+    ]
+
+    STATUS_PREPARED = "prepared"
+    STATUS_SENDING = "sending"
+    STATUS_SENT = "sent"
+    STATUS_FAILED = "failed"
+    STATUS_UNKNOWN = "unknown"
+    STATUS_CHOICES = [
+        (STATUS_PREPARED, "Prepared"),
+        (STATUS_SENDING, "Sending"),
+        (STATUS_SENT, "Sent"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_UNKNOWN, "Delivery unknown"),
+    ]
+
+    quotation = models.OneToOneField(
+        Quotation,
+        on_delete=models.PROTECT,
+        related_name="email_delivery",
+    )
+    gmail_inquiry_import = models.ForeignKey(
+        GmailInquiryImport,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_deliveries",
+    )
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_deliveries",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_deliveries",
+    )
+    delivery_mode = models.CharField(max_length=30, choices=MODE_CHOICES)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PREPARED,
+        db_index=True,
+    )
+    idempotency_key = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    to_addresses = models.JSONField(default=list, blank=True)
+    cc_addresses = models.JSONField(default=list, blank=True)
+    subject = models.CharField(max_length=998)
+    body = models.TextField()
+    trusted_source = models.JSONField(default=dict, blank=True)
+
+    gmail_thread_id = models.CharField(max_length=255, blank=True, db_index=True)
+    source_gmail_message_id = models.CharField(max_length=255, blank=True)
+    source_rfc_message_id = models.CharField(max_length=998, blank=True)
+    source_references = models.TextField(blank=True)
+    outbound_rfc_message_id = models.CharField(
+        max_length=255,
+        unique=True,
+        default=quotation_delivery_message_id,
+        editable=False,
+    )
+    gmail_message_id = models.CharField(max_length=255, blank=True, db_index=True)
+    sent_gmail_thread_id = models.CharField(max_length=255, blank=True)
+
+    attachment_filename = models.CharField(max_length=255, blank=True)
+    attachment_sha256 = models.CharField(max_length=64, blank=True)
+    attachment_size = models.PositiveIntegerField(null=True, blank=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    prepared_at = models.DateTimeField(default=timezone.now)
+    sending_started_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    failed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["quotation", "status"]),
+            models.Index(fields=["gmail_thread_id", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.quotation.quotation_number} email ({self.status})"
+
+
+class QuotationEmailThreadSelection(models.Model):
+    """Short-lived opaque link to a staff-selected Gmail source message."""
+
+    quotation = models.ForeignKey(
+        Quotation,
+        on_delete=models.CASCADE,
+        related_name="email_thread_selections",
+    )
+    gmail_connection = models.ForeignKey(
+        GmailOAuthConnection,
+        on_delete=models.CASCADE,
+        related_name="quotation_email_thread_selections",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_thread_selections",
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    source_email = models.EmailField()
+    gmail_message_id = models.CharField(max_length=255)
+    gmail_thread_id = models.CharField(max_length=255)
+    expires_at = models.DateTimeField(db_index=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["quotation", "expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"Thread selection for {self.quotation.quotation_number}"
+
+
 class QuotationLine(models.Model):
     MATCH_UNRESOLVED = InquiryLine.MATCH_UNRESOLVED
     MATCH_CONFIRMED = InquiryLine.MATCH_CONFIRMED
@@ -2564,6 +2715,10 @@ class QuotationAuditLog(models.Model):
     ACTION_PROFORMA_DOWNLOADED = "proforma_downloaded"
     ACTION_OUTCOME_UPDATED = "outcome_updated"
     ACTION_FOLLOWUP_UPDATED = "followup_updated"
+    ACTION_EMAIL_PREPARED = "email_prepared"
+    ACTION_EMAIL_SENT = "email_sent"
+    ACTION_EMAIL_FAILED = "email_failed"
+    ACTION_EMAIL_UNKNOWN = "email_unknown"
     ACTION_CHOICES = [
         (ACTION_CREATED, "Created"),
         (ACTION_UPDATED, "Updated"),
@@ -2577,6 +2732,10 @@ class QuotationAuditLog(models.Model):
         (ACTION_PROFORMA_DOWNLOADED, "Proforma Downloaded"),
         (ACTION_OUTCOME_UPDATED, "Outcome Updated"),
         (ACTION_FOLLOWUP_UPDATED, "Follow-up Updated"),
+        (ACTION_EMAIL_PREPARED, "Email Prepared"),
+        (ACTION_EMAIL_SENT, "Email Sent"),
+        (ACTION_EMAIL_FAILED, "Email Failed"),
+        (ACTION_EMAIL_UNKNOWN, "Email Delivery Unknown"),
     ]
 
     actor = models.ForeignKey(

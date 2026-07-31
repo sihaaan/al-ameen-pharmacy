@@ -43,6 +43,8 @@ from .ai_learning import (
 )
 from .company_matching import find_similar_companies
 from .contract_intelligence import (
+    GMAIL_REQUIRED_SCOPES,
+    GMAIL_SEND_SCOPE,
     build_contract_intelligence_export,
     build_gmail_auth_url,
     can_manage_shared_gmail,
@@ -54,6 +56,7 @@ from .contract_intelligence import (
     gmail_fetch_attachment_content,
     gmail_connection_lineage_q,
     gmail_oauth_configured,
+    gmail_send_scope_granted,
     parse_gmail_oauth_state,
     resolve_gmail_connection,
     refresh_contract_run_summary,
@@ -111,6 +114,7 @@ from .models import (
     ProformaInvoiceLine,
     Quotation,
     QuotationAuditLog,
+    QuotationEmailDelivery,
     QuotationLine,
     QuotationLPO,
     QuotationOutcomePOImport,
@@ -130,6 +134,15 @@ from .po_evidence_comparison import (
     unavailable_po_evidence_commercial_comparison,
 )
 from .quote_po_intelligence import find_quote_po_evidence, parse_quote_po_evidence, scan_quote_po_evidence_batch
+from .quotation_email_delivery import (
+    QuotationEmailError,
+    delivery_payload as quotation_email_delivery_payload,
+    delivery_preview_payload as quotation_email_preview_payload,
+    find_manual_thread_candidates,
+    prepare_email_preview,
+    reconcile_quotation_email,
+    send_quotation_email,
+)
 from .serializers import (
     CompanyContactSerializer,
     CompanyListSerializer,
@@ -500,10 +513,19 @@ class GmailConnectionView(APIView):
 
     def get(self, request):
         connection = resolve_gmail_connection(request.user, connected_only=False)
+        send_scope_granted = gmail_send_scope_granted(connection)
+        connected = bool(
+            connection
+            and connection.status == GmailOAuthConnection.STATUS_CONNECTED
+        )
         return Response(
             {
                 "configured": gmail_oauth_configured(),
-                "scope": "https://www.googleapis.com/auth/gmail.readonly",
+                "scope": " ".join(GMAIL_REQUIRED_SCOPES),
+                "required_scopes": list(GMAIL_REQUIRED_SCOPES),
+                "gmail_send_scope": GMAIL_SEND_SCOPE,
+                "send_scope_granted": send_scope_granted,
+                "reconnect_required": bool(connected and not send_scope_granted),
                 "connection": GmailOAuthConnectionSerializer(connection).data if connection else None,
                 "can_manage": can_manage_shared_gmail(request.user, connection),
                 "railway_env_vars": [
@@ -522,7 +544,15 @@ class GmailConnectionView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         try:
-            return Response({"auth_url": build_gmail_auth_url(request.user, request)})
+            return Response(
+                {
+                    "auth_url": build_gmail_auth_url(
+                        request.user,
+                        request,
+                        return_path=request.data.get("return_path", ""),
+                    )
+                }
+            )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -543,23 +573,38 @@ class GmailOAuthCallbackView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        state_context = parse_gmail_oauth_state(
+            request.query_params.get("state"),
+            include_return_path=True,
+        )
+        if not state_context:
+            return HttpResponseRedirect(gmail_frontend_redirect_url("invalid-state"))
+        user_id, return_path = state_context
         error = request.query_params.get("error")
         if error:
-            return HttpResponseRedirect(gmail_frontend_redirect_url(f"error:{error}"))
-        user_id = parse_gmail_oauth_state(request.query_params.get("state"))
-        if not user_id:
-            return HttpResponseRedirect(gmail_frontend_redirect_url("invalid-state"))
+            return HttpResponseRedirect(
+                gmail_frontend_redirect_url(f"error:{error}", return_path)
+            )
         code = request.query_params.get("code")
         if not code:
-            return HttpResponseRedirect(gmail_frontend_redirect_url("missing-code"))
+            return HttpResponseRedirect(
+                gmail_frontend_redirect_url("missing-code", return_path)
+            )
         User = get_user_model()
         try:
             user = User.objects.get(pk=user_id, is_staff=True)
             exchange_gmail_code(user, code, request)
         except Exception as exc:
             logger.exception("Gmail OAuth callback failed.")
-            return HttpResponseRedirect(gmail_frontend_redirect_url(f"error:{str(exc)[:80]}"))
-        return HttpResponseRedirect(gmail_frontend_redirect_url("connected"))
+            return HttpResponseRedirect(
+                gmail_frontend_redirect_url(
+                    f"error:{str(exc)[:80]}",
+                    return_path,
+                )
+            )
+        return HttpResponseRedirect(
+            gmail_frontend_redirect_url("connected", return_path)
+        )
 
 
 class ContractIntelligenceRunViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
@@ -2778,21 +2823,26 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         quotation = self.get_object()
-        if quotation.lpos.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
-            return Response(
-                {
-                    "detail": (
-                        "This quotation has a confirmed LPO and cannot be deleted because that would "
-                        "remove accepted-price and order history. Correct the quotation or LPO instead."
-                    )
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-        try:
-            ensure_quotation_editable(quotation)
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
         with transaction.atomic():
+            # Keep the global mutation lock order (Quotation, then
+            # QuotationEmailDelivery). Re-check every destructive precondition
+            # after taking the row lock so a simultaneous finalize/send cannot
+            # race this deletion or deadlock on the protected delivery row.
+            quotation = Quotation.objects.select_for_update().get(pk=quotation.pk)
+            if quotation.lpos.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
+                return Response(
+                    {
+                        "detail": (
+                            "This quotation has a confirmed LPO and cannot be deleted because that would "
+                            "remove accepted-price and order history. Correct the quotation or LPO instead."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            try:
+                ensure_quotation_editable(quotation)
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
             snapshot = build_quotation_delete_snapshot(quotation)
             inquiry = quotation.inquiry
             should_reset_inquiry = (
@@ -2807,6 +2857,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 message="Deleted draft quotation with snapshot.",
                 changes={"snapshot": snapshot},
             )
+            # A pre-send preview ledger has no external side effect and must
+            # not turn an otherwise deletable draft into a PROTECT/500 trap.
+            QuotationEmailDelivery.objects.filter(
+                quotation=quotation,
+                status=QuotationEmailDelivery.STATUS_PREPARED,
+                attempt_count=0,
+            ).delete()
             quotation.delete()
             if should_reset_inquiry:
                 inquiry.status = Inquiry.STATUS_DRAFT
@@ -2847,6 +2904,128 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return self.handle_workflow_error(exc)
         serializer = self.get_serializer(quotation)
         return Response(serializer.data)
+
+    def _quotation_email_error_response(self, exc):
+        quotation = self.get_object()
+        quotation.refresh_from_db()
+        return Response(
+            {
+                "detail": exc.message,
+                "code": exc.code,
+                "quote_finalized": exc.quote_finalized,
+                "retryable": exc.retryable,
+                "quote": self.get_serializer(quotation).data,
+                "delivery": (
+                    quotation_email_delivery_payload(exc.delivery)
+                    if exc.delivery is not None
+                    else None
+                ),
+            },
+            status=exc.http_status,
+        )
+
+    @action(detail=True, methods=["get"])
+    def email_preview(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            delivery = prepare_email_preview(
+                quotation,
+                request.user,
+                thread_selection_token=request.query_params.get(
+                    "thread_selection_token",
+                    "",
+                ),
+                persist=False,
+            )
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
+        return Response(quotation_email_preview_payload(delivery, request.user))
+
+    @action(detail=True, methods=["get"])
+    def email_thread_candidates(self, request, pk=None):
+        quotation = self.get_object()
+        recipient = str(request.query_params.get("recipient") or "").strip()
+        try:
+            raw_limit = request.query_params.get("limit", 10)
+            try:
+                limit = int(raw_limit)
+            except (TypeError, ValueError):
+                limit = 10
+            return Response(
+                find_manual_thread_candidates(
+                    quotation,
+                    request.user,
+                    recipient,
+                    limit=limit,
+                )
+            )
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
+
+    def _send_quotation_email_action(self, request, *, finalize_first):
+        quotation = self.get_object()
+        try:
+            sent_quote, delivery, idempotent = send_quotation_email(
+                quotation,
+                request.user,
+                request.data,
+                finalize_first=finalize_first,
+                thread_selection_token=str(
+                    request.data.get("thread_selection_token") or ""
+                ),
+            )
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
+        except DjangoValidationError as exc:
+            messages = getattr(exc, "messages", None) or [str(exc)]
+            return self._quotation_email_error_response(
+                QuotationEmailError(
+                    str(messages[0]),
+                    code="quotation_finalization_failed",
+                    quote_finalized=False,
+                )
+            )
+        return Response(
+            {
+                "quote": self.get_serializer(sent_quote).data,
+                "delivery": quotation_email_delivery_payload(delivery),
+                "idempotent": idempotent,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def finalize_and_send(self, request, pk=None):
+        return self._send_quotation_email_action(request, finalize_first=True)
+
+    @action(detail=True, methods=["post"])
+    def send_email(self, request, pk=None):
+        return self._send_quotation_email_action(request, finalize_first=False)
+
+    @action(detail=True, methods=["post"])
+    def reconcile_email(self, request, pk=None):
+        quotation = self.get_object()
+        try:
+            quote, delivery, reconciled = reconcile_quotation_email(
+                quotation,
+                request.user,
+            )
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
+        return Response(
+            {
+                "quote": self.get_serializer(quote).data,
+                "delivery": quotation_email_delivery_payload(delivery),
+                "reconciled": reconciled,
+                "detail": (
+                    "Gmail confirms that the quotation email was sent."
+                    if reconciled
+                    else (
+                        "Gmail still does not confirm this delivery. It remains locked as unknown; "
+                        "check the shared Sent mailbox and do not retry blindly."
+                    )
+                ),
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def revise(self, request, pk=None):

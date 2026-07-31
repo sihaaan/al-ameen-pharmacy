@@ -2008,6 +2008,499 @@
   box-shadow: 0 24px 80px rgba(17, 24, 39, 0.28);
 }
 
+.qm-email-preview-backdrop {
+  z-index: 80;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(2px);
+}
+
+.qm-email-preview-modal {
+  width: min(900px, 96vw);
+  max-height: min(92vh, 960px);
+  padding: 0;
+  overflow: auto;
+  border: 1px solid #dbe5e4;
+  border-radius: 14px;
+}
+
+.qm-email-preview-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid #e5e7eb;
+  background: rgba(255, 255, 255, 0.98);
+}
+
+.qm-email-preview-heading h3 {
+  margin: 3px 0 5px;
+  color: #0f172a;
+  font-size: 1.3rem;
+}
+
+.qm-email-preview-heading p,
+.qm-email-source-card p,
+.qm-email-attachment-card p,
+.qm-email-preview-loading p {
+  margin: 0;
+  color: #64748b;
+}
+
+.qm-email-preview-heading .qm-eyebrow {
+  color: #0f766e;
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qm-email-preview-loading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 22px 24px;
+  padding: 18px;
+  border: 1px solid #bde9e3;
+  border-radius: 10px;
+  background: #f0fdfa;
+}
+
+.qm-email-preview-spinner {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 3px solid #99f6e4;
+  border-top-color: #0f766e;
+  border-radius: 50%;
+  animation: qm-email-spin 0.8s linear infinite;
+}
+
+@keyframes qm-email-spin {
+  to { transform: rotate(360deg); }
+}
+
+.qm-email-preview-modal > .qm-feedback {
+  margin: 18px 24px 0;
+}
+
+.qm-email-source-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  margin: 20px 24px 0;
+  padding: 16px;
+  border: 1px solid #dbe5e4;
+  border-radius: 10px;
+}
+
+.qm-email-source-card.trusted {
+  border-color: #99e3d8;
+  background: #f0fdfa;
+}
+
+.qm-email-source-card.manual {
+  border-color: #f3d28c;
+  background: #fffbeb;
+}
+
+.qm-email-source-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #0f766e;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.qm-email-source-card.manual .qm-email-source-icon {
+  color: #9a5b00;
+}
+
+.qm-email-source-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.qm-email-mode-badge {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.69rem;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.qm-email-mode-badge.trusted {
+  color: #0f6b5f;
+  background: #ccfbf1;
+}
+
+.qm-email-mode-badge.manual {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.qm-email-thread-context {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0 0;
+}
+
+.qm-email-thread-context > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.qm-email-thread-context dt {
+  color: #64748b;
+  font-size: 0.77rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.qm-email-thread-context dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #1e293b;
+  font-weight: 700;
+}
+
+.qm-email-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 20px 24px 0;
+}
+
+.qm-email-fields label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  color: #334155;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.qm-email-fields label > span b {
+  color: #b91c1c;
+}
+
+.qm-email-fields input,
+.qm-email-fields textarea {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #111827;
+  font: inherit;
+  font-weight: 500;
+  box-sizing: border-box;
+}
+
+.qm-email-fields input:focus,
+.qm-email-fields textarea:focus {
+  border-color: #0f766e;
+  outline: 3px solid rgba(20, 184, 166, 0.14);
+}
+
+.qm-email-fields input[readonly] {
+  border-color: #dbe5e4;
+  background: #f8fafc;
+  color: #334155;
+}
+
+.qm-email-fields small {
+  color: #64748b;
+  font-size: 0.74rem;
+  font-weight: 500;
+}
+
+.qm-email-field-wide {
+  grid-column: 1 / -1;
+}
+
+.qm-email-fields textarea {
+  min-height: 180px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.qm-email-thread-finder {
+  margin: 18px 24px 0;
+  padding: 15px;
+  border: 1px solid #dbe5e4;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.qm-email-thread-finder-heading,
+.qm-email-thread-candidates-title,
+.qm-email-thread-candidate {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.qm-email-thread-finder-heading > div,
+.qm-email-thread-candidate > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.qm-email-thread-finder p,
+.qm-email-thread-candidate p,
+.qm-email-thread-candidate small {
+  margin: 3px 0 0;
+  color: #64748b;
+}
+
+.qm-email-thread-finder > small {
+  display: block;
+  margin-top: 8px;
+  color: #92400e;
+}
+
+.qm-email-thread-candidates {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.qm-email-thread-candidates-title {
+  align-items: center;
+  color: #334155;
+}
+
+.qm-email-thread-candidate {
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.qm-email-thread-candidate strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #0f172a;
+}
+
+.qm-email-thread-candidate small {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.4;
+}
+
+.qm-email-thread-none {
+  margin-top: 12px !important;
+  padding: 10px;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.qm-email-attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 24px 0;
+  padding: 13px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.qm-email-file-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 7px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
+.qm-email-attachment-card > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.qm-email-attachment-card strong {
+  overflow-wrap: anywhere;
+  color: #1e293b;
+}
+
+.qm-email-attachment-status {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 0.71rem;
+  font-weight: 900;
+}
+
+.qm-email-recipient-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 16px 24px 0;
+  padding: 12px 13px;
+  border: 1px solid #f2cc78;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #713f12;
+  font-weight: 800;
+}
+
+.qm-email-recipient-confirmation input {
+  width: 17px;
+  height: 17px;
+  margin: 2px 0 0;
+  accent-color: #0f766e;
+}
+
+.qm-email-validation,
+.qm-email-preview-warnings {
+  margin: 14px 24px 0;
+  padding: 11px 13px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff1f2;
+  color: #991b1b;
+}
+
+.qm-email-validation ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+
+.qm-email-preview-warnings {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.qm-email-preview-warnings p {
+  margin: 0;
+}
+
+.qm-email-preview-warnings p + p {
+  margin-top: 5px;
+}
+
+.qm-email-preview-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 -8px 20px rgba(15, 23, 42, 0.04);
+}
+
+.qm-email-send-button {
+  min-width: 220px;
+}
+
+@media (max-width: 700px) {
+  .qm-email-preview-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .qm-email-preview-modal {
+    width: 100%;
+    max-height: 94vh;
+    border-radius: 14px 14px 0 0;
+  }
+
+  .qm-email-preview-heading,
+  .qm-email-preview-actions {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .qm-email-source-card,
+  .qm-email-preview-modal > .qm-feedback,
+  .qm-email-attachment-card,
+  .qm-email-thread-finder,
+  .qm-email-recipient-confirmation,
+  .qm-email-validation,
+  .qm-email-preview-warnings {
+    margin-right: 16px;
+    margin-left: 16px;
+  }
+
+  .qm-email-fields {
+    grid-template-columns: 1fr;
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .qm-email-field-wide {
+    grid-column: auto;
+  }
+
+  .qm-email-thread-context > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .qm-email-thread-finder-heading,
+  .qm-email-thread-candidate {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qm-email-thread-finder-heading button,
+  .qm-email-thread-candidate button {
+    width: 100%;
+  }
+
+  .qm-email-attachment-status {
+    display: none;
+  }
+
+  .qm-email-preview-actions {
+    flex-wrap: wrap;
+  }
+
+  .qm-email-preview-actions button,
+  .qm-email-send-button {
+    min-width: 0;
+    flex: 1 1 160px;
+  }
+}
+
 .qm-create-quotation-modal {
   width: min(680px, 96vw);
 }

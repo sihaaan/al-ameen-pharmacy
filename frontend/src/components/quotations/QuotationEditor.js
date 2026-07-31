@@ -5,6 +5,7 @@ import ProductPriceHistoryDialog from './ProductPriceHistoryDialog';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationErrorNotice from './QuotationErrorNotice';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
+import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
 const statusSteps = [
@@ -258,6 +259,20 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [lpoUploading, setLpoUploading] = useState(false);
   const [lpoSaving, setLpoSaving] = useState(false);
   const [lpoFeedback, setLpoFeedback] = useState(null);
+  const [emailPreviewOpen, setEmailPreviewOpen] = useState(false);
+  const [emailPreviewLoading, setEmailPreviewLoading] = useState(false);
+  const [emailPreview, setEmailPreview] = useState(null);
+  const [emailPreviewError, setEmailPreviewError] = useState('');
+  const [emailSendError, setEmailSendError] = useState(null);
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailQuoteFinalized, setEmailQuoteFinalized] = useState(false);
+  const [emailThreadCandidates, setEmailThreadCandidates] = useState([]);
+  const [emailThreadCandidatesLoading, setEmailThreadCandidatesLoading] = useState(false);
+  const [emailThreadCandidatesError, setEmailThreadCandidatesError] = useState('');
+  const [emailThreadSearchCompleted, setEmailThreadSearchCompleted] = useState(false);
+  const [emailGmailReconnectError, setEmailGmailReconnectError] = useState('');
+  const [emailReconciling, setEmailReconciling] = useState(false);
+  const [emailReconcileFeedback, setEmailReconcileFeedback] = useState(null);
   const linePriceVersionRef = useRef({});
   const lineSelectedProductRef = useRef({});
   const lineFormPriceVersionRef = useRef(0);
@@ -266,6 +281,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const loadGenerationRef = useRef(0);
   const referenceLoadGenerationRef = useRef(0);
   const contactLoadGenerationRef = useRef(0);
+  const emailPreviewGenerationRef = useRef(0);
+  const emailThreadSearchGenerationRef = useRef(0);
+  const emailReconcileGenerationRef = useRef(0);
   const quoteRef = useRef(null);
   const quotePartyDraftRef = useRef(quotePartyDraft);
   const quoteTermsDraftRef = useRef(quoteTermsDraft);
@@ -546,11 +564,31 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   }, [quoteId, setLoadedQuote, syncLpos]);
 
   useEffect(() => {
+    setEmailPreviewOpen(false);
+    setEmailPreviewLoading(false);
+    setEmailPreview(null);
+    setEmailPreviewError('');
+    setEmailSendError(null);
+    setEmailSending(false);
+    setEmailQuoteFinalized(false);
+    setEmailThreadCandidates([]);
+    setEmailThreadCandidatesLoading(false);
+    setEmailThreadCandidatesError('');
+    setEmailThreadSearchCompleted(false);
+    setEmailGmailReconnectError('');
+    setEmailReconciling(false);
+    setEmailReconcileFeedback(null);
+    emailPreviewGenerationRef.current += 1;
+    emailThreadSearchGenerationRef.current += 1;
+    emailReconcileGenerationRef.current += 1;
     load();
     return () => {
       loadGenerationRef.current += 1;
       referenceLoadGenerationRef.current += 1;
       contactLoadGenerationRef.current += 1;
+      emailPreviewGenerationRef.current += 1;
+      emailThreadSearchGenerationRef.current += 1;
+      emailReconcileGenerationRef.current += 1;
     };
   }, [load]);
 
@@ -1316,6 +1354,321 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     window.URL.revokeObjectURL(url);
   };
 
+  const loadEmailPreview = async () => {
+    if (emailSending || emailReconciling || saving || actionInFlight) return;
+    if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
+    const requestGeneration = ++emailPreviewGenerationRef.current;
+    setEmailPreviewOpen(true);
+    setEmailPreviewLoading(true);
+    setEmailPreview(null);
+    setEmailPreviewError('');
+    setEmailSendError(null);
+    setEmailQuoteFinalized(['finalized', 'sent'].includes(quote.status));
+    setEmailThreadCandidates([]);
+    setEmailThreadCandidatesError('');
+    setEmailThreadSearchCompleted(false);
+    setEmailGmailReconnectError('');
+    setEmailReconcileFeedback(null);
+    emailThreadSearchGenerationRef.current += 1;
+    emailReconcileGenerationRef.current += 1;
+    try {
+      const response = await quotationAPI.quotes.emailPreview(quote.id);
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      setEmailPreview(response.data || {});
+    } catch (error) {
+      const details = await describeQuotationError(
+        error,
+        'Prepare quotation email preview',
+        `GET /quotations/quotes/${quote.id}/email_preview/`
+      );
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      setEmailPreviewError(details.detail || 'The server could not prepare the email preview.');
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (emailPreviewGenerationRef.current === requestGeneration) {
+        setEmailPreviewLoading(false);
+      }
+    }
+  };
+
+  const closeEmailPreview = () => {
+    if (emailSending || emailReconciling) return;
+    emailPreviewGenerationRef.current += 1;
+    setEmailPreviewOpen(false);
+    setEmailPreviewLoading(false);
+    setEmailPreview(null);
+    setEmailPreviewError('');
+    setEmailSendError(null);
+    setEmailThreadCandidates([]);
+    setEmailThreadCandidatesLoading(false);
+    setEmailThreadCandidatesError('');
+    setEmailThreadSearchCompleted(false);
+    setEmailGmailReconnectError('');
+    setEmailReconciling(false);
+    setEmailReconcileFeedback(null);
+    emailThreadSearchGenerationRef.current += 1;
+    emailReconcileGenerationRef.current += 1;
+  };
+
+  const clearEmailThreadCandidates = () => {
+    emailThreadSearchGenerationRef.current += 1;
+    setEmailThreadCandidates([]);
+    setEmailThreadCandidatesLoading(false);
+    setEmailThreadCandidatesError('');
+    setEmailThreadSearchCompleted(false);
+  };
+
+  const findEmailThreadCandidates = async (recipient) => {
+    if (!recipient || emailThreadCandidatesLoading || emailSending) return;
+    const requestGeneration = ++emailThreadSearchGenerationRef.current;
+    setEmailThreadCandidatesLoading(true);
+    setEmailThreadCandidatesError('');
+    setEmailThreadSearchCompleted(false);
+    try {
+      const response = await quotationAPI.quotes.emailThreadCandidates(quote.id, recipient, 10);
+      if (emailThreadSearchGenerationRef.current !== requestGeneration) return;
+      setEmailThreadCandidates(response.data?.candidates || []);
+      setEmailThreadSearchCompleted(true);
+    } catch (error) {
+      const details = await describeQuotationError(
+        error,
+        'Find original Gmail thread',
+        `GET /quotations/quotes/${quote.id}/email_thread_candidates/`
+      );
+      if (emailThreadSearchGenerationRef.current !== requestGeneration) return;
+      setEmailThreadCandidates([]);
+      setEmailThreadCandidatesError(details.detail || 'The shared mailbox could not be searched.');
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (emailThreadSearchGenerationRef.current === requestGeneration) {
+        setEmailThreadCandidatesLoading(false);
+      }
+    }
+  };
+
+  const selectEmailThreadCandidate = async (candidate) => {
+    if (!candidate?.selection_token || emailSending) return;
+    const requestGeneration = ++emailPreviewGenerationRef.current;
+    setEmailPreviewLoading(true);
+    setEmailThreadCandidatesError('');
+    setEmailReconcileFeedback(null);
+    emailThreadSearchGenerationRef.current += 1;
+    try {
+      const response = await quotationAPI.quotes.emailPreview(quote.id, {
+        thread_selection_token: candidate.selection_token,
+      });
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      setEmailPreview({
+        ...(response.data || {}),
+        thread_selection_token: candidate.selection_token,
+      });
+      setEmailThreadCandidates([]);
+      setEmailThreadSearchCompleted(false);
+    } catch (error) {
+      const details = await describeQuotationError(
+        error,
+        'Open selected Gmail thread',
+        `GET /quotations/quotes/${quote.id}/email_preview/`
+      );
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      setEmailThreadCandidatesError(details.detail || 'That Gmail message could not be verified. Search again and choose another message.');
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (emailPreviewGenerationRef.current === requestGeneration) {
+        setEmailPreviewLoading(false);
+      }
+    }
+  };
+
+  const reconnectGmailForSending = async () => {
+    if (actionInFlight || emailSending) return;
+    setActionInFlight('Reconnect Gmail');
+    setEmailGmailReconnectError('');
+    try {
+      const response = await quotationAPI.gmail.connectUrl(
+        `/admin?quotation_tab=quotes&quote_id=${encodeURIComponent(quote.id)}`
+      );
+      if (response.data?.auth_url) window.location.href = response.data.auth_url;
+      else setEmailGmailReconnectError('Google authorization could not be opened. Use Gmail settings to reconnect the shared mailbox.');
+    } catch (error) {
+      const details = await describeQuotationError(error, 'Reconnect Gmail', 'POST /quotations/gmail/connection/');
+      setEmailGmailReconnectError(details.detail || 'Gmail reconnect could not be started.');
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setActionInFlight('');
+    }
+  };
+
+  const clearCorrectableEmailError = () => {
+    setEmailSendError((current) => (
+      current?.code === 'email_delivery_error' ? null : current
+    ));
+  };
+
+  const reconcileQuotationEmail = async () => {
+    if (emailReconciling || emailSending) return;
+    const requestGeneration = ++emailReconcileGenerationRef.current;
+    setEmailReconciling(true);
+    setEmailReconcileFeedback(null);
+    try {
+      const response = await quotationAPI.quotes.reconcileEmail(quote.id);
+      if (emailReconcileGenerationRef.current !== requestGeneration) return;
+      const responseQuote = response.data?.quote;
+      const delivery = response.data?.delivery || {};
+      const reconciled = response.data?.reconciled === true || delivery.status === 'sent';
+      if (responseQuote?.id) setLoadedQuote(responseQuote);
+      if (reconciled) {
+        setEmailPreviewOpen(false);
+        setLineFeedback({
+          type: 'success',
+          message: response.data?.detail || 'Gmail confirmed that the quotation email was sent.',
+        });
+        if (!responseQuote?.id) await load({ refreshReferences: false });
+      } else {
+        setEmailPreview((current) => ({
+          ...(current || {}),
+          status: delivery.status || current?.status || 'unknown',
+          ...(typeof delivery.can_reconcile === 'boolean'
+            ? { can_reconcile: delivery.can_reconcile }
+            : {}),
+        }));
+        setEmailReconcileFeedback({
+          type: 'warning',
+          title: 'No confirmed Gmail delivery was found yet.',
+          detail: response.data?.detail || 'The delivery remains unknown. Check the Sent mailbox before trying any other action.',
+        });
+      }
+    } catch (error) {
+      const responseData = error?.response?.data || {};
+      const details = await describeQuotationError(
+        error,
+        'Check Gmail delivery status',
+        `POST /quotations/quotes/${quote.id}/reconcile_email/`
+      );
+      if (emailReconcileGenerationRef.current !== requestGeneration) return;
+      if (responseData.quote?.id) setLoadedQuote(responseData.quote);
+      setEmailPreview((current) => ({
+        ...(current || {}),
+        status: responseData.delivery?.status || current?.status || 'unknown',
+        ...(typeof responseData.delivery?.can_reconcile === 'boolean'
+          ? { can_reconcile: responseData.delivery.can_reconcile }
+          : {}),
+      }));
+      setEmailReconcileFeedback({
+        type: 'error',
+        title: 'Gmail status could not be checked.',
+        detail: details.detail || 'The delivery remains blocked. Check the shared mailbox before taking another action.',
+      });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (emailReconcileGenerationRef.current === requestGeneration) {
+        setEmailReconciling(false);
+      }
+    }
+  };
+
+  const finalizeOnlyFromPreview = async () => {
+    if (emailSending || saving || actionInFlight || finalizeIssues.length > 0) return;
+    setEmailSending(true);
+    setSaving(true);
+    setActionInFlight('Finalize');
+    setEmailSendError(null);
+    setErrorInfo(null);
+    try {
+      const response = await quotationAPI.quotes.finalize(quote.id);
+      setEmailQuoteFinalized(true);
+      try {
+        setDownloadLoading(true);
+        await downloadPdfFile(response.data || quote);
+      } catch (downloadError) {
+        const details = await describeQuotationError(
+          downloadError,
+          'Download finalized quotation PDF',
+          `GET /quotations/quotes/${quote.id}/pdf/`
+        );
+        setErrorInfo(details);
+        console.error(formatQuotationError(details), downloadError);
+      } finally {
+        setDownloadLoading(false);
+      }
+      setEmailPreviewOpen(false);
+      setLineFeedback({ type: 'success', message: 'Quotation finalized. No email was sent.' });
+      await load({ refreshReferences: false });
+    } catch (error) {
+      const details = await describeQuotationError(
+        error,
+        'Finalize quotation',
+        `POST /quotations/quotes/${quote.id}/finalize/`
+      );
+      setEmailSendError({
+        kind: 'finalize',
+        detail: details.detail || 'The quotation could not be finalized.',
+        quoteFinalized: false,
+        retryable: true,
+        deliveryStatus: 'not_sent',
+      });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setEmailSending(false);
+      setSaving(false);
+      setActionInFlight('');
+    }
+  };
+
+  const sendQuotationEmail = async (payload) => {
+    if (emailSending || saving || actionInFlight) return;
+    const alreadyFinalized = emailQuoteFinalized || ['finalized', 'sent'].includes(quoteRef.current?.status);
+    const action = alreadyFinalized
+      ? quotationAPI.quotes.sendEmail
+      : quotationAPI.quotes.finalizeAndSend;
+    const endpoint = alreadyFinalized
+      ? `POST /quotations/quotes/${quote.id}/send_email/`
+      : `POST /quotations/quotes/${quote.id}/finalize_and_send/`;
+    setEmailSending(true);
+    setSaving(true);
+    setActionInFlight(alreadyFinalized ? 'Send Quotation' : 'Finalize & Send');
+    setEmailSendError(null);
+    setErrorInfo(null);
+    try {
+      const response = await action(quote.id, payload);
+      const responseQuote = response.data?.quote || response.data?.quotation;
+      if (responseQuote?.id) setLoadedQuote(responseQuote);
+      setEmailPreviewOpen(false);
+      setLineFeedback({
+        type: 'success',
+        message: response.data?.detail || response.data?.message || 'Quotation finalized and emailed successfully.',
+      });
+      await load({ refreshReferences: false });
+    } catch (error) {
+      const responseData = error?.response?.data || {};
+      const deliveryStatus = responseData.delivery_status || responseData.delivery?.status || 'not_sent';
+      const errorCode = String(responseData.code || '');
+      const quoteWasFinalized = Boolean(
+        responseData.quote_finalized
+        || responseData.quotation_finalized
+        || responseData.finalized
+        || ['finalized', 'sent'].includes(responseData.quote?.status)
+        || alreadyFinalized
+      );
+      const details = await describeQuotationError(error, alreadyFinalized ? 'Send quotation email' : 'Finalize and send quotation', endpoint);
+      setEmailQuoteFinalized(quoteWasFinalized);
+      setEmailSendError({
+        code: errorCode,
+        detail: details.detail || 'The email could not be sent.',
+        quoteFinalized: quoteWasFinalized,
+        retryable: responseData.retryable === true,
+        deliveryStatus,
+      });
+      if (responseData.quote?.id) setLoadedQuote(responseData.quote);
+      else if (quoteWasFinalized || deliveryStatus === 'unknown') await load({ refreshReferences: false });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      setEmailSending(false);
+      setSaving(false);
+      setActionInFlight('');
+    }
+  };
+
   const runAction = async (label, action) => {
     if (saving || actionInFlight) return;
     if (label === 'Finalize' && finalizeIssues.length > 0) return;
@@ -1553,7 +1906,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           )}
         </div>
         <div className="qm-action-row">
-          {['draft', 'pending_review', 'approved'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={() => runAction('Finalize', quotationAPI.quotes.finalize)}>{actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}</button>}
+          {['draft', 'pending_review', 'approved'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={loadEmailPreview}>Finalize</button>}
+          {quote.status === 'finalized' && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
           {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
@@ -1865,9 +2219,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             </button>
             <span className="qm-sticky-action-divider" aria-hidden="true" />
             {['draft', 'pending_review', 'approved'].includes(quote.status) && (
-              <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={() => runAction('Finalize', quotationAPI.quotes.finalize)}>
-                {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
-              </button>
+              <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={loadEmailPreview}>Finalize</button>
             )}
             {!['revised', 'cancelled'].includes(quote.status) && (
               <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>
@@ -2127,6 +2479,34 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             </div>
           </div>
         </div>
+      )}
+
+      {emailPreviewOpen && (
+        <QuotationEmailPreviewDialog
+          preview={emailPreview}
+          loading={emailPreviewLoading}
+          previewError={emailPreviewError}
+          sending={emailSending}
+          sendError={emailSendError}
+          quoteIsFinalized={emailQuoteFinalized || ['finalized', 'sent'].includes(quote.status)}
+          threadCandidates={emailThreadCandidates}
+          threadCandidatesLoading={emailThreadCandidatesLoading}
+          threadCandidatesError={emailThreadCandidatesError}
+          threadSearchCompleted={emailThreadSearchCompleted}
+          gmailReconnectError={emailGmailReconnectError}
+          reconciling={emailReconciling}
+          reconcileFeedback={emailReconcileFeedback}
+          onRetryPreview={loadEmailPreview}
+          onReconnectGmail={reconnectGmailForSending}
+          onReconcileEmail={reconcileQuotationEmail}
+          onClearCorrectableError={clearCorrectableEmailError}
+          onFindThread={findEmailThreadCandidates}
+          onSelectThread={selectEmailThreadCandidate}
+          onClearThreadCandidates={clearEmailThreadCandidates}
+          onClose={closeEmailPreview}
+          onFinalizeOnly={finalizeOnlyFromPreview}
+          onSend={sendQuotationEmail}
+        />
       )}
 
       {priceHistoryDialog && (

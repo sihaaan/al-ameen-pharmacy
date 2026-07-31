@@ -108,6 +108,12 @@ instead of a raw service error. **Open Gmail settings** takes the employee to
 the website's Contract Intelligence Gmail settings; an authorized website
 administrator must complete **Connect Gmail**, then reopen the Gmail add-on.
 
+The website mailbox OAuth connection is also used for the quotation editor's
+reviewed reply/new-email workflow. It requests `gmail.readonly` plus
+`gmail.send`; an older read-only connection must be reconnected once. This is
+separate from the add-on manifest permissions, and the add-on itself never
+sends a customer email.
+
 Keep `GMAIL_ADDON_ENABLED=0` until the deployment and environment values match.
 
 ## 4. Private release

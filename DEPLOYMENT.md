@@ -94,7 +94,7 @@ EMAIL_HOST_USER=your-email@gmail.com
 EMAIL_HOST_PASSWORD=your-gmail-app-password
 DEFAULT_FROM_EMAIL=AL AMEEN PHARMACY <your-email@gmail.com>
 
-# Read-only Gmail OAuth for quotation/LPO discovery (optional)
+# Shared Gmail OAuth for quotation/LPO discovery and reviewed quotation delivery (optional)
 GOOGLE_OAUTH_CLIENT_ID=your-google-oauth-client-id
 GOOGLE_OAUTH_CLIENT_SECRET=your-google-oauth-client-secret
 GOOGLE_OAUTH_REDIRECT_URI=https://pharmacy-backend-production-xxxx.up.railway.app/api/quotations/gmail/oauth/callback/
@@ -104,7 +104,11 @@ GOOGLE_OAUTH_REDIRECT_URI=https://pharmacy-backend-production-xxxx.up.railway.ap
 
 If Gmail OAuth is enabled, replace the placeholder backend domain and register
 the exact `GOOGLE_OAUTH_REDIRECT_URI` in the Google Cloud OAuth client. The
-mailbox integration requests read-only Gmail access.
+mailbox integration requests `gmail.readonly` for inquiry evidence and
+`gmail.send` for staff-reviewed quotation delivery. After deploying the send
+workflow, reconnect an existing read-only mailbox once and approve the added
+permission. The quotation preview remains mandatory; connecting Gmail does not
+enable unattended sending.
 
 Mailbox PDF vision has a separate privacy opt-in. Set
 `QUOTATION_MAILBOX_AI_VISION_ENABLED=1` only when staff approve sending bounded
