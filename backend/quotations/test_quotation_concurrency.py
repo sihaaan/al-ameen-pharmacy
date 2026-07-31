@@ -1,8 +1,8 @@
 from datetime import timedelta
 from decimal import Decimal
 from queue import Queue
-from threading import Barrier, Event, Thread
-from unittest import expectedFailure, skipUnless
+from threading import Barrier, Event, Thread, current_thread
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -40,6 +40,7 @@ from .quotation_email_delivery import (
     _record_successful_delivery,
 )
 from .serializers import QuotationSerializer
+from .views import QuotationLineViewSet, QuotationViewSet
 
 
 @skipUnless(
@@ -113,12 +114,13 @@ class QuotationConcurrencyTests(TransactionTestCase):
             client = APIClient()
             client.force_authenticate(staff)
             response = getattr(client, method)(url, payload or {}, format="json")
+            response_data = getattr(response, "data", None) or {}
             results.put(
                 (
                     label,
                     "response",
                     response.status_code,
-                    str(getattr(response, "data", {}).get("code") or ""),
+                    str(response_data.get("code") or ""),
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic for PostgreSQL CI
@@ -134,9 +136,8 @@ class QuotationConcurrencyTests(TransactionTestCase):
             return True
         return False
 
-    @expectedFailure
     def test_quotation_patch_holds_quote_lock_until_update_commits(self):
-        """Characterizes the missing PATCH lock fixed by hardening task 1.2."""
+        """PATCH holds the workflow lock until its quotation mutation commits."""
 
         quotation, _line = self.create_quote()
         mutation_entered = Event()
@@ -181,9 +182,8 @@ class QuotationConcurrencyTests(TransactionTestCase):
             "Quotation PATCH must lock the quotation before saving mutable fields.",
         )
 
-    @expectedFailure
     def test_quotation_line_delete_holds_quote_lock_until_delete_commits(self):
-        """Characterizes the missing DELETE lock fixed by hardening task 1.2."""
+        """Line DELETE follows the quotation-first workflow lock order."""
 
         quotation, line = self.create_quote()
         mutation_entered = Event()
@@ -227,18 +227,224 @@ class QuotationConcurrencyTests(TransactionTestCase):
             "Quotation-line DELETE must lock its quotation before deletion.",
         )
 
+    def test_concurrent_line_deletes_return_204_then_404_without_server_error(self):
+        quotation, line = self.create_quote()
+        first_delete_entered = Event()
+        second_read_line = Event()
+        release_first_delete = Event()
+        results = Queue()
+        original_delete = QuotationLine.delete
+        original_get_object = QuotationLineViewSet.get_object
+
+        def paused_first_delete(instance, *args, **kwargs):
+            first_delete_entered.set()
+            if not release_first_delete.wait(timeout=10):
+                raise AssertionError("Timed out waiting to release the first line DELETE.")
+            return original_delete(instance, *args, **kwargs)
+
+        def observed_get_object(view):
+            value = original_get_object(view)
+            if first_delete_entered.is_set():
+                second_read_line.set()
+            return value
+
+        url = reverse("quotation-line-detail", args=[line.id])
+        with patch.object(QuotationLine, "delete", paused_first_delete), patch.object(
+            QuotationLineViewSet,
+            "get_object",
+            observed_get_object,
+        ):
+            first = Thread(
+                target=self._api_worker,
+                args=(results, "first", "delete", url),
+                daemon=True,
+            )
+            second = Thread(
+                target=self._api_worker,
+                args=(results, "second", "delete", url),
+                daemon=True,
+            )
+            try:
+                first.start()
+                self.assertTrue(first_delete_entered.wait(timeout=10))
+                second.start()
+                self.assertTrue(
+                    second_read_line.wait(timeout=10),
+                    "The second DELETE did not read the line before waiting on the quote lock.",
+                )
+            finally:
+                release_first_delete.set()
+                first.join(timeout=10)
+                if second.ident is not None:
+                    second.join(timeout=10)
+
+        self.assertFalse(first.is_alive() or second.is_alive(), "Concurrent line DELETE deadlocked.")
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse([outcome for outcome in outcomes if outcome[1] == "error"], outcomes)
+        self.assertCountEqual(
+            [(outcome[0], outcome[2]) for outcome in outcomes],
+            [
+                ("first", status.HTTP_204_NO_CONTENT),
+                ("second", status.HTTP_404_NOT_FOUND),
+            ],
+        )
+        self.assertFalse(QuotationLine.objects.filter(pk=line.pk).exists())
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.total, Decimal("0.00"))
+
+    def test_concurrent_company_contact_patch_revalidates_after_quote_lock(self):
+        quotation, _line = self.create_quote()
+        next_company = Company.objects.create(name="Next Concurrent Customer")
+        next_contact = CompanyContact.objects.create(
+            company=next_company,
+            name="Next Buyer",
+            email="next@example.com",
+        )
+        first_update_entered = Event()
+        second_validation_seen = Event()
+        release_first_update = Event()
+        results = Queue()
+        original_update = QuotationSerializer.update
+        original_validate = QuotationSerializer.validate
+
+        def paused_first_update(serializer, instance, validated_data):
+            next_value = validated_data.get("company")
+            if getattr(next_value, "pk", None) == next_company.pk:
+                first_update_entered.set()
+                if not release_first_update.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release the first quotation PATCH.")
+            return original_update(serializer, instance, validated_data)
+
+        def observed_validate(serializer, attrs):
+            contact = attrs.get("contact")
+            if "company" not in attrs and getattr(contact, "pk", None) == self.contact.pk:
+                second_validation_seen.set()
+            return original_validate(serializer, attrs)
+
+        url = reverse("quotation-detail", args=[quotation.id])
+        first = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "first",
+                "patch",
+                url,
+                {"company": next_company.pk, "contact": next_contact.pk},
+            ),
+            daemon=True,
+        )
+        second = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "second",
+                "patch",
+                url,
+                {"contact": self.contact.pk},
+            ),
+            daemon=True,
+        )
+
+        with patch.object(QuotationSerializer, "update", paused_first_update), patch.object(
+            QuotationSerializer,
+            "validate",
+            observed_validate,
+        ):
+            try:
+                first.start()
+                self.assertTrue(first_update_entered.wait(timeout=10))
+                second.start()
+                # With validation inside the quotation lock, this event cannot
+                # fire until the first mutation commits and releases its lock.
+                self.assertFalse(second_validation_seen.wait(timeout=1))
+            finally:
+                release_first_update.set()
+                first.join(timeout=10)
+                if second.ident is not None:
+                    second.join(timeout=10)
+
+        self.assertFalse(first.is_alive() or second.is_alive(), "Concurrent quotation PATCH deadlocked.")
+        self.assertTrue(second_validation_seen.is_set())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse([outcome for outcome in outcomes if outcome[1] == "error"], outcomes)
+        self.assertCountEqual(
+            [(outcome[0], outcome[2]) for outcome in outcomes],
+            [
+                ("first", status.HTTP_200_OK),
+                ("second", status.HTTP_400_BAD_REQUEST),
+            ],
+        )
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.company_id, next_company.pk)
+        self.assertEqual(quotation.contact_id, next_contact.pk)
+
+    def test_quotation_deleted_before_patch_lock_returns_not_found(self):
+        quotation, _line = self.create_quote()
+        patch_read_quote = Event()
+        release_patch_lookup = Event()
+        results = Queue()
+        original_get_object = QuotationViewSet.get_object
+
+        def paused_patch_get_object(view):
+            value = original_get_object(view)
+            if current_thread().name == "stale-quotation-patch":
+                patch_read_quote.set()
+                if not release_patch_lookup.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release quotation PATCH lookup.")
+            return value
+
+        url = reverse("quotation-detail", args=[quotation.id])
+        patch_worker = Thread(
+            target=self._api_worker,
+            args=(results, "patch", "patch", url, {"notes": "Stale patch"}),
+            name="stale-quotation-patch",
+            daemon=True,
+        )
+        delete_worker = Thread(
+            target=self._api_worker,
+            args=(results, "delete", "delete", url),
+            name="concurrent-quotation-delete",
+            daemon=True,
+        )
+
+        with patch.object(QuotationViewSet, "get_object", paused_patch_get_object):
+            try:
+                patch_worker.start()
+                self.assertTrue(
+                    patch_read_quote.wait(timeout=10),
+                    "Quotation PATCH did not read the row before deletion.",
+                )
+                delete_worker.start()
+                delete_worker.join(timeout=10)
+                self.assertFalse(delete_worker.is_alive(), "Quotation DELETE deadlocked.")
+            finally:
+                release_patch_lookup.set()
+                patch_worker.join(timeout=10)
+                if delete_worker.ident is not None:
+                    delete_worker.join(timeout=10)
+
+        self.assertFalse(patch_worker.is_alive(), "Quotation PATCH deadlocked after deletion.")
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse([outcome for outcome in outcomes if outcome[1] == "error"], outcomes)
+        self.assertCountEqual(
+            [(outcome[0], outcome[2]) for outcome in outcomes],
+            [
+                ("delete", status.HTTP_204_NO_CONTENT),
+                ("patch", status.HTTP_404_NOT_FOUND),
+            ],
+        )
+        self.assertFalse(Quotation.objects.filter(pk=quotation.pk).exists())
+
     @patch(
         "quotations.quotation_email_delivery.build_quotation_pdf",
         return_value=b"%PDF-concurrency-test",
     )
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
-    @expectedFailure
     def test_concurrent_send_invokes_gmail_once(self, gmail_send, _build_pdf):
-        """Also captures PostgreSQL's rejection of the current preview lock join.
-
-        Task 1.2 narrows that lock to the quotation table, then this same test
-        exercises the concurrent provider-call invariant and loses the xfail.
-        """
+        """One concurrent confirmation reaches Gmail; the other is rejected."""
 
         quotation, _line = self.create_quote()
         provider_entered = Event()

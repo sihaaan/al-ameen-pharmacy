@@ -616,9 +616,15 @@ def prepare_email_preview(
         )
 
     with transaction.atomic():
-        locked_quote = Quotation.objects.select_for_update().select_related(
-            "company", "contact", "inquiry"
-        ).get(pk=quotation.pk)
+        # Contact and inquiry are nullable, so their select_related joins are
+        # LEFT OUTER JOINs. PostgreSQL rejects an unrestricted FOR UPDATE over
+        # those joins; lock only the quotation row while retaining the related
+        # data needed to build the preview.
+        locked_quote = (
+            Quotation.objects.select_for_update(of=("self",))
+            .select_related("company", "contact", "inquiry")
+            .get(pk=quotation.pk)
+        )
         delivery = QuotationEmailDelivery.objects.select_for_update().filter(
             quotation=locked_quote
         ).first()
@@ -1115,9 +1121,11 @@ def send_quotation_email(
     with transaction.atomic():
         # See _record_successful_delivery: quote must always be locked first.
         locked_quote = Quotation.objects.select_for_update().get(pk=quotation.pk)
-        locked_delivery = QuotationEmailDelivery.objects.select_for_update().select_related(
-            "quotation", "gmail_connection"
-        ).get(pk=preview.pk)
+        locked_delivery = (
+            QuotationEmailDelivery.objects.select_for_update(of=("self",))
+            .select_related("quotation", "gmail_connection")
+            .get(pk=preview.pk)
+        )
         if locked_delivery.status == QuotationEmailDelivery.STATUS_SENT:
             return locked_quote, locked_delivery, True
         if locked_delivery.status == QuotationEmailDelivery.STATUS_UNKNOWN:

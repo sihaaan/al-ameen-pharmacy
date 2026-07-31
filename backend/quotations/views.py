@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Prefetch, Q, Window
 from django.db.models.functions import RowNumber
-from django.http import HttpResponse, HttpResponseRedirect
+from django.http import Http404, HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import mixins, status, viewsets
@@ -2804,14 +2804,33 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, quotation, message="Created quotation.")
 
     def perform_update(self, serializer):
-        ensure_quotation_editable(serializer.instance)
-        quotation = serializer.save()
-        recalculate_quotation_totals(quotation)
-        audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, quotation, message="Updated quotation.")
+        with transaction.atomic():
+            quotation = _quotations_for_update().get(pk=serializer.instance.pk)
+            ensure_quotation_editable(quotation)
+            serializer.instance = quotation
+            quotation = serializer.save()
+            recalculate_quotation_totals(quotation)
+            audit_log(
+                self.request.user,
+                QuotationAuditLog.ACTION_UPDATED,
+                quotation,
+                message="Updated quotation.",
+            )
 
     def update(self, request, *args, **kwargs):
         try:
-            return super().update(request, *args, **kwargs)
+            # DRF normally validates before perform_update(). Take the workflow
+            # lock first so company/contact and any future instance-dependent
+            # validation cannot run against a stale quotation.
+            with transaction.atomic():
+                quotation = self.get_object()
+                try:
+                    _quotations_for_update().get(pk=quotation.pk)
+                except Quotation.DoesNotExist as exc:
+                    # A concurrent DELETE can remove the row between the
+                    # initial permission-aware lookup and lock acquisition.
+                    raise Http404 from exc
+                return super().update(request, *args, **kwargs)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
 
@@ -4113,15 +4132,31 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         line = self.get_object()
-        try:
-            ensure_quotation_editable(line.quotation)
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
-        quotation = line.quotation
-        audit_log(request.user, QuotationAuditLog.ACTION_DELETED, line, message="Deleted quotation line.")
-        response = super().destroy(request, *args, **kwargs)
-        recalculate_quotation_totals(quotation)
-        return response
+        with transaction.atomic():
+            quotation = _quotations_for_update().get(pk=line.quotation_id)
+            try:
+                ensure_quotation_editable(quotation)
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
+            try:
+                locked_line = _quotation_lines_for_update().get(
+                    pk=line.pk,
+                    quotation=quotation,
+                )
+            except QuotationLine.DoesNotExist as exc:
+                # A concurrent delete can remove the line while this request
+                # waits for the quotation lock. Preserve normal DELETE
+                # semantics instead of leaking an internal server error.
+                raise Http404 from exc
+            audit_log(
+                request.user,
+                QuotationAuditLog.ACTION_DELETED,
+                locked_line,
+                message="Deleted quotation line.",
+            )
+            locked_line.delete()
+            recalculate_quotation_totals(quotation)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def remember_alias(self, request, pk=None):
