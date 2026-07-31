@@ -1,5 +1,10 @@
 # Quotation Module TODO
 
+> Historical checklist. It is not the current product roadmap; Gmail intake
+> and reviewed Gmail delivery were implemented after the entries below. Use
+> [TECHNICAL_HARDENING_PROGRESS.md](TECHNICAL_HARDENING_PROGRESS.md) for the
+> active hardening sequence.
+
 ## Phase 1 Completion Checklist
 
 - [x] Create separate Django app: `quotations`

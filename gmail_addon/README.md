@@ -1,88 +1,100 @@
-# Al Ameen Gmail quotation add-on
+# Al Ameen Gmail Quotation Add-on
 
-This directory contains the Google Workspace HTTP add-on deployment template.
-It shows a contextual card for the message open in Gmail and lets the
-authorized shared-mailbox user import the current message, selected thread
-messages, or let the existing inquiry workflow choose relevant thread
-messages. An unpublished developer deployment can be installed on the
-configured `pharmacydxb@gmail.com` consumer account for testing and personal
-use; a private organization-wide listing would require a Google Workspace
-organization.
+| Field | Value |
+|---|---|
+| Document version | 1.1.0 |
+| Status | Developer-deployment guide for the configured consumer Gmail mailbox |
+| Owner | Must be assigned in the Google/Railway operations record |
+| Last verified | 2026-08-01 |
+| Reviewed code | `d88b767` |
+| Add-on deployment ID/publication status | Unknown; verify in Google Cloud |
 
-The add-on callback only issues a short-lived website handoff. Email parsing
-and AI work happen after the browser opens the quotation inquiry page, keeping
-Google's card callback below its execution limit.
+This directory contains the Google Workspace HTTP add-on manifest template.
+The add-on displays the currently open thread, lets an employee use the current
+message, select several messages, or let AI classify messages inside that one
+thread, then opens the website review. It never creates a quotation or sends a
+customer email by itself.
 
-## 1. Prepare the Google Cloud project
+The configured mailbox is `pharmacydxb@gmail.com`, a consumer Gmail account.
+It can use an unpublished developer install. A private organization-wide
+Marketplace listing requires a Google Workspace organization; do not describe
+the consumer-account deployment as a private Workspace release.
 
-1. Use the existing Google Cloud project controlled by the owner of
-   `pharmacydxb@gmail.com`.
-2. Enable the Gmail API, Google Workspace Marketplace SDK, and Google
-   Workspace Add-ons API.
-3. Configure the OAuth consent audience as **External** and add
-   `pharmacydxb@gmail.com` as a test user while the app remains unpublished.
-4. Add the exact scopes from `deployment.template.json`. The
-   `gmail.addons.current.message.metadata` scope provides the open-message
-   context for the unconditional trigger. The add-on itself does not request
-   mailbox-wide Gmail read access; the backend reads the already-connected
-   shared mailbox with its existing read-only OAuth connection.
-   Granular consent is enabled, so the backend first authenticates Google's
-   system token and then asks Gmail for any manifest scopes the user has not
-   yet granted. It validates the user identity and mailbox only after all
-   required scopes are present.
-5. Deploy `deployment.template.json` directly. The checked-in template already
-   points to the Al Ameen production frontend, Railway backend, and publicly
-   readable brand icon, and contains no secrets.
+## 1. Two separate Google permission sets
 
-The contextual endpoint is:
+| Component | Permissions | Purpose |
+|---|---|---|
+| HTTP add-on manifest | `gmail.addons.execute`, `gmail.addons.current.message.metadata`, `userinfo.email` | Open-message/thread context and verified user identity |
+| Website mailbox OAuth | `gmail.readonly`, `gmail.send` | Canonical shared-mailbox evidence and explicit reviewed delivery |
 
-`https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/contextual/`
+The add-on manifest does not grant mailbox-wide reading or sending. The
+Railway backend separately uses the connected website mailbox after verifying
+the add-on request. An older website connection that lacks `gmail.send` must be
+reconnected before reviewed delivery.
 
-The action endpoint, configured in Railway rather than in the manifest, is:
+`gmail.readonly` is a restricted scope. Depending on publication and server-
+side data processing, Google verification and possibly a security assessment
+may be required. Source control cannot prove the project's current status.
+External OAuth apps left in test mode can have short-lived test-user
+authorizations (commonly seven days); verify the current consent-screen status
+when recurring reconnects occur.
 
-`https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/action/`
+## 2. Prepare the Google Cloud project
 
-## 2. Create and test the HTTP deployment
+1. Sign in with an account authorized to administer the project associated
+   with `pharmacydxb@gmail.com`.
+2. Enable Gmail API, Google Workspace Marketplace SDK, and Google Workspace
+   Add-ons API.
+3. Configure the OAuth consent audience. While unpublished, add
+   `pharmacydxb@gmail.com` as a test user and record the test-mode expiry risk.
+4. Review the exact scopes in `deployment.template.json`.
+5. Confirm the template's production URLs and logo before deployment. The
+   checked-in template contains no secrets.
+6. Record a primary and backup Google Cloud owner, deployment ID,
+   authorization service account, OAuth audience/status, and the website user
+   who owns the shared Gmail connection.
 
-Create the deployment with the Google Cloud CLI:
+Endpoints currently referenced by the implementation:
 
 ```text
+Contextual: https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/contextual/
+Action:     https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/action/
+Website:    https://www.ameenpharmacy.ae/admin?admin_tab=quotations&quotation_tab=inquiries
+```
+
+## 3. Create and install a developer deployment
+
+Run from the repository root with a current Google Cloud CLI. Use the checked-
+in template directly; there is no required `deployment.json` file.
+
+```text
+gcloud auth login
+gcloud config set project YOUR_GOOGLE_CLOUD_PROJECT_ID
 gcloud workspace-add-ons deployments create al-ameen-quotation \
-  --deployment-file=deployment.json
-```
-
-Install the unpublished deployment for a test account:
-
-```text
+  --deployment-file=gmail_addon/deployment.template.json
+gcloud workspace-add-ons deployments describe al-ameen-quotation
 gcloud workspace-add-ons deployments install al-ameen-quotation
-```
-
-Alternatively, in Google Cloud Console open **Google Workspace Marketplace
-SDK > HTTP Deployments** and click **Install** next to the unpublished
-deployment while signed in as `pharmacydxb@gmail.com`. On first use, approve
-the requested granular permissions. If any required permission is left
-unchecked, the add-on requests the missing permission again and does not read
-mail or create an import.
-
-Use this command to obtain the deployment service-account email:
-
-```text
 gcloud workspace-add-ons get-authorization
 ```
 
-The backend verifies that service account, the exact callback audience, the
-Google user ID token, and the configured shared mailbox before it touches any
-mail or quotation data.
+The final command returns the deployment authorization service-account
+identity required by the backend. Do not commit its tokens or a filled secret
+file. The Cloud Console alternative is **Google Workspace Marketplace SDK >
+HTTP Deployments**; install while signed in as the intended mailbox.
 
-## 3. Railway environment
+On first use, approve every required granular permission. Missing manifest
+permissions should produce a permission card rather than mailbox access.
 
-Set all of these on the backend service:
+## 4. Railway environment
+
+Keep the integration disabled until every non-secret identity and URL matches
+the Google deployment:
 
 ```text
-GMAIL_ADDON_ENABLED=1
+GMAIL_ADDON_ENABLED=0
 GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL=service-account@project.iam.gserviceaccount.com
-GMAIL_ADDON_SHARED_MAILBOX_EMAIL=shared-mailbox@example.com
-GMAIL_ADDON_OAUTH_CLIENT_ID=oauth-client-id.apps.googleusercontent.com
+GMAIL_ADDON_SHARED_MAILBOX_EMAIL=pharmacydxb@gmail.com
+GMAIL_ADDON_OAUTH_CLIENT_ID=authorization-resource-client-id.apps.googleusercontent.com
 GMAIL_ADDON_ALLOWED_AUDIENCES=https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/contextual/,https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/action/
 GMAIL_ADDON_CONTEXTUAL_URL=https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/contextual/
 GMAIL_ADDON_ACTION_URL=https://al-ameen-pharmacy-production.up.railway.app/api/quotations/gmail/addon/action/
@@ -92,36 +104,63 @@ GMAIL_ADDON_MAX_THREAD_MESSAGES=50
 GMAIL_INQUIRY_ATTACHMENT_VIEW_MAX_BYTES=20971520
 ```
 
-`GMAIL_ADDON_ALLOWED_AUDIENCES` must contain both exact endpoint URLs. Do not
-use a host wildcard. The shared mailbox must also be the connected shared
-Gmail account in the website's quotation settings. Attachment evidence opened
-during staff review is clamped to 1-25 MiB; the default above is 20 MiB.
+`GMAIL_ADDON_ALLOWED_AUDIENCES` must contain both exact endpoint URLs; do not
+use a wildcard. `GMAIL_ADDON_OAUTH_CLIENT_ID` is the client ID in the add-on
+deployment's **Authorization Resource**, not the website Gmail OAuth client.
+The backend intentionally does not fall back between them.
 
-`GMAIL_ADDON_OAUTH_CLIENT_ID` must be the OAuth client ID shown in the
-Marketplace SDK HTTP deployment's **Authorization Resource**. It is not the
-website Gmail OAuth client ID, and the backend intentionally has no fallback
-between the two.
+The website Gmail connection also needs the canonical `GOOGLE_OAUTH_*`
+variables from [backend/.env.example](../backend/.env.example). AI analysis
+additionally requires the explicitly approved provider/model/timeout/privacy
+settings. Enable `GMAIL_ADDON_ENABLED=1` only after the verification below.
 
-If the shared website Gmail authorization is missing, disconnected, expired,
-or revoked, authenticated add-on requests receive a normal reconnect card
-instead of a raw service error. **Open Gmail settings** takes the employee to
-the website's Contract Intelligence Gmail settings; an authorized website
-administrator must complete **Connect Gmail**, then reopen the Gmail add-on.
+## 5. Verification
 
-The website mailbox OAuth connection is also used for the quotation editor's
-reviewed reply/new-email workflow. It requests `gmail.readonly` plus
-`gmail.send`; an older read-only connection must be reconnected once. This is
-separate from the add-on manifest permissions, and the add-on itself never
-sends a customer email.
+Automated local checks use mocked Google/Gmail calls:
 
-Keep `GMAIL_ADDON_ENABLED=0` until the deployment and environment values match.
+```text
+cd backend
+python manage.py test quotations.test_gmail_addon quotations.test_gmail_inquiry_import --noinput
+```
 
-## 4. Private release
+For the developer deployment, record evidence for each item:
 
-After testing, configure a private Google Workspace Marketplace listing and
-let an administrator install it for the quotation team. A private listing
-remains inside the Workspace organization; publishing for consumer or
-cross-domain Gmail accounts requires Google's external-app publication flow.
+- [ ] Deployment `describe` output matches the intended project/template.
+- [ ] Service-account email and both exact audiences match Railway.
+- [ ] Signed callback for `pharmacydxb@gmail.com` opens the sidebar.
+- [ ] A different mailbox is rejected.
+- [ ] Current, selected, and AI-thread modes open an opaque website handoff.
+- [ ] Login returns to the exact import review.
+- [ ] Company, rows, uncertainty, and evidence require employee confirmation.
+- [ ] Selling prices remain blank.
+- [ ] Repeated clicks reuse the import and confirmed threads reopen the quote.
+- [ ] The add-on itself cannot send email.
+- [ ] Missing/revoked/disconnected or failed-refresh website Gmail credentials
+      show a reconnect path instead of raw credentials/errors.
 
-Never commit a filled deployment file, ID token, OAuth credential, Gmail
-message identifier, or generated handoff URL.
+The application analysis is synchronous and can take tens of seconds. The
+website shows/polls resumable state; this is not a background worker.
+
+## 6. Rotation, reconnect, and ownership
+
+- Reconnect the website mailbox when scopes change, Google revokes the grant,
+  refresh fails, external test authorization expires, or `DJANGO_SECRET_KEY`
+  is rotated.
+- Do not delete the website user that owns `GmailOAuthConnection` until a
+  tested ownership-transfer procedure exists; deletion currently cascades the
+  shared connection and related mailbox inventory.
+- Rotate the add-on authorization resource/service account only with a staged
+  Railway audience/identity update and developer smoke test.
+- Maintain a backup administrator who can access Google Cloud, Railway, and
+  the website without sharing one person's credentials.
+
+Never commit OAuth credentials, ID/access/refresh tokens, raw Gmail message or
+thread IDs, generated handoff URLs, or an environment dump.
+
+## 7. Related references
+
+- [Architecture reference](../GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md)
+- [Deployment guide](../DEPLOYMENT.md)
+- [Security guide](../SECURITY.md)
+- [Operations runbook](../OPERATIONS.md)
+- [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)

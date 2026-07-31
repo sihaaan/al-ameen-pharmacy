@@ -282,7 +282,7 @@ QUOTATION_AI_NATIVE_MAX_SPREADSHEET_ROWS_PER_SHEET = int(
 # mailbox file processing; production must opt in explicitly.
 QUOTATION_MAILBOX_AI_VISION_ENABLED = env_bool("QUOTATION_MAILBOX_AI_VISION_ENABLED", False)
 
-# ---- Gmail read-only OAuth for quotation contract intelligence ----
+# ---- Gmail OAuth for quotation discovery and explicit reviewed delivery ----
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()

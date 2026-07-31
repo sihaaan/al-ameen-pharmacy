@@ -1,5 +1,10 @@
 # Al Ameen Pharmacy - Project Status
 
+> Historical snapshot dated 2026-04-23. Versions and production claims below
+> are not current operational evidence. Use [README.md](README.md),
+> [DEPLOYMENT.md](DEPLOYMENT.md), and [OPERATIONS.md](OPERATIONS.md) for the
+> maintained references.
+
 **Last Updated:** 2026-04-23
 **Status:** Production
 **Schema Version:** v2.0 (clean reset)

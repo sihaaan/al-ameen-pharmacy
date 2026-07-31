@@ -296,7 +296,7 @@
 ### 1.6 — Add a privacy-safe golden quotation-intake evaluation corpus
 
 - Status: completed.
-- Commit: this task checkpoint (`test: add synthetic quotation intake evaluation`).
+- Commit: `d88b767` (`test: add synthetic quotation intake evaluation`).
 - Files changed:
   - `backend/quotations/evaluation_corpus/quotation_intake_v1.json`
   - `backend/quotations/evaluation_corpus/README.md`
@@ -360,6 +360,79 @@
   case.
 - Rollback: revert the task 1.6 commit. No database, API, or deployment rollback
   is required.
+
+### 1.7 — Correct and version architecture, deployment, and operational documentation
+
+- Status: completed as a documentation-only checkpoint.
+- Commit: this task checkpoint (`docs: correct quotation operations guidance`).
+- Files changed:
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `DEPLOYMENT.md`
+  - `SECURITY.md`
+  - `OPERATIONS.md`
+  - `gmail_addon/README.md`
+  - `README.md`
+  - `backend/.env.example`
+  - `backend/pharmacy_api/settings.py` (comment only)
+  - `backend/quotations/ai_parsing.py` (comment only)
+  - `QUOTATION_MODULE.md`
+  - `TODO_QUOTATIONS.md`
+  - `current_status.md`
+  - `backend/quotations/test_documentation_contract.py`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added document versions, owners, verification dates, code provenance, and
+    an explicit distinction between implemented, measured, derived, deployment-
+    snapshot, external, proposed, and unknown claims.
+  - Replaced a one-case Gmail latency conclusion with a scoped historical
+    measurement; documented the current pipeline/schema identities,
+    instrumentation, synthetic evaluation seed, cache provenance, and exact
+    limits of what those results establish.
+  - Corrected the Gmail data flow, separate add-on/website OAuth scopes,
+    consumer-account deployment limitations, AI processor boundary, manual
+    private-source durability, mutable delivery ledger, stale-preview gap, and
+    strict no-send reconciliation behavior.
+  - Replaced stale fixed-cost, backup, automatic-migration, Sentry-install, and
+    fully-secured claims with dated provider references and unchecked operator
+    verification steps.
+  - Added a deployment/incident/backup/retention/credential/ambiguous-send
+    operations runbook and marked older roadmap/status documents as historical.
+  - Added automated documentation contracts for metadata, runtime version
+    agreement, relative links, operational gaps, OAuth scope separation,
+    environment inventory, and forbidden stale claims.
+  - Performed a read-only Railway/production database inspection only. No
+    production variable, deployment, migration, provider, model, prompt,
+    schema, or OAuth scope was changed.
+- Tests run:
+  - Initial invocation without a database override was stopped before Django
+    started by the repository's local Debug/Neon safety guard; no test or
+    database operation ran.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_documentation_contract --noinput --verbosity 2`
+    — 9/9 passed.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test pharmacy_api.test_database_settings quotations.test_gmail_addon quotations.test_quotation_email_delivery --noinput --verbosity 1`
+    — 73/73 passed; expected mocked `503` cases were exercised.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py makemigrations --check --dry-run`
+    — no changes detected.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py check` — no issues.
+  - `git diff --check`, stale-claim scan, and relative Markdown-link checks — passed.
+  - Independent review found three remaining wording inaccuracies about outbound
+    thread context, model-snapshot capture, and smoke-test safety; all were
+    corrected, with no remaining high-severity finding.
+- Migrations: none.
+- API changes: none.
+- Frontend changes: none.
+- Accuracy/security impact: documentation now preserves and names all intake,
+  evidence, review, blank-price, verified-recipient, idempotency, ambiguous-send
+  lockout, and reconciliation-only guarantees. No runtime logic changed.
+- Remaining risks: the inspected Railway deployment has no explicit pre-deploy
+  command, health check, volume, or Sentry DSN; private evidence is therefore
+  not durable there. Backup/RPO/RTO, retention/deletion, OAuth publication and
+  security-assessment status, credential successors, provider retention, and
+  monitoring thresholds remain operator-owned unknowns. Tasks 2.1, 2.2, 2.3,
+  2.7, and 2.8 address the corresponding code/configuration preparation without
+  authorizing a production deployment or provider purchase.
+- Rollback: revert the task 1.7 commit. No database, API, frontend, provider, or
+  infrastructure rollback is required.
 
 ## Phase 2
 

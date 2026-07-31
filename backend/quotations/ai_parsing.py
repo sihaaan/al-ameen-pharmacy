@@ -464,8 +464,8 @@ class OpenAIResponsesParseProvider(AIParseProvider):
                     "file_data": f"data:{mime_type};base64,{encoded}",
                 }
                 if mime_type == "application/pdf":
-                    # GPT-5.4 defaults PDF page images to low detail. Dense RFQ
-                    # tables need high detail so column relationships survive.
+                    # Request high detail explicitly for dense RFQ tables so
+                    # behavior does not depend on a configurable model's default.
                     item["detail"] = str(file_input.get("detail") or "high")
                 user_content.append(item)
         for image_url in image_data_urls or []:
