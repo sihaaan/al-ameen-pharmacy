@@ -364,7 +364,7 @@
 ### 1.7 — Correct and version architecture, deployment, and operational documentation
 
 - Status: completed as a documentation-only checkpoint.
-- Commit: this task checkpoint (`docs: correct quotation operations guidance`).
+- Commit: `dcb2b96` (`docs: correct quotation operations guidance`).
 - Files changed:
   - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
   - `DEPLOYMENT.md`
@@ -433,6 +433,61 @@
   authorizing a production deployment or provider purchase.
 - Rollback: revert the task 1.7 commit. No database, API, frontend, provider, or
   infrastructure rollback is required.
+
+### 1.8 — Make audit/history records read-only in Django administration
+
+- Status: completed.
+- Commit: this task checkpoint (`fix: protect admin audit history`).
+- Files changed:
+  - `backend/quotations/admin.py`
+  - `backend/quotations/test_admin_history_readonly.py`
+  - `SECURITY.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Extended the existing history-admin mixin so every concrete model field is
+    displayed read-only, including fields added by future migrations.
+  - Applied that view-only policy to `AIParseLog`, `CompanyPriceHistory`, and
+    `QuotationAuditLog`. Even a superuser can inspect but cannot add, edit,
+    delete, or bulk-delete those records through Django administration.
+  - Retained the existing view-only protection for Gmail imports and mailbox
+    audit/match/message history.
+  - Deliberately kept `AIParseCache` deletable by a superuser for legitimate
+    cache invalidation/privacy purge while continuing to block cache add/edit.
+  - Left historical-import, unconfirmed LPO, and PO review/evidence models out
+    of this task because they are active review workflows, not append-only
+    audit/history ledgers.
+- Tests run:
+  - Pre-fix characterization:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_admin_history_readonly --noinput --verbosity 2`
+    — failed as expected, proving the audit-log/price-history add/change/delete
+    paths and AI-log delete path were available. The initial broad inventory
+    also identified mutable PO review records, which were intentionally
+    excluded after scope review because their lifecycle remains operational.
+  - Focused permissions and real Django-admin endpoint tests:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_admin_history_readonly --noinput --verbosity 2`
+    — 5/5 passed.
+  - Admin/LPO, AI observability, price-context, and historical-import regressions:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_admin_history_readonly quotations.test_lpo_history_guards quotations.test_ai_observability quotations.test_price_history_context quotations.tests.HistoricalPriceImportTests --noinput --verbosity 1`
+    — 80/80 passed.
+  - Independent final review — no actionable scope, permission, workflow, or
+    migration issue found.
+- Migrations: none.
+- API changes: none.
+- Frontend changes: none.
+- Admin behavior changes: audit/history change pages remain viewable to users
+  with view permission, while add/change/delete endpoints return forbidden and
+  `delete_selected` is absent.
+- Accuracy/security impact: closes direct Django-admin tampering of AI parse
+  logs, generated company price history, and quotation audit events without
+  changing employee quotation/LPO/evidence workflows or any intake, pricing,
+  delivery, and reconciliation invariant.
+- Remaining risks: this is an administration-layer control, not a database
+  append-only trigger; trusted application code and direct database operators
+  can still mutate rows. PO review/evidence and historical-import staging are
+  intentionally mutable workflow records. `AIParseCache` deletion remains an
+  explicit operational capability.
+- Rollback: revert the task 1.8 commit. No database or deployment rollback is
+  required.
 
 ## Phase 2
 

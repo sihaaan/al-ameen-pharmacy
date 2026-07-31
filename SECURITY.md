@@ -64,8 +64,10 @@ configuration. Complete the unchecked verification items for each release.
   disabled server-side cursors.
 - Private source references are path-confined and served only through
   authenticated application paths.
-- API audit/history viewsets are read-only where defined. Django-admin audit
-  immutability remains Task 1.8 and must not be assumed yet.
+- API audit/history viewsets are read-only where defined. The hardening branch
+  also makes AI parse logs, generated company price history, and quotation
+  audit logs view-only in Django administration; verify the deployed commit
+  before relying on that production control.
 
 ## 2. Data processors and retained categories
 
@@ -141,7 +143,7 @@ Record operator, evidence link, and UTC time for every checked item.
 - [ ] Google scopes, mailbox, owners, publication/verification, and reconnect tested.
 - [ ] OpenAI project/model, processor terms, retention, and privacy gates approved.
 - [ ] Sentry/logging excludes unnecessary PII and access is restricted.
-- [ ] Audit/history Django administration is read-only after Task 1.8 is deployed.
+- [ ] The deployed commit includes and verifies Task 1.8 read-only audit/history administration.
 - [ ] Ambiguous-email reconciliation and no-blind-retry runbook tested.
 - [ ] RPO/RTO and a successful restore drill are recorded.
 - [ ] Incident contacts and credential revocation access are current.

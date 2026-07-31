@@ -39,6 +39,9 @@ class CompanyContactInline(admin.TabularInline):
 
 
 class ReadOnlyHistoryAdminMixin:
+    def get_readonly_fields(self, request, obj=None):
+        return tuple(field.name for field in self.model._meta.fields)
+
     def has_add_permission(self, request):
         return False
 
@@ -230,33 +233,10 @@ class AIParseCacheAdmin(admin.ModelAdmin):
 
 
 @admin.register(AIParseLog)
-class AIParseLogAdmin(admin.ModelAdmin):
+class AIParseLogAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
     list_display = ["created_at", "provider", "model", "mode", "source_type", "cache_hit", "success", "actor"]
     list_filter = ["provider", "model", "mode", "cache_hit", "success"]
     search_fields = ["source_sha256", "context_hash", "error", "actor__username"]
-    readonly_fields = [
-        "actor",
-        "provider",
-        "model",
-        "mode",
-        "source_type",
-        "source_sha256",
-        "context_hash",
-        "cache_hit",
-        "text_length",
-        "page_count",
-        "image_count",
-        "usage",
-        "success",
-        "error",
-        "created_at",
-    ]
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
 
 
 class InquiryLineInline(admin.TabularInline):
@@ -499,17 +479,15 @@ class ProformaInvoiceAdmin(admin.ModelAdmin):
 
 
 @admin.register(CompanyPriceHistory)
-class CompanyPriceHistoryAdmin(admin.ModelAdmin):
+class CompanyPriceHistoryAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
     list_display = ["company", "product", "quote_item", "unit_price", "currency", "quoted_at", "quotation"]
     list_filter = ["currency", "quoted_at"]
     search_fields = ["company__name", "product__name", "quote_item__name", "quotation__quotation_number"]
     autocomplete_fields = ["company", "product", "quote_item", "quotation", "quotation_line", "created_by"]
-    readonly_fields = ["created_at"]
 
 
 @admin.register(QuotationAuditLog)
-class QuotationAuditLogAdmin(admin.ModelAdmin):
+class QuotationAuditLogAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
     list_display = ["created_at", "actor", "action", "target_type", "target_id", "company", "quotation"]
     list_filter = ["action", "created_at"]
     search_fields = ["message", "actor__username", "company__name", "quotation__quotation_number"]
-    readonly_fields = ["created_at"]
