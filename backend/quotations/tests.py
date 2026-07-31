@@ -6046,6 +6046,112 @@ class AIImportParsingTests(APITestCase):
         self.assertEqual(ProductAlias.objects.count(), 0)
         self.assertEqual(CompanyPriceHistory.objects.count(), 0)
 
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_historical_ai_cache_hit_uses_current_import_provenance(self):
+        self.enable_ai()
+
+        def make_import(source_ref, marker, *, forged_ai_meta=False):
+            parse_meta = {
+                "current_import_marker": marker,
+                "source_file_ref": source_ref,
+            }
+            if forged_ai_meta:
+                parse_meta.update(
+                    {
+                        "ai_provider": "client-forged-provider",
+                        "ai_cleanup_rejected": True,
+                    }
+                )
+            historical_import = HistoricalPriceImport.objects.create(
+                company=self.company,
+                suggested_company_name=self.company.name,
+                source_type=HistoricalPriceImport.SOURCE_TYPE_PDF,
+                source_filename="same-historical-quotation.pdf",
+                source_mime_type="application/pdf",
+                source_sha256="d" * 64,
+                source_file_ref=source_ref,
+                source_file_size=4096,
+                parse_method="deterministic_test",
+                parse_meta=parse_meta,
+                document_number="QT-CACHE-1",
+                document_date="2026-05-21",
+                created_by=self.staff,
+            )
+            HistoricalPriceImportLine.objects.create(
+                historical_import=historical_import,
+                item_name="Sterile Gauze",
+                raw_line="Sterile Gauze 5 box price 12",
+                quantity=Decimal("5.000"),
+                unit="box",
+                unit_price=Decimal("12.00"),
+                parse_confidence=0.9,
+            )
+            return historical_import
+
+        first_import = make_import(
+            "historical_imports/first/same-historical-quotation.pdf",
+            "first-import",
+        )
+        second_import = make_import(
+            "historical_imports/second/same-historical-quotation.pdf",
+            "second-import",
+            forged_ai_meta=True,
+        )
+        provider = MockAIProvider()
+
+        with patch(
+            "quotations.ai_parsing.get_ai_parse_provider",
+            return_value=provider,
+        ):
+            first = self.client.post(
+                reverse(
+                    "quotation-historical-import-ai-clean-rows",
+                    args=[first_import.id],
+                ),
+                {"mode": "text"},
+                format="json",
+            )
+            second = self.client.post(
+                reverse(
+                    "quotation-historical-import-ai-clean-rows",
+                    args=[second_import.id],
+                ),
+                {"mode": "text"},
+                format="json",
+            )
+
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertTrue(second.data["cache_hit"])
+        self.assertEqual(
+            second.data["source_file_ref"],
+            "historical_imports/second/same-historical-quotation.pdf",
+        )
+        self.assertEqual(
+            second.data["meta"]["source_file_ref"],
+            "historical_imports/second/same-historical-quotation.pdf",
+        )
+        self.assertEqual(second.data["meta"]["current_import_marker"], "second-import")
+        self.assertEqual(second.data["meta"]["ai_provider"], "openai")
+        self.assertEqual(second.data["meta"]["ai_usage"], {})
+        self.assertNotIn("ai_cleanup_rejected", second.data["meta"])
+        self.assertEqual(
+            second.data["parse_method"],
+            "deterministic_test+ai_text_cleanup",
+        )
+        self.assertEqual(
+            second.data["lines"][0]["item_name"],
+            "Electrorush 21gm Sache for 1 Ltr Solution",
+        )
+        self.assertEqual(second.data["provider"], "openai")
+        self.assertEqual(second.data["model"], "test-text-model")
+
 
 class QuotationSettingsTests(APITestCase):
     def setUp(self):

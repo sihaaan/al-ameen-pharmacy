@@ -28,7 +28,7 @@ from .import_parsers import (
     normalize_image_bytes_for_ai,
     parse_file_preview,
 )
-from .models import AIParseLog, Company, Inquiry, ProductAlias, Quotation, QuotationSettings
+from .models import AIParseCache, AIParseLog, Company, Inquiry, ProductAlias, Quotation, QuotationSettings
 from .serializers import ImportedInquiryCreateSerializer
 
 
@@ -205,6 +205,127 @@ class InquiryImageAITests(TestCase):
             "warnings": [],
             "meta": {"requires_vision": True},
         }
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_text_cache_rebinds_current_upload_and_omits_source_payload(self):
+        provider = RecordingVisionProvider()
+        first_preview = {
+            "source_type": Inquiry.SOURCE_TYPE_EXCEL,
+            "source_filename": "customer-request.xlsx",
+            "source_mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "source_sha256": "a" * 64,
+            "source_file_ref": "inquiry_sources/first/customer-request.xlsx",
+            "source_file_size": 2048,
+            "parse_method": "openpyxl_structured_v2",
+            "original_text": "PRIVATE BUYER NOTE THAT IS NOT PART OF AN ITEM ROW",
+            "lines": [
+                {
+                    "raw_name": "Gloves Medium",
+                    "quantity": "5",
+                    "unit": "boxes",
+                    "raw_line": "Gloves Medium 5 boxes",
+                }
+            ],
+            "warnings": [],
+            "meta": {
+                "source_file_ref": "inquiry_sources/first/customer-request.xlsx",
+                "source_file_size": 2048,
+                "selected_sheets": [{"sheet_name": "Request", "selected": True}],
+                "ai_cleanup_rejected": True,
+                "ai_cleanup_rejection_reason": "client-forged-on-cache-miss",
+            },
+        }
+        second_preview = {
+            **first_preview,
+            "source_file_ref": "inquiry_sources/second/customer-request.xlsx",
+            "meta": {
+                **first_preview["meta"],
+                "source_file_ref": "inquiry_sources/stale-browser-value.xlsx",
+                "current_upload_marker": "second-upload",
+                "ai_provider": "client-forged-provider",
+                "ai_usage": {"private_trace": "must-not-win"},
+                "ai_cleanup_rejected": True,
+                "ai_cleanup_rejection_reason": "client-forged-reason",
+            },
+        }
+
+        with patch(
+            "quotations.ai_parsing.get_ai_parse_provider",
+            return_value=provider,
+        ):
+            first = clean_preview_with_ai(
+                first_preview,
+                actor=self.staff,
+                requested_mode="text",
+            )
+            self.assertNotIn("ai_cleanup_rejected", first["meta"])
+            self.assertNotIn("ai_cleanup_rejection_reason", first["meta"])
+
+            cached = AIParseCache.objects.get()
+            cached_payload = cached.result
+            for field in (
+                "source_type",
+                "source_filename",
+                "source_mime_type",
+                "source_sha256",
+                "source_file_ref",
+                "source_file_size",
+                "parse_method",
+                "original_text",
+                "cache_hit",
+            ):
+                self.assertNotIn(field, cached_payload)
+            serialized_cache = json.dumps(cached_payload, sort_keys=True)
+            self.assertNotIn("PRIVATE BUYER NOTE", serialized_cache)
+            self.assertNotIn("inquiry_sources/first", serialized_cache)
+            self.assertNotIn("selected_sheets", serialized_cache)
+            self.assertNotIn("ai_usage", cached_payload["meta"])
+            self.assertEqual(cached_payload["lines"][0]["raw_line"], "Gloves Medium 5 boxes")
+
+            # Legacy rows may still contain an earlier upload's full payload.
+            # Reads must filter them without requiring destructive deletion.
+            cached.result = {
+                **cached_payload,
+                "source_file_ref": "inquiry_sources/legacy/private.xlsx",
+                "original_text": "LEGACY PRIVATE BODY",
+                "legacy_private_key": "LEGACY PRIVATE VALUE",
+                "meta": {
+                    **cached_payload["meta"],
+                    "source_file_ref": "inquiry_sources/legacy/private.xlsx",
+                    "legacy_private_meta": "LEGACY PRIVATE META",
+                    "ai_usage": {"provider_private_trace": "LEGACY TRACE"},
+                },
+            }
+            cached.save(update_fields=["result", "updated_at"])
+
+            second = clean_preview_with_ai(
+                second_preview,
+                actor=self.staff,
+                requested_mode="text",
+            )
+
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(
+            second["source_file_ref"],
+            "inquiry_sources/second/customer-request.xlsx",
+        )
+        self.assertEqual(
+            second["meta"]["source_file_ref"],
+            "inquiry_sources/second/customer-request.xlsx",
+        )
+        self.assertEqual(second["meta"]["current_upload_marker"], "second-upload")
+        self.assertEqual(second["meta"]["ai_provider"], "openai")
+        self.assertEqual(second["meta"]["ai_usage"], {})
+        self.assertNotIn("ai_cleanup_rejected", second["meta"])
+        self.assertNotIn("ai_cleanup_rejection_reason", second["meta"])
+        self.assertNotIn("legacy_private_key", second)
+        self.assertNotIn("legacy_private_meta", second["meta"])
+        self.assertEqual(
+            second["parse_method"],
+            "openpyxl_structured_v2+ai_text_cleanup",
+        )
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_in_memory_image_uses_normalized_vision_input_and_cache(self):

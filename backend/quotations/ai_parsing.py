@@ -1141,8 +1141,74 @@ def _render_image_from_private_source(preview):
     }
 
 
+AI_RESULT_META_FIELDS = (
+    "ai_provider",
+    "ai_model",
+    "ai_mode",
+    "ai_document_notes",
+    "ai_document_metadata",
+    "ai_ignored_count",
+    "ai_usage",
+)
+AI_CACHE_RESULT_META_FIELDS = tuple(
+    field for field in AI_RESULT_META_FIELDS if field != "ai_usage"
+)
+AI_CURRENT_SOURCE_META_AI_FIELDS = {
+    "ai_normalized_mime_type",
+    "ai_normalized_width",
+    "ai_normalized_height",
+    "ai_normalized_size",
+}
+
+
+def _cacheable_ai_result(result):
+    """Return only reusable AI output, without upload-specific provenance."""
+
+    cacheable = {
+        key: result[key]
+        for key in (
+            "lines",
+            "warnings",
+            "document_metadata",
+            "summary",
+            "result_source",
+            "ai_status",
+            "ai_status_label",
+            "provider",
+            "model",
+        )
+        if key in result
+    }
+    result_meta = result.get("meta") or {}
+    cacheable["meta"] = {
+        key: result_meta[key]
+        for key in AI_CACHE_RESULT_META_FIELDS
+        if key in result_meta
+    }
+    return cacheable
+
+
+def _current_source_meta(preview):
+    """Return current parser provenance without trusting AI outcome fields."""
+
+    source_meta = {
+        key: value
+        for key, value in (preview.get("meta") or {}).items()
+        if key not in AI_RESULT_META_FIELDS
+        and (
+            not str(key).startswith("ai_")
+            or key in AI_CURRENT_SOURCE_META_AI_FIELDS
+        )
+    }
+    # The validated top-level provenance is canonical if browser-echoed nested
+    # metadata disagrees with it.
+    source_meta["source_file_ref"] = preview.get("source_file_ref", "")
+    source_meta["source_file_size"] = preview.get("source_file_size")
+    return source_meta
+
+
 def _bind_result_source(result, preview):
-    """Keep cacheable AI rows while binding provenance to this upload."""
+    """Bind reusable AI output to the current upload's provenance."""
 
     source_fields = (
         "source_type",
@@ -1156,26 +1222,20 @@ def _bind_result_source(result, preview):
     rebound = {**result}
     for field in source_fields:
         rebound[field] = preview.get(field, "" if field != "source_file_size" else None)
-    rebound_meta = {**(result.get("meta") or {})}
-    preview_meta = preview.get("meta") or {}
-    # The preview can be echoed back by a browser, so only rebind inert source
-    # provenance. Provider/model/mode/usage and other AI audit fields must
-    # always remain the server-generated values in ``result.meta``.
-    for field in (
-        "source_file_ref",
-        "source_file_size",
-        "requires_vision",
-        "image_format",
-        "image_width",
-        "image_height",
-        "image_frame_count",
-        "ai_normalized_mime_type",
-        "ai_normalized_width",
-        "ai_normalized_height",
-        "ai_normalized_size",
-    ):
-        if field in preview_meta:
-            rebound_meta[field] = preview_meta[field]
+    result_source = str(result.get("result_source") or "")
+    rebound["parse_method"] = (
+        _append_parse_method(preview.get("parse_method", ""), result_source)
+        if result_source
+        else preview.get("parse_method", "")
+    )
+    result_meta = result.get("meta") or {}
+    # Preview metadata belongs to this upload. AI identity and usage fields are
+    # reserved for the server-generated result so a browser-echoed preview
+    # cannot replace them.
+    rebound_meta = _current_source_meta(preview)
+    for field in AI_RESULT_META_FIELDS:
+        if field in result_meta:
+            rebound_meta[field] = result_meta[field]
     rebound["meta"] = rebound_meta
     return rebound
 
@@ -1303,7 +1363,17 @@ def _run_ai_cleanup(
             ),
             success=True,
         )
-        return {**cached.result, "cache_hit": True}
+        rebound = _bind_result_source(
+            _cacheable_ai_result(cached.result),
+            preview,
+        )
+        rebound["meta"] = {
+            **(rebound.get("meta") or {}),
+            # A cache hit did not make a provider call. Do not inherit raw
+            # usage or future provider-added fields from the originating run.
+            "ai_usage": {},
+        }
+        return {**rebound, "cache_hit": True}
 
     provider = get_ai_parse_provider(provider_name)
     usage = {}
@@ -1343,7 +1413,7 @@ def _run_ai_cleanup(
                 "mode": mode,
                 "provider": provider_name,
                 "model": model,
-                "result": result,
+                "result": _cacheable_ai_result(result),
             },
         )
         timings_ms["cache_write"] = ai_parse_elapsed_ms(cache_write_started_at)
@@ -1663,7 +1733,7 @@ def _normalize_ai_result(
         "document_metadata": document_metadata,
         "summary": summarize_lines(rows, skipped_count=ignored_count),
         "meta": {
-            **(preview.get("meta") or {}),
+            **_current_source_meta(preview),
             "ai_provider": provider,
             "ai_model": model,
             "ai_mode": mode,

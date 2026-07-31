@@ -157,7 +157,7 @@
 ### 1.4 — Add comparable privacy-safe AI intake instrumentation
 
 - Status: completed.
-- Commit: this task checkpoint (`feat: add AI intake observability`).
+- Commit: `d29a6f3` (`feat: add AI intake observability`).
 - Files changed:
   - `backend/quotations/ai_parsing.py`
   - `backend/quotations/gmail_inquiry_import.py`
@@ -224,6 +224,74 @@
   audit log and may contain provider-supplied diagnostic detail.
 - Rollback: revert the task 1.4 commit. Existing JSON logs remain readable and
   no database rollback is required.
+
+### 1.5 — Fix manual AI cache provenance and sensitive-content persistence
+
+- Status: completed.
+- Commit: this task checkpoint (`fix: bind AI cache hits to current uploads`).
+- Files changed:
+  - `backend/quotations/ai_parsing.py`
+  - `backend/quotations/test_inquiry_image_import.py`
+  - `backend/quotations/tests.py`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Proved that a same-content Excel cache hit returned the first upload's
+    private `source_file_ref` instead of the current upload's reference.
+  - Manual AI cache rows now contain only reusable AI semantic output and the
+    row-level raw evidence needed for staff review. They no longer duplicate
+    upload source fields, original full text, parse method, arbitrary preview
+    metadata, raw provider usage, or a stored cache-hit flag.
+  - Every manual text, Excel, stored-PDF, in-memory PDF, image, and historical
+    cache hit now reconstructs source fields, parse method, and preview metadata
+    from the current source. Server-generated AI identity and document fields
+    take precedence over browser-echoed metadata.
+  - Cache reads apply the same allow-list before hydration, so legacy full
+    cache payloads cannot return stale paths, arbitrary private keys, or raw
+    provider usage. Legacy database rows are not rewritten or deleted.
+  - Browser-echoed `ai_*` outcome metadata is reserved for server values;
+    only the explicit `ai_normalized_*` image-source dimensions are accepted
+    from the current prepared preview.
+  - Cache-hit `meta.ai_usage` is now an empty object because no provider call
+    occurred. The task 1.4 audit log continues to record the cache hit with
+    zero provider cost, while the originating provider call retains its own
+    sanitized audit usage.
+- Tests run:
+  - Pre-fix characterization:
+    `python manage.py test quotations.test_inquiry_image_import.InquiryImageAITests.test_text_cache_rebinds_current_upload_and_omits_source_payload --noinput --verbosity 2`
+    — failed as expected because the second upload received the first private
+    source reference.
+  - Focused text/image/PDF cache tests:
+    `python manage.py test quotations.test_inquiry_image_import.InquiryImageAITests.test_text_cache_rebinds_current_upload_and_omits_source_payload quotations.test_inquiry_image_import.InquiryImageAITests.test_in_memory_image_uses_normalized_vision_input_and_cache quotations.test_inquiry_image_import.InquiryImageAITests.test_ai_cache_key_includes_prompt_and_schema_contract quotations.test_mailbox_po_vision.InMemoryPDFVisionTests.test_in_memory_path_uses_provider_cache_and_log_without_private_storage --noinput --verbosity 2`
+    — 4/4 passed.
+  - Focused current-source and historical cache-hit tests:
+    `python manage.py test quotations.test_inquiry_image_import.InquiryImageAITests.test_text_cache_rebinds_current_upload_and_omits_source_payload quotations.tests.AIImportParsingTests.test_historical_ai_cache_hit_uses_current_import_provenance --noinput --verbosity 1`
+    — 2/2 passed.
+  - Manual AI, image, PDF, mailbox-vision, and LPO parser regressions:
+    `python manage.py test quotations.test_ai_observability quotations.tests.AIImportParsingTests quotations.test_inquiry_image_import quotations.test_mailbox_po_vision quotations.test_lpo_parser_regressions --noinput --verbosity 1`
+    — 159/159 passed.
+  - `python manage.py makemigrations --check --dry-run` — no changes detected.
+  - `python manage.py check` — no issues.
+  - `python -m compileall -q quotations/ai_parsing.py quotations/test_inquiry_image_import.py quotations/tests.py`
+    and `git diff --check` — passed.
+  - Independent final review — no remaining actionable Task 1.5 issue.
+- Migrations: none.
+- API changes: no request/response schema change. On a cache hit, source
+  provenance and parse metadata now belong to the current upload, unknown
+  legacy cache keys are filtered, and `meta.ai_usage` is `{}` rather than the
+  first provider call's raw usage.
+- Frontend changes: none.
+- Accuracy/security impact: semantic rows and their raw row evidence remain in
+  the cache because removing them would weaken employee review and evidence
+  guarantees. The change removes duplicated full source text/private paths,
+  prevents cross-upload provenance leakage, and does not alter extraction,
+  matching, blank-price, or send-safety behavior.
+- Remaining risks: legacy cache rows may still contain old full payloads at
+  rest, but current contract keys make older versions unreachable and every
+  read is filtered. Purging or rewriting those rows would delete persisted
+  data and is intentionally not performed without separate approval. The
+  cache still retains semantic item text and row evidence by design.
+- Rollback: revert the task 1.5 commit. No database rollback is required; cache
+  rows written in the source-neutral format remain valid reusable results.
 
 ## Phase 2
 
