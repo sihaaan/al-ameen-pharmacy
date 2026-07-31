@@ -5872,6 +5872,14 @@ class AIImportParsingTests(APITestCase):
         self.assertEqual(CompanyPriceHistory.objects.count(), 0)
         self.assertEqual(Quotation.objects.count(), 0)
         self.assertEqual(AIParseLog.objects.filter(success=True).count(), 1)
+        log = AIParseLog.objects.get(success=True)
+        observation = log.usage["observability"]
+        self.assertEqual(observation["route"], "manual")
+        self.assertEqual(observation["source_shape"]["input_rows"], 1)
+        self.assertEqual(observation["cost_basis"]["input_tokens"], 10)
+        self.assertEqual(observation["cost_basis"]["output_tokens"], 20)
+        self.assertTrue(observation["provider_call_attempted"])
+        self.assertGreaterEqual(observation["timings_ms"]["total"], 0)
 
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,

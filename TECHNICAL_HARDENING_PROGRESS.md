@@ -97,6 +97,7 @@
 ### 1.3 — Strengthen Gmail ambiguous-send reconciliation
 
 - Status: completed.
+- Commit: `1f230de` (`fix: harden Gmail send reconciliation`).
 - Files changed:
   - `backend/quotations/quotation_email_delivery.py`
   - `backend/quotations/test_quotation_email_delivery.py`
@@ -152,6 +153,77 @@
   known Gmail thread ID until Gmail accepts it; this limitation is explicitly
   compensated by the other independently verified signals.
 - Rollback: revert the task 1.3 commit. No database rollback is required.
+
+### 1.4 — Add comparable privacy-safe AI intake instrumentation
+
+- Status: completed.
+- Commit: this task checkpoint (`feat: add AI intake observability`).
+- Files changed:
+  - `backend/quotations/ai_parsing.py`
+  - `backend/quotations/gmail_inquiry_import.py`
+  - `backend/quotations/test_ai_observability.py`
+  - `backend/quotations/test_gmail_inquiry_import.py`
+  - `backend/quotations/test_inquiry_image_import.py`
+  - `backend/quotations/tests.py`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added one content-free observability envelope to existing `AIParseLog`
+    usage JSON for manual inquiry parsing, Gmail thread parsing, and the
+    mailbox-PO vision route. No new telemetry table or external service is
+    required.
+  - Both intake paths now record comparable source-preparation, provider,
+    validation, and total timing boundaries. Existing Gmail route-stage
+    timings remain available for its additional fetch, extraction, matching,
+    and persistence work.
+  - Cost comparison is based on allow-listed provider token counters,
+    including cached and reasoning token detail when reported. Dollar cost is
+    deliberately not hard-coded because model pricing changes; the existing
+    provider/model columns plus the normalized token basis support auditable
+    cost calculation.
+  - Cache hits explicitly record that no provider call was attempted and zero
+    provider-token cost. Provider usage is retained on validation failures so
+    paid failed calls are not hidden.
+  - Added versioned SHA-256 identities for the exact prompt, effective JSON
+    schema, and pipeline contract. Prompt, schema, customer text, filenames,
+    storage references, Gmail message IDs, and Gmail thread IDs are not copied
+    into the new observability payload.
+  - The complete contract identity, including pipeline version, is part of the
+    manual AI cache key so a changed processing contract cannot be attributed
+    to or served from an older cache entry.
+  - Existing public/manual result usage remains unchanged; only the internal
+    audit copy is numerically allow-listed.
+- Tests run:
+  - Focused contract, timing, privacy, cost, and cache tests:
+    `python manage.py test quotations.test_ai_observability quotations.test_inquiry_image_import.InquiryImageAITests.test_in_memory_image_uses_normalized_vision_input_and_cache quotations.test_inquiry_image_import.InquiryImageAITests.test_ai_cache_key_includes_prompt_and_schema_contract quotations.test_gmail_inquiry_import.GmailInquiryImportTests.test_native_ai_call_logs_actor_usage_and_validation_failures --noinput --verbosity 2`
+    — 6/6 passed across the two focused runs (one initial selector typo was
+    corrected; all discovered tests passed).
+  - Cross-route AI/Gmail regression suite:
+    `python manage.py test quotations.test_ai_observability quotations.tests.AIImportParsingTests quotations.test_inquiry_image_import quotations.test_mailbox_po_vision quotations.test_gmail_inquiry_import --noinput --verbosity 1`
+    — 186/186 passed.
+  - `python manage.py makemigrations --check --dry-run` — no changes detected.
+  - `python manage.py check` — no issues.
+  - `python -m compileall -q quotations/ai_parsing.py quotations/gmail_inquiry_import.py quotations/test_ai_observability.py quotations/test_inquiry_image_import.py quotations/test_gmail_inquiry_import.py quotations/tests.py`
+    and `git diff --check` — passed.
+  - Independent follow-up review — no remaining actionable correctness,
+    security, or API-compatibility issues.
+- Migrations: none; instrumentation uses the existing `AIParseLog.usage` JSON
+  field.
+- API changes: none. Public request/response schemas and the existing provider
+  usage returned with an AI parse result are unchanged.
+- Frontend changes: none.
+- Accuracy/security impact: extraction prompts, schemas, models, OAuth scopes,
+  review gates, blank selling prices, evidence, uncertainty, matching, and
+  email-send guarantees are unchanged. Audit metrics are content-free and
+  external usage dictionaries are allow-listed before persistence.
+- Remaining risks: route durations are application-side measurements rather
+  than distributed traces; provider token counters depend on what the provider
+  reports; dollar-cost conversion must use the price schedule effective at the
+  recorded time; manual source-shape byte counts originate from already
+  validated preview metadata and are diagnostic only. Contract hashes prove
+  identity, not extraction quality. Existing bounded error text remains in the
+  audit log and may contain provider-supplied diagnostic detail.
+- Rollback: revert the task 1.4 commit. Existing JSON logs remain readable and
+  no database rollback is required.
 
 ## Phase 2
 

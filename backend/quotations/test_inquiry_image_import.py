@@ -1,4 +1,5 @@
 import base64
+import json
 import tempfile
 from io import BytesIO
 from unittest.mock import patch
@@ -15,8 +16,10 @@ from rest_framework.test import APITestCase
 from api.models import Product
 
 from .ai_parsing import (
+    AI_PARSE_JSON_SCHEMA,
     AIParseError,
     AIProviderUnavailable,
+    ai_parse_contract_descriptor,
     clean_image_bytes_with_ai,
     clean_preview_with_ai,
 )
@@ -259,6 +262,37 @@ class InquiryImageAITests(TestCase):
             self.assertFalse(image.getexif())
         self.assertIn("untrusted document content", call["instructions"])
         self.assertEqual(AIParseLog.objects.filter(mode="vision", success=True).count(), 2)
+        provider_log, cache_log = list(
+            AIParseLog.objects.filter(mode="vision", success=True).order_by("created_at", "id")
+        )
+        provider_observation = provider_log.usage["observability"]
+        expected_contract = ai_parse_contract_descriptor(
+            pipeline_version="manual_ai_cleanup_v1",
+            schema_name=call["schema_name"],
+            instructions=call["instructions"],
+            schema=call["json_schema"] or AI_PARSE_JSON_SCHEMA,
+        )
+        self.assertEqual(provider_observation["route"], "manual")
+        self.assertEqual(provider_observation["contract"], expected_contract)
+        self.assertTrue(provider_observation["provider_call_attempted"])
+        self.assertFalse(provider_observation["application_cache_hit"])
+        self.assertEqual(provider_observation["cost_basis"]["input_tokens"], 10)
+        self.assertEqual(provider_observation["cost_basis"]["output_tokens"], 15)
+        self.assertEqual(provider_observation["source_shape"]["image_count"], 1)
+        self.assertTrue(
+            {"source_preparation", "cache_lookup", "provider", "validation", "cache_write", "total"}
+            <= set(provider_observation["timings_ms"])
+        )
+        cache_observation = cache_log.usage["observability"]
+        self.assertTrue(cache_observation["application_cache_hit"])
+        self.assertFalse(cache_observation["provider_call_attempted"])
+        self.assertEqual(cache_observation["cost_basis"]["total_tokens"], 0)
+        persisted_metrics = json.dumps(
+            [provider_log.usage, cache_log.usage],
+            sort_keys=True,
+        )
+        self.assertNotIn("phone-inquiry.jpg", persisted_metrics)
+        self.assertNotIn("inquiry_sources/second.jpg", persisted_metrics)
         self.assertEqual(ProductAlias.objects.count(), 0)
         self.assertEqual(Quotation.objects.count(), 0)
 
@@ -285,10 +319,14 @@ class InquiryImageAITests(TestCase):
                 clean_image_bytes_with_ai(data, parsed, actor=self.staff)
 
         log = AIParseLog.objects.get(success=False, mode="vision")
-        self.assertEqual(
-            log.usage,
-            {"input_tokens": 21, "output_tokens": 3},
-        )
+        self.assertEqual(log.usage["input_tokens"], 21)
+        self.assertEqual(log.usage["output_tokens"], 3)
+        observation = log.usage["observability"]
+        self.assertEqual(observation["outcome"], "failure")
+        self.assertEqual(observation["failure_stage"], "validation")
+        self.assertTrue(observation["provider_call_attempted"])
+        self.assertEqual(observation["cost_basis"]["total_tokens"], 24)
+        self.assertGreaterEqual(observation["timings_ms"]["total"], 0)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_private_image_preview_auto_selects_vision_mode(self):
@@ -319,10 +357,19 @@ class InquiryImageAITests(TestCase):
                 first = clean_image_bytes_with_ai(data, parsed, actor=self.staff)
             with patch("quotations.ai_parsing._ai_instructions", return_value="contract version two"):
                 second = clean_image_bytes_with_ai(data, parsed, actor=self.staff)
+            with patch(
+                "quotations.ai_parsing.MANUAL_AI_PIPELINE_VERSION",
+                "manual_ai_cleanup_v2",
+            ), patch(
+                "quotations.ai_parsing._ai_instructions",
+                return_value="contract version two",
+            ):
+                third = clean_image_bytes_with_ai(data, parsed, actor=self.staff)
 
         self.assertFalse(first["cache_hit"])
         self.assertFalse(second["cache_hit"])
-        self.assertEqual(len(provider.calls), 2)
+        self.assertFalse(third["cache_hit"])
+        self.assertEqual(len(provider.calls), 3)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_private_image_storage_read_error_is_a_controlled_ai_error(self):

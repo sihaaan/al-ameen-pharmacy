@@ -20,8 +20,10 @@ from rest_framework.test import APIClient
 
 from api.models import Product
 
-from .ai_parsing import AIParseError
+from .ai_parsing import AIParseError, ai_parse_contract_descriptor
 from .gmail_inquiry_import import (
+    GMAIL_AI_PIPELINE_VERSION,
+    GMAIL_AI_SCHEMA_NAME,
     GmailInquiryImportError,
     _apply_ai_identity_candidates,
     _attachment_extension,
@@ -442,7 +444,15 @@ class GmailInquiryImportTests(TestCase):
         gmail_import = self.issue_and_claim(
             anchor="identity-spoofed-reply-to",
         )
-        def native_result(messages, sources, _files, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            _files,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             body_source = next(
                 source
                 for source in sources
@@ -1723,7 +1733,15 @@ class GmailInquiryImportTests(TestCase):
             [selected],
             [selected, unselected],
         )
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(messages[0]["newest_body_text"], "Please quote")
             self.assertEqual(messages[0]["newest_body_html"], html)
@@ -2073,7 +2091,15 @@ class GmailInquiryImportTests(TestCase):
             body="Any update?",
         )
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(
                 [message["newest_body_text"] for message in messages],
@@ -2483,6 +2509,7 @@ class GmailInquiryImportTests(TestCase):
                 [],
                 gmail_import,
                 self.staff,
+                analysis_timings={"source_preparation": 7.5},
             )
 
         self.assertEqual(parsed["rows"][0]["raw_name"], "Sterile gauze")
@@ -2493,9 +2520,40 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(success_log.source_type, "gmail")
         self.assertEqual(success_log.usage["gmail_import_id"], gmail_import.pk)
         self.assertEqual(success_log.usage["input_tokens"], 120)
+        observation = success_log.usage["observability"]
+        provider_call = get_provider.return_value.clean_rows.call_args.kwargs
+        expected_contract = ai_parse_contract_descriptor(
+            pipeline_version=GMAIL_AI_PIPELINE_VERSION,
+            schema_name=provider_call["schema_name"],
+            instructions=provider_call["instructions"],
+            schema=provider_call["json_schema"],
+        )
+        self.assertEqual(observation["route"], "gmail")
+        self.assertEqual(observation["contract"], expected_contract)
+        self.assertTrue(observation["provider_call_attempted"])
+        self.assertFalse(observation["application_cache_hit"])
+        self.assertEqual(observation["cost_basis"]["input_tokens"], 120)
+        self.assertEqual(observation["cost_basis"]["output_tokens"], 40)
+        self.assertEqual(observation["source_shape"]["message_count"], 1)
+        self.assertEqual(observation["source_shape"]["file_count"], 0)
+        self.assertTrue(
+            {"provider", "validation", "total"}
+            <= set(observation["timings_ms"])
+        )
+        self.assertEqual(observation["timings_ms"]["source_preparation"], 7.5)
+        self.assertGreaterEqual(observation["timings_ms"]["total"], 7.5)
+        safe_metrics = json.dumps(success_log.usage, sort_keys=True)
+        self.assertNotIn("audit-thread", safe_metrics)
+        self.assertNotIn("audit-message", safe_metrics)
+        self.assertNotIn("Please quote 2 boxes", safe_metrics)
         self.assertEqual(
             set(success_log.usage["timings_ms"]),
-            {"ai_provider", "ai_validation", "ai_analysis"},
+            {
+                "source_preparation",
+                "ai_provider",
+                "ai_validation",
+                "ai_analysis",
+            },
         )
         self.assertEqual(
             parsed["_timings_ms"],
@@ -2533,14 +2591,25 @@ class GmailInquiryImportTests(TestCase):
                     [],
                     gmail_import,
                     self.staff,
+                    analysis_timings={"source_preparation": 4.0},
                 )
 
         failed_log = AIParseLog.objects.get(success=False)
         self.assertEqual(failed_log.actor, self.staff)
         self.assertIn("classify every selected message", failed_log.error)
+        self.assertEqual(failed_log.usage["input_tokens"], 25)
+        failed_observation = failed_log.usage["observability"]
+        self.assertEqual(failed_observation["outcome"], "failure")
+        self.assertEqual(failed_observation["failure_stage"], "validation")
+        self.assertEqual(failed_observation["cost_basis"]["input_tokens"], 25)
         self.assertEqual(
             set(failed_log.usage["timings_ms"]),
-            {"ai_provider", "ai_validation", "ai_analysis"},
+            {
+                "source_preparation",
+                "ai_provider",
+                "ai_validation",
+                "ai_analysis",
+            },
         )
 
     @override_settings(
@@ -2647,7 +2716,15 @@ class GmailInquiryImportTests(TestCase):
             "FULL-BODY-TAIL-7F41"
         )
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(messages[0]["newest_body_text"], full_body)
             self.assertEqual(
                 [file_input["content"] for file_input in file_inputs],
@@ -2929,7 +3006,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="preflight-message")
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(
                 [source["kind"] for source in sources],
@@ -3038,7 +3123,15 @@ class GmailInquiryImportTests(TestCase):
         )
         outbound["label_ids"] = ["SENT"]
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertIn(
                 "Signature Gloves | 100 | PCS",
@@ -3148,7 +3241,15 @@ class GmailInquiryImportTests(TestCase):
             html=html,
         )
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(messages[0]["newest_body_html"], html)
             body_source = next(
@@ -3603,7 +3704,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="xlsx-message")
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs[0]["content"], content)
             self.assertIn(
                 "Please find attached updated quotation request.",
@@ -3686,7 +3795,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="typed-item-message")
 
-        def native_result(messages, sources, _files, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            _files,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(messages[0]["newest_body_text"], body)
             body_source = next(
                 source
@@ -3752,7 +3869,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="generic-rfq-prose")
 
-        def native_result(messages, sources, _files, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            _files,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(messages[0]["newest_body_text"], body)
             return validated_native_analysis_result(
                 messages,
@@ -3844,6 +3969,8 @@ class GmailInquiryImportTests(TestCase):
             file_inputs,
             _gmail_import,
             _actor,
+            *,
+            analysis_timings=None,
         ):
             self.assertEqual(len(file_inputs), 12)
             return validated_native_analysis_result(

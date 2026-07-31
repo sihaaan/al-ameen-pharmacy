@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation
@@ -51,6 +52,202 @@ DEFAULT_HARD_MAX_PDF_BYTES = 10 * 1024 * 1024
 DEFAULT_HARD_MAX_PDF_PAGES = 50
 DEFAULT_HARD_MAX_RENDERED_PAGES = 5
 DEFAULT_HARD_MAX_IMAGE_DIMENSION = 2000
+
+AI_PARSE_OBSERVABILITY_VERSION = "ai_parse_observability_v1"
+MANUAL_AI_PIPELINE_VERSION = "manual_ai_cleanup_v1"
+MAILBOX_PO_AI_PIPELINE_VERSION = "mailbox_po_vision_v1"
+AI_PARSE_TIMING_KEYS = (
+    "source_preparation",
+    "cache_lookup",
+    "provider",
+    "validation",
+    "cache_write",
+    "total",
+)
+AI_PARSE_SOURCE_SHAPE_KEYS = (
+    "text_chars",
+    "input_rows",
+    "output_rows",
+    "source_bytes",
+    "page_count",
+    "image_count",
+    "message_count",
+    "file_count",
+    "source_count",
+)
+AI_PARSE_FAILURE_STAGES = {
+    "",
+    "cache_lookup",
+    "provider",
+    "validation",
+    "cache_write",
+}
+
+
+def ai_parse_elapsed_ms(started_at):
+    """Return a bounded monotonic duration without carrying source content."""
+
+    return round(max(0.0, time.perf_counter() - started_at) * 1000, 1)
+
+
+def _nonnegative_int(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, number)
+
+
+def _numeric_snapshot(values, allowed_keys, *, decimal=False):
+    values = values if isinstance(values, dict) else {}
+    result = {}
+    for key in allowed_keys:
+        if key not in values:
+            continue
+        if decimal:
+            try:
+                value = round(max(0.0, float(values[key])), 1)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        else:
+            value = _nonnegative_int(values[key])
+        result[key] = value
+    return result
+
+
+def sanitize_ai_provider_usage(usage):
+    """Allow-list numeric billing fields from a provider response.
+
+    Provider usage objects are external data. Persisting arbitrary future keys
+    could accidentally turn an audit metric into content storage, so only
+    documented numeric token counters are retained.
+    """
+
+    usage = usage if isinstance(usage, dict) else {}
+    sanitized = _numeric_snapshot(
+        usage,
+        ("input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens"),
+    )
+    for field, allowed in (
+        ("input_tokens_details", ("cached_tokens",)),
+        ("prompt_tokens_details", ("cached_tokens",)),
+        ("output_tokens_details", ("reasoning_tokens",)),
+        ("completion_tokens_details", ("reasoning_tokens",)),
+    ):
+        details = _numeric_snapshot(usage.get(field), allowed)
+        if details:
+            sanitized[field] = details
+    return sanitized
+
+
+def ai_parse_contract_descriptor(*, pipeline_version, schema_name, instructions, schema):
+    """Fingerprint the exact existing prompt/schema without storing either."""
+
+    prompt_sha256 = hashlib.sha256(str(instructions or "").encode("utf-8")).hexdigest()
+    schema_bytes = json.dumps(
+        schema or {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    schema_sha256 = hashlib.sha256(schema_bytes).hexdigest()
+    contract_sha256 = hashlib.sha256(
+        f"{pipeline_version}:{schema_name}:{prompt_sha256}:{schema_sha256}".encode("utf-8")
+    ).hexdigest()
+    return {
+        "pipeline_version": str(pipeline_version or "")[:80],
+        "schema_name": str(schema_name or "")[:80],
+        "prompt_sha256": prompt_sha256,
+        "schema_sha256": schema_sha256,
+        "contract_sha256": contract_sha256,
+    }
+
+
+def build_ai_parse_observation(
+    *,
+    route,
+    contract,
+    provider_usage=None,
+    timings_ms=None,
+    source_shape=None,
+    provider_call_attempted,
+    application_cache_hit=False,
+    outcome="success",
+    failure_stage="",
+):
+    """Build the common content-free telemetry envelope for both intake paths."""
+
+    safe_usage = sanitize_ai_provider_usage(provider_usage)
+    contract = contract if isinstance(contract, dict) else {}
+    safe_contract = {}
+    for key in ("pipeline_version", "schema_name"):
+        value = str(contract.get(key) or "")
+        safe_contract[key] = (
+            value[:80]
+            if re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", value)
+            else ""
+        )
+    for key in ("prompt_sha256", "schema_sha256", "contract_sha256"):
+        value = str(contract.get(key) or "").lower()
+        safe_contract[key] = value if re.fullmatch(r"[a-f0-9]{64}", value) else ""
+    input_tokens = _nonnegative_int(
+        safe_usage.get("input_tokens", safe_usage.get("prompt_tokens", 0))
+    )
+    output_tokens = _nonnegative_int(
+        safe_usage.get("output_tokens", safe_usage.get("completion_tokens", 0))
+    )
+    input_details = safe_usage.get("input_tokens_details") or safe_usage.get(
+        "prompt_tokens_details"
+    ) or {}
+    output_details = safe_usage.get("output_tokens_details") or safe_usage.get(
+        "completion_tokens_details"
+    ) or {}
+    cached_input_tokens = min(
+        input_tokens,
+        _nonnegative_int(input_details.get("cached_tokens")),
+    )
+    reported_total = _nonnegative_int(safe_usage.get("total_tokens"))
+    total_tokens = reported_total or input_tokens + output_tokens
+    safe_failure_stage = str(failure_stage or "")
+    if safe_failure_stage not in AI_PARSE_FAILURE_STAGES:
+        safe_failure_stage = ""
+    safe_outcome = str(outcome or "failure")
+    if safe_outcome not in {"success", "failure", "cache_hit"}:
+        safe_outcome = "failure"
+    return {
+        "version": AI_PARSE_OBSERVABILITY_VERSION,
+        "route": (
+            str(route)
+            if str(route) in {"manual", "gmail", "gmail_mailbox_po"}
+            else "unknown"
+        ),
+        "outcome": safe_outcome,
+        "failure_stage": safe_failure_stage,
+        "provider_call_attempted": bool(provider_call_attempted),
+        "application_cache_hit": bool(application_cache_hit),
+        "contract": safe_contract,
+        "timings_ms": _numeric_snapshot(
+            timings_ms,
+            AI_PARSE_TIMING_KEYS,
+            decimal=True,
+        ),
+        "cost_basis": {
+            "usage_reported": bool(safe_usage),
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "uncached_input_tokens": max(0, input_tokens - cached_input_tokens),
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": _nonnegative_int(
+                output_details.get("reasoning_tokens")
+            ),
+            "total_tokens": total_tokens,
+        },
+        "source_shape": _numeric_snapshot(
+            source_shape,
+            AI_PARSE_SOURCE_SHAPE_KEYS,
+        ),
+    }
 
 
 AI_PARSE_JSON_SCHEMA = {
@@ -567,6 +764,7 @@ def prefer_safe_ai_preview(deterministic_preview, ai_preview):
 
 
 def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_vision=True):
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     mode = _select_mode(preview, requested_mode=requested_mode, allow_vision=allow_vision, settings_obj=settings_obj)
@@ -611,6 +809,8 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
         images=images,
         page_count=page_count,
         output_style="inquiry",
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
     return _bind_result_source(result, preview) if _is_image_preview(preview) else result
 
@@ -625,6 +825,7 @@ def clean_image_bytes_with_ai(
 ):
     """Vision-clean a validated inquiry image without requiring source storage."""
 
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     if not settings_obj.ai_pdf_vision_enabled:
@@ -675,6 +876,8 @@ def clean_image_bytes_with_ai(
         output_style="inquiry",
         json_schema=json_schema,
         schema_name=schema_name,
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
     return _bind_result_source(result, prepared_preview)
 
@@ -698,6 +901,7 @@ def clean_pdf_bytes_with_ai(
     environment hard ceiling.
     """
 
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     if not settings_obj.ai_pdf_vision_enabled:
@@ -753,6 +957,8 @@ def clean_pdf_bytes_with_ai(
         output_style="inquiry",
         json_schema=json_schema,
         schema_name=schema_name,
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
     source_page_count = page_count or rendered_page_count
     render_truncated = source_page_count > rendered_page_count
@@ -781,6 +987,7 @@ def clean_pdf_bytes_with_ai(
 
 
 def clean_historical_import_with_ai(historical_import, actor=None, *, requested_mode="auto"):
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     if historical_import.status in {HistoricalPriceImport.STATUS_COMMITTED, HistoricalPriceImport.STATUS_CANCELLED}:
@@ -803,6 +1010,8 @@ def clean_historical_import_with_ai(historical_import, actor=None, *, requested_
         images=images,
         page_count=page_count,
         output_style="historical",
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
 
 
@@ -982,7 +1191,17 @@ def _run_ai_cleanup(
     output_style,
     json_schema=None,
     schema_name="quotation_import_parse",
+    pipeline_started_at=None,
+    source_preparation_ms=None,
 ):
+    run_started_at = (
+        pipeline_started_at
+        if isinstance(pipeline_started_at, (int, float))
+        else time.perf_counter()
+    )
+    timings_ms = {}
+    if source_preparation_ms is not None:
+        timings_ms["source_preparation"] = source_preparation_ms
     availability = get_ai_parse_availability()
     provider_name = availability["provider"]
     model = availability["vision_model"] if mode == AIParseCache.MODE_VISION else availability["text_model"]
@@ -998,23 +1217,72 @@ def _run_ai_cleanup(
         include_mailbox_metadata=schema_name == "mailbox_po_vision_parse",
     )
     effective_schema = json_schema or AI_PARSE_JSON_SCHEMA
-    prompt_contract_hash = hashlib.sha256(
-        json.dumps(
-            {"instructions": instructions, "schema": effective_schema},
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
-    schema_cache_scope = "" if schema_name == "quotation_import_parse" else f":{schema_name}"
+    pipeline_version = (
+        MAILBOX_PO_AI_PIPELINE_VERSION
+        if schema_name == "mailbox_po_vision_parse"
+        else MANUAL_AI_PIPELINE_VERSION
+    )
+    intake_route = (
+        "gmail_mailbox_po"
+        if schema_name == "mailbox_po_vision_parse"
+        else "manual"
+    )
+    contract = ai_parse_contract_descriptor(
+        pipeline_version=pipeline_version,
+        schema_name=schema_name,
+        instructions=instructions,
+        schema=effective_schema,
+    )
     cache_key = hashlib.sha256(
         (
             f"{source_sha256}:{provider_name}:{model}:{mode}:{context_hash}:"
-            f"{prompt_contract_hash}{schema_cache_scope}"
+            f"{contract['contract_sha256']}"
         ).encode("utf-8")
     ).hexdigest()
+    source_shape = {
+        "text_chars": len(context),
+        "input_rows": len(preview.get("lines") or []),
+        "source_bytes": preview.get("source_file_size") or 0,
+        "page_count": page_count or 0,
+        "image_count": len(images),
+        "message_count": 0,
+        "file_count": 1 if preview.get("source_file_size") else 0,
+        "source_count": 1,
+    }
+
+    def audit_usage(
+        provider_usage,
+        *,
+        provider_call_attempted,
+        application_cache_hit=False,
+        outcome="success",
+        failure_stage="",
+        output_rows=0,
+    ):
+        safe_usage = sanitize_ai_provider_usage(provider_usage)
+        observation = build_ai_parse_observation(
+            route=intake_route,
+            contract=contract,
+            provider_usage=safe_usage,
+            timings_ms=timings_ms,
+            source_shape={**source_shape, "output_rows": output_rows},
+            provider_call_attempted=provider_call_attempted,
+            application_cache_hit=application_cache_hit,
+            outcome=outcome,
+            failure_stage=failure_stage,
+        )
+        return {
+            **safe_usage,
+            "timings_ms": observation["timings_ms"],
+            "observability": observation,
+        }
+
+    cache_started_at = time.perf_counter()
     cached = AIParseCache.objects.filter(cache_key=cache_key).first()
+    timings_ms["cache_lookup"] = ai_parse_elapsed_ms(cache_started_at)
     if cached:
+        timings_ms["total"] = ai_parse_elapsed_ms(run_started_at)
+        cached_rows = len((cached.result or {}).get("lines") or [])
         _log_ai_parse(
             actor=actor,
             provider=provider_name,
@@ -1026,12 +1294,21 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
+            usage=audit_usage(
+                {},
+                provider_call_attempted=False,
+                application_cache_hit=True,
+                outcome="cache_hit",
+                output_rows=cached_rows,
+            ),
             success=True,
         )
         return {**cached.result, "cache_hit": True}
 
     provider = get_ai_parse_provider(provider_name)
     usage = {}
+    failure_stage = "provider"
+    provider_started_at = time.perf_counter()
     try:
         raw_result, usage = provider.clean_rows(
             mode=mode,
@@ -1042,6 +1319,9 @@ def _run_ai_cleanup(
             json_schema=json_schema,
             schema_name=schema_name,
         )
+        timings_ms["provider"] = ai_parse_elapsed_ms(provider_started_at)
+        failure_stage = "validation"
+        validation_started_at = time.perf_counter()
         result = _normalize_ai_result(
             raw_result,
             preview=preview,
@@ -1052,6 +1332,9 @@ def _run_ai_cleanup(
             usage=usage,
             schema_name=schema_name,
         )
+        timings_ms["validation"] = ai_parse_elapsed_ms(validation_started_at)
+        failure_stage = "cache_write"
+        cache_write_started_at = time.perf_counter()
         AIParseCache.objects.update_or_create(
             cache_key=cache_key,
             defaults={
@@ -1063,6 +1346,8 @@ def _run_ai_cleanup(
                 "result": result,
             },
         )
+        timings_ms["cache_write"] = ai_parse_elapsed_ms(cache_write_started_at)
+        timings_ms["total"] = ai_parse_elapsed_ms(run_started_at)
         _log_ai_parse(
             actor=actor,
             provider=provider_name,
@@ -1074,11 +1359,22 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
-            usage=usage,
+            usage=audit_usage(
+                usage,
+                provider_call_attempted=True,
+                output_rows=len(result.get("lines") or []),
+            ),
             success=True,
         )
         return result
     except Exception as exc:
+        if "provider" not in timings_ms:
+            timings_ms["provider"] = ai_parse_elapsed_ms(provider_started_at)
+        if failure_stage == "validation" and "validation" not in timings_ms:
+            timings_ms["validation"] = ai_parse_elapsed_ms(validation_started_at)
+        if failure_stage == "cache_write" and "cache_write" not in timings_ms:
+            timings_ms["cache_write"] = ai_parse_elapsed_ms(cache_write_started_at)
+        timings_ms["total"] = ai_parse_elapsed_ms(run_started_at)
         _log_ai_parse(
             actor=actor,
             provider=provider_name,
@@ -1090,7 +1386,12 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
-            usage=usage,
+            usage=audit_usage(
+                usage,
+                provider_call_attempted=True,
+                outcome="failure",
+                failure_stage=failure_stage,
+            ),
             success=False,
             error=str(exc),
         )

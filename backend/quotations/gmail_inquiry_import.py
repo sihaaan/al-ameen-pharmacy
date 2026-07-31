@@ -31,8 +31,11 @@ from python_calamine import load_workbook as load_calamine_workbook
 
 from .ai_parsing import (
     AIParseError,
+    ai_parse_contract_descriptor,
+    build_ai_parse_observation,
     get_ai_parse_availability,
     get_ai_parse_provider,
+    sanitize_ai_provider_usage,
     settings_ai_status,
 )
 from .contract_intelligence import (
@@ -92,6 +95,8 @@ SUPPORTED_GMAIL_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
 # tables. Images commonly embedded in email signatures are never submitted.
 # Manual inquiry image upload remains supported by the existing vision flow.
 NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
+GMAIL_AI_PIPELINE_VERSION = "gmail_inquiry_v2"
+GMAIL_AI_SCHEMA_NAME = "gmail_inquiry_native_v2"
 ANALYSIS_TIMING_KEYS = (
     "gmail_thread_fetch",
     "source_preparation",
@@ -2290,6 +2295,14 @@ def _run_native_thread_analysis(
         sources,
         gmail_import.mode,
     )
+    instructions = _native_thread_instructions(gmail_import.mode)
+    native_schema = _native_thread_schema(message_ids, source_keys)
+    contract = ai_parse_contract_descriptor(
+        pipeline_version=GMAIL_AI_PIPELINE_VERSION,
+        schema_name=GMAIL_AI_SCHEMA_NAME,
+        instructions=instructions,
+        schema=native_schema,
+    )
     source_hash_material = json.dumps(
         {
             "gmail_import_id": gmail_import.pk,
@@ -2311,7 +2324,6 @@ def _run_native_thread_analysis(
     )
     audit_usage = {
         "gmail_import_id": gmail_import.pk,
-        "gmail_thread_id": gmail_import.gmail_thread_id or "",
         "message_count": len(message_ids),
         "native_file_count": len(file_inputs),
         "native_file_bytes": sum(
@@ -2323,22 +2335,80 @@ def _run_native_thread_analysis(
             for file_input in file_inputs
         ),
     }
+    source_shape = {
+        "text_chars": len(text_context),
+        "input_rows": sum(
+            len(source.get("rows") or [])
+            for source in sources
+            if isinstance(source, dict)
+        ),
+        "source_bytes": audit_usage["native_file_bytes"],
+        "page_count": audit_usage["native_pdf_pages"],
+        "image_count": 0,
+        "message_count": len(message_ids),
+        "file_count": len(file_inputs),
+        "source_count": len(sources),
+    }
+
+    def instrumented_usage(
+        provider_usage,
+        *,
+        outcome="success",
+        failure_stage="",
+        output_rows=0,
+    ):
+        safe_usage = sanitize_ai_provider_usage(provider_usage)
+        comparable_total = 0.0
+        for timing_key in ("source_preparation", "ai_analysis"):
+            try:
+                comparable_total += max(
+                    0.0,
+                    float(analysis_timings.get(timing_key) or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+        common_timings = {
+            "source_preparation": analysis_timings.get("source_preparation"),
+            "provider": analysis_timings.get("ai_provider"),
+            "validation": analysis_timings.get("ai_validation"),
+            "total": comparable_total,
+        }
+        observation = build_ai_parse_observation(
+            route="gmail",
+            contract=contract,
+            provider_usage=safe_usage,
+            timings_ms=common_timings,
+            source_shape={**source_shape, "output_rows": output_rows},
+            provider_call_attempted=True,
+            application_cache_hit=False,
+            outcome=outcome,
+            failure_stage=failure_stage,
+        )
+        return {
+            **audit_usage,
+            **safe_usage,
+            "timings_ms": _analysis_timing_snapshot(analysis_timings),
+            "observability": observation,
+        }
+
     usage = {}
     ai_started = time.perf_counter()
     provider_started = ai_started
     validation_started = None
+    failure_stage = "provider"
     try:
         result, usage = provider.clean_rows(
             mode="gmail_native_thread",
             model=model,
-            instructions=_native_thread_instructions(gmail_import.mode),
+            instructions=instructions,
             text_context=text_context,
             image_data_urls=[],
             file_inputs=file_inputs,
-            json_schema=_native_thread_schema(message_ids, source_keys),
-            schema_name="gmail_inquiry_native_v2",
+            json_schema=native_schema,
+            schema_name=GMAIL_AI_SCHEMA_NAME,
         )
         analysis_timings["ai_provider"] = _elapsed_ms(provider_started)
+        failure_stage = "validation"
         validation_started = time.perf_counter()
         if not isinstance(result, dict):
             raise AIParseError("Gmail AI analysis returned an invalid object.")
@@ -2373,12 +2443,11 @@ def _run_native_thread_analysis(
             text_length=len(text_context),
             page_count=audit_usage["native_pdf_pages"],
             image_count=0,
-            usage={
-                **audit_usage,
-                "timings_ms": _analysis_timing_snapshot(
-                    analysis_timings
-                ),
-            },
+            usage=instrumented_usage(
+                usage,
+                outcome="failure",
+                failure_stage=failure_stage,
+            ),
             success=False,
             error=str(exc)[:1000],
         )
@@ -2394,13 +2463,10 @@ def _run_native_thread_analysis(
         text_length=len(text_context),
         page_count=audit_usage["native_pdf_pages"],
         image_count=0,
-        usage={
-            **audit_usage,
-            **(usage or {}),
-            "timings_ms": _analysis_timing_snapshot(
-                analysis_timings
-            ),
-        },
+        usage=instrumented_usage(
+            usage,
+            output_rows=len(validated_result.get("rows") or []),
+        ),
         success=True,
     )
     validated_result["_timings_ms"] = _analysis_timing_snapshot(
@@ -3516,6 +3582,7 @@ def _build_source_analysis(
         file_inputs,
         gmail_import,
         actor,
+        analysis_timings=analysis_timings,
     )
     analysis_timings.update(semantic_result.pop("_timings_ms", {}) or {})
     post_ai_started = time.perf_counter()
