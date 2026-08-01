@@ -27,9 +27,16 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - run: python manage.py makemigrations --check --dry-run
-      - run: python manage.py check
-      - run: python manage.py test --keepdb
+      - name: Verify Python dependency integrity
+        run: python -m pip check
+      - name: Verify migration drift
+        run: python manage.py makemigrations --check --dry-run
+      - name: Run Django system checks
+        run: python manage.py check
+      - name: Run documentation contract tests
+        run: python manage.py test quotations.test_documentation_contract --keepdb
+      - name: Run full SQLite backend suite
+        run: python manage.py test --keepdb
 
   postgres-concurrency:
     runs-on: ubuntu-latest
@@ -73,15 +80,22 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
+      - name: Verify Python dependency integrity
+        run: python -m pip check
       - name: Verify PostgreSQL test target
         run: >-
           python manage.py shell -c "from django.db import connection;
           assert connection.vendor == 'postgresql', connection.vendor;
           cursor = connection.cursor();
           cursor.execute('SHOW server_version_num');
-          assert int(cursor.fetchone()[0]) // 10000 == 17;
+          assert int(cursor.fetchone()[0]) == 170010;
           cursor.execute('SHOW default_transaction_isolation');
           assert cursor.fetchone()[0] == 'read committed'"
+      - name: Run PostgreSQL migration compatibility suite
+        run: >-
+          python manage.py test
+          quotations.test_migration_0036_compatibility
+          --noinput --verbosity 2
       - name: Run PostgreSQL concurrency suite
         run: >-
           python manage.py test
@@ -101,6 +115,13 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm run test:ci
-      - run: npm run build
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Verify frontend dependency tree
+        run: npm ls --all
+      - name: Enforce zero Critical production advisories
+        run: npm audit --omit=dev --audit-level=critical
+      - name: Run frontend tests
+        run: npm run test:ci
+      - name: Build production frontend
+        run: npm run build

@@ -27,6 +27,7 @@ PRIMARY_DOCUMENTS = (
     "SECURITY.md",
     "OPERATIONS.md",
     "RELEASE_CONFIGURATION_PACK.md",
+    "RELEASE_HANDOFF.md",
     "gmail_addon/README.md",
 )
 
@@ -134,7 +135,7 @@ class DocumentationContractTests(SimpleTestCase):
             "SENTRY_DSN",
             "There is no scheduler/worker",
             "existing reconciliation action, which searches and never",
-            "No external value in this pack is a merge blocker",
+            "currently unknown, so it is a merge blocker",
         )
         for phrase in required_phrases:
             with self.subTest(phrase=phrase):

@@ -1,12 +1,17 @@
 # Technical-Hardening Release Configuration Pack
 
+Release packaging, the repository-derived storage map, and outstanding
+live-verification requirements are summarized in
+[RELEASE_HANDOFF.md](RELEASE_HANDOFF.md).
+
 | Field | Value |
 |---|---|
 | Document version | 1.0.0 |
 | Status | Prepared operator runbook; no external setting has been applied |
 | Owner | Al Ameen platform maintainers and named production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | Technical-hardening remediation through 7a29096123c09879579e8215d409a00cc23465e6 |
+| Reviewed code | Application/security remediation through `7a29096123c09879579e8215d409a00cc23465e6` |
+| Accepted implementation candidate | `36db6762d3f92db5cfd341f50dfcb1318a17aba1` |
 
 This pack turns the remaining external release blockers into reproducible
 operator checks. It does not select a storage provider, contain credentials,
@@ -21,7 +26,10 @@ and an ambiguous result is reconciled without sending again.
 ## 1. Gate meanings and current blocker summary
 
 - **Merge blocker** means the branch must not enter the protected integration
-  branch. No external value in this pack is a merge blocker.
+  branch. Railway's externally configured main-branch deployment behavior is
+  currently unknown, so it is a merge blocker until an authorized operator
+  records whether merging this pull request would deploy production and
+  whether Railway waits for required GitHub checks.
 - **Staging blocker** means the affected production-like route cannot be
   accepted in staging until the row is verified. Unrelated synthetic staging
   routes may still run.
@@ -30,6 +38,7 @@ and an ambiguous result is reconciled without sending again.
 
 | Area | Repository-ready state | Required external evidence | Gate |
 |---|---|---|---|
+| Railway auto-deploy | Repository CI contains test/build jobs only; Railway linkage and triggers are not repository configuration | Confirm linked branch/environment, auto-deploy setting, and whether Railway waits for required GitHub checks | Before PR merge |
 | Private evidence | Dedicated private storage alias, bounded exact-key writes, SHA-256 reads, and dual-read fallback exist | Approved durable private provider or mounted volume, pinned package if needed, exact-key qualification, copied-object manifest, backup and restore result | Staging for durable-storage acceptance; production |
 | Migration connection | Guarded runner validates a direct TLS PostgreSQL URL and serializes runs | Sealed Railway MIGRATION_DATABASE_URL for the same database and a successful staging pre-deploy | Staging; production |
 | Railway config | backend/railway.json contains the guarded pre-deploy command | Railway Config File Path exactly /backend/railway.json and deployment preview evidence | Staging; production |

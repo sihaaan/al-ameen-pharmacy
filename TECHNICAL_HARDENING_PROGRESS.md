@@ -35,6 +35,9 @@ Hashes are complete rather than display abbreviations.
 | Release remediation 1 | `619d99b177f4d32bd47b6debe9df6c721495ea16` | `fix: preserve PO import metadata default` |
 | Release remediation 2 | `7f42cd3ba5c041a4409bf90e77062d9c414e16b0` | `fix: validate internal login redirects` |
 | Release remediation 3 | `edf4dd102b7a71601db762813160ae62670a1e46` | `chore: remediate frontend dependency risks` |
+| Release documentation | `7a29096123c09879579e8215d409a00cc23465e6` | `docs: reconcile technical hardening commits` |
+| Release configuration packaging | `f22139c3fc728eb1d7be0590e868bd10d6d64cd0` | `docs: prepare release configuration pack` |
+| Release validation | `36db6762d3f92db5cfd341f50dfcb1318a17aba1` | `test: stabilize PO evidence timestamps` |
 
 ## Phase 1
 
