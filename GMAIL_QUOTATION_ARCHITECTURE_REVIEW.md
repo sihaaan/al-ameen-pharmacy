@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.1.0 |
+| Document version | 1.2.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` on `codex/technical-hardening` |
+| Reviewed code | `d88b767` baseline plus the Task 2.1 checkpoint on `codex/technical-hardening` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -341,10 +341,30 @@ as a conflict (`409`). The
 delivery tables were introduced by
 `backend/quotations/migrations/0034_alter_quotationauditlog_action_and_more.py`.
 
-The server rebuilds and revalidates delivery inputs at send time, but the
-displayed preview has no version/ETag proving it is still current. Task 2.1
-adds that stale-preview guard. This known gap does not permit bypassing the
-existing preview or server verification.
+The server rebuilds and revalidates delivery inputs at send time. Task 2.1 also
+adds two keyed stale-preview guards. The editor fingerprint covers the customer-facing
+quotation revision shown to the employee. The email fingerprint additionally
+covers the projected finalized state, attachment metadata, staff actor, and
+verified Gmail source. The shipped editor retrieves the current quotation
+before opening a preview; that detail response materializes its rows and token
+under one locked database snapshot and requires another explicit action if it
+changed. The browser compares both the token and displayed payload, so even an
+older unlocked error response cannot pair unseen rows with a current token;
+stale-preview refresh passes through the same gate.
+A new or retry send requires the email fingerprint and compares it under the
+authoritative quotation, delivery, line, customer/contact, PDF-settings,
+creator, catalogue/image, and Gmail-connection locks.
+
+After finalization, the exact PDF and raw MIME bytes for that attempt are built
+in memory while those database dependencies remain locked; only the Gmail
+network request happens after commit. Quotation PDFs use ReportLab invariant
+output so a known-failure retry of unchanged content reproduces the recorded
+attachment digest. Missing or changed reviews are blocked
+and must be explicitly refreshed and reviewed; refresh never sends. The guard
+does not content-hash remote bytes that could be overwritten out of band at an
+unchanged storage key, persist the complete outbound bytes as an immutable
+snapshot, or create immutable provider-attempt rows. Those guarantees remain
+Task 2.2.
 
 ## 9. Observability and the measured example
 

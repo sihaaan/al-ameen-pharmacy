@@ -2,19 +2,27 @@
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 import urllib.error
+from dataclasses import asdict
 from datetime import timedelta
+from decimal import Decimal
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formataddr, getaddresses, parseaddr
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.serializers.json import DjangoJSONEncoder
 from django.core.validators import validate_email
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
+
+from api.models import Brand, Product, ProductImage
 
 from .contract_intelligence import (
     can_manage_shared_gmail,
@@ -26,20 +34,35 @@ from .contract_intelligence import (
     resolve_gmail_connection,
 )
 from .models import (
+    Company,
+    CompanyContact,
     GmailInquiryImport,
+    GmailOAuthConnection,
+    QuoteItem,
     Quotation,
     QuotationAuditLog,
     QuotationEmailDelivery,
     QuotationEmailThreadSelection,
+    QuotationLine,
     QuotationSettings,
+    UserQuotationProfile,
 )
 from .pdf import build_quotation_pdf
-from .services import audit_log, finalize_quotation
+from .pdf_config import get_quotation_pdf_config
+from .services import (
+    audit_log,
+    finalize_quotation,
+    quotation_brand_name_for_selection,
+)
 
 
 THREAD_SELECTION_MAX_AGE = 30 * 60
 MAX_TO_ADDRESSES = 10
 MAX_CC_ADDRESSES = 10
+EMAIL_PREVIEW_FINGERPRINT_CONTRACT = "quotation_email_preview_v1"
+EMAIL_PREVIEW_FINGERPRINT_SALT = "quotations.email-preview-fingerprint.v1"
+QUOTATION_REVIEW_FINGERPRINT_CONTRACT = "quotation_editor_review_v1"
+QUOTATION_REVIEW_FINGERPRINT_SALT = "quotations.editor-review-fingerprint.v1"
 
 
 class QuotationEmailError(ValidationError):
@@ -60,6 +83,439 @@ class QuotationEmailError(ValidationError):
         self.retryable = bool(retryable)
         self.quote_finalized = bool(quote_finalized)
         self.delivery = delivery
+
+
+def _image_identity(image):
+    if not image:
+        return None
+    image_field = getattr(image, "image", None)
+    return {
+        "id": getattr(image, "pk", None),
+        "name": str(getattr(image_field, "name", "") or ""),
+        "updated_at": getattr(image, "updated_at", None),
+    }
+
+
+def _file_field_name(instance, field_name):
+    field = getattr(instance, field_name, None) if instance else None
+    return str(getattr(field, "name", "") or "")
+
+
+def _preview_source_identity(delivery):
+    trusted_source = delivery.trusted_source or {}
+    return {
+        "delivery_mode": delivery.delivery_mode,
+        "gmail_connection_id": delivery.gmail_connection_id,
+        "gmail_connection_email": str(
+            getattr(delivery.gmail_connection, "email", "") or ""
+        ).strip().lower(),
+        "gmail_inquiry_import_id": delivery.gmail_inquiry_import_id,
+        "gmail_thread_id": str(delivery.gmail_thread_id or ""),
+        "source_gmail_message_id": str(delivery.source_gmail_message_id or ""),
+        "source_rfc_message_id": str(delivery.source_rfc_message_id or ""),
+        "source_references": str(delivery.source_references or ""),
+        "verified_recipient": str(
+            trusted_source.get("reply_to_email")
+            or trusted_source.get("sender_email")
+            or ""
+        ).strip().lower(),
+        "verified_subject": str(trusted_source.get("subject") or ""),
+        "verified_sender": str(trusted_source.get("sender_email") or "")
+        .strip()
+        .lower(),
+        "scope_email": str(trusted_source.get("scope_email") or "")
+        .strip()
+        .lower(),
+    }
+
+
+def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
+    """Return canonical customer-facing state without exposing it to clients.
+
+    ``project_for_send`` represents the deterministic changes made by
+    finalization (status, effective brand snapshots, and aggregate totals).
+    This lets one reviewed token remain valid across the draft -> finalized
+    transition while still changing for every independently editable value.
+    """
+
+    quotation = Quotation.objects.select_related(
+        "company",
+        "contact",
+        "created_by",
+    ).get(pk=quotation.pk)
+    company = quotation.company
+    contact = quotation.contact
+    created_by = quotation.created_by
+    try:
+        creator_profile = getattr(created_by, "quotation_profile", None)
+    except Exception:
+        creator_profile = None
+
+    lines = list(
+        quotation.lines.select_related(
+            "product__brand",
+            "product_image",
+            "quote_item__product__brand",
+        )
+        .prefetch_related("product__images")
+        .order_by("sort_order", "id")
+    )
+    line_state = []
+    projected_subtotal = Decimal("0.00")
+    projected_vat_total = Decimal("0.00")
+    projected_total = Decimal("0.00")
+    for line in lines:
+        selected_image = None
+        if line.include_product_image:
+            selected_image = line.product_image or (
+                line.product.primary_image if line.product_id else None
+            )
+        effective_brand = (
+            line.brand_name_snapshot
+            or quotation_brand_name_for_selection(
+                product=line.product,
+                quote_item=line.quote_item,
+            )
+        )
+        if line.match_status != QuotationLine.MATCH_IGNORED:
+            projected_subtotal += line.line_subtotal or Decimal("0.00")
+            projected_vat_total += line.vat_amount or Decimal("0.00")
+            projected_total += line.line_total or Decimal("0.00")
+        line_state.append(
+            {
+                "id": line.id,
+                "sort_order": line.sort_order,
+                "match_status": line.match_status,
+                "product_id": line.product_id,
+                "quote_item_id": line.quote_item_id,
+                "product_image_id": line.product_image_id,
+                "include_product_image": line.include_product_image,
+                "selected_image": _image_identity(selected_image),
+                "item_name_snapshot": line.item_name_snapshot,
+                "brand_name_snapshot": (
+                    effective_brand if project_for_send else line.brand_name_snapshot
+                ),
+                "effective_finalized_brand": effective_brand,
+                "description": line.description,
+                "quantity": line.quantity,
+                "unit": line.unit,
+                "unit_price": line.unit_price,
+                "vat_rate": line.vat_rate,
+                "line_subtotal": line.line_subtotal,
+                "vat_amount": line.vat_amount,
+                "line_total": line.line_total,
+            }
+        )
+
+    resolved_pdf_config = pdf_config or get_quotation_pdf_config(quotation=quotation)
+    pdf_settings = QuotationSettings.objects.filter(pk=1).first()
+    rendered_status = quotation.status
+    if project_for_send and quotation.status in {
+        *Quotation.EDITABLE_STATUSES,
+        Quotation.STATUS_FINALIZED,
+    }:
+        rendered_status = Quotation.STATUS_FINALIZED
+    return {
+        "quotation": {
+            "id": quotation.id,
+            "quotation_number": quotation.quotation_number,
+            "status": rendered_status,
+            "version": quotation.version,
+            "company_id": quotation.company_id,
+            "contact_id": quotation.contact_id,
+            "created_by_id": quotation.created_by_id,
+            "created_by_username": str(getattr(created_by, "username", "") or ""),
+            "created_at": quotation.created_at,
+            "valid_until": quotation.valid_until,
+            "currency": quotation.currency,
+            "payment_terms": quotation.payment_terms,
+            "show_brand_column": quotation.show_brand_column,
+            "subtotal": projected_subtotal if project_for_send else quotation.subtotal,
+            "vat_total": projected_vat_total if project_for_send else quotation.vat_total,
+            "total": projected_total if project_for_send else quotation.total,
+            "notes": quotation.notes,
+        },
+        "company": {
+            "name": company.name,
+            "email": company.email,
+            "billing_address": company.billing_address,
+            "trn": company.trn,
+        },
+        "contact": (
+            {
+                "name": contact.name,
+                "email": contact.email,
+                "phone": contact.phone,
+            }
+            if contact
+            else None
+        ),
+        "creator_profile": {
+            "updated_at": getattr(creator_profile, "updated_at", None),
+            "signature_name": str(
+                getattr(getattr(creator_profile, "signature_image", None), "name", "")
+                or ""
+            ),
+        },
+        "pdf_config": asdict(resolved_pdf_config),
+        "pdf_settings_identity": (
+            {
+                "updated_at": pdf_settings.updated_at,
+                "logo_name": _file_field_name(pdf_settings, "logo"),
+                "signature_name": _file_field_name(
+                    pdf_settings,
+                    "signature_image",
+                ),
+                "stamp_name": _file_field_name(pdf_settings, "stamp_image"),
+            }
+            if pdf_settings
+            else None
+        ),
+        "lines": line_state,
+    }
+
+
+def _quotation_preview_state(quotation, delivery, actor, *, pdf_config=None):
+    return {
+        "contract": EMAIL_PREVIEW_FINGERPRINT_CONTRACT,
+        "actor_id": getattr(actor, "pk", None),
+        "customer": _quotation_customer_state(
+            quotation,
+            pdf_config=pdf_config,
+            project_for_send=True,
+        ),
+        "attachment": {
+            "filename": str(delivery.attachment_filename or ""),
+            "sha256": str(delivery.attachment_sha256 or ""),
+            "size": delivery.attachment_size,
+        },
+        "source": _preview_source_identity(delivery),
+    }
+
+
+def _state_fingerprint(state, *, salt):
+    canonical = json.dumps(
+        state,
+        cls=DjangoJSONEncoder,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return salted_hmac(
+        salt,
+        canonical,
+        algorithm="sha256",
+    ).hexdigest()
+
+
+def quotation_review_fingerprint(quotation):
+    return _state_fingerprint(
+        {
+            "contract": QUOTATION_REVIEW_FINGERPRINT_CONTRACT,
+            "customer": _quotation_customer_state(
+                quotation,
+                project_for_send=False,
+            ),
+        },
+        salt=QUOTATION_REVIEW_FINGERPRINT_SALT,
+    )
+
+
+def quotation_email_preview_fingerprint(
+    quotation,
+    delivery,
+    actor,
+    *,
+    pdf_config=None,
+):
+    return _state_fingerprint(
+        _quotation_preview_state(
+            quotation,
+            delivery,
+            actor,
+            pdf_config=pdf_config,
+        ),
+        salt=EMAIL_PREVIEW_FINGERPRINT_SALT,
+    )
+
+
+def require_current_quotation_review(quotation, fingerprint):
+    supplied = str(fingerprint or "").strip()
+    if not supplied:
+        raise QuotationEmailError(
+            "Reload and review the quotation before opening its email preview.",
+            code="quotation_review_required",
+            http_status=400,
+            retryable=False,
+            quote_finalized=quotation.status in {
+                Quotation.STATUS_FINALIZED,
+                Quotation.STATUS_SENT,
+            },
+        )
+    expected = quotation_review_fingerprint(quotation)
+    if not secrets.compare_digest(supplied, expected):
+        raise QuotationEmailError(
+            "The quotation changed in another session. The editor has been refreshed; review the latest quotation before opening its email preview.",
+            code="stale_quotation_review",
+            http_status=409,
+            retryable=False,
+            quote_finalized=quotation.status in {
+                Quotation.STATUS_FINALIZED,
+                Quotation.STATUS_SENT,
+            },
+        )
+
+
+def _require_current_email_preview(
+    quotation,
+    delivery,
+    actor,
+    fingerprint,
+    *,
+    pdf_config=None,
+):
+    supplied = str(fingerprint or "").strip()
+    if not supplied:
+        raise QuotationEmailError(
+            "Open and review the latest email preview before sending this quotation.",
+            code="email_preview_required",
+            http_status=400,
+            retryable=False,
+            quote_finalized=quotation.status in {
+                Quotation.STATUS_FINALIZED,
+                Quotation.STATUS_SENT,
+            },
+            delivery=delivery if getattr(delivery, "pk", None) else None,
+        )
+    expected = quotation_email_preview_fingerprint(
+        quotation,
+        delivery,
+        actor,
+        pdf_config=pdf_config,
+    )
+    if not secrets.compare_digest(supplied, expected):
+        raise QuotationEmailError(
+            "The quotation or verified reply source changed after this preview. Reload and review the latest preview before sending.",
+            code="stale_email_preview",
+            http_status=409,
+            retryable=False,
+            quote_finalized=quotation.status in {
+                Quotation.STATUS_FINALIZED,
+                Quotation.STATUS_SENT,
+            },
+            delivery=delivery if getattr(delivery, "pk", None) else None,
+        )
+
+
+def _lock_email_render_dependencies(quotation, delivery=None):
+    """Lock every database row that can affect the reviewed PDF or MIME source.
+
+    The caller must already hold the quotation and delivery locks. Keeping the
+    shared quote -> delivery -> line order makes concurrent quotation writes
+    serialize, while these additional locks close changes to related customer,
+    branding, catalogue, image, creator, and Gmail identity rows until the
+    exact outbound MIME bytes have been prepared.
+    """
+
+    line_refs = list(
+        QuotationLine.objects.select_for_update(of=("self",))
+        .filter(quotation_id=quotation.pk)
+        .order_by("pk")
+        .values("product_id", "quote_item_id", "product_image_id")
+    )
+    list(
+        Company.objects.select_for_update()
+        .filter(pk=quotation.company_id)
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+    if quotation.contact_id:
+        list(
+            CompanyContact.objects.select_for_update()
+            .filter(pk=quotation.contact_id)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+
+    creator_model = Quotation._meta.get_field("created_by").remote_field.model
+    if quotation.created_by_id:
+        list(
+            creator_model.objects.select_for_update()
+            .filter(pk=quotation.created_by_id)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        list(
+            UserQuotationProfile.objects.select_for_update()
+            .filter(user_id=quotation.created_by_id)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+
+    # The singleton may legitimately be absent in an older/local database.
+    # In that case the resolved config is frozen and passed to the PDF builder
+    # below, so a concurrent first-time settings insert cannot alter the bytes.
+    list(
+        QuotationSettings.objects.select_for_update()
+        .filter(pk=1)
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+
+    quote_item_ids = {
+        row["quote_item_id"] for row in line_refs if row["quote_item_id"]
+    }
+    quote_item_rows = list(
+        QuoteItem.objects.select_for_update()
+        .filter(pk__in=quote_item_ids)
+        .order_by("pk")
+        .values("product_id")
+    )
+    product_ids = {
+        row["product_id"] for row in line_refs if row["product_id"]
+    }
+    product_ids.update(
+        row["product_id"] for row in quote_item_rows if row["product_id"]
+    )
+    product_rows = list(
+        Product.objects.select_for_update()
+        .filter(pk__in=product_ids)
+        .order_by("pk")
+        .values("brand_id")
+    )
+    brand_ids = {row["brand_id"] for row in product_rows if row["brand_id"]}
+    list(
+        Brand.objects.select_for_update()
+        .filter(pk__in=brand_ids)
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+
+    explicit_image_ids = {
+        row["product_image_id"]
+        for row in line_refs
+        if row["product_image_id"]
+    }
+    list(
+        ProductImage.objects.select_for_update()
+        .filter(Q(pk__in=explicit_image_ids) | Q(product_id__in=product_ids))
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
+
+    locked_connection = None
+    if delivery is not None and delivery.gmail_connection_id:
+        locked_connection = GmailOAuthConnection.objects.select_for_update().get(
+            pk=delivery.gmail_connection_id
+        )
+        delivery.gmail_connection = locked_connection
+    return locked_connection
+
+
+def lock_quotation_review_dependencies(quotation):
+    """Lock rows used by the customer-facing quotation review representation."""
+
+    _lock_email_render_dependencies(quotation)
 
 
 def _require_staff(actor):
@@ -163,7 +619,14 @@ def quotation_attachment_filename(quotation):
 def _default_body(quotation):
     contact_name = str(getattr(quotation.contact, "name", "") or "").strip()
     salutation = contact_name.split()[0] if contact_name else "Sir or Madam"
-    sender_name = str(QuotationSettings.get_solo().company_name or "Al Ameen Pharmacy LLC").strip()
+    # Preview is a read operation. Do not create the singleton settings row
+    # here: doing so changes the quotation review fingerprint between the
+    # editor GET and the preview response. Resolve the same fallback config
+    # that the PDF renderer uses when settings have not been saved yet.
+    sender_name = str(
+        get_quotation_pdf_config(quotation=quotation).company_name
+        or "Al Ameen Pharmacy LLC"
+    ).strip()
     return (
         f"Dear {salutation},\n\n"
         "Greetings.\n\n"
@@ -582,6 +1045,7 @@ def prepare_email_preview(
     *,
     thread_selection_token="",
     persist=False,
+    expected_preview_fingerprint="",
 ):
     """Build a preview before finalization; persist only when sending starts."""
 
@@ -647,6 +1111,13 @@ def prepare_email_preview(
                 thread_selection_token or source.get("gmail_import")
             ),
         )
+        if expected_preview_fingerprint:
+            _require_current_email_preview(
+                locked_quote,
+                delivery,
+                actor,
+                expected_preview_fingerprint,
+            )
         delivery.save()
         if created:
             audit_log(
@@ -659,7 +1130,7 @@ def prepare_email_preview(
         return delivery
 
 
-def delivery_preview_payload(delivery, actor=None):
+def delivery_preview_payload(delivery, actor=None, *, preview_fingerprint=None):
     connection = delivery.gmail_connection
     connected = bool(connection and connection.status == connection.STATUS_CONNECTED)
     send_authorized = bool(connected and gmail_send_scope_granted(connection))
@@ -676,7 +1147,7 @@ def delivery_preview_payload(delivery, actor=None):
         warnings.append(
             "Gmail did not confirm the previous attempt. Do not resend until the shared mailbox is checked."
         )
-    return {
+    payload = {
         "delivery_id": delivery.id,
         "delivery_mode": delivery.delivery_mode,
         "can_reply_to_thread": delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY,
@@ -705,6 +1176,58 @@ def delivery_preview_payload(delivery, actor=None):
         "gmail_can_manage": can_manage_shared_gmail(actor, connection),
         "reconnect_required": bool(connected and not send_authorized),
     }
+    if actor is not None:
+        payload["preview_fingerprint"] = (
+            preview_fingerprint
+            or quotation_email_preview_fingerprint(
+                delivery.quotation,
+                delivery,
+                actor,
+            )
+        )
+    return payload
+
+
+def reviewed_delivery_preview_payload(
+    quotation,
+    delivery,
+    actor,
+    *,
+    quotation_review_fingerprint_value="",
+):
+    """Bind a preview response to the quotation revision displayed by staff.
+
+    The parameter remains optional for compatibility with older internal API
+    clients. The shipped editor always supplies it. When present, the final
+    comparison and email-token construction happen under the same dependency
+    locks, so a change during Gmail source discovery cannot mint a sendable
+    token for unseen quotation state.
+    """
+
+    supplied = str(quotation_review_fingerprint_value or "").strip()
+    if not supplied:
+        return delivery_preview_payload(delivery, actor)
+
+    with transaction.atomic():
+        locked_quote = Quotation.objects.select_for_update().get(pk=quotation.pk)
+        if getattr(delivery, "pk", None):
+            QuotationEmailDelivery.objects.select_for_update(of=("self",)).get(
+                pk=delivery.pk
+            )
+        _lock_email_render_dependencies(locked_quote, delivery)
+        pdf_config = get_quotation_pdf_config(quotation=locked_quote)
+        require_current_quotation_review(locked_quote, supplied)
+        email_fingerprint = quotation_email_preview_fingerprint(
+            locked_quote,
+            delivery,
+            actor,
+            pdf_config=pdf_config,
+        )
+        return delivery_preview_payload(
+            delivery,
+            actor,
+            preview_fingerprint=email_fingerprint,
+        )
 
 
 def delivery_payload(delivery):
@@ -777,11 +1300,15 @@ def _references_header(delivery):
     return " ".join(dict.fromkeys(values))
 
 
-def _build_raw_message(delivery, pdf_bytes):
+def _build_raw_message(delivery, pdf_bytes, *, sender_name=None):
     connection = delivery.gmail_connection
     from_email = str(getattr(connection, "email", "") or "").strip().lower()
     validate_email(from_email)
-    sender_name = str(QuotationSettings.get_solo().company_name or "Al Ameen Pharmacy LLC").strip()
+    sender_name = str(
+        sender_name
+        or QuotationSettings.get_solo().company_name
+        or "Al Ameen Pharmacy LLC"
+    ).strip()
     message = EmailMessage(policy=SMTP)
     message["From"] = formataddr((sender_name, from_email))
     message["To"] = ", ".join(delivery.to_addresses or [])
@@ -1189,6 +1716,7 @@ def send_quotation_email(
     """Finalize (when requested), commit, then send outside the transaction."""
 
     _require_staff(actor)
+    preview_fingerprint = str(data.get("preview_fingerprint") or "").strip()
     preflight = prepare_email_preview(
         quotation,
         actor,
@@ -1201,6 +1729,12 @@ def send_quotation_email(
         QuotationEmailDelivery.STATUS_SENDING,
         QuotationEmailDelivery.STATUS_UNKNOWN,
     }:
+        _require_current_email_preview(
+            quotation,
+            preflight,
+            actor,
+            preview_fingerprint,
+        )
         _validate_editable_fields(preflight, data)
         if (
             not preflight.gmail_connection
@@ -1245,6 +1779,7 @@ def send_quotation_email(
             actor,
             thread_selection_token=thread_selection_token,
             persist=True,
+            expected_preview_fingerprint=preview_fingerprint,
         )
     else:
         preview = preflight
@@ -1279,6 +1814,11 @@ def send_quotation_email(
             },
             delivery=stale,
         )
+    preparation_failure = None
+    raw_message = None
+    send_connection = None
+    send_thread_id = ""
+    send_is_reply = False
     with transaction.atomic():
         # See _record_successful_delivery: quote must always be locked first.
         locked_quote = Quotation.objects.select_for_update().get(pk=quotation.pk)
@@ -1305,6 +1845,19 @@ def send_quotation_email(
                 quote_finalized=locked_quote.status in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT},
                 delivery=locked_delivery,
             )
+
+        send_connection = _lock_email_render_dependencies(
+            locked_quote,
+            locked_delivery,
+        )
+        pdf_config = get_quotation_pdf_config(quotation=locked_quote)
+        _require_current_email_preview(
+            locked_quote,
+            locked_delivery,
+            actor,
+            preview_fingerprint,
+            pdf_config=pdf_config,
+        )
 
         # Validate every user-controlled recipient/header before changing the
         # quotation state. Provider/configuration failures happen later and
@@ -1364,79 +1917,158 @@ def send_quotation_email(
         locked_delivery.subject = subject
         locked_delivery.body = body
         locked_delivery.actor = actor
-        locked_delivery.status = QuotationEmailDelivery.STATUS_SENDING
         locked_delivery.attempt_count += 1
         locked_delivery.sending_started_at = timezone.now()
         locked_delivery.failed_at = None
         locked_delivery.last_error = ""
-        locked_delivery.save(
-            update_fields=[
-                "to_addresses",
-                "cc_addresses",
-                "subject",
-                "body",
-                "actor",
-                "status",
-                "attempt_count",
-                "sending_started_at",
-                "failed_at",
-                "last_error",
-                "updated_at",
-            ]
+
+        # Finalization deliberately mutates status, blank brand snapshots, and
+        # aggregate totals. The projected fingerprint must remain identical;
+        # this second assertion prevents a future finalization change from
+        # silently escaping the reviewed contract.
+        _require_current_email_preview(
+            locked_quote,
+            locked_delivery,
+            actor,
+            preview_fingerprint,
+            pdf_config=pdf_config,
         )
+
+        try:
+            # A savepoint keeps the outer transaction usable if PDF/MIME
+            # preparation fails. The outer transaction can then commit both
+            # the finalized quotation and a durable FAILED delivery state.
+            with transaction.atomic():
+                pdf_bytes = build_quotation_pdf(
+                    locked_quote,
+                    config=pdf_config,
+                )
+                pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                pdf_size = len(pdf_bytes)
+                if (
+                    locked_delivery.attachment_sha256
+                    and locked_delivery.attachment_sha256 != pdf_sha256
+                ):
+                    raise QuotationEmailError(
+                        "The regenerated quotation PDF differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
+                        code="attachment_snapshot_mismatch",
+                        retryable=False,
+                    )
+                if (
+                    locked_delivery.attachment_size is not None
+                    and locked_delivery.attachment_size != pdf_size
+                ):
+                    raise QuotationEmailError(
+                        "The regenerated quotation PDF size differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
+                        code="attachment_snapshot_mismatch",
+                        retryable=False,
+                    )
+                raw_message = _build_raw_message(
+                    locked_delivery,
+                    pdf_bytes,
+                    sender_name=pdf_config.company_name,
+                )
+        except Exception as exc:  # normalized after the finalized state commits
+            preparation_failure = exc
+            safe_failure = (
+                exc.message
+                if isinstance(exc, QuotationEmailError)
+                else "The quotation PDF or email could not be prepared."
+            )
+            locked_delivery.status = QuotationEmailDelivery.STATUS_FAILED
+            locked_delivery.last_error = str(safe_failure)[:1000]
+            locked_delivery.failed_at = timezone.now()
+            locked_delivery.save(
+                update_fields=[
+                    "to_addresses",
+                    "cc_addresses",
+                    "subject",
+                    "body",
+                    "actor",
+                    "status",
+                    "attempt_count",
+                    "sending_started_at",
+                    "failed_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+            audit_log(
+                actor,
+                QuotationAuditLog.ACTION_EMAIL_FAILED,
+                locked_delivery,
+                message=f"Email delivery failed for {locked_quote.quotation_number}.",
+                changes={"attempt_count": locked_delivery.attempt_count},
+                company=locked_quote.company,
+                quotation=locked_quote,
+            )
+        else:
+            if (
+                not locked_delivery.attachment_sha256
+                or locked_delivery.attachment_size is None
+            ):
+                locked_delivery.attachment_sha256 = pdf_sha256
+                locked_delivery.attachment_size = pdf_size
+            locked_delivery.status = QuotationEmailDelivery.STATUS_SENDING
+            locked_delivery.save(
+                update_fields=[
+                    "to_addresses",
+                    "cc_addresses",
+                    "subject",
+                    "body",
+                    "actor",
+                    "status",
+                    "attachment_sha256",
+                    "attachment_size",
+                    "attempt_count",
+                    "sending_started_at",
+                    "failed_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+            send_thread_id = (
+                locked_delivery.gmail_thread_id
+                if locked_delivery.delivery_mode
+                == QuotationEmailDelivery.MODE_GMAIL_REPLY
+                else ""
+            )
+            send_is_reply = (
+                locked_delivery.delivery_mode
+                == QuotationEmailDelivery.MODE_GMAIL_REPLY
+            )
         delivery_id = locked_delivery.id
 
-    # The quote finalization and sending marker are committed before PDF
-    # generation or any Gmail request. A provider failure can never roll the
-    # quotation back to an editable state.
+    if preparation_failure is not None:
+        failed = QuotationEmailDelivery.objects.select_related("quotation").get(
+            pk=delivery_id
+        )
+        if isinstance(preparation_failure, QuotationEmailError):
+            raise QuotationEmailError(
+                f"The quotation is finalized, but the email was not sent. {preparation_failure.message}",
+                code=preparation_failure.code,
+                retryable=preparation_failure.retryable,
+                quote_finalized=True,
+                delivery=failed,
+            ) from preparation_failure
+        raise QuotationEmailError(
+            "The quotation is finalized, but its PDF/email could not be prepared.",
+            code="email_prepare_failed",
+            retryable=True,
+            quote_finalized=True,
+            delivery=failed,
+        ) from preparation_failure
+
+    # All customer-facing bytes and thread headers are frozen before locks are
+    # released. Only the Gmail network call occurs in the ambiguous window.
     gmail_request_started = False
     try:
-        delivery = QuotationEmailDelivery.objects.select_related(
-            "quotation__company", "quotation__contact", "gmail_connection"
-        ).get(pk=delivery_id)
-        if not delivery.gmail_connection:
-            raise PermissionError("The shared Gmail mailbox is not connected.")
-        if not gmail_send_scope_granted(delivery.gmail_connection):
-            raise PermissionError(
-                "Gmail send permission is missing. Reconnect the shared Gmail mailbox and approve sending."
-            )
-        pdf_bytes = build_quotation_pdf(delivery.quotation)
-        pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
-        with transaction.atomic():
-            attachment_row = QuotationEmailDelivery.objects.select_for_update().get(pk=delivery_id)
-            if attachment_row.status != QuotationEmailDelivery.STATUS_SENDING:
-                raise QuotationEmailError("The delivery state changed before Gmail could be called.")
-            if (
-                attachment_row.attachment_sha256
-                and attachment_row.attachment_sha256 != pdf_sha256
-            ):
-                raise QuotationEmailError(
-                    "The regenerated quotation PDF differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
-                    code="attachment_snapshot_mismatch",
-                    retryable=False,
-                )
-            if not attachment_row.attachment_sha256:
-                attachment_row.attachment_sha256 = pdf_sha256
-                attachment_row.attachment_size = len(pdf_bytes)
-                attachment_row.save(
-                    update_fields=["attachment_sha256", "attachment_size", "updated_at"]
-                )
-        raw_message = _build_raw_message(delivery, pdf_bytes)
-        # Refresh/validate OAuth before entering the ambiguous delivery window.
-        # Only errors after this point could have occurred after Gmail received
-        # the messages.send request.
-        access_token = prepared_access_token or get_valid_access_token(
-            delivery.gmail_connection
-        )
+        access_token = prepared_access_token or get_valid_access_token(send_connection)
         gmail_request_started = True
         response = gmail_send_raw_message(
-            delivery.gmail_connection,
+            send_connection,
             raw_message,
-            thread_id=(
-                delivery.gmail_thread_id
-                if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
-                else ""
-            ),
+            thread_id=send_thread_id,
             access_token=access_token,
         )
     except QuotationEmailError as exc:
@@ -1601,8 +2233,8 @@ def send_quotation_email(
     gmail_message_id = str((response or {}).get("id") or "").strip()
     sent_thread_id = str((response or {}).get("threadId") or "").strip()
     if not gmail_message_id or not sent_thread_id or (
-        delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
-        and sent_thread_id != delivery.gmail_thread_id
+        send_is_reply
+        and sent_thread_id != send_thread_id
     ):
         current = QuotationEmailDelivery.objects.select_related(
             "gmail_connection", "quotation"

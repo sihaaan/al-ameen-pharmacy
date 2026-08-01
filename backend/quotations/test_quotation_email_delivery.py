@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import time
 import urllib.error
 import urllib.parse
 from datetime import timedelta
@@ -16,7 +17,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from api.models import Product
+from api.models import Brand, Product
 
 from .contract_intelligence import (
     GMAIL_READONLY_SCOPE,
@@ -34,6 +35,7 @@ from .models import (
     QuotationEmailDelivery,
     QuotationEmailThreadSelection,
     QuotationLine,
+    QuotationSettings,
 )
 from .quotation_email_delivery import _mark_delivery_failure
 
@@ -92,6 +94,7 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             vat_rate=Decimal("5.00"),
             match_status=QuotationLine.MATCH_CONFIRMED,
         )
+        self.latest_quotation = quotation
         return quotation
 
     @staticmethod
@@ -157,7 +160,31 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         )
         return gmail_import
 
-    def manual_payload(self, **overrides):
+    def preview_fingerprint(self, quotation=None, *, params=None):
+        quotation = quotation or self.latest_quotation
+        request_params = dict(params or {})
+        request_params.setdefault(
+            "quotation_review_fingerprint",
+            self.quotation_review_fingerprint(quotation),
+        )
+        response = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id]),
+            request_params,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(response.data.get("preview_fingerprint"))
+        return response.data["preview_fingerprint"]
+
+    def quotation_review_fingerprint(self, quotation=None):
+        quotation = quotation or self.latest_quotation
+        response = self.client.get(
+            reverse("quotation-detail", args=[quotation.id]),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(response.data.get("quotation_review_fingerprint"))
+        return response.data["quotation_review_fingerprint"]
+
+    def manual_payload(self, *, include_preview=True, quotation=None, **overrides):
         payload = {
             "to": ["buyer@example.com"],
             "cc": [],
@@ -165,10 +192,12 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             "body": "Please find the quotation attached.",
             "confirm_recipient": True,
         }
+        if include_preview:
+            payload["preview_fingerprint"] = self.preview_fingerprint(quotation)
         payload.update(overrides)
         return payload
 
-    def gmail_payload(self, **overrides):
+    def gmail_payload(self, *, include_preview=True, quotation=None, **overrides):
         payload = {
             "to": ["orders@example.com"],
             "cc": [],
@@ -176,6 +205,8 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             "body": "Please find the quotation attached.",
             "confirm_recipient": True,
         }
+        if include_preview:
+            payload["preview_fingerprint"] = self.preview_fingerprint(quotation)
         payload.update(overrides)
         return payload
 
@@ -187,9 +218,273 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(response.data["delivery_mode"], "new_email")
         self.assertEqual(response.data["to"], ["buyer@example.com"])
         self.assertIsNone(response.data["delivery_id"])
+        self.assertTrue(response.data["preview_fingerprint"])
         self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
         quotation.refresh_from_db()
         self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+
+        repeated = self.client.get(reverse("quotation-email-preview", args=[quotation.id]))
+        self.assertEqual(
+            repeated.data["preview_fingerprint"],
+            response.data["preview_fingerprint"],
+        )
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_send_requires_a_reviewed_preview_before_any_side_effect(self, send, pdf):
+        quotation = self.create_quote()
+
+        response = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(include_preview=False),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "email_preview_required")
+        self.assertTrue(response.data["refresh_preview"])
+        self.assertFalse(response.data["quote_finalized"])
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+        self.assertFalse(
+            QuotationAuditLog.objects.filter(
+                quotation=quotation,
+                action=QuotationAuditLog.ACTION_EMAIL_PREPARED,
+            ).exists()
+        )
+        pdf.assert_not_called()
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-current")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        return_value={"id": "gmail-current", "threadId": "thread-current"},
+    )
+    def test_changed_quotation_rejects_old_preview_then_fresh_review_sends(self, send, pdf):
+        quotation = self.create_quote()
+        old_fingerprint = self.preview_fingerprint(quotation)
+        line = quotation.lines.get()
+        line.item_name_snapshot = "Changed after preview"
+        line.save(update_fields=["item_name_snapshot", "updated_at"])
+
+        stale = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(
+                include_preview=False,
+                preview_fingerprint=old_fingerprint,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(stale.data["code"], "stale_email_preview")
+        self.assertTrue(stale.data["refresh_preview"])
+        self.assertFalse(stale.data["quote_finalized"])
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+        pdf.assert_not_called()
+        send.assert_not_called()
+
+        fresh_fingerprint = self.preview_fingerprint(quotation)
+        self.assertNotEqual(fresh_fingerprint, old_fingerprint)
+        sent = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(
+                include_preview=False,
+                preview_fingerprint=fresh_fingerprint,
+            ),
+            format="json",
+        )
+        self.assertEqual(sent.status_code, status.HTTP_200_OK)
+        self.assertEqual(sent.data["quote"]["status"], Quotation.STATUS_SENT)
+        pdf.assert_called_once()
+        send.assert_called_once()
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_preview_fingerprint_is_bound_to_quote_and_staff_actor(self, send, pdf):
+        quotation_a = self.create_quote()
+        fingerprint_a = self.preview_fingerprint(quotation_a)
+        quotation_b = self.create_quote()
+
+        wrong_quote = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation_b.id]),
+            self.manual_payload(
+                include_preview=False,
+                quotation=quotation_b,
+                preview_fingerprint=fingerprint_a,
+            ),
+            format="json",
+        )
+        self.assertEqual(wrong_quote.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(wrong_quote.data["code"], "stale_email_preview")
+
+        other_staff = User.objects.create_user(
+            username="other-email-staff",
+            password="pass",
+            is_staff=True,
+        )
+        self.client.force_authenticate(other_staff)
+        wrong_actor = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation_a.id]),
+            self.manual_payload(
+                include_preview=False,
+                quotation=quotation_a,
+                preview_fingerprint=fingerprint_a,
+            ),
+            format="json",
+        )
+        self.assertEqual(wrong_actor.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(wrong_actor.data["code"], "stale_email_preview")
+        self.assertFalse(QuotationEmailDelivery.objects.exists())
+        pdf.assert_not_called()
+        send.assert_not_called()
+
+    def test_preview_fingerprint_tracks_customer_facing_but_not_internal_state(self):
+        quotation = self.create_quote()
+        baseline = self.preview_fingerprint(quotation)
+
+        quotation.outcome_notes = "Internal sales follow-up only"
+        quotation.save(update_fields=["outcome_notes", "updated_at"])
+        self.assertEqual(self.preview_fingerprint(quotation), baseline)
+
+        self.company.billing_address = "New customer-facing billing address"
+        self.company.save(update_fields=["billing_address", "updated_at"])
+        company_changed = self.preview_fingerprint(quotation)
+        self.assertNotEqual(company_changed, baseline)
+
+        settings_obj = QuotationSettings.get_solo()
+        settings_obj.default_terms = "Updated customer-facing quotation terms."
+        settings_obj.save(update_fields=["default_terms", "updated_at"])
+        self.assertNotEqual(self.preview_fingerprint(quotation), company_changed)
+
+    def test_preview_rejects_a_quotation_revision_not_shown_in_the_editor(self):
+        quotation = self.create_quote()
+        displayed_fingerprint = self.quotation_review_fingerprint(quotation)
+
+        current = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id]),
+            {"quotation_review_fingerprint": displayed_fingerprint},
+        )
+        self.assertEqual(current.status_code, status.HTTP_200_OK, current.data)
+
+        line = quotation.lines.get()
+        line.item_name_snapshot = "Changed by another employee"
+        line.save(update_fields=["item_name_snapshot", "updated_at"])
+        stale = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id]),
+            {"quotation_review_fingerprint": displayed_fingerprint},
+        )
+
+        self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(stale.data["code"], "stale_quotation_review")
+        self.assertTrue(stale.data["refresh_quote"])
+        self.assertEqual(
+            stale.data["quote"]["lines"][0]["item_name_snapshot"],
+            "Changed by another employee",
+        )
+        self.assertFalse(
+            QuotationEmailDelivery.objects.filter(quotation=quotation).exists()
+        )
+
+    def test_preview_does_not_create_default_settings_or_invalidate_review(self):
+        quotation = self.create_quote()
+        self.assertFalse(QuotationSettings.objects.exists())
+        displayed_fingerprint = self.quotation_review_fingerprint(quotation)
+
+        response = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id]),
+            {"quotation_review_fingerprint": displayed_fingerprint},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(response.data["preview_fingerprint"])
+        self.assertFalse(QuotationSettings.objects.exists())
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_attachment_metadata_change_invalidates_reviewed_preview(self, send, pdf):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_FAILED,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation preview",
+            body="Please find the quotation attached.",
+            attachment_filename="EMAIL-CUSTOMER.pdf",
+            attachment_sha256="a" * 64,
+            attachment_size=123,
+        )
+        fingerprint = self.preview_fingerprint(quotation)
+        delivery.attachment_filename = "UNREVIEWED-NAME.pdf"
+        delivery.save(update_fields=["attachment_filename", "updated_at"])
+
+        response = self.client.post(
+            reverse("quotation-send-email", args=[quotation.id]),
+            self.manual_payload(
+                include_preview=False,
+                quotation=quotation,
+                preview_fingerprint=fingerprint,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "stale_email_preview")
+        self.assertTrue(response.data["quote_finalized"])
+        pdf.assert_not_called()
+        send.assert_not_called()
+
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        return_value={"id": "gmail-projected", "threadId": "thread-projected"},
+    )
+    def test_reviewed_draft_projection_matches_finalized_pdf_state(self, send):
+        brand = Brand.objects.create(name="Projected Brand")
+        self.product.brand = brand
+        self.product.save(update_fields=["brand", "updated_at"])
+        quotation = self.create_quote()
+        quotation.subtotal = Decimal("999.00")
+        quotation.vat_total = Decimal("999.00")
+        quotation.total = Decimal("1998.00")
+        quotation.save(update_fields=["subtotal", "vat_total", "total", "updated_at"])
+
+        rendered = {}
+
+        def render_pdf(current, *, config=None):
+            current.refresh_from_db()
+            line = current.lines.get()
+            rendered.update(
+                status=current.status,
+                brand=line.brand_name_snapshot,
+                subtotal=current.subtotal,
+                total=current.total,
+                sender=config.company_name,
+            )
+            return b"%PDF-projected"
+
+        with patch(
+            "quotations.quotation_email_delivery.build_quotation_pdf",
+            side_effect=render_pdf,
+        ):
+            response = self.client.post(
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                self.manual_payload(quotation=quotation),
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(rendered["status"], Quotation.STATUS_FINALIZED)
+        self.assertEqual(rendered["brand"], "Projected Brand")
+        self.assertEqual(rendered["subtotal"], Decimal("20.00"))
+        self.assertEqual(rendered["total"], Decimal("21.00"))
+        self.assertTrue(rendered["sender"])
+        send.assert_called_once()
 
     @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
     def test_gmail_preview_uses_latest_relevant_inbound_even_when_context(self, fetch):
@@ -204,7 +499,20 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(response.data["delivery_mode"], "gmail_reply")
         self.assertEqual(response.data["to"], ["orders@example.com"])
         self.assertEqual(response.data["subject"], "RFQ medical supplies")
+        self.assertTrue(response.data["preview_fingerprint"])
         self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+
+        fetch.return_value = self.source_metadata(
+            message_id="gmail-followup-2",
+            rfc_message_id="<changed-source@example.com>",
+        )
+        changed_source = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id])
+        )
+        self.assertNotEqual(
+            changed_source.data["preview_fingerprint"],
+            response.data["preview_fingerprint"],
+        )
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     def test_wrong_gmail_recipient_is_rejected_before_finalization(self, send):
@@ -445,13 +753,8 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
         self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_FAILED)
 
-    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"same-pdf")
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
-    def test_identical_pdf_known_failure_retries_once_without_refinalizing(
-        self,
-        send,
-        _pdf,
-    ):
+    def test_real_pdf_known_failure_retries_once_without_refinalizing(self, send):
         quotation = self.create_quote()
         send.side_effect = [
             RuntimeError("Google API request failed with HTTP 400: invalid"),
@@ -465,6 +768,12 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         )
         quotation.refresh_from_db()
         finalized_at = quotation.finalized_at
+        first_pdf_hash = QuotationEmailDelivery.objects.get(
+            quotation=quotation
+        ).attachment_sha256
+        # Cross ReportLab's normal timestamp boundary. Without invariant PDF
+        # output, identical visible content receives a different document ID.
+        time.sleep(1.1)
         second = self.client.post(
             reverse("quotation-send-email", args=[quotation.id]),
             self.manual_payload(),
@@ -476,6 +785,10 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(second.data["quote"]["status"], Quotation.STATUS_SENT)
         self.assertEqual(second.data["delivery"]["attempt_count"], 2)
         self.assertEqual(QuotationEmailDelivery.objects.filter(quotation=quotation).count(), 1)
+        self.assertEqual(
+            QuotationEmailDelivery.objects.get(quotation=quotation).attachment_sha256,
+            first_pdf_hash,
+        )
         quotation.refresh_from_db()
         self.assertEqual(quotation.finalized_at, finalized_at)
         self.assertEqual(
@@ -509,10 +822,11 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(response.data["code"], "email_prepare_failed")
         self.assertTrue(response.data["quote_finalized"])
         self.assertTrue(response.data["retryable"])
-        self.assertEqual(
-            QuotationEmailDelivery.objects.get(quotation=quotation).status,
-            QuotationEmailDelivery.STATUS_FAILED,
-        )
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_FAILED)
+        self.assertEqual(delivery.attempt_count, 1)
         send.assert_not_called()
 
     @patch(

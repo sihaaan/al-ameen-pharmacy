@@ -19,6 +19,7 @@ const gmailPreview = {
   subject: 'Re: RFQ - First aid supplies',
   body: 'Dear Maria,\n\nPlease find attached our quotation.',
   attachment_filename: 'CUSTOMER-QT-20260731-0001.pdf',
+  preview_fingerprint: 'preview-fingerprint-1',
 };
 
 const defaultProps = {
@@ -68,6 +69,7 @@ describe('QuotationEmailPreviewDialog', () => {
       body: 'Updated approved wording.',
       confirm_recipient: true,
       delivery_mode: 'gmail_reply',
+      preview_fingerprint: 'preview-fingerprint-1',
     });
   });
 
@@ -254,6 +256,40 @@ describe('QuotationEmailPreviewDialog', () => {
     expect(onClearCorrectableError).not.toHaveBeenCalled();
     expect(screen.getByText('The finalized PDF no longer matches the reviewed attachment.')).toBeInTheDocument();
   });
+
+  test.each(['stale_email_preview', 'email_preview_required'])(
+    'hard-blocks %s until staff explicitly refreshes and reviews again',
+    (code) => {
+      const onRefreshPreview = jest.fn();
+      const onClearCorrectableError = jest.fn();
+      render(
+        <QuotationEmailPreviewDialog
+          {...defaultProps}
+          sendError={{
+            code,
+            detail: 'The quotation no longer matches the reviewed preview.',
+            quoteFinalized: false,
+            retryable: true,
+            deliveryStatus: 'not_sent',
+          }}
+          onRefreshPreview={onRefreshPreview}
+          onClearCorrectableError={onClearCorrectableError}
+        />
+      );
+
+      expect(screen.getByText('Refresh and review the quotation email before sending.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+      fireEvent.change(screen.getByLabelText(/Message/), {
+        target: { value: 'Editing this must not unlock an outdated preview.' },
+      });
+      expect(onClearCorrectableError).not.toHaveBeenCalled();
+      expect(defaultProps.onSend).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+      expect(onRefreshPreview).toHaveBeenCalledTimes(1);
+      expect(defaultProps.onSend).not.toHaveBeenCalled();
+    }
+  );
 
   test('allows a definite failed delivery to be retried without finalizing again', () => {
     render(

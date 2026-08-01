@@ -137,10 +137,12 @@ from .quote_po_intelligence import find_quote_po_evidence, parse_quote_po_eviden
 from .quotation_email_delivery import (
     QuotationEmailError,
     delivery_payload as quotation_email_delivery_payload,
-    delivery_preview_payload as quotation_email_preview_payload,
+    reviewed_delivery_preview_payload,
     find_manual_thread_candidates,
+    lock_quotation_review_dependencies,
     prepare_email_preview,
     reconcile_quotation_email,
+    require_current_quotation_review,
     send_quotation_email,
 )
 from .serializers import (
@@ -2799,6 +2801,27 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         return queryset.order_by("-updated_at", "-id")
 
+    def retrieve(self, request, *args, **kwargs):
+        """Return one internally consistent quotation-review snapshot.
+
+        DRF normally serializes prefetched rows and method fields lazily. A
+        concurrent edit could otherwise land between the visible line payload
+        and its review fingerprint, pairing old rows with a token for newer
+        database state. Lock the quotation and every PDF dependency until the
+        complete response data has been materialized.
+        """
+
+        with transaction.atomic():
+            visible = self.get_object()
+            try:
+                quotation = Quotation.objects.select_for_update().get(pk=visible.pk)
+            except Quotation.DoesNotExist as exc:
+                raise Http404 from exc
+            lock_quotation_review_dependencies(quotation)
+            serializer = self.get_serializer(quotation)
+            payload = serializer.data
+        return Response(payload)
+
     def perform_create(self, serializer):
         quotation = serializer.save()
         audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, quotation, message="Created quotation.")
@@ -2933,6 +2956,11 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 "code": exc.code,
                 "quote_finalized": exc.quote_finalized,
                 "retryable": exc.retryable,
+                "refresh_preview": exc.code in {
+                    "email_preview_required",
+                    "stale_email_preview",
+                },
+                "refresh_quote": exc.code == "stale_quotation_review",
                 "quote": self.get_serializer(quotation).data,
                 "delivery": (
                     quotation_email_delivery_payload(exc.delivery)
@@ -2947,6 +2975,15 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def email_preview(self, request, pk=None):
         quotation = self.get_object()
         try:
+            review_fingerprint = request.query_params.get(
+                "quotation_review_fingerprint",
+                "",
+            )
+            if review_fingerprint:
+                require_current_quotation_review(
+                    quotation,
+                    review_fingerprint,
+                )
             delivery = prepare_email_preview(
                 quotation,
                 request.user,
@@ -2958,7 +2995,19 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         except QuotationEmailError as exc:
             return self._quotation_email_error_response(exc)
-        return Response(quotation_email_preview_payload(delivery, request.user))
+        try:
+            payload = reviewed_delivery_preview_payload(
+                quotation,
+                delivery,
+                request.user,
+                quotation_review_fingerprint_value=request.query_params.get(
+                    "quotation_review_fingerprint",
+                    "",
+                ),
+            )
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
+        return Response(payload)
 
     @action(detail=True, methods=["get"])
     def email_thread_candidates(self, request, pk=None):
@@ -4207,27 +4256,53 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def upload_product_image(self, request, pk=None):
         line = self.get_object()
         try:
-            ensure_quotation_editable(line.quotation)
+            with transaction.atomic():
+                quotation = _quotations_for_update().get(pk=line.quotation_id)
+                ensure_quotation_editable(quotation)
+                line = (
+                    _quotation_lines_for_update()
+                    .select_related("product")
+                    .get(pk=line.pk, quotation=quotation)
+                )
+                if not line.product_id:
+                    return Response(
+                        {"detail": "Match this line to a Product before uploading an item image."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                image_file = request.FILES.get("image")
+                if not image_file:
+                    return Response(
+                        {"detail": "Choose an image file."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                has_primary = ProductImage.objects.filter(
+                    product=line.product,
+                    is_primary=True,
+                ).exists()
+                product_image = ProductImage.objects.create(
+                    product=line.product,
+                    image=image_file,
+                    alt_text=line.item_name_snapshot or line.product.name,
+                    is_primary=not has_primary,
+                    display_order=ProductImage.objects.filter(product=line.product).count(),
+                    source_type="manual_upload",
+                )
+                line.product_image = product_image
+                line.include_product_image = True
+                line.save(
+                    update_fields=["product_image", "include_product_image", "updated_at"]
+                )
+                recalculate_quotation_totals(quotation)
+                audit_log(
+                    request.user,
+                    QuotationAuditLog.ACTION_UPDATED,
+                    line,
+                    message="Uploaded Product image from quotation line.",
+                )
+        except (Quotation.DoesNotExist, QuotationLine.DoesNotExist) as exc:
+            raise Http404 from exc
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
-        if not line.product_id:
-            return Response({"detail": "Match this line to a Product before uploading an item image."}, status=status.HTTP_400_BAD_REQUEST)
-        image_file = request.FILES.get("image")
-        if not image_file:
-            return Response({"detail": "Choose an image file."}, status=status.HTTP_400_BAD_REQUEST)
-        has_primary = ProductImage.objects.filter(product=line.product, is_primary=True).exists()
-        product_image = ProductImage.objects.create(
-            product=line.product,
-            image=image_file,
-            alt_text=line.item_name_snapshot or line.product.name,
-            is_primary=not has_primary,
-            display_order=ProductImage.objects.filter(product=line.product).count(),
-            source_type="manual_upload",
-        )
-        line.product_image = product_image
-        line.include_product_image = True
-        line.save(update_fields=["product_image", "include_product_image", "updated_at"])
-        audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Uploaded Product image from quotation line.")
         return Response(
             {
                 "line": QuotationLineSerializer(line, context={"request": request}).data,

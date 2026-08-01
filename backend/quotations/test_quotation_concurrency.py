@@ -6,6 +6,7 @@ from unittest import skipUnless
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import (
     OperationalError,
     close_old_connections,
@@ -38,6 +39,7 @@ from .models import (
 from .quotation_email_delivery import (
     _mark_delivery_failure,
     _record_successful_delivery,
+    _validate_editable_fields,
 )
 from .serializers import QuotationSerializer
 from .views import QuotationLineViewSet, QuotationViewSet
@@ -438,6 +440,342 @@ class QuotationConcurrencyTests(TransactionTestCase):
         )
         self.assertFalse(Quotation.objects.filter(pk=quotation.pk).exists())
 
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_send_waiting_on_quote_mutation_rejects_old_preview(self, gmail_send, build_pdf):
+        quotation, _line = self.create_quote()
+        preview_client = APIClient()
+        preview_client.force_authenticate(self.staff)
+        preview = preview_client.get(
+            reverse("quotation-email-preview", args=[quotation.id])
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+
+        mutation_entered = Event()
+        release_mutation = Event()
+        send_preflight_complete = Event()
+        results = Queue()
+        original_update = QuotationSerializer.update
+
+        def paused_update(serializer, instance, validated_data):
+            mutation_entered.set()
+            if not release_mutation.wait(timeout=10):
+                raise AssertionError("Timed out waiting to release quotation mutation.")
+            return original_update(serializer, instance, validated_data)
+
+        validate_calls = {"count": 0}
+
+        def observed_validation(*args, **kwargs):
+            result = _validate_editable_fields(*args, **kwargs)
+            validate_calls["count"] += 1
+            if validate_calls["count"] == 1:
+                send_preflight_complete.set()
+            return result
+
+        payload = {
+            "to": ["buyer@example.com"],
+            "cc": [],
+            "subject": "Quotation preview",
+            "body": "Please find the quotation attached.",
+            "confirm_recipient": True,
+            "preview_fingerprint": preview.data["preview_fingerprint"],
+        }
+        patch_worker = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "patch",
+                "patch",
+                reverse("quotation-detail", args=[quotation.id]),
+                {"notes": "Changed while the old preview remained open"},
+            ),
+            daemon=True,
+        )
+        send_worker = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "send",
+                "post",
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                payload,
+            ),
+            daemon=True,
+        )
+
+        with patch.object(QuotationSerializer, "update", paused_update), patch(
+            "quotations.quotation_email_delivery._validate_editable_fields",
+            side_effect=observed_validation,
+        ):
+            try:
+                patch_worker.start()
+                self.assertTrue(mutation_entered.wait(timeout=10))
+                send_worker.start()
+                self.assertTrue(send_preflight_complete.wait(timeout=10))
+            finally:
+                release_mutation.set()
+                patch_worker.join(timeout=10)
+                send_worker.join(timeout=10)
+
+        self.assertFalse(patch_worker.is_alive(), "Quotation mutation deadlocked.")
+        self.assertFalse(send_worker.is_alive(), "Stale-preview send deadlocked.")
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse([outcome for outcome in outcomes if outcome[1] == "error"], outcomes)
+        self.assertCountEqual(
+            [(outcome[0], outcome[2], outcome[3]) for outcome in outcomes],
+            [
+                ("patch", status.HTTP_200_OK, ""),
+                ("send", status.HTTP_409_CONFLICT, "stale_email_preview"),
+            ],
+        )
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+        build_pdf.assert_not_called()
+        gmail_send.assert_not_called()
+
+    def test_quotation_detail_payload_and_review_token_are_one_locked_snapshot(self):
+        quotation, line = self.create_quote()
+        fingerprint_started = Event()
+        release_retrieve = Event()
+        mutation_finished = Event()
+        results = Queue()
+        original_fingerprint = QuotationSerializer.get_quotation_review_fingerprint
+
+        def paused_fingerprint(serializer, instance):
+            if current_thread().name == "quotation-review-retrieve":
+                fingerprint_started.set()
+                if not release_retrieve.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release quotation review.")
+            return original_fingerprint(serializer, instance)
+
+        def retrieve_quote():
+            close_old_connections()
+            try:
+                staff = User.objects.get(pk=self.staff.pk)
+                client = APIClient()
+                client.force_authenticate(staff)
+                response = client.get(
+                    reverse("quotation-detail", args=[quotation.id])
+                )
+                results.put(("retrieve", response.status_code, response.data))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("retrieve", "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        def update_line():
+            close_old_connections()
+            try:
+                QuotationLine.objects.filter(pk=line.pk).update(
+                    item_name_snapshot="Changed after locked review"
+                )
+                results.put(("line", "updated"))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("line", "error", repr(exc)))
+            finally:
+                mutation_finished.set()
+                connections.close_all()
+
+        retrieve_worker = Thread(
+            target=retrieve_quote,
+            name="quotation-review-retrieve",
+            daemon=True,
+        )
+        mutation_worker = Thread(target=update_line, daemon=True)
+        with patch.object(
+            QuotationSerializer,
+            "get_quotation_review_fingerprint",
+            paused_fingerprint,
+        ):
+            try:
+                retrieve_worker.start()
+                self.assertTrue(fingerprint_started.wait(timeout=10))
+                mutation_worker.start()
+                self.assertFalse(
+                    mutation_finished.wait(timeout=1),
+                    "A PDF-affecting line changed while its review response was being serialized.",
+                )
+            finally:
+                release_retrieve.set()
+                retrieve_worker.join(timeout=10)
+                if mutation_worker.ident is not None:
+                    mutation_worker.join(timeout=10)
+
+        self.assertFalse(retrieve_worker.is_alive() or mutation_worker.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        retrieve_outcome = next(row for row in outcomes if row[0] == "retrieve")
+        self.assertEqual(retrieve_outcome[1], status.HTTP_200_OK)
+        review_payload = retrieve_outcome[2]
+        self.assertEqual(
+            review_payload["lines"][0]["item_name_snapshot"],
+            self.product.name,
+        )
+        self.assertTrue(review_payload["quotation_review_fingerprint"])
+        self.assertIn(("line", "updated"), outcomes)
+
+        preview_client = APIClient()
+        preview_client.force_authenticate(self.staff)
+        stale = preview_client.get(
+            reverse("quotation-email-preview", args=[quotation.id]),
+            {
+                "quotation_review_fingerprint": review_payload[
+                    "quotation_review_fingerprint"
+                ]
+            },
+        )
+        self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT, stale.data)
+        self.assertEqual(stale.data["code"], "stale_quotation_review")
+
+    def test_email_bytes_are_built_while_customer_dependency_lock_is_held(self):
+        quotation, _line = self.create_quote()
+        self.company.billing_address = "Reviewed customer address"
+        self.company.save(update_fields=["billing_address", "updated_at"])
+        preview_client = APIClient()
+        preview_client.force_authenticate(self.staff)
+        preview = preview_client.get(
+            reverse("quotation-email-preview", args=[quotation.id])
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK, preview.data)
+
+        renderer_entered = Event()
+        release_renderer = Event()
+        mutation_finished = Event()
+        results = Queue()
+        rendered = {}
+
+        def paused_renderer(current, *, config=None):
+            rendered["billing_address"] = current.company.billing_address
+            renderer_entered.set()
+            if not release_renderer.wait(timeout=10):
+                raise AssertionError("Timed out waiting to release PDF preparation.")
+            return b"%PDF-locked-customer-state"
+
+        def update_company():
+            close_old_connections()
+            try:
+                Company.objects.filter(pk=self.company.pk).update(
+                    billing_address="Address changed after preparation"
+                )
+                results.put(("company", "updated"))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("company", "error", repr(exc)))
+            finally:
+                mutation_finished.set()
+                connections.close_all()
+
+        send_payload = {
+            "to": ["buyer@example.com"],
+            "cc": [],
+            "subject": "Quotation preview",
+            "body": "Please find the quotation attached.",
+            "confirm_recipient": True,
+            "preview_fingerprint": preview.data["preview_fingerprint"],
+        }
+        send_worker = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "send",
+                "post",
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                send_payload,
+            ),
+            daemon=True,
+        )
+        mutation_worker = Thread(target=update_company, daemon=True)
+
+        with patch(
+            "quotations.quotation_email_delivery.build_quotation_pdf",
+            side_effect=paused_renderer,
+        ), patch(
+            "quotations.quotation_email_delivery.gmail_send_raw_message",
+            return_value={"id": "gmail-frozen", "threadId": "thread-frozen"},
+        ):
+            try:
+                send_worker.start()
+                self.assertTrue(renderer_entered.wait(timeout=10))
+                mutation_worker.start()
+                self.assertFalse(
+                    mutation_finished.wait(timeout=1),
+                    "Customer data changed while the reviewed PDF was being built.",
+                )
+            finally:
+                release_renderer.set()
+                send_worker.join(timeout=10)
+                if mutation_worker.ident is not None:
+                    mutation_worker.join(timeout=10)
+
+        self.assertFalse(send_worker.is_alive() or mutation_worker.is_alive())
+        self.assertEqual(rendered["billing_address"], "Reviewed customer address")
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse([outcome for outcome in outcomes if outcome[1] == "error"], outcomes)
+        self.assertIn(("send", "response", status.HTTP_200_OK, ""), outcomes)
+        self.assertIn(("company", "updated"), outcomes)
+        self.company.refresh_from_db()
+        self.assertEqual(
+            self.company.billing_address,
+            "Address changed after preparation",
+        )
+
+    def test_image_upload_deleted_before_lock_returns_not_found(self):
+        quotation, line = self.create_quote()
+        initial_lookup_finished = Event()
+        release_upload = Event()
+        results = Queue()
+        original_get_object = QuotationLineViewSet.get_object
+
+        def paused_get_object(view):
+            value = original_get_object(view)
+            if current_thread().name == "stale-image-upload":
+                initial_lookup_finished.set()
+                if not release_upload.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release image upload.")
+            return value
+
+        def upload_image():
+            close_old_connections()
+            try:
+                staff = User.objects.get(pk=self.staff.pk)
+                client = APIClient()
+                client.force_authenticate(staff)
+                response = client.post(
+                    reverse("quotation-line-upload-product-image", args=[line.id]),
+                    {
+                        "image": SimpleUploadedFile(
+                            "item.png",
+                            b"\x89PNG\r\n\x1a\nnot-read-before-lock",
+                            content_type="image/png",
+                        )
+                    },
+                    format="multipart",
+                )
+                results.put(("upload", response.status_code))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("upload", "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        worker = Thread(target=upload_image, name="stale-image-upload", daemon=True)
+        with patch.object(QuotationLineViewSet, "get_object", paused_get_object):
+            try:
+                worker.start()
+                self.assertTrue(initial_lookup_finished.wait(timeout=10))
+                quotation.delete()
+            finally:
+                release_upload.set()
+                worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive(), "Image upload deadlocked after deletion.")
+        self.assertEqual(results.get_nowait(), ("upload", status.HTTP_404_NOT_FOUND))
+
     @patch(
         "quotations.quotation_email_delivery.build_quotation_pdf",
         return_value=b"%PDF-concurrency-test",
@@ -459,12 +797,19 @@ class QuotationConcurrencyTests(TransactionTestCase):
 
         gmail_send.side_effect = paused_provider
         url = reverse("quotation-finalize-and-send", args=[quotation.id])
+        preview_client = APIClient()
+        preview_client.force_authenticate(self.staff)
+        preview = preview_client.get(
+            reverse("quotation-email-preview", args=[quotation.id])
+        )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
         payload = {
             "to": ["buyer@example.com"],
             "cc": [],
             "subject": "Quotation preview",
             "body": "Please find the quotation attached.",
             "confirm_recipient": True,
+            "preview_fingerprint": preview.data["preview_fingerprint"],
         }
         first = Thread(
             target=self._api_worker,

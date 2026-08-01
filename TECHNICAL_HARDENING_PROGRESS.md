@@ -491,7 +491,142 @@
 
 ## Phase 2
 
-Not started.
+### 2.1 — Reject sends from stale quotation-email previews
+
+- Status: completed.
+- Commit: this task checkpoint (`fix: reject stale quotation email previews`).
+- Files changed:
+  - `backend/quotations/quotation_email_delivery.py`
+  - `backend/quotations/pdf.py`
+  - `backend/quotations/serializers.py`
+  - `backend/quotations/services.py`
+  - `backend/quotations/views.py`
+  - `backend/quotations/test_quotation_email_delivery.py`
+  - `backend/quotations/test_quotation_concurrency.py`
+  - `frontend/src/components/quotations/QuotationEmailPreviewDialog.js`
+  - `frontend/src/components/quotations/QuotationEmailPreviewDialog.test.js`
+  - `frontend/src/components/quotations/QuotationEditor.js`
+  - `frontend/src/components/quotations/QuotationEditor.test.js`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `SECURITY.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Every email-preview response now includes a keyed SHA-256 fingerprint of a
+    versioned, canonical customer-facing state. It covers the quotation and
+    ordered lines, effective finalized brand, customer/contact details, PDF
+    configuration and asset identities, creator signature identity, staff
+    actor, and the exact verified Gmail source/thread/recipient/subject. The
+    browser receives only the fingerprint, never the canonical values.
+  - Quotation detail responses also carry a separate keyed editor-revision
+    fingerprint. The detail endpoint locks the quotation and all PDF
+    dependencies until both the visible response rows and token are fully
+    serialized, preventing a hybrid old-payload/new-token response. Before
+    opening a preview, the shipped editor retrieves that atomic snapshot. If it
+    differs in either token or displayed payload from the revision on screen,
+    the editor is refreshed, the preview remains closed, and a second explicit
+    action is required. Stale-preview refresh uses this same gate, including
+    after an unlocked error response. The final editor-
+    token comparison and email-token creation are also atomic under the render-
+    dependency locks.
+  - Finalize-and-send and send-email require the reviewed fingerprint for any
+    transition from prepared/failed to sending. It is checked before preview
+    persistence and again under the authoritative quotation/delivery locks,
+    before finalization, PDF generation, or Gmail. Attachment filename, digest,
+    and size are also bound to the token. Missing previews return a
+    safe `400 email_preview_required`; changed previews return a safe
+    `409 stale_email_preview`. Sent remains idempotent, while sending/unknown
+    retain their stronger existing lockout/reconciliation behavior.
+  - Quote lines, company/contact, creator/profile, PDF settings, referenced
+    QuoteItems/Products/Brands/images, and the Gmail connection are locked in a
+    primary-key-ordered sequence. The finalized PDF and exact raw MIME are built while
+    those dependencies remain locked; Gmail receives those already-frozen
+    in-memory bytes only after the database transaction commits.
+  - Quotation PDF generation now enables ReportLab invariant output. A known
+    provider rejection can therefore regenerate the same visible finalized
+    quotation after the normal PDF timestamp boundary and reproduce the stored
+    attachment digest instead of falsely failing as a changed attachment.
+  - Finalization is projected into the preview state, so its deterministic
+    status/brand/total updates do not invalidate a correctly reviewed draft.
+    PDF preparation failure still commits the finalized quotation and a failed,
+    retryable delivery record instead of losing reconciliation state.
+  - The browser treats either preview error as a hard block, offers an explicit
+    Refresh preview action, preserves an explicitly selected Gmail thread, and
+    requires a second deliberate Send click after refresh. Failed refreshes do
+    not clear the stale block or trigger a send.
+  - The two remaining PDF-affecting mutation paths now follow the global
+    quotation-then-line lock order: single-line Product creation and quotation-
+    line Product-image upload. Both recheck editability under the quotation lock;
+    image upload also bumps the quotation state through total recalculation.
+    A concurrent line deletion now returns a normal not-found response instead
+    of raising a server error during image upload.
+  - Email preview remains read-only when no settings singleton exists; it uses
+    the PDF fallback configuration instead of creating settings and falsely
+    invalidating the just-loaded editor revision.
+  - Internal outcome/follow-up state is deliberately excluded from the
+    fingerprint so unrelated history work does not invalidate an email review.
+- Tests run:
+  - Focused backend fingerprint/source/send checks:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_manual_preview_is_read_only_and_prefills_explicit_contact quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_send_requires_a_reviewed_preview_before_any_side_effect quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_changed_quotation_rejects_old_preview_then_fresh_review_sends quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_preview_fingerprint_is_bound_to_quote_and_staff_actor quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_gmail_reply_sends_exact_thread_headers_and_marks_quote_sent --noinput --verbosity 2`
+    — 5/5 passed.
+  - Full SQLite delivery suite (final run):
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_quotation_email_delivery --noinput --verbosity 1`
+    — 51/51 passed.
+  - Additional canonical-state/source regression:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_preview_fingerprint_tracks_customer_facing_but_not_internal_state quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_gmail_preview_uses_latest_relevant_inbound_even_when_context quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_changed_quotation_rejects_old_preview_then_fresh_review_sends --noinput --verbosity 1`
+    — 3/3 passed.
+  - Local isolated PostgreSQL 17 / `READ COMMITTED` concurrency suite:
+    `DATABASE_URL=postgresql://postgres@127.0.0.1:55432/pharmacy_ci_local python manage.py test quotations.test_product_matching_rework.ProductAliasConcurrencyTests quotations.test_quotation_concurrency --noinput --verbosity 2`
+    — 16/16 passed, including an atomic detail-payload/token snapshot, preview
+    → concurrent edit → stale send, dependency-lock/frozen-render, concurrent
+    deletion, and concurrent double-send coverage.
+  - Quotation permissions/workflow/Product regressions:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.tests.QuotationPermissionTests quotations.tests.QuotationWorkflowTests quotations.test_product_matching_rework.ProductMatchingReworkTests --noinput --verbosity 1`
+    — 121/121 passed.
+  - Frontend preview/editor tests:
+    `npm test -- --watchAll=false --runInBand QuotationEmailPreviewDialog.test.js QuotationEditor.test.js`
+    — 60/60 passed, including same-token/hybrid-payload and stale-refresh
+    regressions.
+  - `npm run build` — optimized production build compiled successfully.
+  - Documentation contract suite:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_documentation_contract --noinput --verbosity 1`
+    — 9/9 passed.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py makemigrations --check --dry-run`
+    — no changes detected.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py check`, Python
+    compilation, and `git diff --check` — passed.
+- Migrations: none.
+- API changes: quotation detail adds `quotation_review_fingerprint`, and
+  `GET email_preview` adds `preview_fingerprint`. The optional internal
+  `quotation_review_fingerprint` preview query parameter rejects an editor
+  revision changed in another session. The two internal staff send actions
+  require the email-preview value for a new/retry send and add refresh guidance
+  on missing/stale errors. Reconcile and finalize-only APIs are unchanged, and
+  terminal sends retain existing idempotency.
+- Frontend changes: the editor performs one fresh quotation check before
+  preview. Stale quotation or email reviews are visibly blocked and can only be
+  replaced by employee review followed by another explicit preview/send action.
+- Accuracy/security impact: prevents a changed quotation, line, PDF setting,
+  customer identity, or Gmail reply source from being finalized/emailed under
+  an older review. The keyed digest is actor/quotation-bound and compared in
+  constant time. Verified reply headers, recipient confirmation, one-successful-
+  email idempotency, ambiguous-send lockout, and reconciliation-never-sends
+  remain unchanged.
+- Remaining risks: remote asset bytes replaced out of band at an unchanged
+  storage key are not content-hashed by the review token. The exact PDF/MIME is
+  frozen only in process memory for one attempt, not persisted as a complete
+  immutable snapshot, and the ledger still lacks immutable provider-attempt
+  rows; Task 2.2 addresses those gaps. The editor query parameter is optional
+  for backward compatibility: the shipped frontend always supplies it, while
+  an unknown legacy internal caller can preview current server state but cannot
+  prove it matches that caller's earlier screen. Storage I/O while render locks
+  are held can extend lock waits, and Product-image upload still performs
+  external storage work while holding quotation/line locks. Generic reverse-FK
+  deletion can also take a dependency lock before PostgreSQL applies changes to
+  quotation lines, the reverse of reviewed render order; PostgreSQL safely
+  aborts a deadlock participant, but Task 2.8 must bound and normalize that
+  availability failure. Neither limitation permits a stale send.
+- Rollback: revert the task 2.1 commit as one backend/frontend unit. No database,
+  provider, OAuth, prompt, model, or infrastructure rollback is required.
 
 ## Phase 3
 

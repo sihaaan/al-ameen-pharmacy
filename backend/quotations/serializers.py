@@ -12,6 +12,7 @@ from api.serializers import ProductListSerializer
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
+from .quotation_email_delivery import quotation_review_fingerprint
 from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
 from .models import (
     Company,
@@ -2218,6 +2219,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     latest_lpo = serializers.SerializerMethodField()
     lpo_count = serializers.SerializerMethodField()
     lines = QuotationLineSerializer(many=True, read_only=True)
+    quotation_review_fingerprint = serializers.SerializerMethodField()
 
     class Meta:
         model = Quotation
@@ -2276,6 +2278,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "lpo_count",
             "is_historical_import",
             "lines",
+            "quotation_review_fingerprint",
             "created_at",
             "updated_at",
         ]
@@ -2321,6 +2324,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "lpo_count",
             "is_historical_import",
             "lines",
+            "quotation_review_fingerprint",
             "created_at",
             "updated_at",
         ]
@@ -2346,6 +2350,9 @@ class QuotationSerializer(serializers.ModelSerializer):
 
     def get_lpo_count(self, obj):
         return obj.lpos.count()
+
+    def get_quotation_review_fingerprint(self, obj):
+        return quotation_review_fingerprint(obj)
 
 
 class QuotationListSerializer(serializers.ModelSerializer):

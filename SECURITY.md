@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.0.0 |
+| Document version | 2.1.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` |
+| Reviewed code | `d88b767` baseline plus the Task 2.1 checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
@@ -40,6 +40,15 @@ configuration. Complete the unchecked verification items for each release.
   forward that link.
 - Gmail reply recipient, subject, thread ID, and RFC reply headers are
   re-fetched and verified by the server.
+- The shipped editor verifies its displayed quotation revision before opening
+  an email preview. New/retry sends then require the employee's keyed email-
+  preview fingerprint. A missing or changed quotation/PDF/source review is
+  blocked under the authoritative render locks until the employee explicitly
+  refreshes, reviews, and clicks Send again.
+- PDF and raw MIME bytes are built in memory while their database dependencies
+  are locked; deterministic quotation-PDF output makes known-failure retries
+  reproduce the recorded digest, and the Gmail request uses the exact frozen
+  bytes prepared for that attempt.
 - One aggregate delivery record per quotation revision, database locking, and
   delivery-state checks prevent ordinary double sends.
 - An ambiguous result becomes `unknown`; blind retry is blocked. Reconciliation
@@ -193,9 +202,16 @@ Record operator, evidence link, and UTC time for every checked item.
 - Default private quotation storage is ephemeral on Railway without a volume.
 - There is no automated retention/deletion schedule, SLO/alert set, cost
   budget, or stuck-delivery sweeper.
-- A sent-email preview has no stale-preview version guard yet (Task 2.1).
+- The stale-preview guard fingerprints database/config asset identities but
+  cannot detect remote bytes replaced out of band at the same storage key.
+  Exact attempt bytes are frozen only in memory, not persisted as a complete
+  immutable outbound snapshot; persistence remains Task 2.2.
 - The delivery ledger is mutable aggregate state, not immutable provider-attempt
   history (Task 2.2).
+- Reverse foreign-key deletion paths can acquire a dependency before a
+  quotation/line lock, while reviewed rendering uses quotation-first order.
+  PostgreSQL safely aborts a deadlock participant, but explicit timeout/deadlock
+  normalization remains Task 2.8 availability work.
 - Formal credential ownership transfer remains Task 2.7.
 
 These are explicit risks, not permission to bypass the existing review,

@@ -66,6 +66,7 @@ const QuotationEmailPreviewDialog = ({
   reconciling = false,
   reconcileFeedback = null,
   onRetryPreview,
+  onRefreshPreview,
   onReconnectGmail,
   onReconcileEmail,
   onClearCorrectableError,
@@ -106,10 +107,14 @@ const QuotationEmailPreviewDialog = ({
       : '',
   ].filter(Boolean);
   const correctableSendError = sendError?.code === 'email_delivery_error';
+  const stalePreviewError = ['stale_email_preview', 'email_preview_required'].includes(
+    String(sendError?.code || '')
+  );
   const hardErrorStatus = ['unknown', 'sending', 'sent'].includes(String(sendError?.deliveryStatus || '').toLowerCase());
   const attachmentSnapshotMismatch = sendError?.code === 'attachment_snapshot_mismatch';
   const retryBlocked = Boolean(sendError && (
     attachmentSnapshotMismatch
+    || stalePreviewError
     || hardErrorStatus
     || (!correctableSendError && sendError.retryable !== true)
   ));
@@ -148,6 +153,9 @@ const QuotationEmailPreviewDialog = ({
       body: body.trim(),
       confirm_recipient: isThreadReply || recipientConfirmed,
       delivery_mode: normalized.delivery_mode,
+      ...(normalized.preview_fingerprint
+        ? { preview_fingerprint: normalized.preview_fingerprint }
+        : {}),
       ...(normalized.thread_selection_token
         ? { thread_selection_token: normalized.thread_selection_token }
         : {}),
@@ -233,7 +241,9 @@ const QuotationEmailPreviewDialog = ({
               <div className={`qm-feedback ${sendError.quoteFinalized ? 'warning' : 'error'}`} role="alert">
                 <div>
                   <strong>
-                    {correctableSendError
+                    {stalePreviewError
+                      ? 'Refresh and review the quotation email before sending.'
+                      : correctableSendError
                       ? 'Check the email details and try again.'
                       : sendError.kind === 'finalize'
                       ? 'The quotation was not finalized.'
@@ -242,10 +252,24 @@ const QuotationEmailPreviewDialog = ({
                       : 'The quotation email was not sent.'}
                   </strong>
                   <p>{sendError.detail}</p>
+                  {stalePreviewError && (
+                    <>
+                      <p>The quotation changed after this preview was prepared. Refreshing will load the latest quotation and require another explicit Send click.</p>
+                      {(onRefreshPreview || onRetryPreview) && (
+                        <button
+                          type="button"
+                          className="qm-secondary small"
+                          onClick={onRefreshPreview || onRetryPreview}
+                        >
+                          Refresh preview
+                        </button>
+                      )}
+                    </>
+                  )}
                   {correctableSendError && (
                     <p>Correct the recipient, CC, subject, message, or confirmation below. The quotation has not been sent.</p>
                   )}
-                  {!correctableSendError && !hardErrorStatus && sendError.quoteFinalized && sendError.retryable && (
+                  {!stalePreviewError && !correctableSendError && !hardErrorStatus && sendError.quoteFinalized && sendError.retryable && (
                     <p>No duplicate quotation will be created. Review the details and safely retry sending below.</p>
                   )}
                   {!correctableSendError && sendError.deliveryStatus === 'unknown' && (
@@ -257,7 +281,7 @@ const QuotationEmailPreviewDialog = ({
                   {!correctableSendError && sendError.deliveryStatus === 'sent' && (
                     <p>Gmail already recorded this quotation as sent. Duplicate sending is disabled.</p>
                   )}
-                  {!correctableSendError && !sendError.retryable && !hardErrorStatus && (
+                  {!stalePreviewError && !correctableSendError && !sendError.retryable && !hardErrorStatus && (
                     <p>Sending cannot be retried from this preview. Resolve the reported issue or refresh the quotation first.</p>
                   )}
                 </div>
