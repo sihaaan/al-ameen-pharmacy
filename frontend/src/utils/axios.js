@@ -1,6 +1,7 @@
 // frontend/src/utils/axios.js
 import axios from 'axios';
 import { API_BASE_URL } from '../config';
+import { internalPathOrHome } from './internalRedirect';
 
 export const AUTH_SESSION_CLEARED_EVENT = 'auth-session-cleared';
 
@@ -63,7 +64,9 @@ const redirectToLogin = () => {
     return;
   }
 
-  const next = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const next = internalPathOrHome(
+    `${window.location.pathname}${window.location.search}${window.location.hash}`
+  );
   const loginUrl = `/login?next=${encodeURIComponent(next)}`;
 
   // BrowserRouter listens for popstate, so this moves to the login page without

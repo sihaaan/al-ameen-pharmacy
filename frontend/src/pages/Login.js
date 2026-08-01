@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { internalPathOrHome } from '../utils/internalRedirect';
 import './Auth.css';
 
 function Login() {
@@ -17,8 +18,7 @@ function Login() {
 
   const getSafeNext = useCallback(() => {
     const params = new URLSearchParams(location.search);
-    const next = params.get('next');
-    return next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    return internalPathOrHome(params.get('next'));
   }, [location.search]);
 
   useEffect(() => {
