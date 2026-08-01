@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.0.0 |
+| Document version | 2.1.0 |
 | Status | Operator guide; live values require independent verification |
 | Owner | Al Ameen platform maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` |
+| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This guide separates repository behavior from live provider configuration. A
@@ -275,6 +275,28 @@ Application rollback and data rollback are separate decisions.
 
 Destructive migration reversal, data deletion, or production restore requires
 explicit authority and is outside an ordinary code rollback.
+
+### Task 2.2 migration note
+
+Migration `quotations.0035_quotationemailoutboundsnapshot_and_more` creates
+three new empty tables (snapshot, provider attempt, and append-only attempt
+event), their indexes, and integrity constraints. It does not rewrite or
+backfill `QuotationEmailDelivery`. Apply the migration before promoting Task
+2.2 application code and verify it on a production-sized staging schema.
+
+After any snapshot, attempt, or event row exists, do **not** reverse `0035` as
+an ordinary rollback: reversal deletes forensic send history and exact retry
+bytes. Do not run pre-Task-2.2 send/retry code against those rows either: it
+does not enforce the frozen snapshot and can rebuild a failed retry. Prefer a
+forward fix. If application rollback below Task 2.2 is unavoidable, suspend
+all quotation-email sends/retries (for example by disabling the send endpoints
+at the deployment boundary or disconnecting the shared Gmail credential),
+retain all three tables, and restore a compatible snapshot guard before
+reenabling sends. Reconciliation must also remain no-send. Capacity planning
+must include up to 35 MiB of raw MIME per quotation delivery plus database
+backups; actual storage should be measured from representative quotations
+before deployment. No production migration or deployment is authorized by
+this document.
 
 ## 12. Cost guidance
 

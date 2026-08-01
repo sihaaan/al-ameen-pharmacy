@@ -437,7 +437,7 @@
 ### 1.8 — Make audit/history records read-only in Django administration
 
 - Status: completed.
-- Commit: this task checkpoint (`fix: protect admin audit history`).
+- Commit: `801d045` (`fix: protect admin audit history`).
 - Files changed:
   - `backend/quotations/admin.py`
   - `backend/quotations/test_admin_history_readonly.py`
@@ -494,7 +494,7 @@
 ### 2.1 — Reject sends from stale quotation-email previews
 
 - Status: completed.
-- Commit: this task checkpoint (`fix: reject stale quotation email previews`).
+- Commit: `644a7c5` (`fix: reject stale quotation email previews`).
 - Files changed:
   - `backend/quotations/quotation_email_delivery.py`
   - `backend/quotations/pdf.py`
@@ -627,6 +627,140 @@
   availability failure. Neither limitation permits a stale send.
 - Rollback: revert the task 2.1 commit as one backend/frontend unit. No database,
   provider, OAuth, prompt, model, or infrastructure rollback is required.
+
+### 2.2 — Freeze outbound snapshots and preserve provider-attempt history
+
+- Status: completed in the branch; production migration/deployment not performed.
+- Commit: this task checkpoint (`feat: freeze quotation email delivery attempts`).
+- Files changed:
+  - `backend/quotations/models.py`
+  - `backend/quotations/quotation_email_delivery.py`
+  - `backend/quotations/views.py`
+  - `backend/quotations/admin.py`
+  - `backend/quotations/migrations/0035_quotationemailoutboundsnapshot_and_more.py`
+  - `backend/quotations/test_quotation_email_delivery.py`
+  - `backend/quotations/test_quotation_concurrency.py`
+  - `backend/quotations/test_product_matching_rework.py`
+  - `backend/quotations/test_admin_history_readonly.py`
+  - `frontend/src/components/quotations/QuotationEmailPreviewDialog.js`
+  - `frontend/src/components/quotations/QuotationEmailPreviewDialog.test.js`
+  - `frontend/src/components/quotations/QuotationEditor.js`
+  - `frontend/src/components/quotations/QuotationEditor.test.js`
+  - `frontend/src/components/quotations/QuotationModule.css`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `SECURITY.md`
+  - `DEPLOYMENT.md`
+  - `OPERATIONS.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added one write-once outbound snapshot per delivery. It stores versioned
+    structured send facts, the exact RFC-MIME bytes (including the PDF), raw
+    and attachment digests/sizes, and the Gmail API thread argument. The raw
+    MIME is capped at 35 MiB, remains database-private, and is excluded from
+    APIs and the admin form.
+  - Snapshot metadata plus bytes receive a complete SHA-256 digest. Every
+    provider call rechecks the raw and complete digests before Gmail receives
+    base64url re-encoding of the persisted bytes.
+  - Added an immutable child row per actual Gmail call with request identity
+    and employee/mailbox attribution. Provider outcomes and later strict
+    reconciliation proof are separate append-only immutable event rows, so an
+    original HTTP/network ambiguity and its safe error classification are
+    never overwritten.
+  - The snapshot, immutable attempt row, and aggregate `sending` state commit
+    in one transaction before the provider call. Normal success, known
+    rejection, ambiguity, incomplete receipt, and later reconciliation append
+    event facts while retaining the existing aggregate API and lock order.
+  - The in-memory Gmail credential generation used to obtain the access token
+    is rechecked under the Gmail-connection row lock. A concurrent OAuth
+    replacement aborts before finalization, snapshot creation, or Gmail, so
+    immutable mailbox attribution cannot be paired with another credential.
+  - An already ambiguous or active delivery returns its persisted safety state
+    before entering the separate send-token path. A late provider result is
+    still appended when strict reconciliation has already made the aggregate
+    terminal `sent`; it can never downgrade that aggregate or emit a false
+    failure audit.
+  - Known-safe retries show and send the exact frozen recipient, CC, subject,
+    body, thread headers, and PDF. They do not rerender the PDF, rebuild MIME,
+    or refetch a different source email. Changes require a quotation revision.
+  - Legacy rows were not backfilled. A legacy failed row may create its first
+    honest snapshot on an explicitly reviewed retry after the prior PDF digest
+    check; legacy sent/unknown reconciliation remains supported.
+  - Frozen retry fields are read-only in the browser, but manual new-email
+    retries still require explicit recipient confirmation and another Send
+    click. A first failed attempt immediately marks the displayed preview as
+    frozen and requires a refresh/review before retry. Unknown/sending remain
+    blocked and reconciliation never sends.
+  - Metadata-only preview/admin queries defer the potentially 35 MiB raw MIME.
+    Only send-integrity verification loads it. Reconciliation treats the
+    frozen mailbox, Message-ID, delivery mode, and expected thread as canonical
+    even if the mutable aggregate is stale.
+  - Reviewed preview construction uses the freshly locked delivery row rather
+    than status read before the lock. PostgreSQL worker finalizers also close
+    their thread-owned connections so the production-equivalent suite removes
+    its temporary database cleanly.
+- Tests run:
+  - Focused snapshot/attempt/admin suite:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_gmail_reply_sends_exact_thread_headers_and_marks_quote_sent quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_known_provider_rejection_leaves_quote_finalized_and_retryable quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_real_pdf_known_failure_retries_once_without_refinalizing quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_pdf_preparation_exception_is_known_failure_not_unbound_or_unknown quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_legacy_failed_delivery_freezes_first_honest_snapshot_on_retry quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_temporary_http_send_response_is_unknown_not_retryable quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_ambiguous_attempt_preserves_initial_outcome_when_reconciled quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_retry_uses_persisted_mime_without_rerendering_pdf quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_frozen_retry_rejects_edited_customer_facing_fields quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_corrupt_frozen_mime_blocks_retry_before_gmail quotations.test_quotation_email_delivery.QuotationEmailDeliveryAPITests.test_snapshot_and_completed_attempt_reject_mutation_and_deletion quotations.test_admin_history_readonly --noinput --verbosity 2`
+    — 17/17 passed.
+  - Full SQLite delivery/admin suite:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_quotation_email_delivery quotations.test_admin_history_readonly --noinput --verbosity 1`
+    — 71/71 passed.
+  - Local PostgreSQL 17 / `READ COMMITTED` concurrency suite:
+    `DATABASE_URL=postgresql://postgres@127.0.0.1:55432/pharmacy_ci_local python manage.py test quotations.test_product_matching_rework.ProductAliasConcurrencyTests quotations.test_quotation_concurrency --noinput --verbosity 1`
+    — 16/16 passed, including proof that snapshot + immutable attempt are visible
+    before Gmail is invoked and concurrent confirmation still calls Gmail once;
+    the temporary PostgreSQL database was dropped cleanly.
+  - Quotation permissions/workflow/Product regressions:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.tests.QuotationPermissionTests quotations.tests.QuotationWorkflowTests quotations.test_product_matching_rework.ProductMatchingReworkTests --noinput --verbosity 1`
+    — 121/121 passed.
+  - Frontend preview/editor tests:
+    `npm test -- --watchAll=false --runInBand QuotationEmailPreviewDialog.test.js QuotationEditor.test.js`
+    — 65/65 passed, including the first-failure frozen-response merge,
+    explicit refresh, read-only review, and exact retry integration flow.
+  - `npm run build` — optimized production build compiled successfully.
+  - Documentation contract suite:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_documentation_contract --noinput --verbosity 1`
+    — 9/9 passed.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py makemigrations --check --dry-run`
+    — no changes detected beyond the committed `0035` migration.
+  - `DATABASE_URL=sqlite:///db.sqlite3 python manage.py check`, Python
+    compilation, and `git diff --check` — passed.
+- Migration:
+  - `0035` is additive and schema-only: three new empty tables, indexes, and
+    constraints; no existing row rewrite and no fabricated backfill.
+  - Apply before promoting Task 2.2 code. Reversing `0035` after rows exist
+    would destroy audit/retry evidence and requires explicit destructive-data
+    authority.
+- API/frontend changes: existing paths and request fields are unchanged.
+  Preview and delivery responses add only `outbound_snapshot_frozen`. The
+  server adds non-breaking `409 outbound_snapshot_mismatch`,
+  `409 gmail_connection_changed`, and safe snapshot integrity/size errors. The
+  browser makes a frozen retry read-only and directs content changes to the
+  existing revision workflow.
+- Accuracy/security impact: exact retries can no longer change recipient, CC,
+  subject, body, reply headers, MIME boundaries, or PDF bytes. Provider calls
+  and learned outcomes are individually attributable without overwriting
+  earlier facts. Raw MIME
+  contains customer/PDF data, so database access, backups, retention, and
+  capacity require operator governance; normal APIs/admin forms never return
+  it. Privileged raw SQL remains outside application immutability, while digest
+  verification blocks a corrupted snapshot before retry.
+- Remaining risks: the preview token still identifies remote asset keys, not
+  out-of-band bytes replaced at the same key before the first snapshot. A crash
+  after committing the attempt but before reaching Gmail cannot be distinguished
+  safely; the attempt may have no result event and remains locked for no-send
+  reconciliation. There is no automated stuck-delivery sweeper, and legacy
+  historical attempts cannot be reconstructed honestly. Reconciliation success
+  is append-only, but repeated unsuccessful checks do not yet receive one
+  immutable event per invocation. Task 2.3 addresses private evidence-storage
+  abstraction; Task 2.8 addresses bounded database availability handling.
+- Rollback: before any `0035` rows exist, the application commit may be reverted
+  and the unused migration may be reversed with an approved recovery point.
+  After rows exist, retain all three tables and prefer a forward fix. If code
+  must be rolled back below Task 2.2, suspend every quotation-email send/retry
+  until a compatibility guard that honors existing frozen snapshots is
+  restored; old send code can otherwise rebuild a failed retry. No OAuth, AI
+  model/prompt/schema, provider, or production infrastructure changed.
 
 ## Phase 3
 

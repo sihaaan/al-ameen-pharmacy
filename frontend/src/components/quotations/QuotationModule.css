@@ -2220,7 +2220,8 @@
   outline: 3px solid rgba(20, 184, 166, 0.14);
 }
 
-.qm-email-fields input[readonly] {
+.qm-email-fields input[readonly],
+.qm-email-fields textarea[readonly] {
   border-color: #dbe5e4;
   background: #f8fafc;
   color: #334155;

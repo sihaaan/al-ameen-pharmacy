@@ -13,6 +13,10 @@ from quotations.gmail_inquiry_import import (
     GMAIL_AI_SCHEMA_NAME,
     GMAIL_IDENTITY_MATCH_VERSION,
 )
+from quotations.models import (
+    QuotationEmailDeliveryAttemptEvent,
+    QuotationEmailOutboundSnapshot,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +53,7 @@ class DocumentationContractTests(SimpleTestCase):
             MANUAL_AI_PIPELINE_VERSION,
             MAILBOX_PO_AI_PIPELINE_VERSION,
             AI_PARSE_OBSERVABILITY_VERSION,
+            QuotationEmailOutboundSnapshot.CONTRACT_VERSION,
         )
         for version in expected_versions:
             with self.subTest(version=version):
@@ -57,7 +62,12 @@ class DocumentationContractTests(SimpleTestCase):
         headings = re.findall(r"(?m)^## (.+)$", content)
         self.assertEqual(len(headings), len(set(headings)))
         self.assertIn("store=false", content)
-        self.assertIn("mutable aggregate ledger", content)
+        self.assertIn("backward-compatible one-to-one aggregate state", content)
+        self.assertIn("`QuotationEmailDeliveryAttempt` child row", content)
+        self.assertIn(
+            f"append-only `{QuotationEmailDeliveryAttemptEvent.__name__}`",
+            content,
+        )
         self.assertIn("stale-preview", content)
         self.assertIn("30-case fully synthetic", content)
 

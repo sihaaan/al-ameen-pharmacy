@@ -42,6 +42,9 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationEmailDelivery,
+    QuotationEmailDeliveryAttempt,
+    QuotationEmailDeliveryAttemptEvent,
+    QuotationEmailOutboundSnapshot,
     QuotationEmailThreadSelection,
     QuotationLine,
     QuotationSettings,
@@ -63,6 +66,7 @@ EMAIL_PREVIEW_FINGERPRINT_CONTRACT = "quotation_email_preview_v1"
 EMAIL_PREVIEW_FINGERPRINT_SALT = "quotations.email-preview-fingerprint.v1"
 QUOTATION_REVIEW_FINGERPRINT_CONTRACT = "quotation_editor_review_v1"
 QUOTATION_REVIEW_FINGERPRINT_SALT = "quotations.editor-review-fingerprint.v1"
+MAX_OUTBOUND_MIME_BYTES = 35 * 1024 * 1024
 
 
 class QuotationEmailError(ValidationError):
@@ -127,6 +131,20 @@ def _preview_source_identity(delivery):
         .strip()
         .lower(),
     }
+
+
+def _delivery_snapshot(delivery, *, include_raw=False, for_update=False):
+    """Fetch snapshot metadata without pulling the potentially large MIME blob."""
+
+    delivery_id = getattr(delivery, "pk", None)
+    if not delivery_id:
+        return None
+    queryset = QuotationEmailOutboundSnapshot.objects.filter(delivery_id=delivery_id)
+    if not include_raw:
+        queryset = queryset.defer("raw_mime")
+    if for_update:
+        queryset = queryset.select_for_update()
+    return queryset.first()
 
 
 def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
@@ -276,6 +294,7 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
 
 
 def _quotation_preview_state(quotation, delivery, actor, *, pdf_config=None):
+    snapshot = _delivery_snapshot(delivery) if getattr(delivery, "pk", None) else None
     return {
         "contract": EMAIL_PREVIEW_FINGERPRINT_CONTRACT,
         "actor_id": getattr(actor, "pk", None),
@@ -288,6 +307,9 @@ def _quotation_preview_state(quotation, delivery, actor, *, pdf_config=None):
             "filename": str(delivery.attachment_filename or ""),
             "sha256": str(delivery.attachment_sha256 or ""),
             "size": delivery.attachment_size,
+            "outbound_snapshot_sha256": (
+                str(snapshot.snapshot_sha256) if snapshot else ""
+            ),
         },
         "source": _preview_source_identity(delivery),
     }
@@ -1039,6 +1061,23 @@ def _populate_preview_delivery(
     return delivery
 
 
+def _apply_outbound_snapshot(delivery, snapshot):
+    delivery.delivery_mode = snapshot.delivery_mode
+    delivery.to_addresses = list(snapshot.to_addresses or [])
+    delivery.cc_addresses = list(snapshot.cc_addresses or [])
+    delivery.subject = snapshot.subject
+    delivery.body = snapshot.body
+    delivery.gmail_thread_id = snapshot.gmail_api_thread_id
+    delivery.source_gmail_message_id = snapshot.source_gmail_message_id
+    delivery.source_rfc_message_id = snapshot.source_rfc_message_id
+    delivery.source_references = snapshot.source_references
+    delivery.outbound_rfc_message_id = snapshot.outbound_rfc_message_id
+    delivery.attachment_filename = snapshot.attachment_filename
+    delivery.attachment_sha256 = snapshot.attachment_sha256
+    delivery.attachment_size = snapshot.attachment_size
+    return delivery
+
+
 def prepare_email_preview(
     quotation,
     actor,
@@ -1059,6 +1098,24 @@ def prepare_email_preview(
         QuotationEmailDelivery.STATUS_UNKNOWN,
         QuotationEmailDelivery.STATUS_SENDING,
     }:
+        return existing
+    existing_snapshot = _delivery_snapshot(existing) if existing else None
+    if (
+        existing
+        and existing_snapshot
+        and existing.status == QuotationEmailDelivery.STATUS_FAILED
+    ):
+        # A known-safe retry is a review of the exact persisted request. Do not
+        # refetch a newer source message or rewrite any customer-facing field.
+        existing.actor = actor
+        _apply_outbound_snapshot(existing, existing_snapshot)
+        if expected_preview_fingerprint:
+            _require_current_email_preview(
+                quotation,
+                existing,
+                actor,
+                expected_preview_fingerprint,
+            )
         return existing
     source = _source_for_preview(
         quotation,
@@ -1089,9 +1146,11 @@ def prepare_email_preview(
             .select_related("company", "contact", "inquiry")
             .get(pk=quotation.pk)
         )
-        delivery = QuotationEmailDelivery.objects.select_for_update().filter(
-            quotation=locked_quote
-        ).first()
+        delivery = (
+            QuotationEmailDelivery.objects.select_for_update(of=("self",))
+            .filter(quotation=locked_quote)
+            .first()
+        )
         if delivery and delivery.status in {
             QuotationEmailDelivery.STATUS_SENT,
             QuotationEmailDelivery.STATUS_UNKNOWN,
@@ -1131,6 +1190,7 @@ def prepare_email_preview(
 
 
 def delivery_preview_payload(delivery, actor=None, *, preview_fingerprint=None):
+    snapshot = _delivery_snapshot(delivery) if getattr(delivery, "pk", None) else None
     connection = delivery.gmail_connection
     connected = bool(connection and connection.status == connection.STATUS_CONNECTED)
     send_authorized = bool(connected and gmail_send_scope_granted(connection))
@@ -1141,28 +1201,41 @@ def delivery_preview_payload(delivery, actor=None, *, preview_fingerprint=None):
         warnings.append(
             "Reconnect the shared Gmail mailbox and approve Gmail send permission before sending."
         )
-    if not delivery.to_addresses:
-        warnings.append("Enter and confirm the recipient email address before sending.")
     if delivery.status == QuotationEmailDelivery.STATUS_UNKNOWN:
         warnings.append(
             "Gmail did not confirm the previous attempt. Do not resend until the shared mailbox is checked."
         )
+    if snapshot and delivery.status == QuotationEmailDelivery.STATUS_FAILED:
+        warnings.append(
+            "This is an exact frozen retry. Recipient, CC, subject, message, thread headers, and PDF cannot be changed; create a quotation revision for different content."
+        )
+    to_addresses = list(snapshot.to_addresses or []) if snapshot else list(delivery.to_addresses or [])
+    cc_addresses = list(snapshot.cc_addresses or []) if snapshot else list(delivery.cc_addresses or [])
+    subject = snapshot.subject if snapshot else delivery.subject
+    body = snapshot.body if snapshot else delivery.body
+    attachment_filename = snapshot.attachment_filename if snapshot else delivery.attachment_filename
+    attachment_sha256 = snapshot.attachment_sha256 if snapshot else delivery.attachment_sha256
+    attachment_size = snapshot.attachment_size if snapshot else delivery.attachment_size
+    delivery_mode = snapshot.delivery_mode if snapshot else delivery.delivery_mode
+    if not to_addresses:
+        warnings.append("Enter and confirm the recipient email address before sending.")
     payload = {
         "delivery_id": delivery.id,
-        "delivery_mode": delivery.delivery_mode,
-        "can_reply_to_thread": delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY,
+        "delivery_mode": delivery_mode,
+        "can_reply_to_thread": delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY,
         "trusted_source": delivery.trusted_source or {},
         "thread": {
-            "linked": delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY,
-            "subject": delivery.subject if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY else "",
+            "linked": delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY,
+            "subject": subject if delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY else "",
         },
-        "to": list(delivery.to_addresses or []),
-        "cc": list(delivery.cc_addresses or []),
-        "subject": delivery.subject,
-        "body": delivery.body,
-        "attachment_filename": delivery.attachment_filename,
-        "attachment_sha256": delivery.attachment_sha256,
-        "attachment_size": delivery.attachment_size,
+        "to": to_addresses,
+        "cc": cc_addresses,
+        "subject": subject,
+        "body": body,
+        "attachment_filename": attachment_filename,
+        "attachment_sha256": attachment_sha256,
+        "attachment_size": attachment_size,
+        "outbound_snapshot_frozen": bool(snapshot),
         "status": delivery.status,
         "can_reconcile": delivery.status in {
             QuotationEmailDelivery.STATUS_SENDING,
@@ -1211,9 +1284,14 @@ def reviewed_delivery_preview_payload(
     with transaction.atomic():
         locked_quote = Quotation.objects.select_for_update().get(pk=quotation.pk)
         if getattr(delivery, "pk", None):
-            QuotationEmailDelivery.objects.select_for_update(of=("self",)).get(
+            delivery = QuotationEmailDelivery.objects.select_for_update(
+                of=("self",)
+            ).select_related("quotation", "gmail_connection").get(
                 pk=delivery.pk
             )
+            QuotationEmailOutboundSnapshot.objects.select_for_update().only("id").filter(
+                delivery_id=delivery.pk
+            ).first()
         _lock_email_render_dependencies(locked_quote, delivery)
         pdf_config = get_quotation_pdf_config(quotation=locked_quote)
         require_current_quotation_review(locked_quote, supplied)
@@ -1231,23 +1309,26 @@ def reviewed_delivery_preview_payload(
 
 
 def delivery_payload(delivery):
+    snapshot = _delivery_snapshot(delivery) if getattr(delivery, "pk", None) else None
+    delivery_mode = snapshot.delivery_mode if snapshot else delivery.delivery_mode
     return {
         "id": delivery.id,
         "quotation": delivery.quotation_id,
-        "delivery_mode": delivery.delivery_mode,
+        "delivery_mode": delivery_mode,
         "status": delivery.status,
+        "outbound_snapshot_frozen": bool(snapshot),
         "can_reconcile": delivery.status in {
             QuotationEmailDelivery.STATUS_SENDING,
             QuotationEmailDelivery.STATUS_UNKNOWN,
         },
-        "to": list(delivery.to_addresses or []),
-        "cc": list(delivery.cc_addresses or []),
-        "subject": delivery.subject,
-        "body": delivery.body,
+        "to": list(snapshot.to_addresses or []) if snapshot else list(delivery.to_addresses or []),
+        "cc": list(snapshot.cc_addresses or []) if snapshot else list(delivery.cc_addresses or []),
+        "subject": snapshot.subject if snapshot else delivery.subject,
+        "body": snapshot.body if snapshot else delivery.body,
         "trusted_source": delivery.trusted_source or {},
-        "attachment_filename": delivery.attachment_filename,
-        "attachment_sha256": delivery.attachment_sha256,
-        "attachment_size": delivery.attachment_size,
+        "attachment_filename": snapshot.attachment_filename if snapshot else delivery.attachment_filename,
+        "attachment_sha256": snapshot.attachment_sha256 if snapshot else delivery.attachment_sha256,
+        "attachment_size": snapshot.attachment_size if snapshot else delivery.attachment_size,
         "attempt_count": delivery.attempt_count,
         "last_error": delivery.last_error,
         "prepared_at": delivery.prepared_at,
@@ -1336,7 +1417,275 @@ def _build_raw_message(delivery, pdf_bytes, *, sender_name=None):
     return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
 
 
-def _mark_delivery_failure(delivery_id, *, unknown, message, actor):
+def _decode_gmail_raw_message(raw_message):
+    value = str(raw_message or "")
+    padded = value + ("=" * (-len(value) % 4))
+    try:
+        return base64.urlsafe_b64decode(padded.encode("ascii"))
+    except Exception as exc:
+        raise QuotationEmailError(
+            "The prepared email bytes could not be frozen safely.",
+            code="outbound_snapshot_invalid",
+            retryable=False,
+        ) from exc
+
+
+def _encode_gmail_raw_message(raw_mime):
+    return base64.urlsafe_b64encode(bytes(raw_mime)).decode("ascii").rstrip("=")
+
+
+def _snapshot_metadata(snapshot):
+    return {
+        "contract_version": str(snapshot.contract_version or ""),
+        "delivery_id": snapshot.delivery_id,
+        "gmail_connection_id_snapshot": snapshot.gmail_connection_id_snapshot,
+        "mailbox_email": str(snapshot.mailbox_email or "").strip().lower(),
+        "sender_name": str(snapshot.sender_name or ""),
+        "delivery_mode": str(snapshot.delivery_mode or ""),
+        "to_addresses": list(snapshot.to_addresses or []),
+        "cc_addresses": list(snapshot.cc_addresses or []),
+        "subject": str(snapshot.subject or ""),
+        "body": str(snapshot.body or ""),
+        "gmail_api_thread_id": str(snapshot.gmail_api_thread_id or ""),
+        "source_gmail_message_id": str(snapshot.source_gmail_message_id or ""),
+        "source_rfc_message_id": str(snapshot.source_rfc_message_id or ""),
+        "source_references": str(snapshot.source_references or ""),
+        "outbound_rfc_message_id": str(snapshot.outbound_rfc_message_id or ""),
+        "attachment_filename": str(snapshot.attachment_filename or ""),
+        "attachment_sha256": str(snapshot.attachment_sha256 or ""),
+        "attachment_size": snapshot.attachment_size,
+        "raw_mime_sha256": str(snapshot.raw_mime_sha256 or ""),
+        "raw_mime_size": snapshot.raw_mime_size,
+    }
+
+
+def _outbound_snapshot_digest(metadata, raw_mime):
+    canonical = json.dumps(
+        metadata,
+        cls=DjangoJSONEncoder,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical + b"\0" + bytes(raw_mime)).hexdigest()
+
+
+def _create_outbound_snapshot(delivery, actor, *, sender_name, pdf_bytes, raw_message):
+    raw_mime = _decode_gmail_raw_message(raw_message)
+    if not raw_mime or len(raw_mime) > MAX_OUTBOUND_MIME_BYTES:
+        raise QuotationEmailError(
+            "The prepared quotation email is too large to freeze and send safely.",
+            code="outbound_snapshot_too_large",
+            retryable=False,
+        )
+    mailbox_email = str(getattr(delivery.gmail_connection, "email", "") or "").strip().lower()
+    validate_email(mailbox_email)
+    raw_mime_sha256 = hashlib.sha256(raw_mime).hexdigest()
+    snapshot = QuotationEmailOutboundSnapshot(
+        delivery=delivery,
+        created_by=actor,
+        created_by_username=str(getattr(actor, "get_username", lambda: "")() or "")[:150],
+        gmail_connection_id_snapshot=delivery.gmail_connection_id,
+        mailbox_email=mailbox_email,
+        sender_name=str(sender_name or "")[:255],
+        delivery_mode=delivery.delivery_mode,
+        to_addresses=list(delivery.to_addresses or []),
+        cc_addresses=list(delivery.cc_addresses or []),
+        subject=delivery.subject,
+        body=delivery.body,
+        gmail_api_thread_id=(
+            delivery.gmail_thread_id
+            if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
+            else ""
+        ),
+        source_gmail_message_id=delivery.source_gmail_message_id,
+        source_rfc_message_id=delivery.source_rfc_message_id,
+        source_references=delivery.source_references,
+        outbound_rfc_message_id=delivery.outbound_rfc_message_id,
+        attachment_filename=delivery.attachment_filename,
+        attachment_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+        attachment_size=len(pdf_bytes),
+        raw_mime=raw_mime,
+        raw_mime_sha256=raw_mime_sha256,
+        raw_mime_size=len(raw_mime),
+        snapshot_sha256="",
+    )
+    snapshot.snapshot_sha256 = _outbound_snapshot_digest(
+        _snapshot_metadata(snapshot),
+        raw_mime,
+    )
+    snapshot.save(force_insert=True)
+    return snapshot
+
+
+def _verify_outbound_snapshot(snapshot):
+    raw_mime = bytes(snapshot.raw_mime or b"")
+    raw_digest = hashlib.sha256(raw_mime).hexdigest()
+    expected_snapshot_digest = _outbound_snapshot_digest(
+        _snapshot_metadata(snapshot),
+        raw_mime,
+    )
+    valid = (
+        snapshot.contract_version == QuotationEmailOutboundSnapshot.CONTRACT_VERSION
+        and 0 < len(raw_mime) <= MAX_OUTBOUND_MIME_BYTES
+        and snapshot.raw_mime_size == len(raw_mime)
+        and secrets.compare_digest(str(snapshot.raw_mime_sha256 or ""), raw_digest)
+        and secrets.compare_digest(
+            str(snapshot.snapshot_sha256 or ""),
+            expected_snapshot_digest,
+        )
+    )
+    if not valid:
+        raise QuotationEmailError(
+            "The frozen quotation email failed its integrity check. It was not sent.",
+            code="outbound_snapshot_corrupt",
+            retryable=False,
+        )
+    return raw_mime
+
+
+def _require_snapshot_matches_delivery(delivery, snapshot):
+    connection_email = str(
+        getattr(delivery.gmail_connection, "email", "") or ""
+    ).strip().lower()
+    current = {
+        "delivery_mode": delivery.delivery_mode,
+        "to_addresses": list(delivery.to_addresses or []),
+        "cc_addresses": list(delivery.cc_addresses or []),
+        "subject": str(delivery.subject or ""),
+        "body": str(delivery.body or ""),
+        "gmail_api_thread_id": (
+            str(delivery.gmail_thread_id or "")
+            if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
+            else ""
+        ),
+        "source_gmail_message_id": str(delivery.source_gmail_message_id or ""),
+        "source_rfc_message_id": str(delivery.source_rfc_message_id or ""),
+        "source_references": str(delivery.source_references or ""),
+        "outbound_rfc_message_id": str(delivery.outbound_rfc_message_id or ""),
+        "attachment_filename": str(delivery.attachment_filename or ""),
+        "attachment_sha256": str(delivery.attachment_sha256 or ""),
+        "attachment_size": delivery.attachment_size,
+        "mailbox_email": connection_email,
+    }
+    frozen = {
+        key: value
+        for key, value in _snapshot_metadata(snapshot).items()
+        if key in current
+    }
+    if current != frozen:
+        raise QuotationEmailError(
+            "The saved delivery no longer matches its frozen outbound email. Create a reviewed quotation revision instead of changing a retry.",
+            code="outbound_snapshot_mismatch",
+            http_status=409,
+            retryable=False,
+        )
+
+
+def _require_payload_matches_snapshot(snapshot, *, to_addresses, cc_addresses, subject, body):
+    if (
+        list(to_addresses) != list(snapshot.to_addresses or [])
+        or list(cc_addresses) != list(snapshot.cc_addresses or [])
+        or str(subject) != str(snapshot.subject)
+        or str(body) != str(snapshot.body)
+    ):
+        raise QuotationEmailError(
+            "A retry must use the exact recipient, CC, subject, and message that were previously reviewed. Create a quotation revision to change them.",
+            code="outbound_snapshot_mismatch",
+            http_status=409,
+            retryable=False,
+        )
+
+
+def _create_provider_attempt(delivery, snapshot, actor):
+    return QuotationEmailDeliveryAttempt.objects.create(
+        delivery=delivery,
+        snapshot=snapshot,
+        sequence=delivery.attempt_count,
+        actor=actor,
+        actor_username=str(getattr(actor, "get_username", lambda: "")() or "")[:150],
+        gmail_connection_id_snapshot=delivery.gmail_connection_id,
+        mailbox_email=snapshot.mailbox_email,
+        raw_mime_sha256=snapshot.raw_mime_sha256,
+        expected_thread_id=snapshot.gmail_api_thread_id,
+    )
+
+
+def _gmail_send_credential_generation(connection):
+    """Return an in-memory identity for the exact credential used to send.
+
+    The value is never persisted or logged. Comparing it again under the
+    connection row lock prevents a concurrent OAuth replacement from pairing
+    frozen mailbox attribution with an access token obtained from a different
+    credential generation.
+    """
+
+    if not connection:
+        return None
+    return (
+        connection.pk,
+        connection.user_id,
+        bool(connection.is_shared),
+        str(connection.status or ""),
+        str(connection.email or "").strip().lower(),
+        tuple(sorted(str(scope or "") for scope in (connection.scopes or []))),
+        str(connection.access_token_encrypted or ""),
+        connection.token_expiry,
+    )
+
+
+def _latest_provider_attempt(delivery):
+    return delivery.provider_attempts.order_by("-sequence", "-id").first()
+
+
+def _append_provider_attempt_event(
+    attempt,
+    *,
+    event_type,
+    actor,
+    event_key="",
+    provider_message_id="",
+    provider_thread_id="",
+    provider_http_status=None,
+    error_category="",
+    error_code="",
+    error_class="",
+    error_summary="",
+):
+    if not attempt:
+        return None
+    attempt = QuotationEmailDeliveryAttempt.objects.select_for_update().get(pk=attempt.pk)
+    event_key = str(event_key or event_type)
+    existing = attempt.events.filter(event_key=event_key).first()
+    if existing:
+        return existing
+    return QuotationEmailDeliveryAttemptEvent.objects.create(
+        attempt=attempt,
+        event_key=event_key,
+        event_type=event_type,
+        actor=actor,
+        actor_username=str(getattr(actor, "get_username", lambda: "")() or "")[:150],
+        provider_message_id=str(provider_message_id or "")[:255],
+        provider_thread_id=str(provider_thread_id or "")[:255],
+        provider_http_status=provider_http_status,
+        error_category=str(error_category or "")[:50],
+        error_code=str(error_code or "")[:100],
+        error_class=str(error_class or "")[:255],
+        error_summary=str(error_summary or "")[:1000],
+    )
+
+
+def _mark_delivery_failure(
+    delivery_id,
+    *,
+    unknown,
+    message,
+    actor,
+    attempt_id=None,
+    error_code="",
+    error_class="",
+    provider_http_status=None,
+):
     now = timezone.now()
     quotation_id = QuotationEmailDelivery.objects.only("quotation_id").get(
         pk=delivery_id
@@ -1346,11 +1695,50 @@ def _mark_delivery_failure(delivery_id, *, unknown, message, actor):
             pk=quotation_id
         )
         delivery = QuotationEmailDelivery.objects.select_for_update().get(pk=delivery_id)
+        attempt = None
+        if attempt_id:
+            attempt = QuotationEmailDeliveryAttempt.objects.filter(
+                pk=attempt_id,
+                delivery=delivery,
+            ).first()
+        elif unknown:
+            attempt = _latest_provider_attempt(delivery)
+        _append_provider_attempt_event(
+            attempt,
+            event_type=(
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN
+                if unknown
+                else QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_FAILED
+            ),
+            actor=actor,
+            provider_http_status=provider_http_status,
+            error_category="ambiguous" if unknown else "rejected",
+            error_code=error_code,
+            error_class=error_class,
+            error_summary=str(message),
+        )
         # SENT is terminal. A reconciliation request can prove delivery while
-        # the original request is unwinding from a timeout; that late failure
-        # must never downgrade the reconciled delivery or emit a false failure
-        # audit record.
+        # the original request is unwinding from a timeout. Preserve that late
+        # provider fact above, but never downgrade the reconciled delivery or
+        # emit a false failure audit record.
         if delivery.status == QuotationEmailDelivery.STATUS_SENT:
+            return delivery
+        # Only the latest committed provider call may change the mutable
+        # non-success aggregate. A delayed handler from an older retry remains
+        # useful append-only history but cannot overwrite a newer SENDING state.
+        if attempt_id and (
+            attempt is None or attempt.sequence != delivery.attempt_count
+        ):
+            return delivery
+        # UNKNOWN means Gmail may already have accepted the message. It
+        # dominates every later failure classification so blind retry can never
+        # be re-enabled by completion-order races.
+        if delivery.status == QuotationEmailDelivery.STATUS_UNKNOWN:
+            return delivery
+        if (
+            delivery.status == QuotationEmailDelivery.STATUS_FAILED
+            and not unknown
+        ):
             return delivery
         delivery.status = (
             QuotationEmailDelivery.STATUS_UNKNOWN
@@ -1376,7 +1764,15 @@ def _mark_delivery_failure(delivery_id, *, unknown, message, actor):
         return delivery
 
 
-def _record_successful_delivery(delivery_id, gmail_message_id, sent_thread_id, actor):
+def _record_successful_delivery(
+    delivery_id,
+    gmail_message_id,
+    sent_thread_id,
+    actor,
+    *,
+    attempt_id=None,
+    reconciled=False,
+):
     now = timezone.now()
     quotation_id = QuotationEmailDelivery.objects.only("quotation_id").get(
         pk=delivery_id
@@ -1389,6 +1785,50 @@ def _record_successful_delivery(delivery_id, gmail_message_id, sent_thread_id, a
         sent_delivery = QuotationEmailDelivery.objects.select_for_update().select_related(
             "quotation"
         ).get(pk=delivery_id)
+        attempt = None
+        if attempt_id:
+            attempt = QuotationEmailDeliveryAttempt.objects.filter(
+                pk=attempt_id,
+                delivery=sent_delivery,
+            ).first()
+        elif reconciled:
+            attempt = _latest_provider_attempt(sent_delivery)
+        if reconciled and attempt and not attempt.events.filter(
+            event_type__in=[
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT,
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_FAILED,
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+            ]
+        ).exists():
+            _append_provider_attempt_event(
+                attempt,
+                event_type=QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+                actor=actor,
+                event_key="provider_unknown:reconciliation_pending",
+                error_category="ambiguous",
+                error_code="provider_outcome_missing",
+                error_summary=(
+                    "The provider call had no durable result before strict Gmail reconciliation."
+                ),
+            )
+        _append_provider_attempt_event(
+            attempt,
+            event_type=(
+                QuotationEmailDeliveryAttemptEvent.EVENT_RECONCILED_SENT
+                if reconciled
+                else QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT
+            ),
+            actor=actor,
+            provider_message_id=gmail_message_id,
+            provider_thread_id=sent_thread_id,
+            error_category="reconciliation" if reconciled else "",
+            error_code="delivery_reconciled" if reconciled else "",
+            error_summary=(
+                "The sent message was proven by strict Gmail reconciliation."
+                if reconciled
+                else ""
+            ),
+        )
         if sent_delivery.status == QuotationEmailDelivery.STATUS_SENT:
             return sent_quote, sent_delivery
         sent_delivery.status = QuotationEmailDelivery.STATUS_SENT
@@ -1440,7 +1880,7 @@ def _record_successful_delivery(delivery_id, gmail_message_id, sent_thread_id, a
     return sent_quote, sent_delivery
 
 
-def _reconcile_delivery_with_gmail(delivery, actor):
+def _reconcile_delivery_with_gmail(delivery, actor, *, attempt_id=None):
     """Find a strictly verified sent message for an ambiguous delivery.
 
     ``None`` means Gmail was checked successfully and no qualifying sent
@@ -1461,7 +1901,13 @@ def _reconcile_delivery_with_gmail(delivery, actor):
             quote_finalized=True,
             delivery=delivery,
         )
-    mailbox_email = str(connection.email or "").strip().lower()
+    snapshot = _delivery_snapshot(delivery)
+    connected_mailbox_email = str(connection.email or "").strip().lower()
+    mailbox_email = (
+        str(snapshot.mailbox_email or "").strip().lower()
+        if snapshot
+        else connected_mailbox_email
+    )
     if not mailbox_email:
         raise QuotationEmailError(
             "The connected shared Gmail mailbox has no verified email identity.",
@@ -1470,7 +1916,29 @@ def _reconcile_delivery_with_gmail(delivery, actor):
             quote_finalized=True,
             delivery=delivery,
         )
-    outbound_message_id = str(delivery.outbound_rfc_message_id or "").strip()
+    if snapshot and connected_mailbox_email != mailbox_email:
+        raise QuotationEmailError(
+            "The connected shared mailbox does not match the mailbox frozen for this delivery.",
+            code="delivery_reconciliation_invalid",
+            retryable=False,
+            quote_finalized=True,
+            delivery=delivery,
+        )
+    outbound_message_id = str(
+        snapshot.outbound_rfc_message_id
+        if snapshot
+        else delivery.outbound_rfc_message_id
+        or ""
+    ).strip()
+    delivery_mode = snapshot.delivery_mode if snapshot else delivery.delivery_mode
+    expected_thread_id = str(
+        snapshot.gmail_api_thread_id
+        if snapshot
+        else delivery.gmail_thread_id
+        if delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
+        else delivery.sent_gmail_thread_id
+        or ""
+    ).strip()
     if not re.fullmatch(r"<[^<>\r\n]+>", outbound_message_id):
         raise QuotationEmailError(
             "This delivery has no valid stable Message-ID and cannot be reconciled safely.",
@@ -1481,8 +1949,8 @@ def _reconcile_delivery_with_gmail(delivery, actor):
         )
     message_id = outbound_message_id[1:-1]
     if (
-        delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
-        and not str(delivery.gmail_thread_id or "").strip()
+        delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
+        and not expected_thread_id
     ):
         raise QuotationEmailError(
             "This Gmail reply delivery has no expected source thread and cannot be reconciled safely.",
@@ -1550,18 +2018,12 @@ def _reconcile_delivery_with_gmail(delivery, actor):
             continue
         if (
             str(metadata.get("rfc_message_id") or "").strip()
-            != delivery.outbound_rfc_message_id
+            != outbound_message_id
         ):
             continue
         thread_id = str(metadata.get("gmail_thread_id") or "").strip()
         if not thread_id:
             continue
-        expected_thread_id = str(
-            delivery.gmail_thread_id
-            if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY
-            else delivery.sent_gmail_thread_id
-            or ""
-        ).strip()
         if expected_thread_id and thread_id != expected_thread_id:
             continue
         verified_matches.append((candidate_id, thread_id))
@@ -1603,15 +2065,21 @@ def _reconcile_delivery_with_gmail(delivery, actor):
             candidate_id,
             thread_id,
             actor,
+            attempt_id=attempt_id,
+            reconciled=True,
         )
     return None
 
 
-def _reconcile_after_ambiguous_outcome(delivery, actor):
+def _reconcile_after_ambiguous_outcome(delivery, actor, *, attempt_id=None):
     """Reconcile or preserve the delivery's non-retryable ambiguous state."""
 
     try:
-        return _reconcile_delivery_with_gmail(delivery, actor)
+        return _reconcile_delivery_with_gmail(
+            delivery,
+            actor,
+            attempt_id=attempt_id,
+        )
     except QuotationEmailError as exc:
         current = QuotationEmailDelivery.objects.select_related(
             "quotation", "gmail_connection"
@@ -1627,6 +2095,9 @@ def _reconcile_after_ambiguous_outcome(delivery, actor):
                     "do not resend it blindly."
                 ),
                 actor=actor,
+                attempt_id=attempt_id,
+                error_code="gmail_reconciliation_unavailable",
+                error_class=type(exc).__name__,
             )
             if current.status == QuotationEmailDelivery.STATUS_SENT:
                 return current.quotation, current
@@ -1724,6 +2195,7 @@ def send_quotation_email(
         persist=False,
     )
     prepared_access_token = None
+    prepared_credential_generation = None
     if preflight.status not in {
         QuotationEmailDelivery.STATUS_SENT,
         QuotationEmailDelivery.STATUS_SENDING,
@@ -1764,6 +2236,9 @@ def send_quotation_email(
             prepared_access_token = get_valid_access_token(
                 preflight.gmail_connection
             )
+            prepared_credential_generation = _gmail_send_credential_generation(
+                preflight.gmail_connection
+            )
         except Exception as exc:
             raise QuotationEmailError(
                 "Reconnect the shared Gmail mailbox before finalizing and sending.",
@@ -1783,11 +2258,32 @@ def send_quotation_email(
         )
     else:
         preview = preflight
+    if preview.status == QuotationEmailDelivery.STATUS_SENT:
+        # SENT is terminal and idempotent. A later OAuth disconnect must not
+        # turn a harmless repeated click into a reconnect error or provider call.
+        return preview.quotation, preview, True
     if preview.status == QuotationEmailDelivery.STATUS_UNKNOWN:
         reconciled = _reconcile_after_ambiguous_outcome(preview, actor)
         if reconciled:
             reconciled_quote, reconciled_delivery = reconciled
             return reconciled_quote, reconciled_delivery, True
+        preview = QuotationEmailDelivery.objects.select_related(
+            "quotation", "gmail_connection"
+        ).get(pk=preview.pk)
+        if preview.status == QuotationEmailDelivery.STATUS_SENT:
+            return preview.quotation, preview, True
+        if preview.status == QuotationEmailDelivery.STATUS_UNKNOWN:
+            raise QuotationEmailError(
+                "Gmail still does not confirm the previous delivery. Check the shared Sent mailbox before taking any further action.",
+                code="delivery_unknown",
+                http_status=409,
+                retryable=False,
+                quote_finalized=preview.quotation.status in {
+                    Quotation.STATUS_FINALIZED,
+                    Quotation.STATUS_SENT,
+                },
+                delivery=preview,
+            )
     if preview.status == QuotationEmailDelivery.STATUS_SENDING and _stale_sending(preview):
         reconciled = _reconcile_after_ambiguous_outcome(preview, actor)
         if reconciled:
@@ -1814,11 +2310,59 @@ def send_quotation_email(
             },
             delivery=stale,
         )
+    if preview.status == QuotationEmailDelivery.STATUS_SENDING:
+        preview = QuotationEmailDelivery.objects.select_related(
+            "quotation", "gmail_connection"
+        ).get(pk=preview.pk)
+        if preview.status == QuotationEmailDelivery.STATUS_SENT:
+            return preview.quotation, preview, True
+        if preview.status == QuotationEmailDelivery.STATUS_UNKNOWN:
+            raise QuotationEmailError(
+                "Gmail did not confirm the previous delivery. Check the shared Sent mailbox before taking any further action.",
+                code="delivery_unknown",
+                http_status=409,
+                retryable=False,
+                quote_finalized=preview.quotation.status in {
+                    Quotation.STATUS_FINALIZED,
+                    Quotation.STATUS_SENT,
+                },
+                delivery=preview,
+            )
+        if preview.status == QuotationEmailDelivery.STATUS_SENDING:
+            raise QuotationEmailError(
+                "This quotation email is already being sent.",
+                code="delivery_in_progress",
+                http_status=409,
+                retryable=False,
+                quote_finalized=preview.quotation.status in {
+                    Quotation.STATUS_FINALIZED,
+                    Quotation.STATUS_SENT,
+                },
+                delivery=preview,
+            )
     preparation_failure = None
     raw_message = None
     send_connection = None
     send_thread_id = ""
     send_is_reply = False
+    provider_attempt_id = None
+    if prepared_access_token is None:
+        try:
+            prepared_access_token = get_valid_access_token(preview.gmail_connection)
+            prepared_credential_generation = _gmail_send_credential_generation(
+                preview.gmail_connection
+            )
+        except Exception as exc:
+            raise QuotationEmailError(
+                "Reconnect the shared Gmail mailbox before finalizing and sending.",
+                code="gmail_reconnect_required",
+                retryable=True,
+                quote_finalized=quotation.status in {
+                    Quotation.STATUS_FINALIZED,
+                    Quotation.STATUS_SENT,
+                },
+                delivery=preview,
+            ) from exc
     with transaction.atomic():
         # See _record_successful_delivery: quote must always be locked first.
         locked_quote = Quotation.objects.select_for_update().get(pk=quotation.pk)
@@ -1850,6 +2394,21 @@ def send_quotation_email(
             locked_quote,
             locked_delivery,
         )
+        if (
+            _gmail_send_credential_generation(send_connection)
+            != prepared_credential_generation
+        ):
+            raise QuotationEmailError(
+                "The shared Gmail connection changed while this send was being prepared. Review the current email preview and try again.",
+                code="gmail_connection_changed",
+                http_status=409,
+                retryable=True,
+                quote_finalized=locked_quote.status in {
+                    Quotation.STATUS_FINALIZED,
+                    Quotation.STATUS_SENT,
+                },
+                delivery=locked_delivery,
+            )
         pdf_config = get_quotation_pdf_config(quotation=locked_quote)
         _require_current_email_preview(
             locked_quote,
@@ -1866,6 +2425,20 @@ def send_quotation_email(
             locked_delivery,
             data,
         )
+        outbound_snapshot = _delivery_snapshot(
+            locked_delivery,
+            include_raw=True,
+            for_update=True,
+        )
+        if outbound_snapshot:
+            _require_snapshot_matches_delivery(locked_delivery, outbound_snapshot)
+            _require_payload_matches_snapshot(
+                outbound_snapshot,
+                to_addresses=to_addresses,
+                cc_addresses=cc_addresses,
+                subject=subject,
+                body=body,
+            )
         if (
             not locked_delivery.gmail_connection
             or locked_delivery.gmail_connection.status
@@ -1939,35 +2512,56 @@ def send_quotation_email(
             # preparation fails. The outer transaction can then commit both
             # the finalized quotation and a durable FAILED delivery state.
             with transaction.atomic():
-                pdf_bytes = build_quotation_pdf(
-                    locked_quote,
-                    config=pdf_config,
-                )
-                pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
-                pdf_size = len(pdf_bytes)
-                if (
-                    locked_delivery.attachment_sha256
-                    and locked_delivery.attachment_sha256 != pdf_sha256
-                ):
-                    raise QuotationEmailError(
-                        "The regenerated quotation PDF differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
-                        code="attachment_snapshot_mismatch",
-                        retryable=False,
+                if outbound_snapshot:
+                    raw_mime = _verify_outbound_snapshot(outbound_snapshot)
+                    raw_message = _encode_gmail_raw_message(raw_mime)
+                    pdf_sha256 = outbound_snapshot.attachment_sha256
+                    pdf_size = outbound_snapshot.attachment_size
+                else:
+                    pdf_bytes = build_quotation_pdf(
+                        locked_quote,
+                        config=pdf_config,
                     )
-                if (
-                    locked_delivery.attachment_size is not None
-                    and locked_delivery.attachment_size != pdf_size
-                ):
-                    raise QuotationEmailError(
-                        "The regenerated quotation PDF size differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
-                        code="attachment_snapshot_mismatch",
-                        retryable=False,
+                    pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+                    pdf_size = len(pdf_bytes)
+                    if (
+                        locked_delivery.attachment_sha256
+                        and locked_delivery.attachment_sha256 != pdf_sha256
+                    ):
+                        raise QuotationEmailError(
+                            "The regenerated quotation PDF differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
+                            code="attachment_snapshot_mismatch",
+                            retryable=False,
+                        )
+                    if (
+                        locked_delivery.attachment_size is not None
+                        and locked_delivery.attachment_size != pdf_size
+                    ):
+                        raise QuotationEmailError(
+                            "The regenerated quotation PDF size differs from the attachment recorded for the previous attempt. Start a reviewed revision instead of retrying with changed content.",
+                            code="attachment_snapshot_mismatch",
+                            retryable=False,
+                        )
+                    raw_message = _build_raw_message(
+                        locked_delivery,
+                        pdf_bytes,
+                        sender_name=pdf_config.company_name,
                     )
-                raw_message = _build_raw_message(
-                    locked_delivery,
-                    pdf_bytes,
-                    sender_name=pdf_config.company_name,
-                )
+                    outbound_snapshot = _create_outbound_snapshot(
+                        locked_delivery,
+                        actor,
+                        sender_name=pdf_config.company_name,
+                        pdf_bytes=pdf_bytes,
+                        raw_message=raw_message,
+                    )
+                    # Gmail always receives bytes read back from the durable
+                    # snapshot, never a separate in-memory construction.
+                    outbound_snapshot = QuotationEmailOutboundSnapshot.objects.get(
+                        pk=outbound_snapshot.pk
+                    )
+                    raw_message = _encode_gmail_raw_message(
+                        _verify_outbound_snapshot(outbound_snapshot)
+                    )
         except Exception as exc:  # normalized after the finalized state commits
             preparation_failure = exc
             safe_failure = (
@@ -2027,14 +2621,15 @@ def send_quotation_email(
                     "updated_at",
                 ]
             )
-            send_thread_id = (
-                locked_delivery.gmail_thread_id
-                if locked_delivery.delivery_mode
-                == QuotationEmailDelivery.MODE_GMAIL_REPLY
-                else ""
+            provider_attempt = _create_provider_attempt(
+                locked_delivery,
+                outbound_snapshot,
+                actor,
             )
+            provider_attempt_id = provider_attempt.id
+            send_thread_id = outbound_snapshot.gmail_api_thread_id
             send_is_reply = (
-                locked_delivery.delivery_mode
+                outbound_snapshot.delivery_mode
                 == QuotationEmailDelivery.MODE_GMAIL_REPLY
             )
         delivery_id = locked_delivery.id
@@ -2063,7 +2658,7 @@ def send_quotation_email(
     # released. Only the Gmail network call occurs in the ambiguous window.
     gmail_request_started = False
     try:
-        access_token = prepared_access_token or get_valid_access_token(send_connection)
+        access_token = prepared_access_token
         gmail_request_started = True
         response = gmail_send_raw_message(
             send_connection,
@@ -2077,6 +2672,9 @@ def send_quotation_email(
             unknown=False,
             message=exc.message,
             actor=actor,
+            attempt_id=provider_attempt_id,
+            error_code=exc.code,
+            error_class=type(exc).__name__,
         )
         if failed.status == QuotationEmailDelivery.STATUS_SENT:
             return failed.quotation, failed, True
@@ -2093,6 +2691,9 @@ def send_quotation_email(
             unknown=False,
             message=str(exc),
             actor=actor,
+            attempt_id=provider_attempt_id,
+            error_code="gmail_reconnect_required",
+            error_class=type(exc).__name__,
         )
         if failed.status == QuotationEmailDelivery.STATUS_SENT:
             return failed.quotation, failed, True
@@ -2110,6 +2711,9 @@ def send_quotation_email(
                 unknown=False,
                 message="The quotation PDF or email could not be prepared.",
                 actor=actor,
+                attempt_id=provider_attempt_id,
+                error_code="email_prepare_failed",
+                error_class=type(exc).__name__,
             )
             if failed.status == QuotationEmailDelivery.STATUS_SENT:
                 return failed.quotation, failed, True
@@ -2123,13 +2727,6 @@ def send_quotation_email(
         code_match = re.search(r"HTTP\s+(\d{3})", str(exc))
         http_code = int(code_match.group(1)) if code_match else 0
         if http_code in {408, 425, 429} or http_code >= 500:
-            current = QuotationEmailDelivery.objects.select_related(
-                "gmail_connection", "quotation"
-            ).get(pk=delivery_id)
-            reconciled = _reconcile_after_ambiguous_outcome(current, actor)
-            if reconciled:
-                reconciled_quote, reconciled_delivery = reconciled
-                return reconciled_quote, reconciled_delivery, False
             unknown = _mark_delivery_failure(
                 delivery_id,
                 unknown=True,
@@ -2138,9 +2735,21 @@ def send_quotation_email(
                     "Check the shared Sent mailbox before retrying."
                 ),
                 actor=actor,
+                attempt_id=provider_attempt_id,
+                error_code="delivery_unknown",
+                error_class=type(exc).__name__,
+                provider_http_status=http_code or None,
             )
             if unknown.status == QuotationEmailDelivery.STATUS_SENT:
                 return unknown.quotation, unknown, True
+            reconciled = _reconcile_after_ambiguous_outcome(
+                unknown,
+                actor,
+                attempt_id=provider_attempt_id,
+            )
+            if reconciled:
+                reconciled_quote, reconciled_delivery = reconciled
+                return reconciled_quote, reconciled_delivery, False
             raise QuotationEmailError(
                 unknown.last_error,
                 code="delivery_unknown",
@@ -2159,6 +2768,10 @@ def send_quotation_email(
             unknown=False,
             message=safe,
             actor=actor,
+            attempt_id=provider_attempt_id,
+            error_code="gmail_send_failed",
+            error_class=type(exc).__name__,
+            provider_http_status=http_code or None,
         )
         if failed.status == QuotationEmailDelivery.STATUS_SENT:
             return failed.quotation, failed, True
@@ -2171,24 +2784,38 @@ def send_quotation_email(
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         if gmail_request_started:
-            current = QuotationEmailDelivery.objects.select_related(
-                "gmail_connection", "quotation"
-            ).get(pk=delivery_id)
-            reconciled = _reconcile_after_ambiguous_outcome(current, actor)
+            result = _mark_delivery_failure(
+                delivery_id,
+                unknown=True,
+                message=(
+                    "Gmail did not confirm whether the message was accepted. "
+                    "Check the shared Sent mailbox using the quotation number before any retry."
+                ),
+                actor=actor,
+                attempt_id=provider_attempt_id,
+                error_code="delivery_unknown",
+                error_class=type(exc).__name__,
+            )
+            if result.status == QuotationEmailDelivery.STATUS_SENT:
+                return result.quotation, result, True
+            reconciled = _reconcile_after_ambiguous_outcome(
+                result,
+                actor,
+                attempt_id=provider_attempt_id,
+            )
             if reconciled:
                 reconciled_quote, reconciled_delivery = reconciled
                 return reconciled_quote, reconciled_delivery, False
-        result = _mark_delivery_failure(
-            delivery_id,
-            unknown=gmail_request_started,
-            message=(
-                "Gmail did not confirm whether the message was accepted. "
-                "Check the shared Sent mailbox using the quotation number before any retry."
-                if gmail_request_started
-                else "The quotation PDF or email could not be prepared."
-            ),
-            actor=actor,
-        )
+        else:
+            result = _mark_delivery_failure(
+                delivery_id,
+                unknown=False,
+                message="The quotation PDF or email could not be prepared.",
+                actor=actor,
+                attempt_id=provider_attempt_id,
+                error_code="email_prepare_failed",
+                error_class=type(exc).__name__,
+            )
         if result.status == QuotationEmailDelivery.STATUS_SENT:
             return result.quotation, result, True
         raise QuotationEmailError(
@@ -2201,24 +2828,38 @@ def send_quotation_email(
         ) from exc
     except Exception as exc:
         if gmail_request_started:
-            current = QuotationEmailDelivery.objects.select_related(
-                "gmail_connection", "quotation"
-            ).get(pk=delivery_id)
-            reconciled = _reconcile_after_ambiguous_outcome(current, actor)
+            result = _mark_delivery_failure(
+                delivery_id,
+                unknown=True,
+                message=(
+                    "An unexpected error occurred after delivery started. "
+                    "Check the shared Sent mailbox before retrying."
+                ),
+                actor=actor,
+                attempt_id=provider_attempt_id,
+                error_code="delivery_unknown",
+                error_class=type(exc).__name__,
+            )
+            if result.status == QuotationEmailDelivery.STATUS_SENT:
+                return result.quotation, result, True
+            reconciled = _reconcile_after_ambiguous_outcome(
+                result,
+                actor,
+                attempt_id=provider_attempt_id,
+            )
             if reconciled:
                 reconciled_quote, reconciled_delivery = reconciled
                 return reconciled_quote, reconciled_delivery, False
-        result = _mark_delivery_failure(
-            delivery_id,
-            unknown=gmail_request_started,
-            message=(
-                "An unexpected error occurred after delivery started. "
-                "Check the shared Sent mailbox before retrying."
-                if gmail_request_started
-                else "The quotation PDF or email could not be prepared."
-            ),
-            actor=actor,
-        )
+        else:
+            result = _mark_delivery_failure(
+                delivery_id,
+                unknown=False,
+                message="The quotation PDF or email could not be prepared.",
+                actor=actor,
+                attempt_id=provider_attempt_id,
+                error_code="email_prepare_failed",
+                error_class=type(exc).__name__,
+            )
         if result.status == QuotationEmailDelivery.STATUS_SENT:
             return result.quotation, result, True
         raise QuotationEmailError(
@@ -2236,13 +2877,6 @@ def send_quotation_email(
         send_is_reply
         and sent_thread_id != send_thread_id
     ):
-        current = QuotationEmailDelivery.objects.select_related(
-            "gmail_connection", "quotation"
-        ).get(pk=delivery_id)
-        reconciled = _reconcile_after_ambiguous_outcome(current, actor)
-        if reconciled:
-            reconciled_quote, reconciled_delivery = reconciled
-            return reconciled_quote, reconciled_delivery, False
         unknown = _mark_delivery_failure(
             delivery_id,
             unknown=True,
@@ -2251,9 +2885,20 @@ def send_quotation_email(
                 "Check the shared Sent mailbox before retrying."
             ),
             actor=actor,
+            attempt_id=provider_attempt_id,
+            error_code="delivery_unknown",
+            error_class="IncompleteGmailReceipt",
         )
         if unknown.status == QuotationEmailDelivery.STATUS_SENT:
             return unknown.quotation, unknown, True
+        reconciled = _reconcile_after_ambiguous_outcome(
+            unknown,
+            actor,
+            attempt_id=provider_attempt_id,
+        )
+        if reconciled:
+            reconciled_quote, reconciled_delivery = reconciled
+            return reconciled_quote, reconciled_delivery, False
         raise QuotationEmailError(
             unknown.last_error,
             code="delivery_unknown",
@@ -2268,5 +2913,6 @@ def send_quotation_email(
         gmail_message_id,
         sent_thread_id,
         actor,
+        attempt_id=provider_attempt_id,
     )
     return sent_quote, sent_delivery, False

@@ -1869,6 +1869,211 @@ class QuotationEmailDelivery(models.Model):
         return f"{self.quotation.quotation_number} email ({self.status})"
 
 
+class ImmutableEmailHistoryQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError("Immutable email history cannot be bulk-updated.")
+
+    def delete(self):
+        raise ValidationError("Immutable email history cannot be bulk-deleted.")
+
+
+class QuotationEmailOutboundSnapshot(models.Model):
+    """Exact, write-once customer email bytes and their reviewed send facts."""
+
+    CONTRACT_VERSION = "quotation_email_outbound_v1"
+
+    delivery = models.OneToOneField(
+        QuotationEmailDelivery,
+        on_delete=models.PROTECT,
+        related_name="outbound_snapshot",
+    )
+    contract_version = models.CharField(
+        max_length=64,
+        default=CONTRACT_VERSION,
+        editable=False,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_outbound_snapshots",
+    )
+    created_by_username = models.CharField(max_length=150, blank=True)
+    gmail_connection_id_snapshot = models.PositiveBigIntegerField(null=True, blank=True)
+    mailbox_email = models.EmailField()
+    sender_name = models.CharField(max_length=255, blank=True)
+    delivery_mode = models.CharField(max_length=30, choices=QuotationEmailDelivery.MODE_CHOICES)
+    to_addresses = models.JSONField(default=list)
+    cc_addresses = models.JSONField(default=list, blank=True)
+    subject = models.CharField(max_length=998)
+    body = models.TextField()
+    gmail_api_thread_id = models.CharField(max_length=255, blank=True)
+    source_gmail_message_id = models.CharField(max_length=255, blank=True)
+    source_rfc_message_id = models.CharField(max_length=998, blank=True)
+    source_references = models.TextField(blank=True)
+    outbound_rfc_message_id = models.CharField(max_length=255)
+    attachment_filename = models.CharField(max_length=255)
+    attachment_sha256 = models.CharField(max_length=64)
+    attachment_size = models.PositiveIntegerField()
+    raw_mime = models.BinaryField(editable=False)
+    raw_mime_sha256 = models.CharField(max_length=64, editable=False)
+    raw_mime_size = models.PositiveIntegerField(editable=False)
+    snapshot_sha256 = models.CharField(max_length=64, editable=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ImmutableEmailHistoryQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(raw_mime_size__gt=0),
+                name="quotation_email_snapshot_raw_size_positive",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Outbound email snapshots are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Outbound email snapshots cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.delivery} snapshot {self.snapshot_sha256[:12]}"
+
+
+class QuotationEmailDeliveryAttempt(models.Model):
+    """Immutable request facts for one committed provider call."""
+
+    PROVIDER_GMAIL = "gmail"
+
+    delivery = models.ForeignKey(
+        QuotationEmailDelivery,
+        on_delete=models.PROTECT,
+        related_name="provider_attempts",
+    )
+    snapshot = models.ForeignKey(
+        QuotationEmailOutboundSnapshot,
+        on_delete=models.PROTECT,
+        related_name="provider_attempts",
+    )
+    sequence = models.PositiveIntegerField()
+    correlation_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    provider = models.CharField(max_length=30, default=PROVIDER_GMAIL, editable=False)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_delivery_attempts",
+    )
+    actor_username = models.CharField(max_length=150, blank=True)
+    gmail_connection_id_snapshot = models.PositiveBigIntegerField(null=True, blank=True)
+    mailbox_email = models.EmailField()
+    raw_mime_sha256 = models.CharField(max_length=64)
+    expected_thread_id = models.CharField(max_length=255, blank=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ImmutableEmailHistoryQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["delivery_id", "sequence"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["delivery", "sequence"],
+                name="quotation_email_attempt_delivery_sequence_unique",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sequence__gt=0),
+                name="quotation_email_attempt_sequence_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["delivery", "started_at"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Provider-attempt records are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Provider-attempt records cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.delivery} attempt {self.sequence}"
+
+
+class QuotationEmailDeliveryAttemptEvent(models.Model):
+    """Append-only facts learned after an immutable provider call began."""
+
+    EVENT_PROVIDER_SENT = "provider_sent"
+    EVENT_PROVIDER_FAILED = "provider_failed"
+    EVENT_PROVIDER_UNKNOWN = "provider_unknown"
+    EVENT_RECONCILED_SENT = "reconciled_sent"
+    EVENT_CHOICES = [
+        (EVENT_PROVIDER_SENT, "Provider confirmed sent"),
+        (EVENT_PROVIDER_FAILED, "Provider call failed"),
+        (EVENT_PROVIDER_UNKNOWN, "Provider result unknown"),
+        (EVENT_RECONCILED_SENT, "Sent message verified by reconciliation"),
+    ]
+
+    attempt = models.ForeignKey(
+        QuotationEmailDeliveryAttempt,
+        on_delete=models.PROTECT,
+        related_name="events",
+    )
+    # A stable per-attempt key makes repeated reconciliation/result handling
+    # idempotent without ever updating a historical row.
+    event_key = models.CharField(max_length=64)
+    event_type = models.CharField(max_length=30, choices=EVENT_CHOICES)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quotation_email_delivery_attempt_events",
+    )
+    actor_username = models.CharField(max_length=150, blank=True)
+    provider_message_id = models.CharField(max_length=255, blank=True)
+    provider_thread_id = models.CharField(max_length=255, blank=True)
+    provider_http_status = models.PositiveSmallIntegerField(null=True, blank=True)
+    error_category = models.CharField(max_length=50, blank=True)
+    error_code = models.CharField(max_length=100, blank=True)
+    error_class = models.CharField(max_length=255, blank=True)
+    error_summary = models.CharField(max_length=1000, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = ImmutableEmailHistoryQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["attempt_id", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["attempt", "event_key"],
+                name="quotation_email_attempt_event_key_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["event_type", "created_at"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Provider-attempt events are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Provider-attempt events cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.attempt} - {self.event_type}"
+
+
 class QuotationEmailThreadSelection(models.Model):
     """Short-lived opaque link to a staff-selected Gmail source message."""
 

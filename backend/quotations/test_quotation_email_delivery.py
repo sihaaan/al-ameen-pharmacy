@@ -10,7 +10,9 @@ from email.parser import BytesParser
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.core.signing import TimestampSigner
+from django.db import connection
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -33,11 +35,18 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationEmailDelivery,
+    QuotationEmailDeliveryAttempt,
+    QuotationEmailDeliveryAttemptEvent,
+    QuotationEmailOutboundSnapshot,
     QuotationEmailThreadSelection,
     QuotationLine,
     QuotationSettings,
 )
-from .quotation_email_delivery import _mark_delivery_failure
+from .quotation_email_delivery import (
+    _delivery_snapshot,
+    _mark_delivery_failure,
+    _record_successful_delivery,
+)
 
 
 class QuotationEmailDeliveryAPITests(APITestCase):
@@ -672,9 +681,8 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(send.call_args.kwargs["thread_id"], "gmail-thread-1")
         raw = send.call_args.args[1]
         padded = raw + ("=" * (-len(raw) % 4))
-        message = BytesParser(policy=policy.default).parsebytes(
-            base64.urlsafe_b64decode(padded.encode("ascii"))
-        )
+        raw_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
+        message = BytesParser(policy=policy.default).parsebytes(raw_bytes)
         self.assertEqual(message["To"], "orders@example.com")
         self.assertEqual(message["Subject"], "RFQ medical supplies")
         self.assertEqual(message["In-Reply-To"], "<customer-1@example.com>")
@@ -683,6 +691,18 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             "<older@example.com> <customer-1@example.com>",
         )
         self.assertTrue(message["Message-ID"].startswith("<quotation-"))
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(delivery=delivery)
+        attempt = QuotationEmailDeliveryAttempt.objects.get(delivery=delivery)
+        self.assertEqual(bytes(snapshot.raw_mime), raw_bytes)
+        self.assertEqual(snapshot.gmail_api_thread_id, "gmail-thread-1")
+        self.assertEqual(snapshot.source_rfc_message_id, "<customer-1@example.com>")
+        self.assertEqual(snapshot.raw_mime_sha256, hashlib.sha256(bytes(snapshot.raw_mime)).hexdigest())
+        self.assertEqual(attempt.sequence, 1)
+        event = attempt.events.get()
+        self.assertEqual(event.event_type, QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT)
+        self.assertEqual(event.provider_message_id, "gmail-sent-1")
+        self.assertEqual(event.provider_thread_id, "gmail-thread-1")
 
     def test_late_failure_cannot_downgrade_terminal_sent_delivery(self):
         quotation = self.create_quote(status_value=Quotation.STATUS_SENT)
@@ -732,6 +752,60 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         )
 
     @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_late_provider_outcome_is_appended_after_reconciliation_wins(
+        self,
+        send,
+        _pdf,
+    ):
+        quotation = self.create_quote()
+
+        def reconcile_then_timeout(*_args, **_kwargs):
+            delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+            attempt = delivery.provider_attempts.get()
+            _record_successful_delivery(
+                delivery.id,
+                "gmail-reconciled-before-return",
+                "gmail-reconciled-thread",
+                self.staff,
+                attempt_id=attempt.id,
+                reconciled=True,
+            )
+            raise urllib.error.URLError("provider response arrived too late")
+
+        send.side_effect = reconcile_then_timeout
+        response = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_SENT)
+        attempt = delivery.provider_attempts.get()
+        events = list(attempt.events.order_by("created_at", "id"))
+        self.assertEqual(
+            [event.event_key for event in events],
+            [
+                "provider_unknown:reconciliation_pending",
+                QuotationEmailDeliveryAttemptEvent.EVENT_RECONCILED_SENT,
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+            ],
+        )
+        self.assertEqual(events[-1].error_code, "delivery_unknown")
+        self.assertEqual(events[-1].error_class, "URLError")
+        self.assertFalse(
+            QuotationAuditLog.objects.filter(
+                quotation=quotation,
+                action__in=[
+                    QuotationAuditLog.ACTION_EMAIL_FAILED,
+                    QuotationAuditLog.ACTION_EMAIL_UNKNOWN,
+                ],
+            ).exists()
+        )
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
     @patch(
         "quotations.quotation_email_delivery.gmail_send_raw_message",
         side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
@@ -748,10 +822,18 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(response.data["quote_finalized"])
         self.assertTrue(response.data["retryable"])
+        self.assertTrue(response.data["refresh_preview"])
+        self.assertTrue(response.data["delivery"]["outbound_snapshot_frozen"])
         quotation.refresh_from_db()
         self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
         delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
         self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_FAILED)
+        self.assertTrue(hasattr(delivery, "outbound_snapshot"))
+        attempt = delivery.provider_attempts.get()
+        event = attempt.events.get()
+        self.assertEqual(event.event_type, QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_FAILED)
+        self.assertEqual(event.provider_http_status, 400)
+        self.assertEqual(event.error_code, "gmail_send_failed")
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     def test_real_pdf_known_failure_retries_once_without_refinalizing(self, send):
@@ -771,6 +853,12 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         first_pdf_hash = QuotationEmailDelivery.objects.get(
             quotation=quotation
         ).attachment_sha256
+        retry_staff = User.objects.create_user(
+            username="email-retry-staff",
+            password="pass",
+            is_staff=True,
+        )
+        self.client.force_authenticate(retry_staff)
         # Cross ReportLab's normal timestamp boundary. Without invariant PDF
         # output, identical visible content receives a different document ID.
         time.sleep(1.1)
@@ -799,6 +887,71 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             1,
         )
         self.assertEqual(send.call_count, 2)
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        self.assertEqual(delivery.provider_attempts.count(), 2)
+        self.assertEqual(
+            list(
+                QuotationEmailDeliveryAttemptEvent.objects.filter(
+                    attempt__delivery=delivery
+                ).order_by("attempt__sequence").values_list("event_type", flat=True)
+            ),
+            [
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_FAILED,
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT,
+            ],
+        )
+        self.assertEqual(
+            list(delivery.provider_attempts.values_list("actor_username", flat=True)),
+            [self.staff.username, retry_staff.username],
+        )
+        first_raw = send.call_args_list[0].args[1]
+        second_raw = send.call_args_list[1].args[1]
+        self.assertEqual(second_raw, first_raw)
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"reply-pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_failed_gmail_reply_retry_reuses_exact_mime_and_original_thread(
+        self,
+        fetch,
+        send,
+        pdf,
+    ):
+        quotation = self.create_quote()
+        self.gmail_link(quotation)
+        fetch.return_value = self.source_metadata(message_id="gmail-followup-2")
+        send.side_effect = [
+            RuntimeError("Google API request failed with HTTP 400: invalid"),
+            {"id": "gmail-reply-retry", "threadId": "gmail-thread-1"},
+        ]
+
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.gmail_payload(),
+            format="json",
+        )
+        fetches_before_retry = fetch.call_count
+        retry_payload = self.gmail_payload()
+        self.assertEqual(fetch.call_count, fetches_before_retry)
+        second = self.client.post(
+            reverse("quotation-send-email", args=[quotation.id]),
+            retry_payload,
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(pdf.call_count, 1)
+        self.assertEqual(fetch.call_count, fetches_before_retry)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_args_list[0].args[1], send.call_args_list[1].args[1])
+        self.assertEqual(send.call_args_list[0].kwargs["thread_id"], "gmail-thread-1")
+        self.assertEqual(send.call_args_list[1].kwargs["thread_id"], "gmail-thread-1")
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(
+            delivery__quotation=quotation
+        )
+        self.assertEqual(snapshot.delivery_mode, QuotationEmailDelivery.MODE_GMAIL_REPLY)
+        self.assertEqual(snapshot.gmail_api_thread_id, "gmail-thread-1")
 
     @patch(
         "quotations.quotation_email_delivery.build_quotation_pdf",
@@ -827,7 +980,55 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
         self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_FAILED)
         self.assertEqual(delivery.attempt_count, 1)
+        self.assertFalse(
+            QuotationEmailOutboundSnapshot.objects.filter(delivery=delivery).exists()
+        )
+        self.assertFalse(delivery.provider_attempts.exists())
         send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"legacy-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        return_value={"id": "gmail-legacy-retry", "threadId": "legacy-thread"},
+    )
+    def test_legacy_failed_delivery_freezes_first_honest_snapshot_on_retry(
+        self,
+        send,
+        _pdf,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_FAILED,
+            to_addresses=["buyer@example.com"],
+            cc_addresses=[],
+            subject="Quotation preview",
+            body="Please find the quotation attached.",
+            attachment_filename="legacy.pdf",
+            attachment_sha256=hashlib.sha256(b"legacy-pdf").hexdigest(),
+            attachment_size=len(b"legacy-pdf"),
+            attempt_count=1,
+        )
+
+        response = self.client.post(
+            reverse("quotation-send-email", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(delivery=delivery)
+        attempt = QuotationEmailDeliveryAttempt.objects.get(delivery=delivery)
+        self.assertEqual(snapshot.attachment_sha256, delivery.attachment_sha256)
+        self.assertEqual(attempt.sequence, 2)
+        self.assertEqual(
+            attempt.events.get().event_type,
+            QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT,
+        )
+        send.assert_called_once()
 
     @patch(
         "quotations.quotation_email_delivery.get_valid_access_token",
@@ -857,6 +1058,50 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
         self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
         send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_changed_gmail_credential_generation_aborts_before_finalization(
+        self,
+        send,
+        pdf,
+    ):
+        quotation = self.create_quote()
+
+        def rotate_credential(_connection):
+            GmailOAuthConnection.objects.filter(pk=self.connection.pk).update(
+                access_token_encrypted=encrypt_token("replacement-access-token"),
+                token_expiry=timezone.now() + timedelta(hours=1),
+            )
+            return "access-token-from-prior-generation"
+
+        with patch(
+            "quotations.quotation_email_delivery.get_valid_access_token",
+            side_effect=rotate_credential,
+        ):
+            response = self.client.post(
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                self.manual_payload(),
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "gmail_connection_changed")
+        self.assertTrue(response.data["retryable"])
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        send.assert_not_called()
+        pdf.assert_not_called()
+        self.assertFalse(
+            QuotationEmailOutboundSnapshot.objects.filter(
+                delivery__quotation=quotation
+            ).exists()
+        )
+        self.assertFalse(
+            QuotationEmailDeliveryAttempt.objects.filter(
+                delivery__quotation=quotation
+            ).exists()
+        )
 
     @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
     @patch("quotations.quotation_email_delivery.gmail_search_messages")
@@ -888,6 +1133,169 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             QuotationEmailDelivery.objects.get(quotation=quotation).status,
             QuotationEmailDelivery.STATUS_UNKNOWN,
         )
+        attempt = QuotationEmailDeliveryAttempt.objects.get(
+            delivery__quotation=quotation
+        )
+        event = attempt.events.get()
+        self.assertEqual(event.event_type, QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN)
+        self.assertEqual(event.error_code, "delivery_unknown")
+        self.assertEqual(event.error_class, "RuntimeError")
+        self.assertEqual(event.provider_http_status, 503)
+
+        late = _mark_delivery_failure(
+            attempt.delivery_id,
+            unknown=False,
+            message="A delayed handler classified the same call as rejected.",
+            actor=self.staff,
+            attempt_id=attempt.id,
+            error_code="gmail_send_failed",
+            error_class="LateDefiniteFailure",
+            provider_http_status=400,
+        )
+        self.assertEqual(late.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        attempt.refresh_from_db()
+        self.assertEqual(
+            list(attempt.events.values_list("event_type", flat=True)),
+            [
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_FAILED,
+            ],
+        )
+        self.assertEqual(
+            QuotationAuditLog.objects.filter(
+                quotation=quotation,
+                action=QuotationAuditLog.ACTION_EMAIL_FAILED,
+            ).count(),
+            0,
+        )
+
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_search_messages",
+        return_value={"messages": []},
+    )
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=urllib.error.URLError("accepted but response lost"),
+    )
+    def test_unknown_delivery_does_not_refresh_send_token_after_genuine_not_found(
+        self,
+        send,
+        _pdf,
+        search,
+        _fetch,
+    ):
+        quotation = self.create_quote()
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_409_CONFLICT)
+
+        with patch(
+            "quotations.quotation_email_delivery.get_valid_access_token",
+            side_effect=AssertionError(
+                "A delivery locked as unknown must not enter the send-token path."
+            ),
+        ) as token:
+            second = self.client.post(
+                reverse("quotation-send-email", args=[quotation.id]),
+                self.manual_payload(),
+                format="json",
+            )
+
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(second.data["code"], "delivery_unknown")
+        self.assertFalse(second.data["retryable"])
+        token.assert_not_called()
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(search.call_count, 2)
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_active_sending_delivery_does_not_refresh_send_token(self, send, _pdf):
+        quotation = self.create_quote()
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        QuotationEmailDelivery.objects.filter(pk=delivery.pk).update(
+            status=QuotationEmailDelivery.STATUS_SENDING,
+            sending_started_at=timezone.now(),
+        )
+
+        with patch(
+            "quotations.quotation_email_delivery.get_valid_access_token",
+            side_effect=AssertionError(
+                "An active delivery must not enter the send-token path."
+            ),
+        ) as token:
+            second = self.client.post(
+                reverse("quotation-send-email", args=[quotation.id]),
+                self.manual_payload(),
+                format="json",
+            )
+
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(second.data["code"], "delivery_in_progress")
+        self.assertFalse(second.data["retryable"])
+        token.assert_not_called()
+        self.assertEqual(send.call_count, 1)
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"attempt-order-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_older_attempt_failure_cannot_overwrite_newer_sending_state(self, _send, _pdf):
+        quotation = self.create_quote()
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(delivery=delivery)
+        first_attempt = delivery.provider_attempts.get(sequence=1)
+        delivery.status = QuotationEmailDelivery.STATUS_SENDING
+        delivery.attempt_count = 2
+        delivery.save(update_fields=["status", "attempt_count", "updated_at"])
+        QuotationEmailDeliveryAttempt.objects.create(
+            delivery=delivery,
+            snapshot=snapshot,
+            sequence=2,
+            actor=self.staff,
+            actor_username=self.staff.username,
+            gmail_connection_id_snapshot=self.connection.id,
+            mailbox_email=snapshot.mailbox_email,
+            raw_mime_sha256=snapshot.raw_mime_sha256,
+            expected_thread_id=snapshot.gmail_api_thread_id,
+        )
+
+        late = _mark_delivery_failure(
+            delivery.id,
+            unknown=False,
+            message="Late failure from attempt one.",
+            actor=self.staff,
+            attempt_id=first_attempt.id,
+            error_code="gmail_send_failed",
+            error_class="LateAttemptFailure",
+            provider_http_status=400,
+        )
+
+        self.assertEqual(late.status, QuotationEmailDelivery.STATUS_SENDING)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_SENDING)
+        self.assertEqual(delivery.attempt_count, 2)
 
     @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
     @patch("quotations.quotation_email_delivery.gmail_search_messages")
@@ -919,6 +1327,60 @@ class QuotationEmailDeliveryAPITests(APITestCase):
             QuotationEmailDelivery.STATUS_UNKNOWN,
         )
 
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=urllib.error.URLError("accepted but response lost"),
+    )
+    def test_ambiguous_attempt_preserves_initial_outcome_when_reconciled(
+        self,
+        send,
+        _pdf,
+        search,
+        fetch,
+    ):
+        quotation = self.create_quote()
+        search.return_value = {"messages": [{"id": "gmail-proven-sent"}]}
+
+        def metadata(*_args, **_kwargs):
+            delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+            return self.source_metadata(
+                message_id="gmail-proven-sent",
+                thread_id="gmail-proven-thread",
+                sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+                rfc_message_id=delivery.outbound_rfc_message_id,
+                label_ids=["SENT"],
+            )
+
+        fetch.side_effect = metadata
+
+        response = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["delivery"]["status"], "sent")
+        attempt = QuotationEmailDeliveryAttempt.objects.get(
+            delivery__quotation=quotation
+        )
+        events = list(attempt.events.order_by("created_at", "id"))
+        self.assertEqual(
+            [event.event_type for event in events],
+            [
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+                QuotationEmailDeliveryAttemptEvent.EVENT_RECONCILED_SENT,
+            ],
+        )
+        self.assertEqual(events[0].error_code, "delivery_unknown")
+        self.assertEqual(events[0].error_class, "URLError")
+        self.assertEqual(events[1].provider_message_id, "gmail-proven-sent")
+        self.assertEqual(events[1].provider_thread_id, "gmail-proven-thread")
+        self.assertEqual(send.call_count, 1)
+
     @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"%PDF-test")
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     def test_repeated_click_after_success_is_idempotent(self, send, _pdf):
@@ -927,12 +1389,20 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         url = reverse("quotation-finalize-and-send", args=[quotation.id])
 
         first = self.client.post(url, self.manual_payload(), format="json")
-        second = self.client.post(url, self.manual_payload(), format="json")
+        self.connection.status = GmailOAuthConnection.STATUS_DISCONNECTED
+        self.connection.save(update_fields=["status", "updated_at"])
+        second_payload = self.manual_payload()
+        with patch(
+            "quotations.quotation_email_delivery.get_valid_access_token",
+            side_effect=AssertionError("A terminal SENT delivery must not refresh OAuth."),
+        ) as token:
+            second = self.client.post(url, second_payload, format="json")
 
         self.assertEqual(first.status_code, status.HTTP_200_OK)
         self.assertEqual(second.status_code, status.HTTP_200_OK)
         self.assertTrue(second.data["idempotent"])
         self.assertEqual(send.call_count, 1)
+        token.assert_not_called()
 
     def test_sending_or_unknown_delivery_blocks_cancel_and_revision_race(self):
         for delivery_status in [
@@ -1191,6 +1661,79 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(matched.status_code, status.HTTP_200_OK)
         self.assertTrue(matched.data["reconciled"])
         send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"snapshot-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=urllib.error.URLError("accepted but response lost"),
+    )
+    def test_reconciliation_uses_frozen_snapshot_when_mutable_delivery_drifts(
+        self,
+        send,
+        _pdf,
+        search,
+        fetch,
+    ):
+        quotation = self.create_quote()
+        self.gmail_link(quotation)
+
+        def metadata(_connection, message_id):
+            if message_id == "gmail-followup-2":
+                return self.source_metadata(message_id="gmail-followup-2")
+            snapshot = QuotationEmailOutboundSnapshot.objects.get(
+                delivery__quotation=quotation
+            )
+            return self.source_metadata(
+                message_id=message_id,
+                thread_id=snapshot.gmail_api_thread_id,
+                sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+                rfc_message_id=snapshot.outbound_rfc_message_id,
+                label_ids=["SENT"],
+            )
+
+        fetch.side_effect = metadata
+        search.return_value = {"messages": []}
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.gmail_payload(),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_409_CONFLICT)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(
+            delivery__quotation=quotation
+        )
+        QuotationEmailDelivery.objects.filter(quotation=quotation).update(
+            outbound_rfc_message_id="invalid mutable message id",
+            gmail_thread_id="tampered-thread",
+        )
+        search.return_value = {"messages": [{"id": "gmail-frozen-proof"}]}
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["reconciled"])
+        query = search.call_args.args[1]
+        self.assertIn(snapshot.outbound_rfc_message_id[1:-1], query)
+        self.assertEqual(fetch.call_args.args[1], "gmail-frozen-proof")
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        self.assertEqual(delivery.sent_gmail_thread_id, snapshot.gmail_api_thread_id)
+        event_types = list(
+            delivery.provider_attempts.get().events.values_list("event_type", flat=True)
+        )
+        self.assertEqual(
+            event_types,
+            [
+                QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+                QuotationEmailDeliveryAttemptEvent.EVENT_RECONCILED_SENT,
+            ],
+        )
+        self.assertEqual(send.call_count, 1)
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     @patch("quotations.quotation_email_delivery.gmail_search_messages")
@@ -1513,21 +2056,38 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertFalse(first.data["retryable"])
         delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
         self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        attempt = delivery.provider_attempts.get()
+        initial_event = attempt.events.get(
+            event_type=QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN
+        )
+        self.assertEqual(initial_event.error_code, "delivery_unknown")
+        self.assertEqual(initial_event.error_class, "URLError")
+        self.assertFalse(
+            attempt.events.filter(
+                event_type=QuotationEmailDeliveryAttemptEvent.EVENT_RECONCILED_SENT
+            ).exists()
+        )
         self.assertEqual(send.call_count, 1)
         self.assertEqual(search.call_count, 2)
         fetch.assert_not_called()
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     @patch("quotations.quotation_email_delivery.build_quotation_pdf")
-    def test_retry_refuses_changed_pdf_snapshot(self, pdf, send):
+    def test_retry_uses_persisted_mime_without_rerendering_pdf(self, pdf, send):
         quotation = self.create_quote()
         pdf.side_effect = [b"first-pdf", b"changed-pdf"]
-        send.side_effect = RuntimeError("Google API request failed with HTTP 400: invalid")
+        send.side_effect = [
+            RuntimeError("Google API request failed with HTTP 400: invalid"),
+            {"id": "gmail-retry", "threadId": "gmail-retry-thread"},
+        ]
 
         first = self.client.post(
             reverse("quotation-finalize-and-send", args=[quotation.id]),
             self.manual_payload(),
             format="json",
+        )
+        frozen_preview = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id])
         )
         second = self.client.post(
             reverse("quotation-send-email", args=[quotation.id]),
@@ -1536,10 +2096,127 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         )
 
         self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(second.data["code"], "attachment_snapshot_mismatch")
-        self.assertFalse(second.data["retryable"])
+        self.assertTrue(frozen_preview.data["outbound_snapshot_frozen"])
+        self.assertNotIn("raw_mime", frozen_preview.data)
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(pdf.call_count, 1)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_args_list[0].args[1], send.call_args_list[1].args[1])
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        self.assertEqual(delivery.provider_attempts.count(), 2)
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"first-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_frozen_retry_rejects_edited_customer_facing_fields(self, send, _pdf):
+        quotation = self.create_quote()
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(
+                cc=["accounts@example.com"],
+                subject="Reviewed subject",
+                body="Reviewed body",
+            ),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        frozen = self.client.get(reverse("quotation-email-preview", args=[quotation.id]))
+
+        for field, value in [
+            ("to", ["different@example.com"]),
+            ("cc", ["different@example.com"]),
+            ("subject", "Different subject"),
+            ("body", "Different body"),
+        ]:
+            with self.subTest(field=field):
+                payload = {
+                    "to": frozen.data["to"],
+                    "cc": frozen.data["cc"],
+                    "subject": frozen.data["subject"],
+                    "body": frozen.data["body"],
+                    "confirm_recipient": True,
+                    "preview_fingerprint": frozen.data["preview_fingerprint"],
+                    field: value,
+                }
+                response = self.client.post(
+                    reverse("quotation-send-email", args=[quotation.id]),
+                    payload,
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+                self.assertEqual(response.data["code"], "outbound_snapshot_mismatch")
         self.assertEqual(send.call_count, 1)
+        self.assertEqual(
+            QuotationEmailDeliveryAttempt.objects.filter(
+                delivery__quotation=quotation
+            ).count(),
+            1,
+        )
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"deferred-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_metadata_snapshot_fetch_defers_raw_mime_for_preview_paths(self, _send, _pdf):
+        quotation = self.create_quote()
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+
+        metadata_snapshot = _delivery_snapshot(delivery)
+        self.assertIn("raw_mime", metadata_snapshot.get_deferred_fields())
+        preview = self.client.get(reverse("quotation-email-preview", args=[quotation.id]))
+        self.assertEqual(preview.status_code, status.HTTP_200_OK)
+        self.assertTrue(preview.data["outbound_snapshot_frozen"])
+        self.assertNotIn("raw_mime", preview.data)
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"first-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_corrupt_frozen_mime_blocks_retry_before_gmail(self, send, _pdf):
+        quotation = self.create_quote()
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(
+            delivery__quotation=quotation
+        )
+        table_name = connection.ops.quote_name(snapshot._meta.db_table)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"UPDATE {table_name} SET raw_mime = %s WHERE id = %s",
+                [b"corrupt", snapshot.pk],
+            )
+
+        response = self.client.post(
+            reverse("quotation-send-email", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "outbound_snapshot_corrupt")
+        self.assertFalse(response.data["retryable"])
+        self.assertFalse(response.data["refresh_preview"])
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(
+            QuotationEmailDeliveryAttempt.objects.filter(
+                delivery__quotation=quotation
+            ).count(),
+            1,
+        )
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
     @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"same-pdf")
@@ -1564,6 +2241,98 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(preview.data["cc"], ["manager@example.com"])
         self.assertEqual(preview.data["subject"], "Edited quotation subject")
         self.assertEqual(preview.data["body"], "Edited staff body")
+        self.assertTrue(preview.data["outbound_snapshot_frozen"])
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"immutable-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_snapshot_and_completed_attempt_reject_mutation_and_deletion(self, _send, _pdf):
+        quotation = self.create_quote()
+        response = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(
+            delivery__quotation=quotation
+        )
+        attempt = QuotationEmailDeliveryAttempt.objects.get(
+            delivery__quotation=quotation
+        )
+        event = attempt.events.get()
+
+        snapshot.subject = "Tampered"
+        with self.assertRaises(ValidationError):
+            snapshot.save()
+        with self.assertRaises(ValidationError):
+            snapshot.delete()
+        with self.assertRaises(ValidationError):
+            QuotationEmailOutboundSnapshot.objects.filter(pk=snapshot.pk).update(
+                subject="Bulk tamper"
+            )
+        with self.assertRaises(ValidationError):
+            QuotationEmailOutboundSnapshot.objects.filter(pk=snapshot.pk).delete()
+
+        attempt.actor_username = "Tampered"
+        with self.assertRaises(ValidationError):
+            attempt.save()
+        with self.assertRaises(ValidationError):
+            attempt.delete()
+        with self.assertRaises(ValidationError):
+            QuotationEmailDeliveryAttempt.objects.filter(pk=attempt.pk).update(
+                actor_username="Bulk tamper"
+            )
+        with self.assertRaises(ValidationError):
+            QuotationEmailDeliveryAttempt.objects.filter(pk=attempt.pk).delete()
+
+        event.error_summary = "Tampered"
+        with self.assertRaises(ValidationError):
+            event.save()
+        with self.assertRaises(ValidationError):
+            event.delete()
+        with self.assertRaises(ValidationError):
+            QuotationEmailDeliveryAttemptEvent.objects.filter(pk=event.pk).update(
+                error_summary="Bulk tamper"
+            )
+        with self.assertRaises(ValidationError):
+            QuotationEmailDeliveryAttemptEvent.objects.filter(pk=event.pk).delete()
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"immutable-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    def test_employee_deletion_nulls_history_actor_but_retains_username(self, _send, _pdf):
+        quotation = self.create_quote()
+        response = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            self.manual_payload(),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        snapshot = QuotationEmailOutboundSnapshot.objects.get(
+            delivery__quotation=quotation
+        )
+        attempt = QuotationEmailDeliveryAttempt.objects.get(
+            delivery__quotation=quotation
+        )
+        event = attempt.events.get()
+        username = self.staff.username
+
+        self.staff.delete()
+
+        snapshot.refresh_from_db()
+        attempt.refresh_from_db()
+        event.refresh_from_db()
+        self.assertIsNone(snapshot.created_by_id)
+        self.assertIsNone(attempt.actor_id)
+        self.assertIsNone(event.actor_id)
+        self.assertEqual(snapshot.created_by_username, username)
+        self.assertEqual(attempt.actor_username, username)
+        self.assertEqual(event.actor_username, username)
 
     @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
     @patch("quotations.quotation_email_delivery.gmail_search_messages")

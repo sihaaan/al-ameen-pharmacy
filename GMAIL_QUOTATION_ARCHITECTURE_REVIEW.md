@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.2.0 |
+| Document version | 1.3.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1 checkpoint on `codex/technical-hardening` |
+| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints on `codex/technical-hardening` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -200,6 +200,7 @@ images are sent.
 | Manual AI cleanup | `manual_ai_cleanup_v1` |
 | Mailbox PO vision | `mailbox_po_vision_v1` |
 | AI parse observability | `ai_parse_observability_v1` |
+| Outbound email snapshot | `quotation_email_outbound_v1` |
 
 Every AI log also records content-free SHA-256 identities for the effective
 prompt, schema, and pipeline contract. These hashes, provider, configured
@@ -311,18 +312,31 @@ stateDiagram-v2
     sending --> sent: Gmail confirms exact receipt
     sending --> failed: definite retryable failure
     sending --> unknown: Gmail may have accepted request
-    failed --> sending: reviewed retry with identical PDF hash
+    failed --> sending: reviewed byte-identical frozen retry
     unknown --> sent: no-send reconciliation verifies message
     unknown --> unknown: not found or Gmail unavailable
 ```
 
-**Implemented in reviewed branch.** `QuotationEmailDelivery` is a one-to-one,
-mutable aggregate ledger per quotation revision, not an immutable attempt
-history. The attachment bytes are guarded by their PDF hash for safe retry;
-recipient/body/source/MIME fields are not yet a complete frozen outbound
-snapshot. Double clicks serialize. A potentially accepted but unconfirmed
-request becomes `unknown`; blind retry is blocked. Immutable provider attempts
-and a complete outbound snapshot are scheduled for Task 2.2.
+**Implemented in reviewed branch.** `QuotationEmailDelivery` remains the
+backward-compatible one-to-one aggregate state per quotation revision. Task
+2.2 adds one write-once `QuotationEmailOutboundSnapshot`, one permanent
+`QuotationEmailDeliveryAttempt` child row for every actual Gmail send call,
+and append-only `QuotationEmailDeliveryAttemptEvent` facts for its result.
+The snapshot stores the exact RFC-MIME bytes, including the PDF, plus the
+mailbox, recipient/CC, subject, body, Gmail API thread argument, RFC reply
+headers, attachment digest/size, and a versioned complete-snapshot digest.
+Known-safe retries verify and resend the persisted bytes; they do not rerender
+the PDF, refetch a different source message, or rebuild MIME boundaries.
+
+Snapshot and attempt rows reject model, bulk, and administration mutation.
+Provider results (`sent`, `failed`, or `unknown`) and strict reconciliation
+proof are separate append-only event rows, so later Gmail proof never erases
+the original timeout, HTTP classification, or uncertainty. Double clicks still
+serialize. A potentially accepted but unconfirmed request remains `unknown`;
+blind retry remains blocked. Pre-Task-2.2 records are not falsely backfilled:
+legacy failed rows create their first honest snapshot only on a later explicitly
+reviewed retry, while legacy sent/unknown rows retain aggregate reconciliation
+compatibility.
 
 Reconciliation never sends. It searches by the stable outbound RFC Message-ID
 and exact connected mailbox and accepts a candidate only after verifying:
@@ -337,9 +351,9 @@ A successful empty search is distinct from a Gmail/API failure. Both remain
 locked for safe later inspection; neither permits an automatic resend. The
 API reports Gmail/search unavailability separately (`503`), rejects malformed
 reconciliation provenance (`400`), and rejects multiple fully verified matches
-as a conflict (`409`). The
-delivery tables were introduced by
-`backend/quotations/migrations/0034_alter_quotationauditlog_action_and_more.py`.
+as a conflict (`409`). The aggregate delivery tables were introduced by
+migration `0034`; the additive snapshot/attempt/event tables are introduced by
+`backend/quotations/migrations/0035_quotationemailoutboundsnapshot_and_more.py`.
 
 The server rebuilds and revalidates delivery inputs at send time. Task 2.1 also
 adds two keyed stale-preview guards. The editor fingerprint covers the customer-facing
@@ -355,16 +369,20 @@ A new or retry send requires the email fingerprint and compares it under the
 authoritative quotation, delivery, line, customer/contact, PDF-settings,
 creator, catalogue/image, and Gmail-connection locks.
 
-After finalization, the exact PDF and raw MIME bytes for that attempt are built
-in memory while those database dependencies remain locked; only the Gmail
-network request happens after commit. Quotation PDFs use ReportLab invariant
-output so a known-failure retry of unchanged content reproduces the recorded
-attachment digest. Missing or changed reviews are blocked
+After finalization, the exact PDF and raw MIME bytes for the first attempt are
+built while those database dependencies remain locked, then the immutable
+snapshot, an immutable provider-attempt request row, and aggregate `sending`
+state commit
+atomically. Only the Gmail network request happens afterward, and its payload
+is re-encoded from the persisted snapshot. Missing or changed reviews are blocked
 and must be explicitly refreshed and reviewed; refresh never sends. The guard
 does not content-hash remote bytes that could be overwritten out of band at an
-unchanged storage key, persist the complete outbound bytes as an immutable
-snapshot, or create immutable provider-attempt rows. Those guarantees remain
-Task 2.2.
+unchanged storage key before the first snapshot is created. Once created, the
+persisted raw MIME and complete digest prevent a retry from inheriting such a
+later change. A process death in the narrow commit-before-HTTP gap may leave an
+attempt without a result event even if Gmail was never reached; safety deliberately wins
+over availability, so stale `sending` still enters no-send reconciliation and
+never becomes blindly retryable.
 
 ## 9. Observability and the measured example
 
@@ -435,6 +453,7 @@ small Gmail thread.
 | Structured import/evidence | PostgreSQL | Staff-only APIs; bounded excerpts | No application purge policy |
 | AI cache/log | PostgreSQL | source hashes, semantic rows/evidence, content-free metrics | No scheduled purge policy |
 | Manual source files | `QUOTATION_PRIVATE_STORAGE_ROOT` | path confinement and authenticated retrieval | Local filesystem by default; no automatic purge |
+| Exact outbound MIME/PDF snapshot | PostgreSQL | 35 MiB cap, complete digest, omitted from APIs/admin form, byte-identical retry | No scheduled purge policy; backup/capacity policy required |
 | Audit/delivery ledgers | PostgreSQL | staff-only/read-oriented application access | No scheduled purge policy |
 
 **Deployment snapshot.** Railway had no volume and
@@ -478,8 +497,10 @@ re-identification, and reviewer-agreement risks.
 | Benchmark other models | Optional/Phase 3; not authorized | approved model change and golden set | quality threshold before latency/cost |
 | Background worker | Optional/Phase 3; not authorized | infrastructure decision | no review/state regression |
 
-No public API, OAuth scope, AI model, prompt, schema, or production
-infrastructure is changed by this reference update.
+Existing API paths and request schemas, OAuth scopes, AI model/prompt/schema,
+and production infrastructure are unchanged. Task 2.2 adds only the preview/
+delivery flag `outbound_snapshot_frozen` plus safe snapshot mismatch,
+integrity, and size errors.
 
 ## 13. Test and deployment provenance
 

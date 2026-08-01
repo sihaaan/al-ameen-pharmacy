@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.1.0 |
+| Document version | 2.2.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1 checkpoint |
+| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
@@ -45,10 +45,16 @@ configuration. Complete the unchecked verification items for each release.
   preview fingerprint. A missing or changed quotation/PDF/source review is
   blocked under the authoritative render locks until the employee explicitly
   refreshes, reviews, and clicks Send again.
-- PDF and raw MIME bytes are built in memory while their database dependencies
-  are locked; deterministic quotation-PDF output makes known-failure retries
-  reproduce the recorded digest, and the Gmail request uses the exact frozen
-  bytes prepared for that attempt.
+- PDF and raw MIME bytes are built while their database dependencies are
+  locked. Before Gmail is called, the exact MIME (including the PDF), complete
+  metadata digest, one provider-attempt row, and aggregate `sending` state are
+  committed atomically. A known-safe retry verifies and reuses those persisted
+  bytes rather than rebuilding customer content.
+- Outbound snapshot/attempt/event models reject model and bulk mutation, are
+  view-only in administration, and never expose raw MIME through the
+  application API or admin form. Provider results and reconciliation proof are
+  append-only event rows; later proof never overwrites the original ambiguous
+  network/HTTP fact.
 - One aggregate delivery record per quotation revision, database locking, and
   delivery-state checks prevent ordinary double sends.
 - An ambiguous result becomes `unknown`; blind retry is blocked. Reconciliation
@@ -83,7 +89,7 @@ configuration. Complete the unchecked verification items for each release.
 | Boundary | Data that may cross it | Current control | Operator decision still required |
 |---|---|---|---|
 | Railway application | accounts, quotations, evidence, audit and delivery state | authenticated APIs, TLS at platform edge, environment secrets | access review, log retention, region/contract |
-| PostgreSQL provider | application records and encrypted Gmail credentials | database authentication/TLS configuration | backup, restore window, RPO/RTO, deletion policy |
+| PostgreSQL provider | application records, encrypted Gmail credentials, and exact outbound quotation MIME/PDF snapshots | database authentication/TLS configuration; raw MIME excluded from application APIs/admin forms | backup, restore window, access review, RPO/RTO, deletion policy |
 | Google/Gmail | mailbox contents and outgoing quotation | OAuth scopes, canonical re-fetch, verified reply/send | publication/verification, owners, retention/legal basis |
 | OpenAI API | bounded bodies/documents or parsed rows | explicit feature gates, strict schema, `store=false` | approved project, retention/residency/DPA/security assessment |
 | Cloudinary | configured catalog/branding media | provider credentials and Django storage | account controls and backup requirements |
@@ -203,11 +209,19 @@ Record operator, evidence link, and UTC time for every checked item.
 - There is no automated retention/deletion schedule, SLO/alert set, cost
   budget, or stuck-delivery sweeper.
 - The stale-preview guard fingerprints database/config asset identities but
-  cannot detect remote bytes replaced out of band at the same storage key.
-  Exact attempt bytes are frozen only in memory, not persisted as a complete
-  immutable outbound snapshot; persistence remains Task 2.2.
-- The delivery ledger is mutable aggregate state, not immutable provider-attempt
-  history (Task 2.2).
+  cannot detect remote bytes replaced out of band at the same storage key
+  before the first outbound snapshot is created. Once an attempt begins, exact
+  MIME bytes are persisted and verified for every retry.
+- Exact outbound MIME duplicates customer email/PDF data in PostgreSQL. It is
+  capped at 35 MiB per delivery and hidden from normal API/admin views, but an
+  approved retention/deletion policy, database access review, backup scope,
+  and storage-growth budget remain operator decisions. Application-level
+  immutability does not prevent a privileged database administrator or raw SQL
+  from changing rows; the snapshot digest detects corruption before retry.
+- A crash in the commit-before-Gmail-call gap leaves a durable attempt without
+  a result event even if the network call was never reached. It remains locked
+  for reconciliation; the system does not trade duplicate-send safety for an
+  automatic retry.
 - Reverse foreign-key deletion paths can acquire a dependency before a
   quotation/line lock, while reviewed rendering uses quotation-first order.
   PostgreSQL safely aborts a deadlock participant, but explicit timeout/deadlock

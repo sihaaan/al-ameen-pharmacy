@@ -34,6 +34,8 @@ from .models import (
     Quotation,
     QuotationAuditLog,
     QuotationEmailDelivery,
+    QuotationEmailDeliveryAttempt,
+    QuotationEmailOutboundSnapshot,
     QuotationLine,
 )
 from .quotation_email_delivery import (
@@ -788,6 +790,7 @@ class QuotationConcurrencyTests(TransactionTestCase):
         provider_entered = Event()
         release_provider = Event()
         results = Queue()
+        durable_state_seen = []
 
         def paused_provider(*_args, **_kwargs):
             provider_entered.set()
@@ -828,6 +831,18 @@ class QuotationConcurrencyTests(TransactionTestCase):
                 provider_entered.wait(timeout=10),
                 "The first send never reached Gmail.",
             )
+            # A separate connection can observe both rows before the provider
+            # is released, proving the pre-call transaction has committed.
+            durable_state_seen.append(
+                (
+                    QuotationEmailOutboundSnapshot.objects.filter(
+                        delivery__quotation_id=quotation.id
+                    ).count(),
+                    QuotationEmailDeliveryAttempt.objects.filter(
+                        delivery__quotation_id=quotation.id,
+                    ).count(),
+                )
+            )
             second.start()
             second.join(timeout=10)
             self.assertFalse(
@@ -852,9 +867,15 @@ class QuotationConcurrencyTests(TransactionTestCase):
             ],
         )
         self.assertEqual(gmail_send.call_count, 1)
+        self.assertEqual(durable_state_seen, [(1, 1)])
         delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
         self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_SENT)
         self.assertEqual(delivery.attempt_count, 1)
+        self.assertEqual(
+            QuotationEmailOutboundSnapshot.objects.filter(delivery=delivery).count(),
+            1,
+        )
+        self.assertEqual(delivery.provider_attempts.count(), 1)
         quotation.refresh_from_db()
         self.assertEqual(quotation.status, Quotation.STATUS_SENT)
 

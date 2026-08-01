@@ -599,9 +599,10 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   }, [load]);
 
   const isEditable = quote && editableStatuses.has(quote.status);
-  const emailPreviewRefreshRequired = ['stale_email_preview', 'email_preview_required'].includes(
-    String(emailSendError?.code || '')
-  );
+  const emailPreviewRefreshRequired = emailSendError?.refreshPreview === true || [
+    'stale_email_preview',
+    'email_preview_required',
+  ].includes(String(emailSendError?.code || ''));
   const activeLines = quote?.lines || [];
   const changedLineIds = quote ? (quote.lines || [])
     .filter((line) => !draftsMatch(lineDrafts[line.id], savedLineDrafts[line.id]))
@@ -1782,7 +1783,14 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         quoteFinalized: quoteWasFinalized,
         retryable: responseData.retryable === true,
         deliveryStatus,
+        refreshPreview: responseData.refresh_preview === true,
       });
+      if (responseData.delivery?.outbound_snapshot_frozen === true) {
+        setEmailPreview((current) => ({
+          ...(current || {}),
+          ...responseData.delivery,
+        }));
+      }
       if (responseData.quote?.id) setLoadedQuote(responseData.quote);
       else if (quoteWasFinalized || deliveryStatus === 'unknown') await load({ refreshReferences: false });
       console.error(formatQuotationError(details), error);

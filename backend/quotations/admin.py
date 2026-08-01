@@ -22,6 +22,10 @@ from .models import (
     ProformaInvoiceLine,
     Quotation,
     QuotationAuditLog,
+    QuotationEmailDelivery,
+    QuotationEmailDeliveryAttempt,
+    QuotationEmailDeliveryAttemptEvent,
+    QuotationEmailOutboundSnapshot,
     QuotationLine,
     QuotationLPO,
     QuotationPOEvidence,
@@ -50,6 +54,118 @@ class ReadOnlyHistoryAdminMixin:
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(QuotationEmailDelivery)
+class QuotationEmailDeliveryAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = [
+        "quotation",
+        "delivery_mode",
+        "status",
+        "attempt_count",
+        "gmail_connection",
+        "sent_at",
+        "created_at",
+    ]
+    list_filter = ["delivery_mode", "status", "created_at"]
+    search_fields = [
+        "quotation__quotation_number",
+        "outbound_rfc_message_id",
+        "gmail_message_id",
+        "gmail_thread_id",
+    ]
+
+
+@admin.register(QuotationEmailOutboundSnapshot)
+class QuotationEmailOutboundSnapshotAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = [
+        "delivery",
+        "mailbox_email",
+        "delivery_mode",
+        "attachment_filename",
+        "raw_mime_size",
+        "created_at",
+    ]
+    list_filter = ["delivery_mode", "created_at"]
+    search_fields = [
+        "delivery__quotation__quotation_number",
+        "mailbox_email",
+        "outbound_rfc_message_id",
+        "attachment_sha256",
+        "snapshot_sha256",
+    ]
+    exclude = ("raw_mime",)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).defer("raw_mime")
+
+    def get_readonly_fields(self, request, obj=None):
+        return tuple(
+            field.name
+            for field in self.model._meta.fields
+            if field.name != "raw_mime"
+        )
+
+
+@admin.register(QuotationEmailDeliveryAttempt)
+class QuotationEmailDeliveryAttemptAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = [
+        "delivery",
+        "sequence",
+        "provider_outcome",
+        "mailbox_email",
+        "reconciled",
+        "started_at",
+    ]
+    list_filter = ["provider", "events__event_type", "started_at"]
+    search_fields = [
+        "delivery__quotation__quotation_number",
+        "correlation_id",
+        "events__provider_message_id",
+        "raw_mime_sha256",
+    ]
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("events")
+
+    @admin.display(description="Provider outcome")
+    def provider_outcome(self, obj):
+        provider_types = {
+            QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT,
+            QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_FAILED,
+            QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_UNKNOWN,
+        }
+        return next(
+            (event.get_event_type_display() for event in obj.events.all() if event.event_type in provider_types),
+            "Pending / process interrupted",
+        )
+
+    @admin.display(boolean=True, description="Reconciled")
+    def reconciled(self, obj):
+        return any(
+            event.event_type == QuotationEmailDeliveryAttemptEvent.EVENT_RECONCILED_SENT
+            for event in obj.events.all()
+        )
+
+
+@admin.register(QuotationEmailDeliveryAttemptEvent)
+class QuotationEmailDeliveryAttemptEventAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = [
+        "attempt",
+        "event_type",
+        "provider_http_status",
+        "error_code",
+        "actor_username",
+        "created_at",
+    ]
+    list_filter = ["event_type", "created_at"]
+    search_fields = [
+        "attempt__delivery__quotation__quotation_number",
+        "attempt__correlation_id",
+        "provider_message_id",
+        "provider_thread_id",
+        "error_code",
+    ]
 
 
 @admin.register(GmailInquiryImport)

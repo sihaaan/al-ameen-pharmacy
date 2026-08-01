@@ -2950,23 +2950,32 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def _quotation_email_error_response(self, exc):
         quotation = self.get_object()
         quotation.refresh_from_db()
+        delivery_payload = (
+            quotation_email_delivery_payload(exc.delivery)
+            if exc.delivery is not None
+            else None
+        )
         return Response(
             {
                 "detail": exc.message,
                 "code": exc.code,
                 "quote_finalized": exc.quote_finalized,
                 "retryable": exc.retryable,
-                "refresh_preview": exc.code in {
-                    "email_preview_required",
-                    "stale_email_preview",
-                },
+                "refresh_preview": (
+                    exc.code in {
+                        "email_preview_required",
+                        "stale_email_preview",
+                    }
+                    or bool(
+                        delivery_payload
+                        and delivery_payload.get("outbound_snapshot_frozen")
+                        and delivery_payload.get("status") == QuotationEmailDelivery.STATUS_FAILED
+                        and exc.retryable
+                    )
+                ),
                 "refresh_quote": exc.code == "stale_quotation_review",
                 "quote": self.get_serializer(quotation).data,
-                "delivery": (
-                    quotation_email_delivery_payload(exc.delivery)
-                    if exc.delivery is not None
-                    else None
-                ),
+                "delivery": delivery_payload,
             },
             status=exc.http_status,
         )

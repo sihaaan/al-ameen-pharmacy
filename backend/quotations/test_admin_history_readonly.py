@@ -14,6 +14,10 @@ from .models import (
     MailboxPOMatchRun,
     MailboxPOMessage,
     QuotationAuditLog,
+    QuotationEmailDelivery,
+    QuotationEmailDeliveryAttempt,
+    QuotationEmailDeliveryAttemptEvent,
+    QuotationEmailOutboundSnapshot,
 )
 
 
@@ -26,6 +30,10 @@ READ_ONLY_ADMIN_MODELS = (
     AIParseLog,
     CompanyPriceHistory,
     QuotationAuditLog,
+    QuotationEmailDelivery,
+    QuotationEmailOutboundSnapshot,
+    QuotationEmailDeliveryAttempt,
+    QuotationEmailDeliveryAttemptEvent,
 )
 
 
@@ -53,7 +61,10 @@ class AuditHistoryAdminReadOnlyTests(TestCase):
 
                 concrete_fields = {field.name for field in model._meta.fields}
                 readonly_fields = set(model_admin.get_readonly_fields(self.request))
-                self.assertTrue(concrete_fields.issubset(readonly_fields))
+                excluded_fields = set(model_admin.exclude or ())
+                self.assertTrue(
+                    (concrete_fields - excluded_fields).issubset(readonly_fields)
+                )
 
     def test_audit_log_change_page_is_viewable_but_mutations_are_forbidden(self):
         entry = QuotationAuditLog.objects.create(
@@ -126,3 +137,14 @@ class AuditHistoryAdminReadOnlyTests(TestCase):
         self.assertFalse(model_admin.has_change_permission(self.request))
         self.assertTrue(model_admin.has_delete_permission(self.request))
         self.assertIn("delete_selected", model_admin.get_actions(self.request))
+
+    def test_exact_outbound_mime_is_not_rendered_in_admin(self):
+        model_admin = admin.site._registry[QuotationEmailOutboundSnapshot]
+
+        self.assertIn("raw_mime", model_admin.exclude)
+        self.assertNotIn("raw_mime", model_admin.get_fields(self.request))
+        deferred_fields, is_deferred = model_admin.get_queryset(
+            self.request
+        ).query.deferred_loading
+        self.assertTrue(is_deferred)
+        self.assertIn("raw_mime", deferred_fields)

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.0.0 |
+| Document version | 1.1.0 |
 | Status | Initial current-state runbook; unresolved items are marked explicitly |
 | Owner | Assign a primary and backup production operator |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` |
+| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This runbook preserves employee review, blank selling prices, suggestion-only
@@ -113,19 +113,20 @@ When analysis appears stuck:
 | Handoff expired | claim rejected | return to Gmail and create a new handoff | not applicable |
 | Database lock wait/failure | request fails or waits within DB behavior | inspect logs; retry only the non-send operation after state refresh | never infer email status |
 | PDF generation definite failure | quotation may be finalized; delivery not sent | fix cause and use reviewed allowed path | only if server marks retryable and hash rules pass |
-| Gmail definite failure before acceptance | delivery may be retryable | rebuild/review preview and follow backend state | only explicit safe retry |
+| Gmail definite failure before acceptance | delivery may be retryable with an exact frozen snapshot | reopen/review the frozen preview; do not edit it | only explicit byte-identical retry |
 | Gmail timeout/429/5xx/network ambiguity | delivery becomes/remains `unknown` | reconcile and inspect Sent | **No** |
-| Process crash after send request | state may be stale `sending`/`unknown` | use no-send reconciliation | **No** |
+| Process crash after snapshot/attempt commit | state may be stale `sending` with a durable attempt but no result event, whether or not Gmail was reached | use no-send reconciliation | **No** |
 | Reconciliation API unavailable | distinct non-retryable unavailable result | wait, then reconcile later; inspect Sent | **No** |
 | Successful reconciliation search, no verified match | genuine not-found, delivery remains locked | wait for Gmail consistency and inspect Sent | **No** |
 | Multiple/malformed reconciliation candidates | conflict/provenance error | escalate; compare exact RFC ID/From/thread/SENT evidence | **No** |
-| Retry PDF hash mismatch | retry blocked | create/review a proper quotation revision | **No** |
+| Frozen snapshot mismatch/corruption | retry blocked before Gmail | preserve hashes/attempt history; create a reviewed revision or escalate corruption | **No** |
 | Private evidence missing | authenticated open fails/reference is stale | recover exact hash-matched canonical source; audit action | not applicable |
 
 ## 6. Ambiguous Gmail delivery procedure
 
 1. Preserve the quotation number, revision, delivery status, stable outbound
-   RFC Message-ID, UTC time, and sanitized error. Do not disclose OAuth tokens.
+   RFC Message-ID, snapshot digest, provider-attempt sequence/correlation ID,
+   UTC time, and sanitized error. Do not disclose OAuth tokens or raw MIME.
 2. Do not use send again and do not construct a manual duplicate.
 3. Run **Check Gmail status**. Reconciliation must:
    - search by stable RFC Message-ID and exact connected mailbox;
@@ -140,6 +141,13 @@ When analysis appears stuck:
 
 There is no periodic stuck-delivery sweeper or alert. Recovery is initiated by
 staff or a later request; this remains a known operational gap.
+
+Outbound snapshot, provider-attempt, and attempt-event records are view-only in Django admin.
+The raw MIME itself is deliberately omitted from the admin form and every API
+response. A privileged database investigation may verify digest/size and
+relationships but must not export customer MIME into tickets or chat. Legacy
+sent/unknown deliveries may have no Task-2.2 snapshot or child attempt; do not
+fabricate one during incident review.
 
 ## 7. Database migrations and timeouts
 
@@ -172,6 +180,7 @@ current console rather than this repository.
 An approved plan must cover:
 
 - PostgreSQL and a pre-migration recovery point;
+- exact outbound MIME snapshots and immutable provider-attempt history;
 - durable private quotation evidence after Task 2.3/provider selection;
 - Cloudinary business media if it cannot be recreated;
 - configuration inventory and ownership, without plain-text secret exports;

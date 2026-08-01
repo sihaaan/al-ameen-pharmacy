@@ -846,6 +846,83 @@ describe('QuotationEditor Product price context', () => {
     consoleError.mockRestore();
   });
 
+  test('merges a first failed frozen delivery, requires refresh, and retries its exact read-only email', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    const initialPreview = {
+      delivery_mode: 'gmail_reply',
+      to: ['buyer@example.com'],
+      cc: [],
+      subject: 'Re: RFQ',
+      body: 'Initially reviewed body.',
+      attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      preview_fingerprint: 'initial-preview-fingerprint',
+      trusted_source: { sender_email: 'buyer@example.com', subject: 'RFQ' },
+    };
+    const frozenDelivery = {
+      ...initialPreview,
+      status: 'failed',
+      outbound_snapshot_frozen: true,
+      body: 'Exact frozen body.',
+      last_error: 'Gmail rejected the first provider call.',
+    };
+    const refreshedFrozenPreview = {
+      ...frozenDelivery,
+      preview_fingerprint: 'frozen-preview-fingerprint',
+    };
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.emailPreview
+      .mockResolvedValueOnce({ data: initialPreview })
+      .mockResolvedValueOnce({ data: refreshedFrozenPreview });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: {
+          code: 'gmail_send_failed',
+          detail: 'Gmail rejected the first provider call.',
+          quote_finalized: true,
+          retryable: true,
+          refresh_preview: true,
+          delivery_status: 'failed',
+          quote: finalizedQuote,
+          delivery: frozenDelivery,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    expect(await screen.findByText(/failed provider attempt created an exact frozen email/i)).toBeInTheDocument();
+    dialog = screen.getByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByDisplayValue('Exact frozen body.')).toHaveAttribute('readonly');
+    expect(within(dialog).getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Refresh preview' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(2));
+    dialog = await screen.findByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByDisplayValue('Exact frozen body.')).toHaveAttribute('readonly');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.sendEmail).toHaveBeenCalledWith(21, {
+      to: ['buyer@example.com'],
+      cc: [],
+      subject: 'Re: RFQ',
+      body: 'Exact frozen body.',
+      confirm_recipient: true,
+      delivery_mode: 'gmail_reply',
+      preview_fingerprint: 'frozen-preview-fingerprint',
+    }));
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
+  });
+
   test('retries only the email when finalization succeeded but a definite delivery failure occurred', async () => {
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
