@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.1.0 |
+| Document version | 1.3.0 |
 | Status | Developer-deployment guide for the configured consumer Gmail mailbox |
 | Owner | Must be assigned in the Google/Railway operations record |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` |
+| Reviewed code | Hardening baseline `d88b767` through Task 2.6 checkpoint `3da9b5c`, plus the Task 2.7 worktree checkpoint |
 | Add-on deployment ID/publication status | Unknown; verify in Google Cloud |
 
 This directory contains the Google Workspace HTTP add-on manifest template.
@@ -153,9 +153,39 @@ website shows/polls resumable state; this is not a background worker.
 - Reconnect the website mailbox when scopes change, Google revokes the grant,
   refresh fails, external test authorization expires, or `DJANGO_SECRET_KEY`
   is rotated.
-- Do not delete the website user that owns `GmailOAuthConnection` until a
-  tested ownership-transfer procedure exists; deletion currently cascades the
-  shared connection and related mailbox inventory.
+- Website designated-mailbox enforcement is separately guarded by
+  `QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED=0`. Leave it disabled
+  until the deployed `GMAIL_ADDON_SHARED_MAILBOX_EMAIL` and the connected
+  Google profile have been independently verified as the same mailbox. When
+  enabled, missing/invalid configuration and a different Google profile fail
+  closed before any credential or shared designation is persisted.
+- Do not delete the website user that owns `GmailOAuthConnection` until an
+  ownership transfer has been applied and verified. Migration `0037` makes an
+  attempted current-owner deletion fail with protected-related-data behavior
+  instead of cascading through the Gmail credential and provenance. The
+  operator command is a dry run unless `--apply` is supplied:
+
+  ```text
+  python manage.py transfer_shared_gmail_owner \
+    --initiated-by ACTIVE_SUPERUSER_USERNAME \
+    --new-owner ACTIVE_STAFF_USERNAME \
+    --confirm-mailbox exact-shared-mailbox@example.com
+
+  python manage.py transfer_shared_gmail_owner \
+    --initiated-by ACTIVE_SUPERUSER_USERNAME \
+    --new-owner ACTIVE_STAFF_USERNAME \
+    --confirm-mailbox exact-shared-mailbox@example.com \
+    --apply
+  ```
+
+  Shell access remains the trusted boundary; `--initiated-by` is checked and
+  recorded for audit attribution, not used as independent authentication. The
+  destination must not already own another Gmail connection. The command
+  changes only the owner FK and preserves the connection ID, encrypted tokens,
+  scopes, status, and Gmail-derived provenance. The token-free audit payload
+  also snapshots the initiating superuser so attribution remains after account
+  deletion. Run the dry run again in the reverse direction before using
+  `--apply` for rollback; do not reverse migration `0037` as a routine rollback.
 - Rotate the add-on authorization resource/service account only with a staged
   Railway audience/identity update and developer smoke test.
 - Maintain a backup administrator who can access Google Cloud, Railway, and

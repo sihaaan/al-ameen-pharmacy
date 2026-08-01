@@ -14,18 +14,22 @@ from django.db import (
     connections,
     transaction,
 )
+from django.db.models.deletion import ProtectedError
+from django.test import TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
-from django.test import TransactionTestCase
 
 from api.models import Product
 
 from .contract_intelligence import (
     GMAIL_READONLY_SCOPE,
     GMAIL_SEND_SCOPE,
+    _lock_designated_gmail_mailbox,
     encrypt_token,
+    exchange_gmail_code,
+    transfer_shared_gmail_credential_owner,
 )
 from .models import (
     Company,
@@ -45,6 +49,172 @@ from .quotation_email_delivery import (
 )
 from .serializers import QuotationSerializer
 from .views import QuotationLineViewSet, QuotationViewSet
+
+
+@skipUnless(
+    connection.vendor == "postgresql",
+    "PostgreSQL row-lock semantics are required.",
+)
+@override_settings(
+    GMAIL_ADDON_SHARED_MAILBOX_EMAIL="shared@example.com",
+    QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED=True,
+)
+class GmailCredentialOwnerConcurrencyTests(TransactionTestCase):
+    """Production-database checks for owner transfer/delete serialization."""
+
+    reset_sequences = True
+
+    def setUp(self):
+        self.initiator = User.objects.create_superuser(
+            username="gmail-transfer-concurrency-admin",
+            email="gmail-transfer-concurrency-admin@example.com",
+            password="pass",
+        )
+        self.old_owner = User.objects.create_user(
+            username="gmail-transfer-concurrency-old-owner",
+            is_staff=True,
+        )
+        self.new_owner = User.objects.create_user(
+            username="gmail-transfer-concurrency-new-owner",
+            is_staff=True,
+        )
+        self.gmail_connection = GmailOAuthConnection.objects.create(
+            user=self.old_owner,
+            is_shared=True,
+            email="shared@example.com",
+            status=GmailOAuthConnection.STATUS_CONNECTED,
+        )
+
+    def test_old_owner_delete_cannot_collect_connection_during_transfer(self):
+        transfer_mutated_owner = Event()
+        release_transfer = Event()
+        results = Queue()
+
+        def paused_audit_log(*_args, **_kwargs):
+            transfer_mutated_owner.set()
+            if not release_transfer.wait(timeout=10):
+                raise AssertionError("Timed out waiting to complete owner transfer.")
+
+        def transfer_owner():
+            close_old_connections()
+            try:
+                result = transfer_shared_gmail_credential_owner(
+                    initiated_by=User.objects.get(pk=self.initiator.pk),
+                    new_owner=User.objects.get(pk=self.new_owner.pk),
+                    confirmed_mailbox="shared@example.com",
+                    apply=True,
+                )
+                results.put(("transfer", result["applied"]))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("transfer", "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        worker = Thread(target=transfer_owner, daemon=True)
+        with patch(
+            "quotations.contract_intelligence.audit_log",
+            side_effect=paused_audit_log,
+        ):
+            try:
+                worker.start()
+                self.assertTrue(
+                    transfer_mutated_owner.wait(timeout=10),
+                    "Owner transfer never reached its mutation boundary.",
+                )
+                # The transfer is uncommitted, so this connection still sees
+                # the old owner relationship. PROTECT must reject collection
+                # instead of scheduling the credential row for a stale-PK
+                # cascade delete after the transfer commits.
+                with self.assertRaises(ProtectedError):
+                    User.objects.get(pk=self.old_owner.pk).delete()
+            finally:
+                release_transfer.set()
+                worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive(), "Owner transfer deadlocked.")
+        self.assertEqual(results.get_nowait(), ("transfer", True))
+        self.gmail_connection.refresh_from_db()
+        self.assertEqual(self.gmail_connection.user_id, self.new_owner.pk)
+        self.assertTrue(User.objects.filter(pk=self.old_owner.pk).exists())
+
+    def test_concurrent_first_connects_reuse_one_physical_mailbox_row(self):
+        GmailOAuthConnection.objects.all().delete()
+        second_admin = User.objects.create_superuser(
+            username="gmail-first-connect-concurrency-admin-2",
+            email="gmail-first-connect-concurrency-admin-2@example.com",
+            password="pass",
+        )
+        both_ready = Barrier(2)
+        results = Queue()
+
+        def synchronized_mailbox_lock(mailbox):
+            both_ready.wait(timeout=10)
+            return _lock_designated_gmail_mailbox(mailbox)
+
+        def token_response(_url, data, **_kwargs):
+            code = str(data["code"])
+            return {
+                "access_token": f"access-{code}",
+                "refresh_token": f"refresh-{code}",
+                "expires_in": 3600,
+                "scope": GMAIL_READONLY_SCOPE,
+            }
+
+        def connect(actor_id, code):
+            close_old_connections()
+            try:
+                gmail = exchange_gmail_code(
+                    User.objects.get(pk=actor_id),
+                    code,
+                )
+                results.put(("connected", gmail.pk))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        workers = [
+            Thread(
+                target=connect,
+                args=(self.initiator.pk, "first"),
+                daemon=True,
+            ),
+            Thread(
+                target=connect,
+                args=(second_admin.pk, "second"),
+                daemon=True,
+            ),
+        ]
+        with (
+            patch(
+                "quotations.contract_intelligence._lock_designated_gmail_mailbox",
+                side_effect=synchronized_mailbox_lock,
+            ),
+            patch(
+                "quotations.contract_intelligence._form_request",
+                side_effect=token_response,
+            ),
+            patch(
+                "quotations.contract_intelligence._json_request",
+                return_value={"emailAddress": "shared@example.com"},
+            ),
+        ):
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=15)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        outcomes = [results.get_nowait(), results.get_nowait()]
+        self.assertTrue(
+            all(outcome[0] == "connected" for outcome in outcomes),
+            outcomes,
+        )
+        self.assertEqual({outcome[1] for outcome in outcomes}, {
+            GmailOAuthConnection.objects.get().pk
+        })
+        self.assertEqual(GmailOAuthConnection.objects.count(), 1)
+        self.assertTrue(GmailOAuthConnection.objects.get().is_shared)
 
 
 @skipUnless(

@@ -27,6 +27,7 @@ from .contract_intelligence import (
     encrypt_token,
     exchange_gmail_code,
     gmail_fetch_reply_metadata,
+    transfer_shared_gmail_credential_owner,
 )
 from .models import (
     Company,
@@ -2561,6 +2562,27 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         )
         event = attempt.events.get()
         username = self.staff.username
+
+        successor = User.objects.create_user(
+            username="email-credential-successor",
+            is_staff=True,
+        )
+        transfer_admin = User.objects.create_superuser(
+            username="email-transfer-admin",
+            email="email-transfer-admin@example.com",
+            password="pass",
+        )
+        with override_settings(
+            GMAIL_ADDON_SHARED_MAILBOX_EMAIL="pharmacydxb@gmail.com",
+            QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED=True,
+        ):
+            transfer_result = transfer_shared_gmail_credential_owner(
+                initiated_by=transfer_admin,
+                new_owner=successor,
+                confirmed_mailbox="pharmacydxb@gmail.com",
+                apply=True,
+            )
+        self.assertTrue(transfer_result["applied"])
 
         self.staff.delete()
 

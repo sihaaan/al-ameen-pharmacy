@@ -196,6 +196,7 @@ class CompanyListSerializer(serializers.ModelSerializer):
 
 class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
     is_connected = serializers.SerializerMethodField()
+    mailbox_matches_designated = serializers.SerializerMethodField()
     credential_owner_username = serializers.CharField(source="user.username", read_only=True)
 
     class Meta:
@@ -208,6 +209,7 @@ class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
             "google_subject",
             "status",
             "is_connected",
+            "mailbox_matches_designated",
             "last_error",
             "scopes",
             "token_expiry",
@@ -218,7 +220,20 @@ class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_is_connected(self, obj):
-        return obj.status == GmailOAuthConnection.STATUS_CONNECTED
+        return bool(
+            obj.status == GmailOAuthConnection.STATUS_CONNECTED
+            and self.get_mailbox_matches_designated(obj)
+        )
+
+    def get_mailbox_matches_designated(self, obj):
+        # Lazy import avoids coupling the large Gmail service module into
+        # serializer import time while keeping every status projection aligned
+        # with the operational token/send gate.
+        from .contract_intelligence import (
+            gmail_connection_matches_designated_mailbox,
+        )
+
+        return gmail_connection_matches_designated_mailbox(obj)
 
 
 class GmailInquiryImportSerializer(serializers.ModelSerializer):

@@ -425,7 +425,7 @@ class GmailOAuthConnection(models.Model):
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="quotation_gmail_connection",
     )
     # The quotation workflow uses one company mailbox. The user remains the

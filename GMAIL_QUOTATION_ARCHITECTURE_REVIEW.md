@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.6.0 |
+| Document version | 1.8.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint on `codex/technical-hardening` |
+| Reviewed code | Hardening baseline `d88b767` through Task 2.6 checkpoint `3da9b5c`, plus the Task 2.7 worktree checkpoint on `codex/technical-hardening` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -344,6 +344,40 @@ than creating an invisible `limit + 1` request. The add-on action avoids a secon
 thread-summary request for Current/AI actions, while selected-message actions
 retain a fresh canonical membership check. Both add-on and backend limits are
 hard-capped at 100.
+
+Task 2.7 adds an opt-in website designated-mailbox boundary without changing
+the add-on or OAuth scopes. The default-off
+`QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED` reuses
+`GMAIL_ADDON_SHARED_MAILBOX_EMAIL` as the single expected identity. Once an
+operator enables it, missing/invalid configuration, a different Google OAuth
+profile, and a mismatched stored shared connection fail closed. Profile
+identity is checked before access/refresh tokens or `is_shared` state can be
+persisted, and the central token accessor checks the same identity before any
+operational Gmail read, refresh, or send.
+
+Immediately before persistence, the website re-locks and revalidates the
+current active staff actor and its owner/superuser authority. It never carries
+a refresh token across a physical-mailbox change. With enforcement enabled, a
+unique legacy connection row for the same canonical mailbox is reused even if
+it predates the shared flag; multiple matching rows fail as ambiguous, and an
+existing row for another mailbox is never repurposed. PostgreSQL uses a
+transaction-scoped advisory lock derived from the expected mailbox so two
+concurrent first connects cannot create two provenance lineages. The rollout
+flag leaves the historical replacement behavior unchanged while disabled.
+
+An internal transactional command can transfer only the credential owner FK
+after an exact mailbox confirmation. It locks the users and connection,
+requires an active superuser attribution and active staff successor, refuses a
+successor with another connection, preserves all Gmail provenance, and records
+a token-free audit with an immutable initiating-user snapshot. The command is
+a dry run unless `--apply` is explicit. `GmailOAuthConnection.user` is changed
+from cascade deletion to `PROTECT` by state migration `0037`, preventing an
+owner deletion from collecting the credential during or before succession.
+No route, request contract, AI contract, OAuth scope, or production setting is
+changed automatically. The existing Gmail status response gains additive
+configuration/identity/recovery fields, and its existing settings card now
+shows an unavailable mailbox and only enables OAuth when the current actor can
+complete the provenance-preserving recovery path.
 
 ### 5.3 Deterministic matching after extraction
 

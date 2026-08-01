@@ -49,10 +49,14 @@ from .contract_intelligence import (
     build_contract_intelligence_export,
     build_gmail_auth_url,
     can_manage_shared_gmail,
+    can_start_gmail_oauth,
     clean_contract_run_items,
     discover_contract_sources,
     disconnect_gmail,
     exchange_gmail_code,
+    configured_shared_gmail_mailbox,
+    gmail_connection_matches_designated_mailbox,
+    gmail_designated_mailbox_enforcement_enabled,
     gmail_frontend_redirect_url,
     gmail_fetch_attachment_content,
     gmail_connection_lineage_q,
@@ -542,35 +546,87 @@ class GmailConnectionView(APIView):
 
     def get(self, request):
         connection = resolve_gmail_connection(request.user, connected_only=False)
-        send_scope_granted = gmail_send_scope_granted(connection)
-        connected = bool(
+        mailbox_identity_valid = bool(
+            connection
+            and gmail_connection_matches_designated_mailbox(connection)
+        )
+        stored_connected = bool(
             connection
             and connection.status == GmailOAuthConnection.STATUS_CONNECTED
         )
+        connected = bool(stored_connected and mailbox_identity_valid)
+        send_scope_granted = bool(
+            connected and gmail_send_scope_granted(connection)
+        )
+        configured = gmail_oauth_configured()
+        configuration_error = ""
+        if not configured:
+            if (
+                gmail_designated_mailbox_enforcement_enabled()
+                and not configured_shared_gmail_mailbox()
+            ):
+                configuration_error = (
+                    "Set a valid GMAIL_ADDON_SHARED_MAILBOX_EMAIL before enabling designated-mailbox enforcement."
+                )
+            else:
+                configuration_error = (
+                    "Add GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI on the Railway backend."
+                )
+        connection_unavailable_reason = ""
+        if connection and not mailbox_identity_valid:
+            connection_unavailable_reason = (
+                "The stored Gmail account does not match the configured designated mailbox. Verify GMAIL_ADDON_SHARED_MAILBOX_EMAIL; if it is correct, reconnect the correct Google account as a conflict-free superuser."
+            )
         return Response(
             {
-                "configured": gmail_oauth_configured(),
+                "configured": configured,
+                "configuration_error": configuration_error,
                 "scope": " ".join(GMAIL_REQUIRED_SCOPES),
                 "required_scopes": list(GMAIL_REQUIRED_SCOPES),
                 "gmail_send_scope": GMAIL_SEND_SCOPE,
                 "send_scope_granted": send_scope_granted,
-                "reconnect_required": bool(connected and not send_scope_granted),
+                "reconnect_required": bool(
+                    connection
+                    and (
+                        not mailbox_identity_valid
+                        or (stored_connected and not send_scope_granted)
+                    )
+                ),
+                "connection_unavailable_reason": connection_unavailable_reason,
                 "connection": GmailOAuthConnectionSerializer(connection).data if connection else None,
                 "can_manage": can_manage_shared_gmail(request.user, connection),
+                "can_reconnect": can_start_gmail_oauth(request.user, connection),
                 "railway_env_vars": [
                     "GOOGLE_OAUTH_CLIENT_ID",
                     "GOOGLE_OAUTH_CLIENT_SECRET",
                     "GOOGLE_OAUTH_REDIRECT_URI",
+                    "GMAIL_ADDON_SHARED_MAILBOX_EMAIL",
+                    "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
                 ],
             }
         )
 
     def post(self, request):
-        connection = resolve_gmail_connection(request.user, connected_only=False, shared_only=True)
+        # Management authorization must still see a mismatched stored row so
+        # designated-mailbox fail-closed behavior cannot accidentally make an
+        # existing credential look unowned to another staff member.
+        connection = resolve_gmail_connection(
+            request.user,
+            connected_only=False,
+        )
         if not can_manage_shared_gmail(request.user, connection):
             return Response(
                 {"detail": "Only the shared Gmail credential owner or a superuser can replace the mailbox."},
                 status=status.HTTP_403_FORBIDDEN,
+            )
+        if not can_start_gmail_oauth(request.user, connection):
+            return Response(
+                {
+                    "detail": (
+                        "This Gmail row cannot be safely replaced by the current user. Verify the designated-mailbox setting or reconnect as a conflict-free active superuser."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
             )
         try:
             return Response(
@@ -621,7 +677,7 @@ class GmailOAuthCallbackView(APIView):
             )
         User = get_user_model()
         try:
-            user = User.objects.get(pk=user_id, is_staff=True)
+            user = User.objects.get(pk=user_id, is_active=True, is_staff=True)
             exchange_gmail_code(user, code, request)
         except Exception as exc:
             logger.exception("Gmail OAuth callback failed.")

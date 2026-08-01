@@ -1278,6 +1278,139 @@
   Reverting restores broader retrieval and weaker reuse binding, so prefer a
   forward fix after deployment.
 
+### 2.7 — Enforce the designated mailbox and support safe owner transfer
+
+- Status: completed in code behind a disabled-by-default rollout flag; not
+  enabled or deployed.
+- Commit: this task checkpoint (`fix: guard shared Gmail credential ownership`).
+- Finding verified:
+  - Google-signed add-on requests already required the configured shared
+    mailbox, but website OAuth/manual Gmail operations could designate or use a
+    different Google profile.
+  - The shared `GmailOAuthConnection` belonged to one website user with cascade
+    deletion, and no tested procedure could transfer that owner while keeping
+    the physical credential row and Gmail provenance intact. Concurrent first
+    connects could also create two rows for one physical mailbox.
+  - No verified local expected-mailbox runtime value was available, so rollout
+    must remain dormant until an operator verifies production configuration.
+- Files changed:
+  - `backend/pharmacy_api/settings.py`
+  - `backend/.env.example`
+  - `backend/quotations/contract_intelligence.py`
+  - `backend/quotations/models.py`
+  - `backend/quotations/serializers.py`
+  - `backend/quotations/views.py`
+  - `backend/quotations/management/commands/transfer_shared_gmail_owner.py`
+  - `backend/quotations/migrations/0037_alter_gmailoauthconnection_user.py`
+  - `backend/quotations/test_gmail_designated_mailbox.py`
+  - `backend/quotations/test_quotation_concurrency.py`
+  - `backend/quotations/test_quotation_email_delivery.py`
+  - `frontend/src/components/quotations/ContractIntelligenceManager.js`
+  - `frontend/src/components/quotations/ContractIntelligenceManager.test.js`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `SECURITY.md`
+  - `OPERATIONS.md`
+  - `gmail_addon/README.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added `QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED`, defaulting
+    to false, and reused `GMAIL_ADDON_SHARED_MAILBOX_EMAIL` as the sole expected
+    identity. When enabled, missing/invalid configuration fails closed.
+  - Website OAuth canonicalizes Google's own Gmail profile and rejects a
+    different account before persisting access/refresh tokens, changing a
+    connection, or changing the shared designation. The callback and exchange
+    require an active staff actor; current staff/superuser/owner authority is
+    re-read under a user lock after Google returns and before the connection is
+    locked, so offboarding or a concurrent owner transfer cannot make stale
+    authorization persist credentials.
+  - Enabled mode reuses one canonical existing row for the physical mailbox,
+    including an unambiguous pre-shared legacy row. It rejects multiple matches,
+    non-owner claims, and reuse of a row or refresh token from another mailbox.
+    New mailbox rows require a fresh Google refresh token. A PostgreSQL
+    transaction advisory lock serializes first-connect/reconnect writes for the
+    expected mailbox, closing the valid two-row concurrency outcome. The
+    disabled flag preserves the prior replacement and per-user fallback paths.
+  - Shared operational resolution and the central token accessor both enforce
+    the same expected mailbox before returning a cached token, refreshing it,
+    reading/scanning Gmail, or sending. A caller-supplied prepared send token
+    cannot bypass the identity assertion. Historical contract sources with a
+    direct connection FK cannot bypass the gate. Settings status/disconnect can
+    still see a mismatched row, preserving its ownership/disconnect controls; a
+    mismatch never makes that credential appear unowned to other staff. The UI
+    reports the row as unavailable, explains the conflict-free recovery path,
+    and enables OAuth only for an actor whose callback can preserve provenance.
+  - Added an atomic, dry-run-by-default operator command that requires an exact
+    mailbox confirmation, active superuser attribution, and active staff
+    successor. It locks the initiator, successor, and observed owner in stable
+    order before locking/revalidating the connection, refuses a successor who
+    owns another Gmail row, updates only the owner FK, preserves row ID/tokens/
+    scopes/status and every provenance FK, and writes a token-free audit with
+    immutable initiating-user attribution. Migration `0037` changes owner
+    deletion from `CASCADE` to `PROTECT`, including during a concurrent transfer.
+- Tests run:
+  - Designated-mailbox, token-gate, ownership-transfer, and add-on regression:
+    `DATABASE_URL=sqlite:///task27-focused-final2.sqlite3 python manage.py test quotations.test_gmail_designated_mailbox quotations.test_gmail_addon --noinput --verbosity 1`
+    — 63/63 passed. Logged add-on service-unavailable errors are asserted
+    fail-closed endpoint cases.
+  - Complete mailbox/LPO workflow regression:
+    `DATABASE_URL=sqlite:///task27-email-lpo-rerun.sqlite3 python manage.py test quotations.test_email_lpo --noinput --verbosity 1`
+    — 51/51 passed.
+  - Gmail recovery-state backend/frontend regression:
+    `DATABASE_URL=sqlite:///task27-recovery-final.sqlite3 python manage.py test quotations.test_gmail_designated_mailbox --noinput --verbosity 1`
+    — 38/38 passed; `CI=true npm test -- --watchAll=false --runInBand
+    --runTestsByPath src/components/quotations/ContractIntelligenceManager.test.js`
+    — 4/4 passed. The existing send-scope status regression also passed in the
+    preceding 36/36 combined backend run.
+  - PostgreSQL 17 credential concurrency regression using the local disposable
+    test database with the CI connection/timeouts:
+    `DATABASE_URL=postgresql://postgres@127.0.0.1:55432/postgres PGOPTIONS="-c lock_timeout=5s -c statement_timeout=30s" python manage.py test quotations.test_quotation_concurrency.GmailCredentialOwnerConcurrencyTests --noinput --verbosity 2`
+    — 2/2 passed: concurrent first connects produced one row, and concurrent
+    transfer/deletion preserved the credential and rejected owner deletion.
+  - Complete quotation regression from a fresh SQLite database:
+    `DATABASE_URL=sqlite:///task27-all-quotations-final2.sqlite3 python manage.py test quotations --noinput --verbosity 1`
+    — 1,168 tests completed successfully: 1,150 passed and 18 PostgreSQL/
+    optional-provider tests were intentionally skipped. Logged unavailable/
+    revoked/stale-service errors are asserted resilience cases.
+  - `DATABASE_URL=sqlite:///task27-static-rerun.sqlite3 python manage.py check`,
+    `python manage.py makemigrations --check --dry-run`, `python -m pip check`,
+    `python -m compileall -q api quotations pharmacy_api`, `python manage.py
+    sqlmigrate quotations 0037`, documentation contracts, and `git diff --check`
+    — passed; `0037` emits no SQL and documentation contracts passed 10/10.
+  - `npm run build` — compiled successfully (229.9 kB main JS and 41.36 kB
+    main CSS gzip output).
+- Migration: `0037_alter_gmailoauthconnection_user` is non-destructive and
+  state-only on the tested database. It rewrites no row/token/provenance data;
+  Django's deletion collector now protects the current credential owner. The
+  transfer command changes an existing connection's owner FK only when an
+  operator supplies `--apply` after a successful dry run.
+- API/frontend changes: no breaking endpoint/request/response contract, OAuth
+  scope, or route changed. The Gmail status response gains additive configuration
+  and mailbox-identity recovery fields. The existing card shows `Reconnect
+  required` and the relevant configuration guidance instead of a false healthy
+  state. Deleting the current credential owner fails until ownership is
+  transferred; that is the intentional safety behavior of migration `0037`.
+- Accuracy/security impact: prevents the configured website Gmail credential
+  from silently drifting to another account and provides a non-destructive,
+  auditable succession path. Gmail/manual intake, employee review, row
+  evidence, uncertainty, blank selling prices, suggestion-only matching,
+  preview-before-send, verified replies, one-send-per-revision, ambiguous
+  lockout, and reconciliation-never-sends remain unchanged.
+- Remaining risks/deferred configuration: production enforcement is off until
+  an operator independently verifies the live expected mailbox against the
+  connected Google profile and enables the flag. Shell access is the transfer
+  command's authentication boundary; `--initiated-by` is a checked/audited
+  attribution, not separate shell authentication. A successor who already owns
+  a Gmail connection and multiple legacy rows for the expected mailbox are
+  deliberately refused because safe merging requires an explicit data decision.
+  While the flag is off, legacy mailbox replacement remains possible by design;
+  verify the live physical profile before activation.
+- Rollback: before activation, disable the feature flag and revert the code if
+  needed, but keep migration `0037` unless there is a separately reviewed need
+  to restore unsafe cascade deletion. After an applied transfer, first dry-run
+  and apply the same command back to the previous active, conflict-free staff
+  owner and verify the same connection/provenance. Never delete/merge connection
+  rows or expose token ciphertext during rollback; prefer a forward fix.
+
 ## Phase 3
 
 Intentionally not implemented.

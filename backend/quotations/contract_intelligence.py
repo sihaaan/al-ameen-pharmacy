@@ -15,11 +15,13 @@ from email.parser import BytesParser
 from io import BytesIO
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
-from django.db import transaction
+from django.db import connection as django_connection, transaction
 from django.db.models import Q
+from django.db.models.functions import Lower, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from openpyxl import Workbook
@@ -27,6 +29,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .ai_parsing import AIParseError, get_ai_parse_provider, settings_ai_status
+from .email_identity import canonicalize_email_address
 from .import_parsers import parse_file_preview
 from .import_rules import parse_inquiry_line
 from .matching import suggest_product_for_text
@@ -142,11 +145,93 @@ CONTRACT_AI_JSON_SCHEMA = {
 }
 
 
-def gmail_oauth_configured():
+def gmail_designated_mailbox_enforcement_enabled():
     return bool(
+        getattr(
+            settings,
+            "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
+            False,
+        )
+    )
+
+
+def configured_shared_gmail_mailbox():
+    """Return the one configured mailbox identity, or an empty fail-closed key."""
+
+    return canonicalize_email_address(
+        getattr(settings, "GMAIL_ADDON_SHARED_MAILBOX_EMAIL", "")
+    )
+
+
+def _required_shared_gmail_mailbox():
+    if not gmail_designated_mailbox_enforcement_enabled():
+        return ""
+    mailbox = configured_shared_gmail_mailbox()
+    if not mailbox:
+        raise ValueError(
+            "Designated Gmail mailbox enforcement is enabled, but "
+            "GMAIL_ADDON_SHARED_MAILBOX_EMAIL is missing or invalid."
+        )
+    return mailbox
+
+
+def gmail_connection_matches_designated_mailbox(connection):
+    """Return whether a connection is safe for shared operational Gmail use."""
+
+    if not gmail_designated_mailbox_enforcement_enabled():
+        return True
+    expected_mailbox = configured_shared_gmail_mailbox()
+    return bool(
+        expected_mailbox
+        and connection
+        and canonicalize_email_address(connection.email) == expected_mailbox
+    )
+
+
+def _assert_designated_gmail_connection_identity(connection):
+    """Fail before any Gmail capability uses a mismatched stored credential."""
+
+    if not gmail_designated_mailbox_enforcement_enabled():
+        return
+    expected_mailbox = _required_shared_gmail_mailbox()
+    if (
+        canonicalize_email_address(getattr(connection, "email", ""))
+        != expected_mailbox
+    ):
+        raise RuntimeError(
+            "The Gmail connection does not match the configured designated mailbox."
+        )
+
+
+def _lock_designated_gmail_mailbox(mailbox):
+    """Serialize first-connect/reconnect writes for one physical mailbox.
+
+    PostgreSQL's transaction-scoped advisory lock closes the otherwise valid
+    race where two owner-scoped rows can both be created before either becomes
+    the shared designation. SQLite is used only for local/unit tests and has a
+    database-wide writer lock, so no vendor-specific statement is needed.
+    """
+
+    if not mailbox or django_connection.vendor != "postgresql":
+        return
+    digest = hashlib.sha256(
+        f"quotation-designated-gmail:{mailbox}".encode("utf-8")
+    ).digest()
+    lock_key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+    with django_connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+
+
+def gmail_oauth_configured():
+    credentials_configured = bool(
         getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "")
         and getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", "")
     )
+    if not credentials_configured:
+        return False
+    if gmail_designated_mailbox_enforcement_enabled():
+        return bool(configured_shared_gmail_mailbox())
+    return True
 
 
 def gmail_oauth_redirect_uri(request=None):
@@ -241,6 +326,7 @@ def decrypt_token(value):
 
 def build_gmail_auth_url(user, request=None, *, return_path=""):
     if not gmail_oauth_configured():
+        _required_shared_gmail_mailbox()
         raise ValueError("Gmail OAuth is not configured. Add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.")
     signer = TimestampSigner(salt=GMAIL_OAUTH_STATE_SALT)
     state_payload = {"version": 2, "user_id": int(user.id)}
@@ -324,8 +410,22 @@ def _form_request(url, data, timeout=60):
 
 @transaction.atomic
 def exchange_gmail_code(user, code, request=None):
+    expected_mailbox = _required_shared_gmail_mailbox()
+    User = get_user_model()
+    actor_id = getattr(user, "pk", None)
+    actor_snapshot = (
+        User.objects.filter(pk=actor_id, is_active=True, is_staff=True)
+        .values("id", "is_superuser")
+        .first()
+    )
+    if not actor_snapshot:
+        raise PermissionError("An active staff user is required to connect Gmail.")
     designated = GmailOAuthConnection.objects.filter(is_shared=True).first()
-    if designated and designated.user_id != user.id and not getattr(user, "is_superuser", False):
+    if (
+        designated
+        and designated.user_id != actor_id
+        and not actor_snapshot["is_superuser"]
+    ):
         raise PermissionError("Only the shared Gmail credential owner or a superuser can replace the mailbox.")
     token_payload = _form_request(
         GOOGLE_TOKEN_URL,
@@ -342,21 +442,113 @@ def exchange_gmail_code(user, code, request=None):
         raise RuntimeError("Google OAuth did not return an access token.")
     gmail_profile = _json_request(f"{GMAIL_API_BASE}/profile", token=access_token)
     expires_in = int(token_payload.get("expires_in") or 3600)
-    profile_email = str(gmail_profile.get("emailAddress") or "").strip().lower()
-    # Re-authorising the same physical mailbox must refresh its existing row.
-    # Creating a new owner-scoped row would strand audit/evidence foreign keys
-    # and duplicate the same Gmail messages under a second connection id.
+    profile_email = canonicalize_email_address(gmail_profile.get("emailAddress"))
+    if not profile_email:
+        raise RuntimeError(
+            "Google did not return a valid Gmail profile email. Reconnect Gmail and try again."
+        )
+    if expected_mailbox and profile_email != expected_mailbox:
+        # The token was needed to read Google's own profile, but no credential,
+        # designation, or connection row is persisted until identity matches.
+        raise ValueError(
+            "The authenticated Google account does not match the configured designated Gmail mailbox."
+        )
+    # Google network calls must not hold a database row lock. Re-read and lock
+    # the actor first, then the designation, immediately before persistence.
+    # This matches the owner-transfer lock order and ensures deactivation or a
+    # staff/superuser demotion during Google OAuth cannot authorize a write.
+    locked_actor = (
+        User.objects.select_for_update()
+        .filter(pk=actor_id)
+        .first()
+    )
+    if not (
+        locked_actor
+        and locked_actor.is_active
+        and locked_actor.is_staff
+    ):
+        raise PermissionError("An active staff user is required to connect Gmail.")
+    if expected_mailbox:
+        _lock_designated_gmail_mailbox(expected_mailbox)
+    designated = (
+        GmailOAuthConnection.objects.select_for_update()
+        .filter(is_shared=True)
+        .first()
+    )
     if (
         designated
-        and profile_email
-        and str(designated.email or "").strip().lower() == profile_email
+        and designated.user_id != locked_actor.id
+        and not locked_actor.is_superuser
     ):
+        raise PermissionError(
+            "Only the shared Gmail credential owner or a superuser can replace the mailbox."
+        )
+    # With designated-mailbox enforcement active, reconnect the one existing
+    # row for this physical mailbox even when it predates ``is_shared``. Gmail
+    # message identifiers are mailbox-scoped, so creating another row would
+    # split provenance and connection-scoped deduplication. Multiple legacy
+    # rows are ambiguous and must be repaired deliberately rather than merged.
+    matching_connections = []
+    if expected_mailbox:
+        matching_connections = list(
+            GmailOAuthConnection.objects.select_for_update()
+            .annotate(normalized_email=Lower(Trim("email")))
+            .filter(normalized_email=profile_email)
+            .order_by("pk")[:2]
+        )
+        if len(matching_connections) > 1:
+            raise ValueError(
+                "Multiple Gmail connection rows match the designated mailbox. Resolve the ambiguous legacy rows before reconnecting; no rows were changed."
+            )
+        if (
+            matching_connections
+            and matching_connections[0].user_id != locked_actor.id
+            and not locked_actor.is_superuser
+        ):
+            raise PermissionError(
+                "Only the existing Gmail credential owner or a superuser can reconnect this mailbox."
+            )
+
+    if matching_connections:
+        connection = matching_connections[0]
+        connection_created = False
+    elif (
+        designated
+        and profile_email
+        and canonicalize_email_address(designated.email) == profile_email
+    ):
+        # Preserve the disabled-flag compatibility path exactly as before.
         connection = designated
+        connection_created = False
     else:
-        connection, _ = GmailOAuthConnection.objects.get_or_create(user=user)
-    existing_refresh = decrypt_token(connection.refresh_token_encrypted)
-    refresh_token = token_payload.get("refresh_token") or existing_refresh
-    connection.email = gmail_profile.get("emailAddress", "") or connection.email
+        connection, connection_created = GmailOAuthConnection.objects.get_or_create(
+            user=locked_actor
+        )
+    previous_connection_email = canonicalize_email_address(connection.email)
+    if (
+        expected_mailbox
+        and not connection_created
+        and previous_connection_email != profile_email
+    ):
+        # Gmail message/thread identifiers are mailbox-scoped. Repurposing an
+        # existing row would silently rebind every historical FK to a different
+        # physical account. A conflict-free superuser/successor must create a
+        # distinct row so old provenance remains attached to its original row.
+        raise ValueError(
+            "This website user already owns a Gmail connection for a different mailbox. Use a conflict-free active superuser or successor to connect the designated mailbox; the existing row was not changed."
+        )
+    refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    if not refresh_token and previous_connection_email == profile_email:
+        refresh_token = decrypt_token(connection.refresh_token_encrypted)
+    if not refresh_token:
+        # A refresh credential is bound to the Google account that issued it.
+        # Never carry one across a mailbox-identity change merely because the
+        # access-token profile is correct; Google must issue fresh offline
+        # authority for that physical mailbox.
+        raise RuntimeError(
+            "Google did not return a refresh token for the authenticated mailbox. Reconnect Gmail and approve offline access again."
+        )
+    connection.email = profile_email
     connection.access_token_encrypted = encrypt_token(access_token)
     connection.refresh_token_encrypted = encrypt_token(refresh_token)
     connection.token_expiry = timezone.now() + timedelta(seconds=max(expires_in - 60, 60))
@@ -394,6 +586,10 @@ def resolve_gmail_connection(user=None, *, connected_only=True, shared_only=Fals
     base_queryset = GmailOAuthConnection.objects.select_related("user")
     designated = base_queryset.filter(is_shared=True).order_by("-updated_at", "-id").first()
     if designated:
+        if shared_only and not gmail_connection_matches_designated_mailbox(
+            designated
+        ):
+            return None
         if connected_only and designated.status != GmailOAuthConnection.STATUS_CONNECTED:
             return None
         return designated
@@ -451,6 +647,208 @@ def can_manage_shared_gmail(user, connection=None):
     return connection.user_id == user.id
 
 
+def can_start_gmail_oauth(user, connection=None):
+    """Return whether this actor can complete the currently offered OAuth path.
+
+    Management/disconnect authority is intentionally separate. With designated
+    enforcement enabled, a mismatched owner-scoped row cannot be overwritten;
+    only an actor whose callback can preserve/reuse provenance should be sent
+    through Google consent.
+    """
+
+    if not (
+        user
+        and getattr(user, "is_authenticated", False)
+        and getattr(user, "is_active", False)
+        and getattr(user, "is_staff", False)
+    ):
+        return False
+    if not gmail_designated_mailbox_enforcement_enabled():
+        return can_manage_shared_gmail(user, connection)
+    expected_mailbox = configured_shared_gmail_mailbox()
+    if not expected_mailbox:
+        return False
+
+    designated = (
+        GmailOAuthConnection.objects.filter(is_shared=True)
+        .only("id", "user_id", "email")
+        .first()
+    )
+    if (
+        designated
+        and designated.user_id != user.id
+        and not getattr(user, "is_superuser", False)
+    ):
+        return False
+
+    matching_connections = list(
+        GmailOAuthConnection.objects.annotate(
+            normalized_email=Lower(Trim("email"))
+        )
+        .filter(normalized_email=expected_mailbox)
+        .only("id", "user_id", "email")
+        .order_by("pk")[:2]
+    )
+    if len(matching_connections) > 1:
+        return False
+    if matching_connections:
+        return bool(
+            matching_connections[0].user_id == user.id
+            or getattr(user, "is_superuser", False)
+        )
+
+    # No physical-mailbox row exists yet. A first connect is safe only if the
+    # actor does not already own a different mailbox row that the callback is
+    # prohibited from repurposing.
+    return not GmailOAuthConnection.objects.filter(user=user).exists()
+
+
+@transaction.atomic
+def transfer_shared_gmail_credential_owner(
+    *,
+    initiated_by,
+    new_owner,
+    confirmed_mailbox,
+    apply=False,
+):
+    """Safely transfer only the owner FK of the designated Gmail credential.
+
+    This is an operator-only primitive.  The management command's shell access
+    is the authentication boundary; ``initiated_by`` provides an active-
+    superuser precondition and durable audit attribution, not authentication.
+    Dry-run is the default so callers must explicitly opt into the mutation.
+    """
+
+    if not gmail_designated_mailbox_enforcement_enabled():
+        raise ValueError(
+            "Designated Gmail mailbox owner transfer is disabled."
+        )
+    expected_mailbox = _required_shared_gmail_mailbox()
+    confirmed_identity = canonicalize_email_address(confirmed_mailbox)
+    if not confirmed_identity or confirmed_identity != expected_mailbox:
+        raise ValueError(
+            "Mailbox confirmation does not exactly match the configured designated Gmail mailbox."
+        )
+
+    initiator_id = getattr(initiated_by, "pk", None)
+    new_owner_id = getattr(new_owner, "pk", None)
+    if not initiator_id:
+        raise PermissionError("An active superuser initiator is required.")
+    if not new_owner_id:
+        raise ValueError("An active staff destination owner is required.")
+
+    # Observe the shared row before taking locks so the transaction can lock
+    # every User row involved in the ownership transition in one stable PK
+    # order.  Revalidate the observation after locking the connection: a
+    # concurrent transfer must make this operation fail closed rather than
+    # act on a different owner than the operator reviewed.
+    observed_connection = (
+        GmailOAuthConnection.objects.filter(is_shared=True)
+        .values("pk", "user_id")
+        .first()
+    )
+    if not observed_connection:
+        raise ValueError("No designated shared Gmail connection exists.")
+    observed_connection_id = observed_connection["pk"]
+    observed_owner_id = observed_connection["user_id"]
+
+    User = get_user_model()
+    locked_users = {
+        user.pk: user
+        for user in User.objects.select_for_update()
+        .filter(pk__in={initiator_id, new_owner_id, observed_owner_id})
+        .order_by("pk")
+    }
+    locked_initiator = locked_users.get(initiator_id)
+    if not (
+        locked_initiator
+        and locked_initiator.is_active
+        and locked_initiator.is_superuser
+    ):
+        raise PermissionError("An active superuser initiator is required.")
+    locked_new_owner = locked_users.get(new_owner_id)
+    if not (
+        locked_new_owner
+        and locked_new_owner.is_active
+        and locked_new_owner.is_staff
+    ):
+        raise ValueError("The destination owner must be an active staff user.")
+
+    connection = (
+        GmailOAuthConnection.objects.select_for_update()
+        .select_related("user")
+        .filter(pk=observed_connection_id)
+        .first()
+    )
+    if (
+        not connection
+        or not connection.is_shared
+        or connection.user_id != observed_owner_id
+    ):
+        raise ValueError(
+            "Designated Gmail credential ownership changed; rerun the dry run."
+        )
+    if canonicalize_email_address(connection.email) != expected_mailbox:
+        raise ValueError(
+            "The designated Gmail connection does not match the configured mailbox."
+        )
+
+    conflicting_connection = (
+        GmailOAuthConnection.objects.select_for_update()
+        .filter(user=locked_new_owner)
+        .exclude(pk=connection.pk)
+        .first()
+    )
+    if conflicting_connection:
+        raise ValueError(
+            "The destination owner already owns another Gmail connection; no rows were changed."
+        )
+
+    previous_owner = locked_users.get(observed_owner_id)
+    if previous_owner is None:
+        raise ValueError(
+            "Designated Gmail credential ownership changed; rerun the dry run."
+        )
+    result = {
+        "applied": False,
+        "connection_id": connection.pk,
+        "mailbox": expected_mailbox,
+        "previous_owner": {
+            "id": previous_owner.pk,
+            "username": previous_owner.get_username(),
+        },
+        "new_owner": {
+            "id": locked_new_owner.pk,
+            "username": locked_new_owner.get_username(),
+        },
+    }
+    if previous_owner.pk == locked_new_owner.pk or not apply:
+        return result
+
+    # Restrict the model write to the owner FK.  Token ciphertext, scopes,
+    # status, timestamps, row identity, and every related provenance FK remain
+    # byte-for-byte / row-for-row unchanged.
+    connection.user = locked_new_owner
+    connection.save(update_fields=["user"])
+    audit_log(
+        locked_initiator,
+        QuotationAuditLog.ACTION_UPDATED,
+        connection,
+        message="Transferred designated Gmail credential ownership.",
+        changes={
+            "mailbox": expected_mailbox,
+            "initiated_by": {
+                "id": locked_initiator.pk,
+                "username": locked_initiator.get_username(),
+            },
+            "previous_owner": result["previous_owner"],
+            "new_owner": result["new_owner"],
+        },
+    )
+    result["applied"] = True
+    return result
+
+
 def gmail_send_scope_granted(connection):
     if not connection:
         return False
@@ -491,6 +889,7 @@ def mark_gmail_connection_error(connection, message):
 
 
 def get_valid_access_token(connection):
+    _assert_designated_gmail_connection_identity(connection)
     if connection.status != GmailOAuthConnection.STATUS_CONNECTED:
         raise RuntimeError("Gmail is not connected.")
     access_token = decrypt_token(connection.access_token_encrypted)
@@ -895,6 +1294,7 @@ def gmail_send_raw_message(
 ):
     """Send one RFC 2822 message through the connected shared mailbox."""
 
+    _assert_designated_gmail_connection_identity(connection)
     if not gmail_send_scope_granted(connection):
         raise PermissionError(
             "Gmail send permission is missing. Reconnect the shared Gmail mailbox and approve sending."
@@ -1135,7 +1535,10 @@ def hydrate_contract_source(source, connection, *, include_attachments=True):
 
 
 def discover_contract_sources(run, user, *, batch_size=None, reset_cursor=False):
-    connection = resolve_gmail_connection(user)
+    connection = resolve_gmail_connection(
+        user,
+        shared_only=gmail_designated_mailbox_enforcement_enabled(),
+    )
     if not connection or connection.status != GmailOAuthConnection.STATUS_CONNECTED:
         raise RuntimeError("Connect Gmail read-only before running discovery.")
 
@@ -2170,7 +2573,10 @@ def analyze_contract_run(run, user, *, use_ai=True, source_limit=None):
     run.ai_status = "running"
     run.started_at = timezone.now()
     run.save(update_fields=["status", "ai_status", "started_at", "updated_at"])
-    connection = resolve_gmail_connection(user)
+    connection = resolve_gmail_connection(
+        user,
+        shared_only=gmail_designated_mailbox_enforcement_enabled(),
+    )
     for source in sources:
         source.status = "analyzing"
         source.save(update_fields=["status", "updated_at"])

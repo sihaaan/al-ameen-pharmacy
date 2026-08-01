@@ -369,6 +369,13 @@ GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").stri
 GMAIL_ADDON_ENABLED = env_bool("GMAIL_ADDON_ENABLED", False)
 GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL = os.environ.get("GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_ADDON_SHARED_MAILBOX_EMAIL = os.environ.get("GMAIL_ADDON_SHARED_MAILBOX_EMAIL", "").strip().lower()
+# Roll this out only after the expected mailbox above has been verified in the
+# deployed environment.  When enabled, website OAuth and every shared-only
+# resolver fail closed unless the Google profile is that exact mailbox.
+QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED = env_bool(
+    "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

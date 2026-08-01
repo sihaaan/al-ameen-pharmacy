@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.5.0 |
+| Document version | 2.7.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint |
+| Reviewed code | Hardening baseline `d88b767` through Task 2.6 checkpoint `3da9b5c`, plus the Task 2.7 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
@@ -194,11 +194,24 @@ Record outside source control:
 - approved shared mailbox and authorized users;
 - credential rotation and emergency reconnect procedure.
 
-Deleting the website user that owns the shared Gmail connection currently
-cascades deletion of that connection and related mailbox inventory. Do not
-delete or deactivate that account without an ownership-transfer plan. Task 2.7
-will harden designated-mailbox/ownership behavior behind available
-configuration.
+Migration `0037` protects the shared Gmail connection from deletion with its
+current website owner. Ownership must be transferred first; deleting the
+current owner now fails instead of cascading into the credential or mailbox
+provenance. Task 2.7 also adds a disabled-by-default designated-mailbox gate and
+an operator-only, audited transfer command. Enable the gate only after the
+deployed expected address and the physical Google profile are verified. With
+the gate enabled, invalid/missing configuration and a different Google account
+fail closed before token/designation persistence; every operational Gmail token
+read also rejects a mismatched stored connection. OAuth persistence rechecks
+the actor's current active/staff/owner-or-superuser authority after Google
+returns, refuses cross-mailbox credential-row reuse, reuses one unambiguous
+legacy row for the same physical mailbox, and serializes PostgreSQL first
+connects for that mailbox. The transfer command changes only the owner FK,
+rejects conflicting destination connections, and never logs token material.
+Its immutable audit payload snapshots the initiating superuser identity. Shell
+access is the command's authentication boundary; the named active superuser is
+an authorization precondition and audit attribution, not proof of the human
+shell operator's identity.
 
 ## 4. Secret and key management
 
@@ -304,7 +317,8 @@ Record operator, evidence link, and UTC time for every checked item.
   quotation/line lock, while reviewed rendering uses quotation-first order.
   PostgreSQL safely aborts a deadlock participant, but explicit timeout/deadlock
   normalization remains Task 2.8 availability work.
-- Formal credential ownership transfer remains Task 2.7.
+- Production activation and an actual credential ownership transfer remain
+  operator actions; repository defaults keep Task 2.7 enforcement disabled.
 - Attachment checks do not provide malware/AV detection or parser isolation.
   PDF marker inspection is not exhaustive, and legacy `.xls`/`.xlsb` formula,
   hidden-content, external-link, macro, encryption, and embedded-object coverage

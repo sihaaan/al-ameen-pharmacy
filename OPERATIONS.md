@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.4.0 |
+| Document version | 1.6.0 |
 | Status | Initial current-state runbook; unresolved items are marked explicitly |
 | Owner | Assign a primary and backup production operator |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint |
+| Reviewed code | Hardening baseline `d88b767` through Task 2.6 checkpoint `3da9b5c`, plus the Task 2.7 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This runbook preserves employee review, blank selling prices, suggestion-only
@@ -292,10 +292,45 @@ schedule downtime/coordination, expect stored Gmail token decryption to fail,
 and reconnect the shared mailbox afterward.
 
 Do not delete the website credential-owner account until ownership has been
-transferred and verified. Current model cascades can delete the shared Gmail
-connection and related mailbox inventory. If the expected designated-mailbox
-configuration is unavailable, Task 2.7 must remain disabled rather than guess
-an address or owner.
+transferred and verified. Task 2.7 migration `0037` changes this relationship
+to `PROTECT`, so an attempted deletion of the current owner is rejected instead
+of deleting the Gmail connection or its mailbox provenance. Treat that
+rejection as a succession warning, not as a reason to bypass protection. The
+designated-mailbox enforcement itself remains disabled by default:
+
+1. Verify the Railway value of `GMAIL_ADDON_SHARED_MAILBOX_EMAIL` against the
+   Google profile of the currently connected physical mailbox. Do not copy a
+   value from documentation or guess it.
+2. Set `QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED=1` only after
+   that verification. A missing/invalid expected address, wrong OAuth profile,
+   or mismatched stored shared connection then fails closed.
+3. Before an owner leaves, run `transfer_shared_gmail_owner` without `--apply`
+   using an active superuser for audit attribution, an active staff successor,
+   and the exact configured mailbox confirmation. The successor must not own a
+   different Gmail connection.
+4. Review the token-free dry-run output, rerun with `--apply`, then verify that
+   shared Gmail status, inquiry intake, read-only discovery, reviewed email
+   preview, and Gmail evidence still resolve through the same connection ID.
+5. Only then delete/deactivate the former owner. Preserve the resulting
+   `QuotationAuditLog` record. The audit payload retains the initiating
+   superuser ID/username even if that user is later deleted. For rollback,
+   dry-run and apply the same command in reverse while the former owner is
+   still active staff and conflict-free.
+
+Example (the first invocation is read-only):
+
+```text
+python manage.py transfer_shared_gmail_owner --initiated-by admin_username --new-owner successor_username --confirm-mailbox exact-shared-mailbox@example.com
+python manage.py transfer_shared_gmail_owner --initiated-by admin_username --new-owner successor_username --confirm-mailbox exact-shared-mailbox@example.com --apply
+```
+
+The command relies on trusted administrative shell access. The
+`--initiated-by` username is validated and audited, but does not authenticate
+the person at the shell. Apply migration `0037` as part of the normal release;
+it rewrites no stored Gmail data and changes only Django's owner-deletion
+policy. If validation fails, change no rows; correct the configuration or user
+state and rerun the dry run. Reversing `0037` restores unsafe cascade behavior,
+so prefer a forward fix and keep the protective migration applied.
 
 ## 11. Production evidence record template
 
