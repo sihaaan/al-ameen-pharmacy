@@ -43,7 +43,24 @@ class DocumentationContractTests(SimpleTestCase):
                 self.assertRegex(content, r"(?im)^\| Status \| [^|]+ \|$")
                 self.assertRegex(content, r"(?im)^\| Owner \| [^|]+ \|$")
                 self.assertRegex(content, r"(?im)^\| Last verified \| 2026-08-01 \|$")
-                self.assertIn("`d88b767`", content)
+                self.assertRegex(content, r"(?im)^\| Reviewed code \| [^|]+ \|$")
+
+    def test_task_2_8_documents_name_the_exact_pre_task_checkpoint(self):
+        for relative_path in (
+            "GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md",
+            "DEPLOYMENT.md",
+            "SECURITY.md",
+            "OPERATIONS.md",
+        ):
+            with self.subTest(document=relative_path):
+                content = read_repository_file(relative_path)
+                reviewed_row = re.search(
+                    r"(?im)^\| Reviewed code \| ([^|]+) \|$",
+                    content,
+                )
+                self.assertIsNotNone(reviewed_row)
+                self.assertIn("`7bc7054`", reviewed_row.group(1))
+                self.assertIn("Task 2.8", reviewed_row.group(1))
 
     def test_architecture_versions_match_runtime_contracts(self):
         content = read_repository_file("GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md")
@@ -84,6 +101,9 @@ class DocumentationContractTests(SimpleTestCase):
             "RPO, RTO",
             "no general scheduled purge",
             "no Redis/background worker",
+            "`/backend/railway.json`",
+            "`MIGRATION_DATABASE_URL`",
+            "`database_request_interrupted`",
         )
         for phrase in required_phrases:
             with self.subTest(phrase=phrase):
@@ -126,6 +146,10 @@ class DocumentationContractTests(SimpleTestCase):
         required_names = (
             "DATABASE_CONNECT_TIMEOUT_SECONDS",
             "DATABASE_DISABLE_SERVER_SIDE_CURSORS",
+            "MIGRATION_DATABASE_URL",
+            "MIGRATION_CONNECT_TIMEOUT_SECONDS",
+            "MIGRATION_LOCK_TIMEOUT_MS",
+            "MIGRATION_STATEMENT_TIMEOUT_MS",
             "QUOTATION_PRIVATE_STORAGE_ROOT",
             "QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES",
             "QUOTATION_EVIDENCE_STORAGE_BACKEND",

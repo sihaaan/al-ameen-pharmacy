@@ -384,6 +384,18 @@ security attestation. The dated production snapshot, migration caveat, private
 storage limitation, and rollback procedure are in
 [`DEPLOYMENT.md`](DEPLOYMENT.md) and [`OPERATIONS.md`](OPERATIONS.md).
 
+The repository prepares a guarded Railway pre-deploy command in
+[`backend/railway.json`](backend/railway.json). It is not active merely because
+the file exists: Railway must explicitly select `/backend/railway.json`, and
+the backend must receive a separately verified direct/unpooled
+`MIGRATION_DATABASE_URL` for the same PostgreSQL database. The normal web
+runtime continues to use its pooled `DATABASE_URL`, although Railway still
+exposes both service variables to build, pre-deploy, and runtime processes;
+sealing does not hide them from code in those processes. Do not use a
+more-privileged migration role in the shared service without explicit risk
+acceptance. See the deployment guide before enabling or running any migration,
+and do not bypass its advisory lock with raw `manage.py migrate`.
+
 ---
 
 ## Roadmap

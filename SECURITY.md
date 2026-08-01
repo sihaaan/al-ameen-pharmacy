@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.7.0 |
+| Document version | 2.8.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | Hardening baseline `d88b767` through Task 2.6 checkpoint `3da9b5c`, plus the Task 2.7 worktree checkpoint |
+| Reviewed code | Production baseline `70d3da7`; hardening committed through `7bc7054` plus the Task 2.8 branch checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
@@ -146,7 +146,25 @@ configuration. Complete the unchecked verification items for each release.
   integrity checked before their refs are returned.
 
 - PostgreSQL connections support health checks, bounded connect timeout, and
-  disabled server-side cursors.
+  disabled server-side cursors. The prepared deployment runner requires a
+  separate direct/unpooled PostgreSQL migration URL, checks it against the
+  application target without logging credentials, requires encrypted TLS for
+  non-local targets (prefer `verify-full` where supported), removes inherited
+  libpq target/security overrides, replaces session options with bounded
+  migration-only connect/lock/statement timeouts, serializes guarded runners
+  with a bounded advisory lock, and fails closed.
+- Exact Django-wrapped PostgreSQL lock, deadlock, and query-cancellation states
+  receive a database-detail-free 503 response and privacy-safe structured
+  warning. The response does not expose SQL/exception text, promise that retry
+  is safe, or add automatic mutation/email retries. Other database errors are
+  not broadly reclassified.
+- Railway service variables are visible to build, pre-deploy, and web
+  containers. Only the runner consumes `MIGRATION_DATABASE_URL` in application
+  code, but sealing only prevents dashboard/API retrieval; it does not hide the
+  value from build dependencies or runtime code. It must not be more privileged
+  than the application role without explicit risk acceptance or a separate
+  migration service. Raw `manage.py migrate` commands bypass the guarded
+  advisory lock and are prohibited for this deployment path.
 - Private source references are path-confined and served only through
   authenticated application paths.
 - API audit/history viewsets are read-only where defined. The hardening branch
@@ -236,7 +254,11 @@ Record operator, evidence link, and UTC time for every checked item.
 - [ ] HTTPS redirect, HSTS, secure cookies, and proxy SSL header behavior tested.
 - [ ] Production `DATABASE_URL` points to the intended PostgreSQL database.
 - [ ] Database users are least-privileged and TLS/backup/restore settings verified.
-- [ ] Railway pre-deploy migration command is explicit and migration plan reviewed.
+- [ ] Railway Config File Path is `/backend/railway.json`; its guarded
+      pre-deploy command, direct same-database `MIGRATION_DATABASE_URL`, bounded
+      timeouts, migration plan, least privilege, and recovery point are verified.
+- [ ] Expected branch migrations `0035`, `0036`, and `0037` are reconciled
+      against the live plan; Task 2.8 itself adds no Django migration.
 - [ ] Private quotation evidence has an accepted durability/recovery posture.
 - [ ] Google scopes, mailbox, owners, publication/verification, and reconnect tested.
 - [ ] OpenAI project/model, processor terms, retention, and privacy gates approved.
@@ -285,10 +307,16 @@ Record operator, evidence link, and UTC time for every checked item.
 
 ## 7. Known gaps and scheduled hardening
 
-- No production `lock_timeout` or `statement_timeout` is set by application
-  configuration; Task 2.8 prepares bounded handling.
+- No pooled-runtime `lock_timeout` or `statement_timeout` is set by application
+  configuration. Task 2.8 intentionally bounds only the prepared direct
+  migration process because the inspected Neon pooler rejects startup options;
+  exact interruption handling is implemented without broad retries.
 - The inspected Railway deployment had no pre-deploy command, health check,
-  volume, or Sentry DSN.
+  volume, or Sentry DSN. The guarded repository pre-deploy configuration is
+  prepared but remains inactive until an operator explicitly selects it and
+  provisions/verifies the separate direct migration URL. Once active it runs
+  before every backend deploy, including code-only deploys and rollbacks, and
+  an invalid/missing runner variable blocks promotion.
 - The private-evidence abstraction and dual reader are implemented, but its
   default local backend remains ephemeral on Railway without a volume. No live
   durable provider, credentials, legacy copy, backup, or restore drill is
@@ -315,8 +343,9 @@ Record operator, evidence link, and UTC time for every checked item.
   automatic retry.
 - Reverse foreign-key deletion paths can acquire a dependency before a
   quotation/line lock, while reviewed rendering uses quotation-first order.
-  PostgreSQL safely aborts a deadlock participant, but explicit timeout/deadlock
-  normalization remains Task 2.8 availability work.
+  PostgreSQL may still abort a deadlock participant; Task 2.8 now normalizes the
+  exact wrapped SQLSTATE to an uncertainty-preserving 503, but it does not
+  remove the underlying deadlock risk or make blind retry safe.
 - Production activation and an actual credential ownership transfer remain
   operator actions; repository defaults keep Task 2.7 enforcement disabled.
 - Attachment checks do not provide malware/AV detection or parser isolation.
@@ -335,6 +364,8 @@ evidence, blank-price, recipient-verification, or send-reconciliation controls.
 - [OWASP Web Security Testing Guide](https://owasp.org/www-project-web-security-testing-guide/)
 - [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
 - [Google OAuth app audience](https://support.google.com/cloud/answer/15549945)
+- [Railway service variables](https://docs.railway.com/variables)
+- [PostgreSQL TLS modes](https://www.postgresql.org/docs/17/libpq-ssl.html)
 - [Architecture reference](GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md)
 - [Operations runbook](OPERATIONS.md)
 - [Attachment security and spreadsheet fidelity](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)

@@ -1411,6 +1411,134 @@
   owner and verify the same connection/provenance. Never delete/merge connection
   rows or expose token ciphertext during rollback; prefer a forward fix.
 
+### 2.8 — Explicit deployment migrations and database interruption handling
+
+- Status: completed and tested on the branch; repository configuration is
+  prepared but no Railway setting, credential, production migration, or
+  deployment was changed.
+- Commit: this Task 2.8 checkpoint (`fix: guard deployment migrations and
+  database interruptions`); record the resulting SHA from Git history.
+- Files changed:
+  - `backend/railway.json`
+  - `backend/run_deploy_migrations.py`
+  - `backend/Procfile`
+  - `backend/.env.example`
+  - `backend/pharmacy_api/exception_handlers.py`
+  - `backend/pharmacy_api/test_database_settings.py`
+  - `backend/pharmacy_api/test_deploy_migrations.py`
+  - `backend/pharmacy_api/test_exception_handlers.py`
+  - `backend/quotations/test_documentation_contract.py`
+  - `README.md`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `DEPLOYMENT.md`
+  - `OPERATIONS.md`
+  - `SECURITY.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added a Railway Config-as-Code pre-deploy command that calls a guarded
+    migration runner. The existing Procfile no longer contains a second
+    migration/release path.
+  - The runner requires a direct/unpooled PostgreSQL
+    `MIGRATION_DATABASE_URL`, compares its decoded single TCP host lineage,
+    port, and database with `DATABASE_URL`, rejects pooler/target/session
+    overrides, and requires encrypted TLS for non-local targets. It never puts
+    either URL in command arguments or its own output.
+  - Inherited libpq `PG*` variables are removed for both the advisory-lock
+    connection and migration child so `PGHOSTADDR`, service files, SSL modes,
+    or inherited options cannot bypass validation. The intended Django settings
+    module, disabled persistent connections, and bounded migration connect,
+    lock, and statement timeouts are forced explicitly.
+  - A PostgreSQL advisory lock is acquired under the bounded lock timeout and
+    held for the complete child migration. Concurrent guarded deployments
+    against the same cluster therefore serialize or fail closed rather than
+    running migrations together. Invalid configuration, lock/connect failure,
+    process-start failure, and Django migration failure all return nonzero and
+    stop promotion.
+  - The normal pooled web connection is unchanged. It retains its 8-second
+    connect timeout, 60-second lifetime, health checks, and disabled server-side
+    cursors; unsafe pooler startup/session timeout options were not added.
+  - The DRF exception handler now recognizes only Django-wrapped PostgreSQL
+    `55P03`, `40P01`, and `57014`. It returns a database-detail-free 503 with
+    `code=database_request_interrupted`, no `Retry-After` or retryable flag, and
+    explicit uncertain-state wording. Its warning logs only SQLSTATE, path, and
+    view; all other database failures retain the existing generic 500 path.
+  - Railway activation is deliberately deferred. Service variables are visible
+    to build, pre-deploy, and web processes, so operators are instructed to
+    seal the direct URL, account for build/runtime access, and not introduce a
+    more-privileged role without an explicit risk decision or isolated migration
+    service. Raw `manage.py migrate` paths are prohibited because they bypass
+    the guarded advisory lock.
+- Tests run:
+  - Focused migration, runtime-settings, exception-handler, and documentation
+    contracts:
+    `DATABASE_URL=sqlite:///task28-focused-final2.sqlite3 python manage.py test pharmacy_api.test_deploy_migrations pharmacy_api.test_database_settings pharmacy_api.test_exception_handlers quotations.test_documentation_contract --noinput --verbosity 1`
+    — 44/44 passed.
+  - Disposable local PostgreSQL 17 direct-run integration: created a unique
+    empty database on `127.0.0.1:55432`, supplied hostile inherited
+    `PGHOSTADDR`/`PGSSLMODE`, ran `python run_deploy_migrations.py`, verified 75
+    applied migration records, and dropped the disposable database — passed.
+  - Complete backend regression from a fresh SQLite database:
+    `DATABASE_URL=sqlite:///task28-all-backend.sqlite3 python manage.py test --noinput --verbosity 1`
+    — 1,266 tests completed successfully: 1,248 passed and 18 PostgreSQL/
+    optional-provider tests were intentionally skipped. Logged service errors
+    are asserted failure-path cases.
+  - Production-equivalent local PostgreSQL 17 / `READ COMMITTED` concurrency
+    lane with `PGOPTIONS="-c lock_timeout=5s -c statement_timeout=30s"`:
+    `python manage.py test quotations.test_product_matching_rework.ProductAliasConcurrencyTests quotations.test_quotation_concurrency --noinput --verbosity 2`
+    — 18/18 passed.
+  - Complete frontend suite:
+    `CI=true npm test -- --watchAll=false --runInBand` — 200/200 tests across
+    18/18 suites passed; logged parse/network errors are asserted UI cases.
+  - `npm run build` — compiled successfully (229.92 kB main JS and 41.36 kB
+    main CSS gzip output).
+  - `python manage.py check`, `python manage.py makemigrations --check --dry-run`,
+    `python -m pip check`, `python -m compileall -q api accounting quotations
+    pharmacy_api run_deploy_migrations.py`, Railway JSON parsing, documentation
+    link/fence contracts, and `git diff --check` — passed; no model drift,
+    broken requirement, invalid JSON, or whitespace error was found.
+  - Three independent read-only reviews covered migration target/secret safety,
+    SQLSTATE/API/send-retry behavior, and deployment-document accuracy. Their
+    actionable URL, libpq override, TLS, Procfile, advisory-lock, timeout, and
+    Railway variable-boundary findings were fixed; final focused and broad
+    suites passed with no remaining critical/high-severity issue.
+- Migration: none added by Task 2.8. Against the dated deployed baseline, the
+  complete branch is expected to include existing migrations `0035`, `0036`,
+  and `0037`; the operator must verify the current live plan and a recovery
+  point before activation. No production migration was run.
+- API/frontend changes: no endpoint, OAuth scope, AI model/prompt/schema, or
+  frontend contract changed. Unexpected exact database interruptions now
+  receive additive generic HTTP 503 classification instead of the generic 500;
+  mutation/email requests are not automatically retried. There is no frontend
+  code change.
+- Accuracy/security impact: employee review, Gmail/manual intake, blank selling
+  prices, suggestion-only matching, evidence/uncertainty, preview-before-send,
+  verified reply headers, one successful send per revision, ambiguous-send
+  lockout, and reconciliation-never-sends remain unchanged. The 503 explicitly
+  requires refresh/verification and never asserts whether an external email
+  side effect occurred.
+- Remaining risks/deferred configuration: an operator must verify a current
+  direct endpoint, seal `MIGRATION_DATABASE_URL`, set Railway Config File Path
+  to `/backend/railway.json`, review the live migration plan/timeouts/recovery
+  point, and perform a separate authorized deployment. Once active, the hook
+  runs before every backend deploy or rollback and missing/invalid configuration
+  blocks promotion. Railway's shared service environment does not isolate the
+  direct credential from build dependencies or the web process. The advisory
+  lock coordinates guarded runners, not raw/manual migration commands. A
+  database statement timeout does not bound arbitrary non-database Python in a
+  data migration, so operators must monitor the Railway pre-deploy duration.
+  Pooled-runtime lock/statement timeouts remain unset because the inspected Neon
+  pooler rejects startup options; exact interruption normalization handles, but
+  does not prevent, runtime contention/deadlocks.
+- Rollback: before activation, use a reviewed code rollback that retains the
+  Procfile's web-only state; a blanket revert would restore its legacy migration
+  declaration. After selecting Railway's Config File Path, clear that setting
+  first and confirm the prior deployment remains active before a reviewed code
+  rollback. After any migration runs, application rollback is not schema
+  rollback: preserve logs and the recovery point, follow each reviewed
+  migration's recovery plan, and prefer a compatible forward fix. Never fall
+  back to a raw/pooled migration or broadly auto-retry an uncertain
+  mutation/email operation.
+
 ## Phase 3
 
 Intentionally not implemented.

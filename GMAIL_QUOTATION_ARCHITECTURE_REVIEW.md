@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.8.0 |
+| Document version | 1.9.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | Hardening baseline `d88b767` through Task 2.6 checkpoint `3da9b5c`, plus the Task 2.7 worktree checkpoint on `codex/technical-hardening` |
+| Reviewed code | Production baseline `70d3da7`; hardening committed through `7bc7054` plus the Task 2.8 branch checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -713,6 +713,20 @@ The canonical PostgreSQL concurrency reproduction is the
 `READ COMMITTED`, and bounded lock/statement timeouts. Running the same test
 module against default SQLite intentionally skips PostgreSQL-only cases.
 
+Task 2.8 prepares, but does not activate, a Railway pre-deploy command through
+`backend/railway.json`. Its guarded runner requires a separate direct/unpooled
+PostgreSQL migration URL that matches the application's database target and
+applies bounded migration-process timeouts plus a cross-runner advisory lock
+without changing the pooled web connection. Railway still exposes the direct
+URL service variable to the web container, so it must not silently introduce a
+more-privileged role. Exact Django-wrapped PostgreSQL lock interruption,
+deadlock, and query-cancellation SQLSTATEs return an uncertainty-preserving
+generic 503 with no automatic-retry promise. This does not change Gmail/manual
+intake, AI contracts, review, blank selling prices, delivery idempotency,
+ambiguous-send lockout, or reconciliation behavior. Task 2.8 adds no Django
+migration. Production credentials, config-file activation, migrations, and
+deployment remain operator steps.
+
 ## 14. Source index
 
 - `backend/quotations/gmail_addon.py`
@@ -725,6 +739,9 @@ module against default SQLite intentionally skips PostgreSQL-only cases.
 - `backend/api/upload_validation.py`
 - `backend/quotations/quotation_email_delivery.py`
 - `backend/quotations/private_storage.py`
+- `backend/pharmacy_api/exception_handlers.py`
+- `backend/run_deploy_migrations.py`
+- `backend/railway.json`
 - `backend/quotations/models.py`
 - `frontend/src/components/quotations/GmailInquiryReview.js`
 - `frontend/src/components/quotations/QuotationEmailPreviewDialog.js`

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.4.0 |
+| Document version | 2.5.0 |
 | Status | Operator guide; live values require independent verification |
 | Owner | Al Ameen platform maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint |
+| Reviewed code | `70d3da7` production baseline; hardening committed through `7bc7054` plus the Task 2.8 branch checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This guide separates repository behavior from live provider configuration. A
@@ -87,8 +87,8 @@ npm run build
 The canonical production-equivalent quotation-concurrency lane is
 `postgres-concurrency` in `.github/workflows/ci.yml`. It uses PostgreSQL 17.10,
 `READ COMMITTED`, `lock_timeout=5s`, and `statement_timeout=30s`. Those two
-statement limits are CI settings; they are not currently configured by the
-production application.
+timeout limits are CI settings. The prepared migration runner uses separate
+migration-only defaults; neither setting is added to the pooled web connection.
 
 Before release, save:
 
@@ -115,26 +115,94 @@ Set Railway root directory to `/backend`. The current `backend/Procfile`
 declares:
 
 ```text
-release: python manage.py migrate --noinput && python manage.py collectstatic --noinput
 web: gunicorn pharmacy_api.wsgi --timeout ${GUNICORN_TIMEOUT:-300} --workers ${WEB_CONCURRENCY:-2} --threads ${GUNICORN_THREADS:-2} --log-file -
 ```
 
-Do not assume Railway/Railpack executes the Procfile `release` entry. The
-inspected live deployment had no explicit Railway pre-deploy command. Railway's
-documented migration hook is a **Pre-Deploy Command**, and a failing pre-deploy
-command prevents the new deployment from proceeding. Task 2.8 will prepare and
-test explicit configuration; this documentation update does not mutate it.
+The Procfile deliberately has no release entry or migration path; the observed
+Railway build command already collects static files. The inspected live
+deployment had no explicit Railway pre-deploy command. Railway's documented
+migration hook is a **Pre-Deploy Command**, and a failing pre-deploy command
+prevents the new deployment from proceeding.
+
+Task 2.8 adds the repository configuration
+[`backend/railway.json`](backend/railway.json), whose pre-deploy command is:
+
+```text
+python run_deploy_migrations.py
+```
+
+This is prepared and tested, but **not activated or deployed**. Because the
+service is in a monorepo, an operator must explicitly select Config File Path
+`/backend/railway.json` in Railway and verify the deployment preview before a
+release. Once selected, Railway runs the hook before every backend deployment,
+including a code-only deploy or rollback; a missing/invalid migration variable
+therefore blocks that deployment. The guarded runner:
+
+- requires `MIGRATION_DATABASE_URL` to be a direct/unpooled PostgreSQL URL;
+- requires it to identify the same database, port, and recognized host lineage
+  as the application `DATABASE_URL`;
+- rejects URL options that could override the validated database target;
+- requires encrypted TLS (`require`, `verify-ca`, or `verify-full`) for every
+  non-local migration host; prefer `verify-full` where the provider supports
+  it and independently verify the provider certificate requirements;
+- removes inherited libpq `PG*` variables that could redirect or weaken the
+  validated connection, then sets only guarded migration `PGOPTIONS`;
+- defaults connect timeout to 8 seconds (allowed range 1-60 seconds), lock
+  timeout to 10,000 ms (allowed range 1-300,000 ms), and statement timeout to
+  900,000 ms (allowed range 1-3,600,000 ms and never below lock timeout);
+- acquires one PostgreSQL advisory lock under the bounded lock timeout and
+  holds it across the migration child, preventing concurrent guarded runners
+  against the same database cluster;
+- disables persistent connections for the migration child process; and
+- returns a nonzero status for invalid configuration, process-start failure,
+  or any failed Django migration, so promotion stops.
+
+The PostgreSQL statement timeout bounds database statements, not arbitrary
+non-database Python inside a `RunPython` migration. Review such migrations in
+advance and monitor the Railway pre-deploy duration; do not treat the database
+timeout as a total wall-clock guarantee.
+
+Only the runner consumes `MIGRATION_DATABASE_URL` in application code, but a
+Railway service variable is available to build, pre-deploy, and the running web
+container. Mark it sealed in Railway and never record it in logs, screenshots,
+tickets, source, command arguments, or the frontend. Sealing prevents
+dashboard/API retrieval; it does not isolate the secret from build dependencies
+or the web process. Prefer the existing least-privileged application role
+through its direct endpoint. Do not introduce a more privileged schema
+credential into the shared service environment without explicit risk
+acceptance; use a separately isolated migration service if that separation is
+required. Neon pooled startup options are intentionally not changed.
+`collectstatic` remains the independent Railway build command observed above;
+the migration pre-deploy command does not replace it.
+
+The advisory lock coordinates only `run_deploy_migrations.py`. Do not run raw
+`python manage.py migrate`, a Procfile migration hook, or a concurrent manual
+migration against the same database; those bypass the guard. Every authorized
+migration path must use the guarded runner or a separately reviewed migration
+service with equivalent serialization.
 
 Before a release containing migrations, an operator must verify in Railway:
 
-1. the exact pre-deploy command that will run `python manage.py migrate --noinput`;
-2. that it targets the new build and the intended production database;
-3. that migrations are backward-compatible with the still-running code;
-4. that the migration plan was reviewed and a database recovery point exists;
-5. that static collection/build behavior is independently configured.
+1. Config File Path is exactly `/backend/railway.json` and the deployment
+   preview shows `python run_deploy_migrations.py` as the pre-deploy command;
+2. `MIGRATION_DATABASE_URL` is an independently verified direct endpoint for
+   the same intended database; it is sealed and is not recorded in logs,
+   screenshots, tickets, or release evidence;
+3. the target build contains the reviewed migrations and they are compatible
+   with the still-running code;
+4. the migration plan was reviewed and a database recovery point exists;
+5. timeout overrides, if any, are justified and remain inside the runner's
+   safety bounds;
+6. static collection/build behavior is independently configured.
 
 Migration success is not automatically reversible. Rolling the application
 image back does not undo schema changes or data mutations.
+
+Against the dated production baseline, a full hardening-branch promotion is
+expected to include additive/state migrations `quotations.0035`, `0036`, and
+`0037`; verify the live plan independently because production may have changed.
+Task 2.8 itself adds no Django migration and does not run any production
+migration.
 
 ### Required environment groups
 
@@ -143,7 +211,8 @@ inventory. Never commit filled values. At minimum verify these groups:
 
 - Django: `DJANGO_SECRET_KEY`, `DEBUG=0`, `ALLOWED_HOSTS`, frontend/CORS/CSRF URLs;
 - database: `DATABASE_URL`, connection lifetime/health checks, connect timeout,
-  and disabled server-side cursors;
+  disabled server-side cursors, and the runner-consumed but service-visible
+  `MIGRATION_DATABASE_URL` plus migration timeout bounds;
 - media/private evidence: `CLOUDINARY_URL` where used, plus the separate
   `QUOTATION_EVIDENCE_STORAGE_BACKEND`,
   `QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON`, and local fallback
@@ -164,6 +233,15 @@ The current defaults include an 8-second PostgreSQL connect timeout, a
 AI timeout, a 180-second native Gmail AI timeout, and a 300-second Gunicorn
 timeout. Long Gmail analysis is synchronous; browser polling makes its state
 resumable but does not create a background worker.
+
+PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
+cancellation/statement timeout (`57014`) are normalized only when Django wraps
+the exact driver SQLSTATE. The API returns a generic 503 stating that current
+state may be uncertain. It does not expose SQL/database details, set a
+`Retry-After` header, or claim that a mutation is safe to retry. Staff must
+refresh and verify the quotation and delivery state first; Gmail sends remain
+subject to the existing ambiguous-delivery lock and no-send reconciliation.
+Other database errors retain the existing generic 500 path.
 
 ### Task 2.4 attachment limits
 
@@ -296,13 +374,16 @@ Until those steps are approved and evidenced:
 
 After the approved commit and explicit migration gate are configured:
 
-1. Deploy backend and inspect pre-deploy/build/start logs.
-2. Confirm the deployed commit and deployment ID.
-3. Run `python manage.py showmigrations --plan` in the production context and
+1. Confirm a current database recovery point, review
+   `python manage.py showmigrations --plan`, and then deploy the backend.
+2. Inspect the guarded pre-deploy, build, and start logs; a missing/mismatched
+   direct URL or failed migration must stop promotion.
+3. Confirm the deployed commit and deployment ID.
+4. Run `python manage.py showmigrations --plan` in the production context and
    confirm no intended migration remains unapplied.
-4. Verify API/admin availability and authenticated staff access.
-5. Deploy the frontend and verify its embedded API URL.
-6. Test a production-safe, non-destructive representative workflow:
+5. Verify API/admin availability and authenticated staff access.
+6. Deploy the frontend and verify its embedded API URL.
+7. Test a production-safe, non-destructive representative workflow:
    - login and permissions;
    - company/product lookup;
    - manual inquiry review with blank selling prices;
@@ -314,7 +395,7 @@ After the approved commit and explicit migration gate are configured:
    - quotation preview and **Finalize Only**;
    - a controlled email send only to an approved test recipient;
    - ambiguous-send reconciliation in a mocked/staging environment.
-7. Record the result, UTC time, operator, commit, deployment IDs, and any
+8. Record the result, UTC time, operator, commit, deployment IDs, and any
    deviations in the release record.
 
 The application currently has no configured Railway health check in the
@@ -368,6 +449,17 @@ Application rollback and data rollback are separate decisions.
    no-send reconciliation path and inspect the shared Sent mailbox.
 6. Verify API, migrations, data integrity, private evidence, and the exact
    quotation/email state after recovery.
+
+Before activation, do not blindly revert the whole checkpoint: that would
+restore the legacy Procfile `manage.py migrate` declaration. Use a reviewed
+code rollback that retains the Procfile's web-only state. After Railway selects
+the config file, first clear its **Config File Path**
+`/backend/railway.json` and confirm the prior deployment remains active; only
+then perform a reviewed code rollback. Once any migration runs, do not treat
+removing the pre-deploy command or rolling back an image as a schema rollback.
+Preserve the migration logs and recovery point, apply the reviewed
+migration-specific plan, and prefer a compatible forward fix. Do not switch
+migrations back to the pooled application URL as a recovery shortcut.
 
 Destructive migration reversal, data deletion, or production restore requires
 explicit authority and is outside an ordinary code rollback.
@@ -428,7 +520,8 @@ specific release.
 - [ ] Commit, CI run, owner, UTC time, and deployment IDs recorded.
 - [ ] Environment diff reviewed without exposing secret values.
 - [ ] Production `DATABASE_URL`, PostgreSQL version, and isolation verified.
-- [ ] Migration plan, compatibility, pre-deploy command, and recovery point verified.
+- [ ] `/backend/railway.json`, direct `MIGRATION_DATABASE_URL`, migration plan,
+      compatibility, timeout bounds, and recovery point verified.
 - [ ] Backend and frontend build/test suites passed.
 - [ ] CORS, CSRF, hosts, HTTPS, and public URLs verified.
 - [ ] Private evidence durability limitation accepted or durable storage verified.
@@ -442,7 +535,10 @@ specific release.
 ## 14. References
 
 - [Railway pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command)
+- [Railway config as code](https://docs.railway.com/config-as-code)
+- [Railway service variables](https://docs.railway.com/variables)
 - [Railway deployment reference](https://docs.railway.com/deployments/reference)
+- [PostgreSQL TLS modes](https://www.postgresql.org/docs/17/libpq-ssl.html)
 - [Railway volumes](https://docs.railway.com/volumes/reference)
 - [Django deployment checklist](https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/)
 - [Attachment security and spreadsheet fidelity](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)
