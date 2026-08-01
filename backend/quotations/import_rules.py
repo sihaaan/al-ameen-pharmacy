@@ -464,6 +464,49 @@ STRUCTURED_PACKED_QUANTITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+STRUCTURED_REVIEW_SOURCE_MAX_LENGTH = 80
+SIGNED_NUMERIC_SOURCE_RE = re.compile(r"(?:^|[^\w\d])[-+]\s*\d")
+GROUPED_NUMERIC_SOURCE_RE = re.compile(
+    r"(?:"
+    r"(?<!\d)\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)"
+    r"|(?<!\d)\d{1,3}(?:\.\d{3})+(?:,\d+)?(?!\d)"
+    r"|(?<!\d)\d{1,3}(?:[ ']\d{3})+(?:[.,]\d+)?(?!\d)"
+    r"|(?<!\d)\d{1,2}(?:,\d{2})+,\d{3}(?:\.\d+)?(?!\d)"
+    r")"
+)
+
+
+def _bounded_structured_review_source(value):
+    text = _cell_text(value)
+    if len(text) <= STRUCTURED_REVIEW_SOURCE_MAX_LENGTH:
+        return text
+    return f"{text[: STRUCTURED_REVIEW_SOURCE_MAX_LENGTH - 3].rstrip()}..."
+
+
+def _numeric_source_review_note(label, value):
+    """Describe source formatting that the compatibility parser cannot trust.
+
+    Numeric extraction intentionally remains unchanged here. These flags make
+    potentially lossy signs and thousands separators visible to staff instead
+    of silently treating the compatibility value as authoritative.
+    """
+
+    text = _cell_text(value)
+    if not text:
+        return ""
+    risks = []
+    if SIGNED_NUMERIC_SOURCE_RE.search(text):
+        risks.append("signed")
+    if GROUPED_NUMERIC_SOURCE_RE.search(text):
+        risks.append("grouped")
+    if not risks:
+        return ""
+    risk_label = " and ".join(risks)
+    return (
+        f"{label} uses {risk_label} numeric text and requires review: "
+        f"{_bounded_structured_review_source(text)}"
+    )
+
 
 def split_structured_quantity_unit(quantity_value, unit_value=""):
     """Parse a structured quantity cell without choosing among ambiguous numbers.
@@ -888,16 +931,50 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
 
     quantity_value = _cell_by_role(row, columns, "quantity")
     unit_value = _cell_by_role(row, columns, "unit")
+    unit_price_value = _cell_by_role(row, columns, "unit_price")
+    amount_value = _cell_by_role(row, columns, "amount")
+    vat_rate_value = _cell_by_role(row, columns, "vat_rate")
+    vat_amount_value = _cell_by_role(row, columns, "vat_amount")
+    line_total_value = _cell_by_role(row, columns, "line_total")
     quantity, unit, pack_info, ambiguous_quantity = split_structured_quantity_unit(
         quantity_value,
         unit_value,
     )
     unit = normalize_unit(unit)
-    unit_price = parse_decimal(_cell_by_role(row, columns, "unit_price"))
-    amount = parse_decimal(_cell_by_role(row, columns, "amount"))
-    vat_rate = parse_decimal(_cell_by_role(row, columns, "vat_rate"))
-    vat_amount = parse_decimal(_cell_by_role(row, columns, "vat_amount"))
-    line_total = parse_decimal(_cell_by_role(row, columns, "line_total"))
+    unit_price = parse_decimal(unit_price_value)
+    amount = parse_decimal(amount_value)
+    vat_rate = parse_decimal(vat_rate_value)
+    vat_amount = parse_decimal(vat_amount_value)
+    line_total = parse_decimal(line_total_value)
+
+    review_notes = []
+    if ambiguous_quantity:
+        review_notes.append(
+            "Quantity text requires review: "
+            f"{_bounded_structured_review_source(quantity_value)}"
+        )
+    elif quantity is None:
+        if quantity_value:
+            review_notes.append(
+                "Quantity could not be read and requires review: "
+                f"{_bounded_structured_review_source(quantity_value)}"
+            )
+        else:
+            review_notes.append("Quantity is missing and requires review.")
+    if not unit:
+        review_notes.append("Unit is missing and requires review.")
+
+    for label, source_value in [
+        ("Quantity", quantity_value),
+        ("Unit price", unit_price_value),
+        ("Amount", amount_value),
+        ("VAT rate", vat_rate_value),
+        ("VAT amount", vat_amount_value),
+        ("Total", line_total_value),
+    ]:
+        note = _numeric_source_review_note(label, source_value)
+        if note:
+            review_notes.append(note)
 
     confidence = float(base_confidence)
     if header and header.data_score:
@@ -938,15 +1015,15 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
                     line_total=line_total,
                     pack_info=pack_info,
                 ),
-                (
-                    f"Quantity text requires review: {quantity_value}"
-                    if ambiguous_quantity
-                    else ""
-                ),
+                *review_notes,
             ]
             if value
         ),
-        parse_status=confidence_status(confidence),
+        parse_status=(
+            InquiryLine.PARSE_NEEDS_REVIEW
+            if review_notes
+            else confidence_status(confidence)
+        ),
         parse_confidence=confidence,
         unit_price=decimal_to_preview(unit_price),
         amount=decimal_to_preview(amount),

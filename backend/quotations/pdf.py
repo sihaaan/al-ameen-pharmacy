@@ -626,14 +626,17 @@ def _build_quotation_line_table(quotation, styles, primary):
     return line_table, lines
 
 
-def build_quotation_pdf(quotation):
-    config = get_quotation_pdf_config(quotation=quotation)
+def build_quotation_pdf(quotation, *, config=None):
+    config = config or get_quotation_pdf_config(quotation=quotation)
     primary = colors.HexColor(config.primary_color or "#0F766E")
     accent = colors.HexColor(config.accent_color or "#ECFDF5")
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
+        # A known-failure retry must reproduce the reviewed attachment bytes.
+        # ReportLab otherwise embeds run-specific timestamps/document IDs.
+        invariant=1,
         rightMargin=16 * mm,
         leftMargin=16 * mm,
         topMargin=14 * mm,

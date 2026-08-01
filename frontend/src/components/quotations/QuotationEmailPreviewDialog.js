@@ -66,6 +66,7 @@ const QuotationEmailPreviewDialog = ({
   reconciling = false,
   reconcileFeedback = null,
   onRetryPreview,
+  onRefreshPreview,
   onReconnectGmail,
   onReconcileEmail,
   onClearCorrectableError,
@@ -94,6 +95,7 @@ const QuotationEmailPreviewDialog = ({
   }, [normalized]);
 
   const isThreadReply = normalized.delivery_mode === 'gmail_reply';
+  const outboundSnapshotFrozen = normalized.outbound_snapshot_frozen === true;
   const to = splitEmailAddresses(toText);
   const cc = splitEmailAddresses(ccText);
   const validationErrors = [
@@ -106,10 +108,20 @@ const QuotationEmailPreviewDialog = ({
       : '',
   ].filter(Boolean);
   const correctableSendError = sendError?.code === 'email_delivery_error';
+  const stalePreviewError = ['stale_email_preview', 'email_preview_required'].includes(
+    String(sendError?.code || '')
+  );
+  const frozenPreviewRefresh = Boolean(
+    sendError?.refreshPreview && outboundSnapshotFrozen && !stalePreviewError
+  );
+  const previewRefreshRequired = stalePreviewError || frozenPreviewRefresh;
   const hardErrorStatus = ['unknown', 'sending', 'sent'].includes(String(sendError?.deliveryStatus || '').toLowerCase());
   const attachmentSnapshotMismatch = sendError?.code === 'attachment_snapshot_mismatch';
+  const outboundSnapshotMismatch = sendError?.code === 'outbound_snapshot_mismatch';
   const retryBlocked = Boolean(sendError && (
     attachmentSnapshotMismatch
+    || outboundSnapshotMismatch
+    || previewRefreshRequired
     || hardErrorStatus
     || (!correctableSendError && sendError.retryable !== true)
   ));
@@ -123,6 +135,7 @@ const QuotationEmailPreviewDialog = ({
     && ['unknown', 'sending'].includes(persistedDeliveryStatus)
   );
   const canSearchThread = !isThreadReply
+    && !outboundSnapshotFrozen
     && normalized.gmail_connected !== false
     && to.length === 1
     && emailPattern.test(to[0])
@@ -148,6 +161,9 @@ const QuotationEmailPreviewDialog = ({
       body: body.trim(),
       confirm_recipient: isThreadReply || recipientConfirmed,
       delivery_mode: normalized.delivery_mode,
+      ...(normalized.preview_fingerprint
+        ? { preview_fingerprint: normalized.preview_fingerprint }
+        : {}),
       ...(normalized.thread_selection_token
         ? { thread_selection_token: normalized.thread_selection_token }
         : {}),
@@ -214,7 +230,14 @@ const QuotationEmailPreviewDialog = ({
                   </p>
                 ) : (
                   <p>
-                    This quotation was not created from Gmail. Enter and confirm the recipient carefully; this starts a new conversation.
+                    {outboundSnapshotFrozen
+                      ? 'This retry uses the exact previously reviewed email and attachment. Confirm the recipient again before sending.'
+                      : 'This quotation was not created from Gmail. Enter and confirm the recipient carefully; this starts a new conversation.'}
+                  </p>
+                )}
+                {outboundSnapshotFrozen && (
+                  <p className="qm-field-warning">
+                    Frozen retry: recipient, CC, subject, message, thread headers, and PDF are read-only. Create a quotation revision to change customer-facing content.
                   </p>
                 )}
                 {isThreadReply && (trustedSource.sender_email || sourceSubject) && (
@@ -233,7 +256,9 @@ const QuotationEmailPreviewDialog = ({
               <div className={`qm-feedback ${sendError.quoteFinalized ? 'warning' : 'error'}`} role="alert">
                 <div>
                   <strong>
-                    {correctableSendError
+                    {previewRefreshRequired
+                      ? 'Refresh and review the quotation email before sending.'
+                      : correctableSendError
                       ? 'Check the email details and try again.'
                       : sendError.kind === 'finalize'
                       ? 'The quotation was not finalized.'
@@ -242,10 +267,28 @@ const QuotationEmailPreviewDialog = ({
                       : 'The quotation email was not sent.'}
                   </strong>
                   <p>{sendError.detail}</p>
+                  {previewRefreshRequired && (
+                    <>
+                      <p>
+                        {frozenPreviewRefresh
+                          ? 'The failed provider attempt created an exact frozen email. Refreshing will load that read-only copy and require another explicit Send click.'
+                          : 'The quotation changed after this preview was prepared. Refreshing will load the latest quotation and require another explicit Send click.'}
+                      </p>
+                      {(onRefreshPreview || onRetryPreview) && (
+                        <button
+                          type="button"
+                          className="qm-secondary small"
+                          onClick={onRefreshPreview || onRetryPreview}
+                        >
+                          Refresh preview
+                        </button>
+                      )}
+                    </>
+                  )}
                   {correctableSendError && (
                     <p>Correct the recipient, CC, subject, message, or confirmation below. The quotation has not been sent.</p>
                   )}
-                  {!correctableSendError && !hardErrorStatus && sendError.quoteFinalized && sendError.retryable && (
+                  {!previewRefreshRequired && !correctableSendError && !hardErrorStatus && sendError.quoteFinalized && sendError.retryable && (
                     <p>No duplicate quotation will be created. Review the details and safely retry sending below.</p>
                   )}
                   {!correctableSendError && sendError.deliveryStatus === 'unknown' && (
@@ -257,8 +300,12 @@ const QuotationEmailPreviewDialog = ({
                   {!correctableSendError && sendError.deliveryStatus === 'sent' && (
                     <p>Gmail already recorded this quotation as sent. Duplicate sending is disabled.</p>
                   )}
-                  {!correctableSendError && !sendError.retryable && !hardErrorStatus && (
-                    <p>Sending cannot be retried from this preview. Resolve the reported issue or refresh the quotation first.</p>
+                  {!previewRefreshRequired && !correctableSendError && !sendError.retryable && !hardErrorStatus && (
+                    <p>
+                      {outboundSnapshotMismatch
+                        ? 'The frozen email cannot be edited. Create and review a quotation revision for different customer-facing content.'
+                        : 'Sending cannot be retried from this preview. Resolve the reported issue or refresh the quotation first.'}
+                    </p>
                   )}
                 </div>
               </div>
@@ -309,8 +356,8 @@ const QuotationEmailPreviewDialog = ({
                 <input
                   type="text"
                   value={toText}
-                  readOnly={isThreadReply}
-                  aria-readonly={isThreadReply}
+                  readOnly={isThreadReply || outboundSnapshotFrozen}
+                  aria-readonly={isThreadReply || outboundSnapshotFrozen}
                   onChange={(event) => {
                     setToText(event.target.value);
                     markEmailFieldEdited();
@@ -320,12 +367,15 @@ const QuotationEmailPreviewDialog = ({
                   autoComplete="off"
                 />
                 {isThreadReply && <small>Verified from the relevant inbound Gmail message.</small>}
+                {!isThreadReply && outboundSnapshotFrozen && <small>Frozen from the previous reviewed send attempt.</small>}
               </label>
               <label>
                 <span>CC</span>
                 <input
                   type="text"
                   value={ccText}
+                  readOnly={outboundSnapshotFrozen}
+                  aria-readonly={outboundSnapshotFrozen}
                   onChange={(event) => {
                     setCcText(event.target.value);
                     markEmailFieldEdited();
@@ -339,25 +389,26 @@ const QuotationEmailPreviewDialog = ({
                 <input
                   type="text"
                   value={subject}
-                  readOnly={isThreadReply}
-                  aria-readonly={isThreadReply}
+                  readOnly={isThreadReply || outboundSnapshotFrozen}
+                  aria-readonly={isThreadReply || outboundSnapshotFrozen}
                   onChange={(event) => {
                     setSubject(event.target.value);
                     markEmailFieldEdited();
                   }}
                 />
                 {isThreadReply && <small>Locked so Gmail keeps the reply in the correct conversation.</small>}
+                {!isThreadReply && outboundSnapshotFrozen && <small>Frozen from the previous reviewed send attempt.</small>}
               </label>
               <label className="qm-email-field-wide">
                 <span>Message <b aria-hidden="true">*</b></span>
-                <textarea rows="9" value={body} onChange={(event) => {
+                <textarea rows="9" value={body} readOnly={outboundSnapshotFrozen} aria-readonly={outboundSnapshotFrozen} onChange={(event) => {
                   setBody(event.target.value);
                   markEmailFieldEdited();
                 }} />
               </label>
             </div>
 
-            {!isThreadReply && onFindThread && (
+            {!isThreadReply && !outboundSnapshotFrozen && onFindThread && (
               <section className="qm-email-thread-finder" aria-label="Find original Gmail thread">
                 <div className="qm-email-thread-finder-heading">
                   <div>
@@ -412,9 +463,15 @@ const QuotationEmailPreviewDialog = ({
               <span className="qm-email-file-icon" aria-hidden="true">PDF</span>
               <div>
                 <strong>{normalized.attachment_filename}</strong>
-                <p>The finalized quotation PDF will be generated and attached by the server.</p>
+                <p>
+                  {outboundSnapshotFrozen
+                    ? 'The exact previously reviewed PDF and email bytes will be reused.'
+                    : 'The finalized quotation PDF will be generated and attached by the server.'}
+                </p>
               </div>
-              <span className="qm-email-attachment-status">Ready to attach</span>
+              <span className="qm-email-attachment-status">
+                {outboundSnapshotFrozen ? 'Frozen and verified' : 'Ready to attach'}
+              </span>
             </div>
 
             {!isThreadReply && (

@@ -25,7 +25,8 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 - **About Page** — Company info, services, contact, location, and full footer; inline SVG brand lockup matching site branding
 
 ### Admin
-- **Quotation Module** - Staff-only quotation workflow in `Admin Dashboard -> Quotations` for companies, product-backed internal/public items, company-specific aliases, manual/imported inquiries, historical finalized quotation PDF backfill, deterministic Excel/PDF import review with optional settings-controlled AI cleanup, price history, finalization, protected PDFs, and editable PDF branding settings including logo/signature/stamp images
+- **Quotation Module** - Staff-only quotation workflow in `Admin Dashboard -> Quotations` for companies, product-backed internal/public items, aliases, Gmail/manual inquiries, evidence review, optional AI cleanup, price history, finalization, protected PDFs, and reviewed Gmail delivery
+- **Gmail Quotation Assistant** - HTTP add-on for current/selected/AI-assisted messages inside the open thread; the website still requires employee review and keeps selling prices blank
 - **Accounting Module** - Accounting-permission-only overdue statement workflow in `Admin Dashboard -> Accounting` for monthly POS agewise outstanding imports, due-customer review, persistent customer emails/categories, protected statement PDFs, and ZIP downloads. V1 prepares files only and does not send emails.
 - **Product Management UI** — React-based CRUD with image upload, brand/category dropdowns, inline creation
 - **Category Management** — Hierarchical (parent → child) via Django admin at `/admin`
@@ -43,9 +44,10 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 - **PostgreSQL** (Neon serverless)
 - **JWT Authentication** — `djangorestframework-simplejwt`
 - **Cloudinary** — Image storage and CDN (`products/` and `brands/` paths)
-- **Gmail SMTP** — Transactional emails (password reset)
+- **Gmail SMTP and Gmail API** — Transactional mail, reviewed quotation replies/new messages, and canonical inquiry evidence
+- **OpenAI Responses API (optional)** — Strict-schema, review-only inquiry cleanup/analysis with `store=false`
 - **Gunicorn** + **WhiteNoise** — Production WSGI server and static file serving
-- **Railway** — Deployment with smart migration runner
+- **Railway** — Application hosting; migrations require an explicit, verified pre-deploy configuration
 - **Python 3.12** (deployment runtime: 3.12.8)
 
 ### Frontend
@@ -107,8 +109,9 @@ Frontend: http://localhost:3000
 
 ## Quality Checks
 
-Run these commands before opening a pull request. They mirror the checks in
-`.github/workflows/ci.yml`.
+Run these commands before opening a pull request. The workflow also has a
+separate PostgreSQL 17.10 `READ COMMITTED` quotation-concurrency job; use
+`.github/workflows/ci.yml` as the canonical CI definition.
 
 ### Backend
 
@@ -222,6 +225,8 @@ pharmacy-ecommerce/
 │   │       ├── validate_catalog.py        # Catalog integrity check
 │   │       ├── add_product_images.py      # Bulk image assignment
 │   │       └── import_brochure_images.py  # Import images from brochure PDF
+│   ├── quotations/                        # Quotation, Gmail, AI, PDF, evidence and delivery domain
+│   ├── accounting/                        # Statement/accounting workflow
 │   ├── pharmacy_api/                      # Django project settings
 │   ├── BACKEND_SCHEMA.md                  # Full backend reference
 │   ├── manage.py
@@ -258,7 +263,12 @@ pharmacy-ecommerce/
 │   │       └── axios.js                   # Axios instance with JWT interceptors
 │   └── package.json
 │
-├── current_status.md    # Detailed project status, API reference, catalog breakdown
+├── gmail_addon/                           # Google Workspace HTTP add-on manifest and guide
+├── GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md # Current Gmail/manual quotation architecture
+├── DEPLOYMENT.md                          # Versioned deployment guide
+├── OPERATIONS.md                          # Operational and recovery runbook
+├── TECHNICAL_HARDENING_PROGRESS.md        # Task-level implementation/test evidence
+├── current_status.md                      # Historical project snapshot; not current operations truth
 ├── SECURITY.md
 ├── README.md
 └── .gitignore
@@ -315,6 +325,12 @@ Import images: `python manage.py import_brochure_images [--pdf path] [--force] [
 
 ## Environment Variables
 
+The canonical backend inventory and defaults are in
+[`backend/.env.example`](backend/.env.example). The short local example below
+is intentionally incomplete; production operators must also follow
+[`DEPLOYMENT.md`](DEPLOYMENT.md), [`SECURITY.md`](SECURITY.md), and the
+[`gmail_addon/README.md`](gmail_addon/README.md) when those features are used.
+
 ### Backend (`backend/.env`)
 
 ```env
@@ -363,6 +379,23 @@ REACT_APP_API_URL=http://localhost:8000/api
 
 **Infrastructure:** Railway (backend + frontend), Neon PostgreSQL, Cloudinary CDN
 
+This table identifies intended service URLs, not a live configuration or
+security attestation. The dated production snapshot, migration caveat, private
+storage limitation, and rollback procedure are in
+[`DEPLOYMENT.md`](DEPLOYMENT.md) and [`OPERATIONS.md`](OPERATIONS.md).
+
+The repository prepares a guarded Railway pre-deploy command in
+[`backend/railway.json`](backend/railway.json). It is not active merely because
+the file exists: Railway must explicitly select `/backend/railway.json`, and
+the backend must receive a separately verified direct/unpooled
+`MIGRATION_DATABASE_URL` for the same PostgreSQL database. The normal web
+runtime continues to use its pooled `DATABASE_URL`, although Railway still
+exposes both service variables to build, pre-deploy, and runtime processes;
+sealing does not hide them from code in those processes. Do not use a
+more-privileged migration role in the shared service without explicit risk
+acceptance. See the deployment guide before enabling or running any migration,
+and do not bypass its advisory lock with raw `manage.py migrate`.
+
 ---
 
 ## Roadmap
@@ -388,7 +421,7 @@ REACT_APP_API_URL=http://localhost:8000/api
 - [x] Site-wide branding — inline SVG caduceus icon, gold accent, Arabic/English wordmark in hero and footer
 - [x] Deployed on Railway with custom domain (ameenpharmacy.ae)
 - [ ] Payment gateway — Stripe SDK installed and Order model fields ready; payment flow not yet live
-- [ ] Email order notifications
+- [x] Email order and status notifications
 - [ ] Customer reviews and ratings
 - [ ] Delivery zone / shipping calculator
 

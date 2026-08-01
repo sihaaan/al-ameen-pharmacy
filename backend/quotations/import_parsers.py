@@ -12,8 +12,6 @@ from django.core.exceptions import ValidationError
 from openpyxl import load_workbook as load_openpyxl_workbook
 from PIL import Image as PILImage
 from PIL import ImageOps, UnidentifiedImageError
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 from python_calamine import load_workbook as load_calamine_workbook
 
 try:
@@ -39,6 +37,17 @@ from .import_rules import (
     row_to_text,
     is_noise_line,
     summarize_lines,
+)
+from .attachment_inspection import (
+    PDFResourceLimitError,
+    inspect_pdf_attachment,
+    inspect_spreadsheet_attachment,
+    max_pdf_table_cells,
+    max_pdf_table_rows,
+    validate_pdf_page_geometry,
+    validate_pdf_text_count,
+    validate_pdf_text_output,
+    validate_pdf_word_output,
 )
 from .ocr import OCRProviderUnavailable, get_ocr_provider
 from .private_storage import store_import_source
@@ -84,6 +93,10 @@ def max_pdf_pages():
 
 def max_excel_sheets():
     return int(getattr(settings, "QUOTATION_IMPORT_MAX_EXCEL_SHEETS", 10))
+
+
+def max_excel_columns():
+    return max(1, int(getattr(settings, "QUOTATION_IMPORT_MAX_EXCEL_COLUMNS", 100)))
 
 
 def max_image_pixels():
@@ -404,6 +417,7 @@ def parse_file_preview(
     """
 
     filename = Path(getattr(uploaded_file, "name", "") or "").name
+    declared_content_type = str(getattr(uploaded_file, "content_type", "") or "")
     extension = Path(filename).suffix.lower()
     effective_max_bytes = max_image_upload_bytes(max_bytes) if extension in IMAGE_EXTENSIONS else max_bytes
     data = read_upload_bytes(uploaded_file, max_bytes=effective_max_bytes)
@@ -426,6 +440,7 @@ def parse_file_preview(
             sniffed_mime,
             sha256,
             extension=extension,
+            declared_content_type=declared_content_type,
         )
     elif extension == ".pdf":
         preview = parse_pdf_preview(
@@ -434,6 +449,7 @@ def parse_file_preview(
             sniffed_mime,
             sha256,
             max_pages=max_pdf_pages_override,
+            declared_content_type=declared_content_type,
         )
     else:
         preview = parse_image_preview(
@@ -555,15 +571,38 @@ def _fallback_parse_sheet_text(sheet_name, rows):
 def _openpyxl_rows(data):
     workbook = load_openpyxl_workbook(BytesIO(data), read_only=True, data_only=True)
     try:
-        for sheet in workbook.worksheets[: max_excel_sheets()]:
-            if getattr(sheet, "sheet_state", "visible") != "visible":
-                continue
+        visible_sheets = [
+            sheet
+            for sheet in workbook.worksheets
+            if getattr(sheet, "sheet_state", "visible") == "visible"
+        ]
+        sheet_limit_reached = len(visible_sheets) > max_excel_sheets()
+        for sheet in visible_sheets[: max_excel_sheets()]:
             rows = []
-            for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                rows.append((row_index, tuple(row)))
+            row_limit_reached = False
+            sheet_max_column = int(getattr(sheet, "max_column", 0) or 0)
+            column_limit_reached = sheet_max_column > max_excel_columns()
+            effective_max_column = max(
+                1,
+                min(max_excel_columns(), sheet_max_column or max_excel_columns()),
+            )
+            for row_index, row in enumerate(
+                sheet.iter_rows(values_only=True, max_col=effective_max_column),
+                start=1,
+            ):
                 if len(rows) >= max_excel_rows():
+                    row_limit_reached = True
                     break
-            yield sheet.title, rows, "openpyxl_structured_v2"
+                rows.append((row_index, tuple(row)))
+            yield sheet.title, rows, "openpyxl_structured_v2", {
+                "row_limit_reached": row_limit_reached,
+                "column_limit_reached": column_limit_reached,
+                "sheet_limit_reached": sheet_limit_reached,
+                "workbook_sheet_count": len(workbook.worksheets),
+                "visible_sheet_count": len(visible_sheets),
+                "hidden_sheet_count": len(workbook.worksheets) - len(visible_sheets),
+                "parser_fallback": False,
+            }
     finally:
         workbook.close()
 
@@ -571,14 +610,42 @@ def _openpyxl_rows(data):
 def _calamine_rows(data):
     workbook = load_calamine_workbook(BytesIO(data))
     try:
-        for sheet_name in workbook.sheet_names[: max_excel_sheets()]:
+        metadata_by_name = {
+            str(metadata.name): metadata
+            for metadata in (getattr(workbook, "sheets_metadata", None) or [])
+        }
+        visible_sheet_names = [
+            sheet_name
+            for sheet_name in workbook.sheet_names
+            if str(getattr(metadata_by_name.get(sheet_name), "visible", "visible"))
+            .rsplit(".", 1)[-1]
+            .lower()
+            == "visible"
+        ]
+        sheet_limit_reached = len(visible_sheet_names) > max_excel_sheets()
+        for sheet_name in visible_sheet_names[: max_excel_sheets()]:
             sheet = workbook.get_sheet_by_name(sheet_name)
             rows = []
+            row_limit_reached = False
+            column_limit_reached = False
             for row_index, row in enumerate(sheet.iter_rows(), start=1):
-                rows.append((row_index, tuple(row)))
                 if len(rows) >= max_excel_rows():
+                    row_limit_reached = True
                     break
-            yield sheet_name, rows, "calamine_structured_v2"
+                row_values = tuple(row)
+                if len(row_values) > max_excel_columns():
+                    column_limit_reached = True
+                rows.append((row_index, row_values[: max_excel_columns()]))
+            yield sheet_name, rows, "calamine_structured_v2", {
+                "row_limit_reached": row_limit_reached,
+                "column_limit_reached": column_limit_reached,
+                "sheet_limit_reached": sheet_limit_reached,
+                "workbook_sheet_count": len(workbook.sheet_names),
+                "visible_sheet_count": len(visible_sheet_names),
+                "hidden_sheet_count": len(workbook.sheet_names) - len(visible_sheet_names),
+                "merged_range_count": len(getattr(sheet, "merged_cell_ranges", None) or []),
+                "parser_fallback": False,
+            }
     finally:
         workbook.close()
 
@@ -586,24 +653,46 @@ def _calamine_rows(data):
 def _iter_excel_rows(data, extension):
     if extension == ".xlsx":
         try:
-            yield from _openpyxl_rows(data)
+            # Buffer the bounded result before yielding. If openpyxl fails on a
+            # later sheet, calamine can take over without duplicating sheets
+            # that were already emitted.
+            buffered = list(_openpyxl_rows(data))
+            yield from buffered
             return
         except Exception:
-            yield from _calamine_rows(data)
+            for sheet_name, rows, parser_name, iterator_meta in _calamine_rows(data):
+                yield sheet_name, rows, parser_name, {
+                    **iterator_meta,
+                    "parser_fallback": True,
+                }
             return
     yield from _calamine_rows(data)
 
 
-def parse_excel_preview(data, filename, content_type, sha256, *, extension=".xlsx", source_file_ref=""):
+def parse_excel_preview(
+    data,
+    filename,
+    content_type,
+    sha256,
+    *,
+    extension=".xlsx",
+    source_file_ref="",
+    declared_content_type="",
+):
     lines = []
-    warnings = []
+    inspection = inspect_spreadsheet_attachment(
+        data,
+        extension=extension,
+        declared_mime_type=declared_content_type,
+    )
+    warnings = list(inspection.get("warnings") or [])
     sheet_metadata = []
     fallback_candidates = []
     skipped_count = 0
     parser_used = "excel_structured_v2"
 
     try:
-        for sheet_name, rows, parser_name in _iter_excel_rows(data, extension):
+        for sheet_name, rows, parser_name, iterator_meta in _iter_excel_rows(data, extension):
             if not rows:
                 sheet_metadata.append(
                     {
@@ -617,19 +706,26 @@ def parse_excel_preview(data, filename, content_type, sha256, *, extension=".xls
                         "rows_seen": 0,
                         "parsed_rows": 0,
                         "skipped_rows": 0,
+                        **iterator_meta,
                     }
                 )
                 continue
             parser_used = parser_name
             sheet_lines, metadata = _parse_sheet_rows(sheet_name, rows, parser_name=parser_name)
+            metadata.update(iterator_meta)
             sheet_metadata.append(metadata)
             if metadata["selected"]:
                 lines.extend(sheet_lines)
                 skipped_count += metadata["skipped_rows"]
             else:
                 fallback_candidates.append((sheet_name, rows))
-            if len(rows) >= max_excel_rows():
+            if iterator_meta.get("row_limit_reached"):
                 warnings.append(f"Stopped reading sheet '{sheet_name}' after {max_excel_rows()} rows.")
+            if iterator_meta.get("column_limit_reached"):
+                warnings.append(
+                    f"Stopped reading columns in sheet '{sheet_name}' after "
+                    f"{max_excel_columns()} columns."
+                )
     except Exception as exc:
         raise ValidationError(f"Could not read Excel workbook: {exc}") from exc
 
@@ -644,6 +740,39 @@ def parse_excel_preview(data, filename, content_type, sha256, *, extension=".xls
         warnings.append("No item lines were detected in the Excel workbook.")
 
     selected_sheets = [sheet for sheet in sheet_metadata if sheet.get("selected")]
+    if any(sheet.get("sheet_limit_reached") for sheet in sheet_metadata):
+        warnings.append(
+            f"Workbook has more than {max_excel_sheets()} visible sheets; "
+            "later visible sheets were not parsed."
+        )
+    if any(sheet.get("parser_fallback") for sheet in sheet_metadata):
+        warnings.append(
+            "The primary XLSX reader could not complete the workbook, so a "
+            "bounded fallback reader was used. Review all extracted rows."
+        )
+    if len(selected_sheets) > 1:
+        warnings.append(
+            "Items were extracted from multiple sheets. Check for archived or "
+            "duplicated request rows; no rows were removed automatically."
+        )
+        signatures = {}
+        for line in lines:
+            signature = (
+                str(line.get("raw_name") or "").strip().casefold(),
+                str(line.get("quantity") or "").strip(),
+                str(line.get("unit") or "").strip().casefold(),
+            )
+            if not signature[0]:
+                continue
+            signatures.setdefault(signature, set()).add(
+                str(line.get("source_sheet") or "")
+            )
+        if any(len(sheet_names) > 1 for sheet_names in signatures.values()):
+            warnings.append(
+                "Potential duplicate item rows appear on more than one sheet. "
+                "They remain included for staff review."
+            )
+    warnings = list(dict.fromkeys(warnings))
     return _preview_response(
         source_type="excel",
         source_filename=filename,
@@ -661,26 +790,21 @@ def parse_excel_preview(data, filename, content_type, sha256, *, extension=".xls
             "inspected_sheets": [sheet["sheet_name"] for sheet in sheet_metadata],
             "source_file_ref": source_file_ref,
             "source_file_size": len(data),
+            "attachment_safety": inspection.get("safety") or {},
+            "spreadsheet_fidelity": inspection.get("fidelity") or {},
         },
     )
 
 
-def _preflight_pdf(data, *, max_pages=None):
-    if not data.startswith(b"%PDF-"):
-        raise ValidationError("Invalid PDF file. The upload does not look like a PDF.")
-    try:
-        reader = PdfReader(BytesIO(data))
-    except PdfReadError as exc:
-        raise ValidationError(f"Could not read PDF: {exc}") from exc
-    if reader.is_encrypted:
-        raise ValidationError("Encrypted PDF files are not supported. Please upload an unlocked PDF.")
-    page_count = len(reader.pages)
+def _preflight_pdf(data, *, max_pages=None, declared_content_type=""):
     effective_max_pages = max_pdf_pages() if max_pages is None else max(1, int(max_pages))
-    if page_count > effective_max_pages:
-        raise ValidationError(
-            f"PDF has {page_count} pages. Maximum supported pages: {effective_max_pages}."
-        )
-    return page_count
+    reader, inspection = inspect_pdf_attachment(
+        data,
+        declared_mime_type=declared_content_type,
+        max_pages=effective_max_pages,
+    )
+    page_count = len(reader.pages)
+    return page_count, inspection
 
 
 def _words_to_layout_text(words):
@@ -753,11 +877,34 @@ def _extract_pymupdf_text(data):
     if fitz is None:
         return text_chunks, word_layout_chunks, page_metadata
 
+    total_text_length = 0
+    total_layout_text_length = 0
+    total_word_count = 0
     with fitz.open(stream=data, filetype="pdf") as document:
         for page_number, page in enumerate(document, start=1):
+            validate_pdf_page_geometry(
+                page.rect.width,
+                page.rect.height,
+                page_number=page_number,
+            )
             words = page.get_text("words") or []
+            total_word_count = validate_pdf_word_output(
+                len(words),
+                current_total=total_word_count,
+                page_number=page_number,
+            )
             text = page.get_text("text") or ""
+            total_text_length = validate_pdf_text_output(
+                text,
+                current_total=total_text_length,
+                page_number=page_number,
+            )
             word_layout_text = _words_to_layout_text(words)
+            total_layout_text_length = validate_pdf_text_output(
+                word_layout_text,
+                current_total=total_layout_text_length,
+                page_number=page_number,
+            )
             text_chunks.append(text)
             word_layout_chunks.append(word_layout_text)
             page_metadata.append(
@@ -950,11 +1097,45 @@ def _parse_pdfplumber_tables(data):
     table_rows_seen = 0
     skipped_count = 0
     current_header = None
+    total_text_length = 0
+    total_table_rows = 0
+    total_table_cells = 0
+    total_table_text_length = 0
     with pdfplumber.open(BytesIO(data)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
+            validate_pdf_page_geometry(
+                page.width,
+                page.height,
+                page_number=page_index,
+            )
             page_tables_seen = 0
+            page_table_text_length = 0
             for table in page.extract_tables() or []:
                 table_rows_seen += len(table)
+                total_table_rows += len(table)
+                total_table_cells += sum(len(row or []) for row in table)
+                if total_table_rows > max_pdf_table_rows():
+                    raise PDFResourceLimitError(
+                        "PDF table extraction exceeds the safe row limit."
+                    )
+                if total_table_cells > max_pdf_table_cells():
+                    raise PDFResourceLimitError(
+                        "PDF table extraction exceeds the safe cell limit."
+                    )
+                table_text_length = sum(
+                    len(str(cell or ""))
+                    for row in table
+                    for cell in (row or [])
+                )
+                page_table_text_length += table_text_length
+                validate_pdf_text_count(
+                    page_table_text_length,
+                    page_number=page_index,
+                )
+                total_table_text_length = validate_pdf_text_count(
+                    table_text_length,
+                    current_total=total_table_text_length,
+                )
                 page_tables_seen += 1
                 rows = [(index + 1, tuple(row or [])) for index, row in enumerate(table)]
                 header = detect_header_row([row for _, row in rows], max_scan_rows=10)
@@ -999,6 +1180,11 @@ def _parse_pdfplumber_tables(data):
                         if parsed:
                             lines.append(parsed)
             extracted_text = page.extract_text() or ""
+            total_text_length = validate_pdf_text_output(
+                extracted_text,
+                current_total=total_text_length,
+                page_number=page_index,
+            )
             page_metadata.append(
                 {
                     "page_number": page_index,
@@ -1066,11 +1252,64 @@ def _parse_pdf_word_layout_item_rows(raw_text):
     return parsed_rows
 
 
-def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="", max_pages=None):
-    page_count = _preflight_pdf(data, max_pages=max_pages)
-    warnings = []
+def parse_pdf_preview(
+    data,
+    filename,
+    content_type,
+    sha256,
+    *,
+    source_file_ref="",
+    max_pages=None,
+    declared_content_type="",
+):
+    page_count, inspection = _preflight_pdf(
+        data,
+        max_pages=max_pages,
+        declared_content_type=declared_content_type,
+    )
+    warnings = list(inspection.get("warnings") or [])
     skipped_count = 0
-    pymupdf_text_chunks, pymupdf_word_layout_chunks, pymupdf_page_metadata = _extract_pymupdf_text(data)
+    if not bool((inspection.get("safety") or {}).get("local_traversal_safe", True)):
+        warnings.append(
+            "Local PDF extraction was skipped because one or more stream filter "
+            "chains cannot be decoded with a bounded in-process preflight. Convert "
+            "the document to a standard PDF or add the request rows manually."
+        )
+        return _preview_response(
+            source_type="pdf",
+            source_filename=filename,
+            source_mime_type=content_type or PDF_MIME,
+            source_sha256=sha256,
+            source_file_ref=source_file_ref,
+            source_file_size=len(data),
+            parse_method="bounded_pdf_local_extraction_skipped_v1",
+            original_text="",
+            lines=[],
+            warnings=warnings,
+            skipped_count=0,
+            meta={
+                "page_count": page_count,
+                "page_metadata": [],
+                "pdfplumber_page_metadata": [],
+                "table_rows_seen": 0,
+                "source_file_ref": source_file_ref,
+                "source_file_size": len(data),
+                "attachment_safety": inspection.get("safety") or {},
+                "pdf_fidelity": inspection.get("fidelity") or {},
+            },
+        )
+    try:
+        (
+            pymupdf_text_chunks,
+            pymupdf_word_layout_chunks,
+            pymupdf_page_metadata,
+        ) = _extract_pymupdf_text(data)
+    except PDFResourceLimitError:
+        raise
+    except Exception as exc:
+        raise ValidationError(
+            "Could not safely extract text from this PDF. The document may be malformed."
+        ) from exc
     selectable_text = "\n".join(chunk for chunk in pymupdf_text_chunks if chunk and chunk.strip()).strip()
     selectable_word_layout = "\n".join(
         chunk for chunk in pymupdf_word_layout_chunks if chunk and chunk.strip()
@@ -1091,6 +1330,8 @@ def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="
                     "Extracted PDF tables contained headers or metadata but no plausible item rows; "
                     "used selectable text layout instead."
                 )
+        except PDFResourceLimitError:
+            raise
         except Exception as exc:
             warnings.append(f"PDF table extraction failed; fell back to text lines. Detail: {exc}")
 
@@ -1115,6 +1356,7 @@ def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="
     if not selectable_text:
         ocr_text, ocr_warning = _try_ocr_fallback(data, filename)
         if ocr_text:
+            validate_pdf_text_output(ocr_text)
             ocr_lines, ocr_skipped = parse_text_lines(ocr_text)
             lines = ocr_lines
             selectable_text = ocr_text
@@ -1148,5 +1390,7 @@ def parse_pdf_preview(data, filename, content_type, sha256, *, source_file_ref="
             "table_rows_seen": table_rows_seen,
             "source_file_ref": source_file_ref,
             "source_file_size": len(data),
+            "attachment_safety": inspection.get("safety") or {},
+            "pdf_fidelity": inspection.get("fidelity") or {},
         },
     )

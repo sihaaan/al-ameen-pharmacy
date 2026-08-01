@@ -1,4 +1,5 @@
 import base64
+import json
 import tempfile
 from io import BytesIO
 from unittest.mock import patch
@@ -15,8 +16,10 @@ from rest_framework.test import APITestCase
 from api.models import Product
 
 from .ai_parsing import (
+    AI_PARSE_JSON_SCHEMA,
     AIParseError,
     AIProviderUnavailable,
+    ai_parse_contract_descriptor,
     clean_image_bytes_with_ai,
     clean_preview_with_ai,
 )
@@ -25,7 +28,16 @@ from .import_parsers import (
     normalize_image_bytes_for_ai,
     parse_file_preview,
 )
-from .models import AIParseLog, Company, Inquiry, ProductAlias, Quotation, QuotationSettings
+from .models import (
+    AIParseCache,
+    AIParseLog,
+    Company,
+    Inquiry,
+    ProductAlias,
+    Quotation,
+    QuotationLine,
+    QuotationSettings,
+)
 from .serializers import ImportedInquiryCreateSerializer
 
 
@@ -204,6 +216,127 @@ class InquiryImageAITests(TestCase):
         }
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_text_cache_rebinds_current_upload_and_omits_source_payload(self):
+        provider = RecordingVisionProvider()
+        first_preview = {
+            "source_type": Inquiry.SOURCE_TYPE_EXCEL,
+            "source_filename": "customer-request.xlsx",
+            "source_mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "source_sha256": "a" * 64,
+            "source_file_ref": "inquiry_sources/first/customer-request.xlsx",
+            "source_file_size": 2048,
+            "parse_method": "openpyxl_structured_v2",
+            "original_text": "PRIVATE BUYER NOTE THAT IS NOT PART OF AN ITEM ROW",
+            "lines": [
+                {
+                    "raw_name": "Gloves Medium",
+                    "quantity": "5",
+                    "unit": "boxes",
+                    "raw_line": "Gloves Medium 5 boxes",
+                }
+            ],
+            "warnings": [],
+            "meta": {
+                "source_file_ref": "inquiry_sources/first/customer-request.xlsx",
+                "source_file_size": 2048,
+                "selected_sheets": [{"sheet_name": "Request", "selected": True}],
+                "ai_cleanup_rejected": True,
+                "ai_cleanup_rejection_reason": "client-forged-on-cache-miss",
+            },
+        }
+        second_preview = {
+            **first_preview,
+            "source_file_ref": "inquiry_sources/second/customer-request.xlsx",
+            "meta": {
+                **first_preview["meta"],
+                "source_file_ref": "inquiry_sources/stale-browser-value.xlsx",
+                "current_upload_marker": "second-upload",
+                "ai_provider": "client-forged-provider",
+                "ai_usage": {"private_trace": "must-not-win"},
+                "ai_cleanup_rejected": True,
+                "ai_cleanup_rejection_reason": "client-forged-reason",
+            },
+        }
+
+        with patch(
+            "quotations.ai_parsing.get_ai_parse_provider",
+            return_value=provider,
+        ):
+            first = clean_preview_with_ai(
+                first_preview,
+                actor=self.staff,
+                requested_mode="text",
+            )
+            self.assertNotIn("ai_cleanup_rejected", first["meta"])
+            self.assertNotIn("ai_cleanup_rejection_reason", first["meta"])
+
+            cached = AIParseCache.objects.get()
+            cached_payload = cached.result
+            for field in (
+                "source_type",
+                "source_filename",
+                "source_mime_type",
+                "source_sha256",
+                "source_file_ref",
+                "source_file_size",
+                "parse_method",
+                "original_text",
+                "cache_hit",
+            ):
+                self.assertNotIn(field, cached_payload)
+            serialized_cache = json.dumps(cached_payload, sort_keys=True)
+            self.assertNotIn("PRIVATE BUYER NOTE", serialized_cache)
+            self.assertNotIn("inquiry_sources/first", serialized_cache)
+            self.assertNotIn("selected_sheets", serialized_cache)
+            self.assertNotIn("ai_usage", cached_payload["meta"])
+            self.assertEqual(cached_payload["lines"][0]["raw_line"], "Gloves Medium 5 boxes")
+
+            # Legacy rows may still contain an earlier upload's full payload.
+            # Reads must filter them without requiring destructive deletion.
+            cached.result = {
+                **cached_payload,
+                "source_file_ref": "inquiry_sources/legacy/private.xlsx",
+                "original_text": "LEGACY PRIVATE BODY",
+                "legacy_private_key": "LEGACY PRIVATE VALUE",
+                "meta": {
+                    **cached_payload["meta"],
+                    "source_file_ref": "inquiry_sources/legacy/private.xlsx",
+                    "legacy_private_meta": "LEGACY PRIVATE META",
+                    "ai_usage": {"provider_private_trace": "LEGACY TRACE"},
+                },
+            }
+            cached.save(update_fields=["result", "updated_at"])
+
+            second = clean_preview_with_ai(
+                second_preview,
+                actor=self.staff,
+                requested_mode="text",
+            )
+
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(
+            second["source_file_ref"],
+            "inquiry_sources/second/customer-request.xlsx",
+        )
+        self.assertEqual(
+            second["meta"]["source_file_ref"],
+            "inquiry_sources/second/customer-request.xlsx",
+        )
+        self.assertEqual(second["meta"]["current_upload_marker"], "second-upload")
+        self.assertEqual(second["meta"]["ai_provider"], "openai")
+        self.assertEqual(second["meta"]["ai_usage"], {})
+        self.assertNotIn("ai_cleanup_rejected", second["meta"])
+        self.assertNotIn("ai_cleanup_rejection_reason", second["meta"])
+        self.assertNotIn("legacy_private_key", second)
+        self.assertNotIn("legacy_private_meta", second["meta"])
+        self.assertEqual(
+            second["parse_method"],
+            "openpyxl_structured_v2+ai_text_cleanup",
+        )
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_in_memory_image_uses_normalized_vision_input_and_cache(self):
         exif = PILImage.Exif()
         exif[274] = 6
@@ -259,6 +392,37 @@ class InquiryImageAITests(TestCase):
             self.assertFalse(image.getexif())
         self.assertIn("untrusted document content", call["instructions"])
         self.assertEqual(AIParseLog.objects.filter(mode="vision", success=True).count(), 2)
+        provider_log, cache_log = list(
+            AIParseLog.objects.filter(mode="vision", success=True).order_by("created_at", "id")
+        )
+        provider_observation = provider_log.usage["observability"]
+        expected_contract = ai_parse_contract_descriptor(
+            pipeline_version="manual_ai_cleanup_v1",
+            schema_name=call["schema_name"],
+            instructions=call["instructions"],
+            schema=call["json_schema"] or AI_PARSE_JSON_SCHEMA,
+        )
+        self.assertEqual(provider_observation["route"], "manual")
+        self.assertEqual(provider_observation["contract"], expected_contract)
+        self.assertTrue(provider_observation["provider_call_attempted"])
+        self.assertFalse(provider_observation["application_cache_hit"])
+        self.assertEqual(provider_observation["cost_basis"]["input_tokens"], 10)
+        self.assertEqual(provider_observation["cost_basis"]["output_tokens"], 15)
+        self.assertEqual(provider_observation["source_shape"]["image_count"], 1)
+        self.assertTrue(
+            {"source_preparation", "cache_lookup", "provider", "validation", "cache_write", "total"}
+            <= set(provider_observation["timings_ms"])
+        )
+        cache_observation = cache_log.usage["observability"]
+        self.assertTrue(cache_observation["application_cache_hit"])
+        self.assertFalse(cache_observation["provider_call_attempted"])
+        self.assertEqual(cache_observation["cost_basis"]["total_tokens"], 0)
+        persisted_metrics = json.dumps(
+            [provider_log.usage, cache_log.usage],
+            sort_keys=True,
+        )
+        self.assertNotIn("phone-inquiry.jpg", persisted_metrics)
+        self.assertNotIn("inquiry_sources/second.jpg", persisted_metrics)
         self.assertEqual(ProductAlias.objects.count(), 0)
         self.assertEqual(Quotation.objects.count(), 0)
 
@@ -285,10 +449,14 @@ class InquiryImageAITests(TestCase):
                 clean_image_bytes_with_ai(data, parsed, actor=self.staff)
 
         log = AIParseLog.objects.get(success=False, mode="vision")
-        self.assertEqual(
-            log.usage,
-            {"input_tokens": 21, "output_tokens": 3},
-        )
+        self.assertEqual(log.usage["input_tokens"], 21)
+        self.assertEqual(log.usage["output_tokens"], 3)
+        observation = log.usage["observability"]
+        self.assertEqual(observation["outcome"], "failure")
+        self.assertEqual(observation["failure_stage"], "validation")
+        self.assertTrue(observation["provider_call_attempted"])
+        self.assertEqual(observation["cost_basis"]["total_tokens"], 24)
+        self.assertGreaterEqual(observation["timings_ms"]["total"], 0)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_private_image_preview_auto_selects_vision_mode(self):
@@ -319,10 +487,19 @@ class InquiryImageAITests(TestCase):
                 first = clean_image_bytes_with_ai(data, parsed, actor=self.staff)
             with patch("quotations.ai_parsing._ai_instructions", return_value="contract version two"):
                 second = clean_image_bytes_with_ai(data, parsed, actor=self.staff)
+            with patch(
+                "quotations.ai_parsing.MANUAL_AI_PIPELINE_VERSION",
+                "manual_ai_cleanup_v2",
+            ), patch(
+                "quotations.ai_parsing._ai_instructions",
+                return_value="contract version two",
+            ):
+                third = clean_image_bytes_with_ai(data, parsed, actor=self.staff)
 
         self.assertFalse(first["cache_hit"])
         self.assertFalse(second["cache_hit"])
-        self.assertEqual(len(provider.calls), 2)
+        self.assertFalse(third["cache_hit"])
+        self.assertEqual(len(provider.calls), 3)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_private_image_storage_read_error_is_a_controlled_ai_error(self):
@@ -457,9 +634,58 @@ class InquiryImageParseFileAPITests(APITestCase):
         self.assertEqual(response.data["lines"][0]["raw_name"], "Gloves Medium")
         self.assertEqual(response.data["lines"][0]["matched_product"], self.product.id)
         self.assertEqual(response.data["lines"][0]["match_status"], "confirmed")
+        self.assertIsNone(response.data["lines"][0]["unit_price"])
+        self.assertIsNone(response.data["lines"][0]["vat_rate"])
+        self.assertIsNone(response.data["lines"][0]["vat_amount"])
+        self.assertIsNone(response.data["lines"][0]["line_total"])
+        self.assertEqual(response.data["lines"][0]["customer_unit_price"], "12.00")
+        self.assertEqual(response.data["lines"][0]["customer_line_total"], "63.00")
+        self.assertEqual(
+            response.data["lines"][0]["customer_vat"],
+            "VAT rate 5%; VAT amount 3.00",
+        )
+        self.assertIn(
+            "Customer/source unit price: 12.00",
+            response.data["lines"][0]["notes"],
+        )
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(provider.calls[0]["mode"], "vision")
         self.assertEqual(len(provider.calls[0]["image_data_urls"]), 1)
+
+        extracted = response.data["lines"][0]
+        inquiry = self.client.post(
+            reverse("quotation-inquiry-create-imported"),
+            {
+                "company": self.company.id,
+                "subject": "Screenshot prices are evidence",
+                "source_type": Inquiry.SOURCE_TYPE_IMAGE,
+                "source_filename": response.data["source_filename"],
+                "source_mime_type": response.data["source_mime_type"],
+                "source_sha256": response.data["source_sha256"],
+                "lines": [
+                    {
+                        "raw_name": extracted["raw_name"],
+                        "raw_line": extracted["raw_line"],
+                        "quantity": extracted["quantity"],
+                        "unit": extracted["unit"],
+                        "unit_price": extracted["unit_price"],
+                        "vat_rate": extracted["vat_rate"] or "0",
+                        "notes": extracted["notes"],
+                        "parse_status": extracted["parse_status"],
+                        "parse_confidence": extracted["parse_confidence"],
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(inquiry.status_code, status.HTTP_201_CREATED)
+        quote = self.client.post(
+            reverse("quotation-inquiry-create-quote", args=[inquiry.data["id"]])
+        )
+        self.assertEqual(quote.status_code, status.HTTP_201_CREATED)
+        quotation_line = QuotationLine.objects.get(quotation_id=quote.data["id"])
+        self.assertIsNone(quotation_line.unit_price)
+        self.assertIn("Customer/source unit price: 12.00", quotation_line.notes)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_image_ai_failure_returns_clear_400_without_saving_an_inquiry(self):

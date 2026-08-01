@@ -2371,12 +2371,17 @@ def remember_quotation_line_alias(line, actor):
 
 @transaction.atomic
 def create_product_from_quotation_line(line, actor, product_name="", *, confirm_create=False):
+    quotation = (
+        _quotations_for_update()
+        .select_related("company")
+        .get(pk=line.quotation_id)
+    )
     line = (
         _quotation_lines_for_update()
         .select_related("quotation__company", "inquiry_line")
-        .get(pk=line.pk)
+        .get(pk=line.pk, quotation=quotation)
     )
-    ensure_quotation_editable(line.quotation)
+    ensure_quotation_editable(quotation)
     resolution = _get_or_create_internal_product_from_line(
         line,
         actor,
@@ -2396,7 +2401,7 @@ def create_product_from_quotation_line(line, actor, product_name="", *, confirm_
             else resolution.match.reason
         ),
     )
-    recalculate_quotation_totals(line.quotation)
+    recalculate_quotation_totals(quotation)
     return line, resolution
 
 

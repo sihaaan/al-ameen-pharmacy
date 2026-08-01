@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from datetime import timedelta
 from pathlib import Path
+import json
 import os
 import re
 from urllib.parse import urlparse
@@ -228,9 +229,84 @@ QUOTATION_PAYMENT_TERMS = os.environ.get("QUOTATION_PAYMENT_TERMS", "As per mutu
 QUOTATION_IMPORT_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_IMPORT_MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 QUOTATION_IMPORT_MAX_EXCEL_ROWS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_ROWS", "500"))
 QUOTATION_IMPORT_MAX_EXCEL_SHEETS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_SHEETS", "10"))
+QUOTATION_IMPORT_MAX_EXCEL_COLUMNS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXCEL_COLUMNS", "100"))
 QUOTATION_IMPORT_MAX_PDF_PAGES = int(os.environ.get("QUOTATION_IMPORT_MAX_PDF_PAGES", "10"))
+QUOTATION_IMPORT_MAX_PDF_OBJECTS = int(os.environ.get("QUOTATION_IMPORT_MAX_PDF_OBJECTS", "20000"))
+QUOTATION_IMPORT_MAX_PDF_STREAMS = int(os.environ.get("QUOTATION_IMPORT_MAX_PDF_STREAMS", "5000"))
+QUOTATION_IMPORT_MAX_PDF_DECODED_STREAM_BYTES = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_DECODED_STREAM_BYTES", str(32 * 1024 * 1024))
+)
+QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES", str(64 * 1024 * 1024))
+)
+QUOTATION_IMPORT_MAX_PDF_PAGE_DIMENSION_POINTS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_PAGE_DIMENSION_POINTS", "10000")
+)
+QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS", "16000000")
+)
+QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS", "25000000")
+)
+QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS", "25000000")
+)
+QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE", "250000")
+)
+QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS", "1000000")
+)
+QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE", "50000")
+)
+QUOTATION_IMPORT_MAX_PDF_TOTAL_WORDS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TOTAL_WORDS", "250000")
+)
+QUOTATION_IMPORT_MAX_PDF_TABLE_ROWS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TABLE_ROWS", "20000")
+)
+QUOTATION_IMPORT_MAX_PDF_TABLE_CELLS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TABLE_CELLS", "100000")
+)
+QUOTATION_IMPORT_MAX_ARCHIVE_ENTRIES = int(os.environ.get("QUOTATION_IMPORT_MAX_ARCHIVE_ENTRIES", "2048"))
+QUOTATION_IMPORT_MAX_ARCHIVE_UNCOMPRESSED_BYTES = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_ARCHIVE_UNCOMPRESSED_BYTES", str(128 * 1024 * 1024))
+)
+QUOTATION_IMPORT_MAX_ARCHIVE_MEMBER_BYTES = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_ARCHIVE_MEMBER_BYTES", str(32 * 1024 * 1024))
+)
+QUOTATION_PRICE_REFERENCE_MAX_EXCEL_ROWS = int(
+    os.environ.get("QUOTATION_PRICE_REFERENCE_MAX_EXCEL_ROWS", "5000")
+)
 QUOTATION_IMPORT_STORE_SOURCE_FILES = bool(int(os.environ.get("QUOTATION_IMPORT_STORE_SOURCE_FILES", "1")))
 QUOTATION_PRIVATE_STORAGE_ROOT = os.environ.get("QUOTATION_PRIVATE_STORAGE_ROOT", str(BASE_DIR / "private_media" / "quotations"))
+QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES = int(
+    os.environ.get(
+        "QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES",
+        str(QUOTATION_IMPORT_MAX_UPLOAD_BYTES),
+    )
+)
+if QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES < 1:
+    raise ImproperlyConfigured("QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES must be positive.")
+QUOTATION_EVIDENCE_STORAGE_BACKEND = os.environ.get(
+    "QUOTATION_EVIDENCE_STORAGE_BACKEND",
+    "quotations.private_storage.QuotationEvidenceFileSystemStorage",
+).strip()
+if not QUOTATION_EVIDENCE_STORAGE_BACKEND:
+    raise ImproperlyConfigured("QUOTATION_EVIDENCE_STORAGE_BACKEND cannot be empty.")
+try:
+    QUOTATION_EVIDENCE_STORAGE_OPTIONS = json.loads(
+        os.environ.get("QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON", "{}")
+    )
+except json.JSONDecodeError as exc:
+    raise ImproperlyConfigured(
+        "QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON must be a JSON object."
+    ) from exc
+if not isinstance(QUOTATION_EVIDENCE_STORAGE_OPTIONS, dict):
+    raise ImproperlyConfigured(
+        "QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON must be a JSON object."
+    )
 QUOTATION_IMPORT_OCR_PROVIDER = os.environ.get("QUOTATION_IMPORT_OCR_PROVIDER", "")
 QUOTATION_LOGO_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_LOGO_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
@@ -282,7 +358,7 @@ QUOTATION_AI_NATIVE_MAX_SPREADSHEET_ROWS_PER_SHEET = int(
 # mailbox file processing; production must opt in explicitly.
 QUOTATION_MAILBOX_AI_VISION_ENABLED = env_bool("QUOTATION_MAILBOX_AI_VISION_ENABLED", False)
 
-# ---- Gmail read-only OAuth for quotation contract intelligence ----
+# ---- Gmail OAuth for quotation discovery and explicit reviewed delivery ----
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
@@ -293,6 +369,13 @@ GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").stri
 GMAIL_ADDON_ENABLED = env_bool("GMAIL_ADDON_ENABLED", False)
 GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL = os.environ.get("GMAIL_ADDON_SERVICE_ACCOUNT_EMAIL", "").strip().lower()
 GMAIL_ADDON_SHARED_MAILBOX_EMAIL = os.environ.get("GMAIL_ADDON_SHARED_MAILBOX_EMAIL", "").strip().lower()
+# Roll this out only after the expected mailbox above has been verified in the
+# deployed environment.  When enabled, website OAuth and every shared-only
+# resolver fail closed unless the Google profile is that exact mailbox.
+QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED = env_bool(
+    "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",
@@ -365,6 +448,10 @@ if cloudinary_url:
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
         },
+        "quotation_evidence": {
+            "BACKEND": QUOTATION_EVIDENCE_STORAGE_BACKEND,
+            "OPTIONS": QUOTATION_EVIDENCE_STORAGE_OPTIONS,
+        },
     }
 else:
     # Development: Use local filesystem for both
@@ -374,6 +461,10 @@ else:
         },
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+        "quotation_evidence": {
+            "BACKEND": QUOTATION_EVIDENCE_STORAGE_BACKEND,
+            "OPTIONS": QUOTATION_EVIDENCE_STORAGE_OPTIONS,
         },
     }
 

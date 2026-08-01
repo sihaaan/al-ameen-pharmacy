@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation
@@ -11,6 +12,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from .attachment_inspection import inspect_pdf_attachment
 from .import_rules import (
     is_obvious_po_metadata_item,
     preserve_specific_item_details,
@@ -41,6 +43,10 @@ AI_DETERMINISTIC_GUARD_WARNING = (
     "AI cleanup was rejected because it removed or changed high-confidence deterministic item data; "
     "the deterministic extraction was kept for staff review."
 )
+AI_CUSTOMER_EVIDENCE_GUARD_WARNING = (
+    "AI cleanup was rejected because customer price evidence could not be mapped "
+    "back to a unique source row; the deterministic extraction was kept for staff review."
+)
 
 # In-memory vision is used for Gmail attachments that deliberately must not be
 # copied into private import storage.  Keep a hard ceiling in addition to the
@@ -51,6 +57,202 @@ DEFAULT_HARD_MAX_PDF_BYTES = 10 * 1024 * 1024
 DEFAULT_HARD_MAX_PDF_PAGES = 50
 DEFAULT_HARD_MAX_RENDERED_PAGES = 5
 DEFAULT_HARD_MAX_IMAGE_DIMENSION = 2000
+
+AI_PARSE_OBSERVABILITY_VERSION = "ai_parse_observability_v1"
+MANUAL_AI_PIPELINE_VERSION = "manual_ai_cleanup_v1"
+MAILBOX_PO_AI_PIPELINE_VERSION = "mailbox_po_vision_v1"
+AI_PARSE_TIMING_KEYS = (
+    "source_preparation",
+    "cache_lookup",
+    "provider",
+    "validation",
+    "cache_write",
+    "total",
+)
+AI_PARSE_SOURCE_SHAPE_KEYS = (
+    "text_chars",
+    "input_rows",
+    "output_rows",
+    "source_bytes",
+    "page_count",
+    "image_count",
+    "message_count",
+    "file_count",
+    "source_count",
+)
+AI_PARSE_FAILURE_STAGES = {
+    "",
+    "cache_lookup",
+    "provider",
+    "validation",
+    "cache_write",
+}
+
+
+def ai_parse_elapsed_ms(started_at):
+    """Return a bounded monotonic duration without carrying source content."""
+
+    return round(max(0.0, time.perf_counter() - started_at) * 1000, 1)
+
+
+def _nonnegative_int(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, number)
+
+
+def _numeric_snapshot(values, allowed_keys, *, decimal=False):
+    values = values if isinstance(values, dict) else {}
+    result = {}
+    for key in allowed_keys:
+        if key not in values:
+            continue
+        if decimal:
+            try:
+                value = round(max(0.0, float(values[key])), 1)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        else:
+            value = _nonnegative_int(values[key])
+        result[key] = value
+    return result
+
+
+def sanitize_ai_provider_usage(usage):
+    """Allow-list numeric billing fields from a provider response.
+
+    Provider usage objects are external data. Persisting arbitrary future keys
+    could accidentally turn an audit metric into content storage, so only
+    documented numeric token counters are retained.
+    """
+
+    usage = usage if isinstance(usage, dict) else {}
+    sanitized = _numeric_snapshot(
+        usage,
+        ("input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens"),
+    )
+    for field, allowed in (
+        ("input_tokens_details", ("cached_tokens",)),
+        ("prompt_tokens_details", ("cached_tokens",)),
+        ("output_tokens_details", ("reasoning_tokens",)),
+        ("completion_tokens_details", ("reasoning_tokens",)),
+    ):
+        details = _numeric_snapshot(usage.get(field), allowed)
+        if details:
+            sanitized[field] = details
+    return sanitized
+
+
+def ai_parse_contract_descriptor(*, pipeline_version, schema_name, instructions, schema):
+    """Fingerprint the exact existing prompt/schema without storing either."""
+
+    prompt_sha256 = hashlib.sha256(str(instructions or "").encode("utf-8")).hexdigest()
+    schema_bytes = json.dumps(
+        schema or {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    schema_sha256 = hashlib.sha256(schema_bytes).hexdigest()
+    contract_sha256 = hashlib.sha256(
+        f"{pipeline_version}:{schema_name}:{prompt_sha256}:{schema_sha256}".encode("utf-8")
+    ).hexdigest()
+    return {
+        "pipeline_version": str(pipeline_version or "")[:80],
+        "schema_name": str(schema_name or "")[:80],
+        "prompt_sha256": prompt_sha256,
+        "schema_sha256": schema_sha256,
+        "contract_sha256": contract_sha256,
+    }
+
+
+def build_ai_parse_observation(
+    *,
+    route,
+    contract,
+    provider_usage=None,
+    timings_ms=None,
+    source_shape=None,
+    provider_call_attempted,
+    application_cache_hit=False,
+    outcome="success",
+    failure_stage="",
+):
+    """Build the common content-free telemetry envelope for both intake paths."""
+
+    safe_usage = sanitize_ai_provider_usage(provider_usage)
+    contract = contract if isinstance(contract, dict) else {}
+    safe_contract = {}
+    for key in ("pipeline_version", "schema_name"):
+        value = str(contract.get(key) or "")
+        safe_contract[key] = (
+            value[:80]
+            if re.fullmatch(r"[a-zA-Z0-9_.:-]{1,80}", value)
+            else ""
+        )
+    for key in ("prompt_sha256", "schema_sha256", "contract_sha256"):
+        value = str(contract.get(key) or "").lower()
+        safe_contract[key] = value if re.fullmatch(r"[a-f0-9]{64}", value) else ""
+    input_tokens = _nonnegative_int(
+        safe_usage.get("input_tokens", safe_usage.get("prompt_tokens", 0))
+    )
+    output_tokens = _nonnegative_int(
+        safe_usage.get("output_tokens", safe_usage.get("completion_tokens", 0))
+    )
+    input_details = safe_usage.get("input_tokens_details") or safe_usage.get(
+        "prompt_tokens_details"
+    ) or {}
+    output_details = safe_usage.get("output_tokens_details") or safe_usage.get(
+        "completion_tokens_details"
+    ) or {}
+    cached_input_tokens = min(
+        input_tokens,
+        _nonnegative_int(input_details.get("cached_tokens")),
+    )
+    reported_total = _nonnegative_int(safe_usage.get("total_tokens"))
+    total_tokens = reported_total or input_tokens + output_tokens
+    safe_failure_stage = str(failure_stage or "")
+    if safe_failure_stage not in AI_PARSE_FAILURE_STAGES:
+        safe_failure_stage = ""
+    safe_outcome = str(outcome or "failure")
+    if safe_outcome not in {"success", "failure", "cache_hit"}:
+        safe_outcome = "failure"
+    return {
+        "version": AI_PARSE_OBSERVABILITY_VERSION,
+        "route": (
+            str(route)
+            if str(route) in {"manual", "gmail", "gmail_mailbox_po"}
+            else "unknown"
+        ),
+        "outcome": safe_outcome,
+        "failure_stage": safe_failure_stage,
+        "provider_call_attempted": bool(provider_call_attempted),
+        "application_cache_hit": bool(application_cache_hit),
+        "contract": safe_contract,
+        "timings_ms": _numeric_snapshot(
+            timings_ms,
+            AI_PARSE_TIMING_KEYS,
+            decimal=True,
+        ),
+        "cost_basis": {
+            "usage_reported": bool(safe_usage),
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "uncached_input_tokens": max(0, input_tokens - cached_input_tokens),
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": _nonnegative_int(
+                output_details.get("reasoning_tokens")
+            ),
+            "total_tokens": total_tokens,
+        },
+        "source_shape": _numeric_snapshot(
+            source_shape,
+            AI_PARSE_SOURCE_SHAPE_KEYS,
+        ),
+    }
 
 
 AI_PARSE_JSON_SCHEMA = {
@@ -267,8 +469,8 @@ class OpenAIResponsesParseProvider(AIParseProvider):
                     "file_data": f"data:{mime_type};base64,{encoded}",
                 }
                 if mime_type == "application/pdf":
-                    # GPT-5.4 defaults PDF page images to low detail. Dense RFQ
-                    # tables need high detail so column relationships survive.
+                    # Request high detail explicitly for dense RFQ tables so
+                    # behavior does not depend on a configurable model's default.
                     item["detail"] = str(file_input.get("detail") or "high")
                 user_content.append(item)
         for image_url in image_data_urls or []:
@@ -567,6 +769,7 @@ def prefer_safe_ai_preview(deterministic_preview, ai_preview):
 
 
 def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_vision=True):
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     mode = _select_mode(preview, requested_mode=requested_mode, allow_vision=allow_vision, settings_obj=settings_obj)
@@ -583,7 +786,10 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
                     "meta": {**(preview.get("meta") or {}), **image_meta},
                 }
             else:
-                images, rendered_page_count = _render_pdf_images(preview.get("source_file_ref", ""))
+                images, rendered_page_count = _render_pdf_images(
+                    preview.get("source_file_ref", ""),
+                    expected_sha256=preview.get("source_sha256") or "",
+                )
         except AIParseError:
             if image_preview or requested_mode != "auto":
                 raise
@@ -611,6 +817,8 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
         images=images,
         page_count=page_count,
         output_style="inquiry",
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
     return _bind_result_source(result, preview) if _is_image_preview(preview) else result
 
@@ -625,6 +833,7 @@ def clean_image_bytes_with_ai(
 ):
     """Vision-clean a validated inquiry image without requiring source storage."""
 
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     if not settings_obj.ai_pdf_vision_enabled:
@@ -675,6 +884,8 @@ def clean_image_bytes_with_ai(
         output_style="inquiry",
         json_schema=json_schema,
         schema_name=schema_name,
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
     return _bind_result_source(result, prepared_preview)
 
@@ -698,6 +909,7 @@ def clean_pdf_bytes_with_ai(
     environment hard ceiling.
     """
 
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     if not settings_obj.ai_pdf_vision_enabled:
@@ -753,6 +965,8 @@ def clean_pdf_bytes_with_ai(
         output_style="inquiry",
         json_schema=json_schema,
         schema_name=schema_name,
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
     source_page_count = page_count or rendered_page_count
     render_truncated = source_page_count > rendered_page_count
@@ -781,6 +995,7 @@ def clean_pdf_bytes_with_ai(
 
 
 def clean_historical_import_with_ai(historical_import, actor=None, *, requested_mode="auto"):
+    pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
     if historical_import.status in {HistoricalPriceImport.STATUS_COMMITTED, HistoricalPriceImport.STATUS_CANCELLED}:
@@ -791,7 +1006,10 @@ def clean_historical_import_with_ai(historical_import, actor=None, *, requested_
     images = []
     page_count = _safe_int(historical_import.parse_meta.get("page_count"), default=0)
     if mode == AIParseCache.MODE_VISION:
-        images, rendered_page_count = _render_pdf_images(historical_import.source_file_ref)
+        images, rendered_page_count = _render_pdf_images(
+            historical_import.source_file_ref,
+            expected_sha256=historical_import.source_sha256,
+        )
         if not images:
             raise AIParseError("AI vision cleanup could not render the source PDF. Use text cleanup or review manually.")
         page_count = page_count or rendered_page_count
@@ -803,6 +1021,8 @@ def clean_historical_import_with_ai(historical_import, actor=None, *, requested_
         images=images,
         page_count=page_count,
         output_style="historical",
+        pipeline_started_at=pipeline_started_at,
+        source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
 
 
@@ -910,7 +1130,10 @@ def _is_image_preview(preview):
 
 def _render_image_from_private_source(preview):
     source_file_ref = str(preview.get("source_file_ref") or "")
-    data = read_private_ref(source_file_ref)
+    data = read_private_ref(
+        source_file_ref,
+        expected_sha256=preview.get("source_sha256") or "",
+    )
     if not data:
         raise AIParseError("Source image is not available in private storage.")
     filename = preview.get("source_filename") or "inquiry-image.png"
@@ -932,8 +1155,163 @@ def _render_image_from_private_source(preview):
     }
 
 
+AI_RESULT_META_FIELDS = (
+    "ai_provider",
+    "ai_model",
+    "ai_mode",
+    "ai_document_notes",
+    "ai_document_metadata",
+    "ai_ignored_count",
+    "ai_usage",
+)
+AI_CACHE_RESULT_META_FIELDS = tuple(
+    field for field in AI_RESULT_META_FIELDS if field != "ai_usage"
+)
+AI_CURRENT_SOURCE_META_AI_FIELDS = {
+    "ai_normalized_mime_type",
+    "ai_normalized_width",
+    "ai_normalized_height",
+    "ai_normalized_size",
+}
+
+
+def _cacheable_ai_result(result):
+    """Return only reusable AI output, without upload-specific provenance."""
+
+    cacheable = {
+        key: result[key]
+        for key in (
+            "lines",
+            "warnings",
+            "document_metadata",
+            "summary",
+            "result_source",
+            "ai_status",
+            "ai_status_label",
+            "provider",
+            "model",
+        )
+        if key in result
+    }
+    result_meta = result.get("meta") or {}
+    cacheable["meta"] = {
+        key: result_meta[key]
+        for key in AI_CACHE_RESULT_META_FIELDS
+        if key in result_meta
+    }
+    return cacheable
+
+
+def _current_source_meta(preview):
+    """Return current parser provenance without trusting AI outcome fields."""
+
+    source_meta = {
+        key: value
+        for key, value in (preview.get("meta") or {}).items()
+        if key not in AI_RESULT_META_FIELDS
+        and (
+            not str(key).startswith("ai_")
+            or key in AI_CURRENT_SOURCE_META_AI_FIELDS
+        )
+    }
+    # The validated top-level provenance is canonical if browser-echoed nested
+    # metadata disagrees with it.
+    source_meta["source_file_ref"] = preview.get("source_file_ref", "")
+    source_meta["source_file_size"] = preview.get("source_file_size")
+    return source_meta
+
+
+CUSTOMER_EVIDENCE_FIELDS = (
+    "customer_unit_price",
+    "customer_amount",
+    "customer_vat_rate",
+    "customer_vat_amount",
+    "customer_vat",
+    "customer_line_total",
+)
+
+
+def _evidence_identity(value):
+    return " ".join(re.findall(r"[a-z0-9]+", _clean_text(value).lower()))
+
+
+def _has_customer_evidence(row):
+    return any(_clean_text((row or {}).get(field)) for field in CUSTOMER_EVIDENCE_FIELDS)
+
+
+def _row_evidence_match(source_row, candidate_row):
+    source_raw = _evidence_identity(
+        source_row.get("raw_line") or source_row.get("raw_source_text")
+    )
+    candidate_raw = _evidence_identity(
+        candidate_row.get("raw_line") or candidate_row.get("raw_source_text")
+    )
+    if source_raw and candidate_raw and source_raw == candidate_raw:
+        return True
+
+    source_name = _evidence_identity(_guard_item_name(source_row))
+    candidate_name = _evidence_identity(_guard_item_name(candidate_row))
+    if not source_name or source_name != candidate_name:
+        return False
+    source_quantity = _guard_decimal(source_row.get("quantity"))
+    candidate_quantity = _guard_decimal(candidate_row.get("quantity"))
+    if (
+        source_quantity is not None
+        and candidate_quantity is not None
+        and source_quantity != candidate_quantity
+    ):
+        return False
+    source_unit = _evidence_identity(source_row.get("unit"))
+    candidate_unit = _evidence_identity(candidate_row.get("unit"))
+    return not (source_unit and candidate_unit and source_unit != candidate_unit)
+
+
+def _restore_customer_evidence(preview, result):
+    """Copy current-source evidence only after a unique deterministic row match.
+
+    Reusable AI cache payloads intentionally contain no upload-specific source
+    evidence. This merge therefore runs only while binding a result to the
+    current preview. If evidence cannot be mapped uniquely, callers must keep
+    the deterministic rows rather than silently discard it.
+    """
+
+    source_rows = [
+        row
+        for row in ((preview or {}).get("lines") or [])
+        if isinstance(row, dict) and _has_customer_evidence(row)
+    ]
+    if not source_rows:
+        return True
+    candidate_rows = [
+        row for row in ((result or {}).get("lines") or []) if isinstance(row, dict)
+    ]
+    used = set()
+    for source_row in source_rows:
+        matches = [
+            index
+            for index, candidate_row in enumerate(candidate_rows)
+            if index not in used and _row_evidence_match(source_row, candidate_row)
+        ]
+        if len(matches) != 1:
+            return False
+        match_index = matches[0]
+        used.add(match_index)
+        candidate_row = candidate_rows[match_index]
+        for field in CUSTOMER_EVIDENCE_FIELDS:
+            source_value = source_row.get(field)
+            if _clean_text(source_value) and not _clean_text(candidate_row.get(field)):
+                candidate_row[field] = source_value
+        source_notes = _clean_text(source_row.get("notes"))
+        candidate_notes = _clean_text(candidate_row.get("notes"))
+        if source_notes and source_notes.lower() not in candidate_notes.lower():
+            candidate_row["notes"] = " | ".join(
+                value for value in (candidate_notes, source_notes) if value
+            )
+    return True
+
+
 def _bind_result_source(result, preview):
-    """Keep cacheable AI rows while binding provenance to this upload."""
+    """Bind reusable AI output to the current upload's provenance."""
 
     source_fields = (
         "source_type",
@@ -947,26 +1325,54 @@ def _bind_result_source(result, preview):
     rebound = {**result}
     for field in source_fields:
         rebound[field] = preview.get(field, "" if field != "source_file_size" else None)
-    rebound_meta = {**(result.get("meta") or {})}
-    preview_meta = preview.get("meta") or {}
-    # The preview can be echoed back by a browser, so only rebind inert source
-    # provenance. Provider/model/mode/usage and other AI audit fields must
-    # always remain the server-generated values in ``result.meta``.
-    for field in (
-        "source_file_ref",
-        "source_file_size",
-        "requires_vision",
-        "image_format",
-        "image_width",
-        "image_height",
-        "image_frame_count",
-        "ai_normalized_mime_type",
-        "ai_normalized_width",
-        "ai_normalized_height",
-        "ai_normalized_size",
-    ):
-        if field in preview_meta:
-            rebound_meta[field] = preview_meta[field]
+    result_source = str(result.get("result_source") or "")
+    rebound["parse_method"] = (
+        _append_parse_method(preview.get("parse_method", ""), result_source)
+        if result_source
+        else preview.get("parse_method", "")
+    )
+    result_meta = result.get("meta") or {}
+    # Parser/inspection warnings describe the current source and must never be
+    # replaced by provider output or inherited solely from a reusable cache.
+    # Keep them alongside any warnings produced by AI validation.
+    rebound["warnings"] = list(
+        dict.fromkeys(
+            _clean_text(warning)
+            for warning in [
+                *((preview or {}).get("warnings") or []),
+                *((result or {}).get("warnings") or []),
+            ]
+            if _clean_text(warning)
+        )
+    )
+    if not _restore_customer_evidence(preview, rebound):
+        fallback = {**(preview or {})}
+        fallback["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *rebound["warnings"],
+                    AI_CUSTOMER_EVIDENCE_GUARD_WARNING,
+                ]
+            )
+        )
+        fallback["meta"] = {
+            **_current_source_meta(preview),
+            "ai_cleanup_rejected": True,
+            "ai_cleanup_rejection_reason": "customer_price_evidence_unmapped",
+        }
+        fallback["result_source"] = AI_SOURCE_DETERMINISTIC
+        fallback["ai_status"] = AI_STATUS_FAILED
+        fallback["ai_status_label"] = (
+            "AI cleanup rejected; deterministic customer evidence kept."
+        )
+        return fallback
+    # Preview metadata belongs to this upload. AI identity and usage fields are
+    # reserved for the server-generated result so a browser-echoed preview
+    # cannot replace them.
+    rebound_meta = _current_source_meta(preview)
+    for field in AI_RESULT_META_FIELDS:
+        if field in result_meta:
+            rebound_meta[field] = result_meta[field]
     rebound["meta"] = rebound_meta
     return rebound
 
@@ -982,7 +1388,17 @@ def _run_ai_cleanup(
     output_style,
     json_schema=None,
     schema_name="quotation_import_parse",
+    pipeline_started_at=None,
+    source_preparation_ms=None,
 ):
+    run_started_at = (
+        pipeline_started_at
+        if isinstance(pipeline_started_at, (int, float))
+        else time.perf_counter()
+    )
+    timings_ms = {}
+    if source_preparation_ms is not None:
+        timings_ms["source_preparation"] = source_preparation_ms
     availability = get_ai_parse_availability()
     provider_name = availability["provider"]
     model = availability["vision_model"] if mode == AIParseCache.MODE_VISION else availability["text_model"]
@@ -998,23 +1414,72 @@ def _run_ai_cleanup(
         include_mailbox_metadata=schema_name == "mailbox_po_vision_parse",
     )
     effective_schema = json_schema or AI_PARSE_JSON_SCHEMA
-    prompt_contract_hash = hashlib.sha256(
-        json.dumps(
-            {"instructions": instructions, "schema": effective_schema},
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
-    schema_cache_scope = "" if schema_name == "quotation_import_parse" else f":{schema_name}"
+    pipeline_version = (
+        MAILBOX_PO_AI_PIPELINE_VERSION
+        if schema_name == "mailbox_po_vision_parse"
+        else MANUAL_AI_PIPELINE_VERSION
+    )
+    intake_route = (
+        "gmail_mailbox_po"
+        if schema_name == "mailbox_po_vision_parse"
+        else "manual"
+    )
+    contract = ai_parse_contract_descriptor(
+        pipeline_version=pipeline_version,
+        schema_name=schema_name,
+        instructions=instructions,
+        schema=effective_schema,
+    )
     cache_key = hashlib.sha256(
         (
             f"{source_sha256}:{provider_name}:{model}:{mode}:{context_hash}:"
-            f"{prompt_contract_hash}{schema_cache_scope}"
+            f"{contract['contract_sha256']}"
         ).encode("utf-8")
     ).hexdigest()
+    source_shape = {
+        "text_chars": len(context),
+        "input_rows": len(preview.get("lines") or []),
+        "source_bytes": preview.get("source_file_size") or 0,
+        "page_count": page_count or 0,
+        "image_count": len(images),
+        "message_count": 0,
+        "file_count": 1 if preview.get("source_file_size") else 0,
+        "source_count": 1,
+    }
+
+    def audit_usage(
+        provider_usage,
+        *,
+        provider_call_attempted,
+        application_cache_hit=False,
+        outcome="success",
+        failure_stage="",
+        output_rows=0,
+    ):
+        safe_usage = sanitize_ai_provider_usage(provider_usage)
+        observation = build_ai_parse_observation(
+            route=intake_route,
+            contract=contract,
+            provider_usage=safe_usage,
+            timings_ms=timings_ms,
+            source_shape={**source_shape, "output_rows": output_rows},
+            provider_call_attempted=provider_call_attempted,
+            application_cache_hit=application_cache_hit,
+            outcome=outcome,
+            failure_stage=failure_stage,
+        )
+        return {
+            **safe_usage,
+            "timings_ms": observation["timings_ms"],
+            "observability": observation,
+        }
+
+    cache_started_at = time.perf_counter()
     cached = AIParseCache.objects.filter(cache_key=cache_key).first()
+    timings_ms["cache_lookup"] = ai_parse_elapsed_ms(cache_started_at)
     if cached:
+        timings_ms["total"] = ai_parse_elapsed_ms(run_started_at)
+        cached_rows = len((cached.result or {}).get("lines") or [])
         _log_ai_parse(
             actor=actor,
             provider=provider_name,
@@ -1026,12 +1491,31 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
+            usage=audit_usage(
+                {},
+                provider_call_attempted=False,
+                application_cache_hit=True,
+                outcome="cache_hit",
+                output_rows=cached_rows,
+            ),
             success=True,
         )
-        return {**cached.result, "cache_hit": True}
+        rebound = _bind_result_source(
+            _cacheable_ai_result(cached.result),
+            preview,
+        )
+        rebound["meta"] = {
+            **(rebound.get("meta") or {}),
+            # A cache hit did not make a provider call. Do not inherit raw
+            # usage or future provider-added fields from the originating run.
+            "ai_usage": {},
+        }
+        return {**rebound, "cache_hit": True}
 
     provider = get_ai_parse_provider(provider_name)
     usage = {}
+    failure_stage = "provider"
+    provider_started_at = time.perf_counter()
     try:
         raw_result, usage = provider.clean_rows(
             mode=mode,
@@ -1042,6 +1526,9 @@ def _run_ai_cleanup(
             json_schema=json_schema,
             schema_name=schema_name,
         )
+        timings_ms["provider"] = ai_parse_elapsed_ms(provider_started_at)
+        failure_stage = "validation"
+        validation_started_at = time.perf_counter()
         result = _normalize_ai_result(
             raw_result,
             preview=preview,
@@ -1052,6 +1539,9 @@ def _run_ai_cleanup(
             usage=usage,
             schema_name=schema_name,
         )
+        timings_ms["validation"] = ai_parse_elapsed_ms(validation_started_at)
+        failure_stage = "cache_write"
+        cache_write_started_at = time.perf_counter()
         AIParseCache.objects.update_or_create(
             cache_key=cache_key,
             defaults={
@@ -1060,9 +1550,11 @@ def _run_ai_cleanup(
                 "mode": mode,
                 "provider": provider_name,
                 "model": model,
-                "result": result,
+                "result": _cacheable_ai_result(result),
             },
         )
+        timings_ms["cache_write"] = ai_parse_elapsed_ms(cache_write_started_at)
+        timings_ms["total"] = ai_parse_elapsed_ms(run_started_at)
         _log_ai_parse(
             actor=actor,
             provider=provider_name,
@@ -1074,11 +1566,22 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
-            usage=usage,
+            usage=audit_usage(
+                usage,
+                provider_call_attempted=True,
+                output_rows=len(result.get("lines") or []),
+            ),
             success=True,
         )
-        return result
+        return _bind_result_source(result, preview)
     except Exception as exc:
+        if "provider" not in timings_ms:
+            timings_ms["provider"] = ai_parse_elapsed_ms(provider_started_at)
+        if failure_stage == "validation" and "validation" not in timings_ms:
+            timings_ms["validation"] = ai_parse_elapsed_ms(validation_started_at)
+        if failure_stage == "cache_write" and "cache_write" not in timings_ms:
+            timings_ms["cache_write"] = ai_parse_elapsed_ms(cache_write_started_at)
+        timings_ms["total"] = ai_parse_elapsed_ms(run_started_at)
         _log_ai_parse(
             actor=actor,
             provider=provider_name,
@@ -1090,7 +1593,12 @@ def _run_ai_cleanup(
             text_length=len(context),
             page_count=page_count,
             image_count=len(images),
-            usage=usage,
+            usage=audit_usage(
+                usage,
+                provider_call_attempted=True,
+                outcome="failure",
+                failure_stage=failure_stage,
+            ),
             success=False,
             error=str(exc),
         )
@@ -1362,7 +1870,7 @@ def _normalize_ai_result(
         "document_metadata": document_metadata,
         "summary": summarize_lines(rows, skipped_count=ignored_count),
         "meta": {
-            **(preview.get("meta") or {}),
+            **_current_source_meta(preview),
             "ai_provider": provider,
             "ai_model": model,
             "ai_mode": mode,
@@ -1492,10 +2000,13 @@ def _historical_import_to_preview(historical_import):
     }
 
 
-def _render_pdf_images(source_file_ref):
+def _render_pdf_images(source_file_ref, *, expected_sha256=""):
     if fitz is None:
         raise AIProviderUnavailable("AI vision cleanup is unavailable because PDF rendering is not installed.")
-    data = read_private_ref(source_file_ref)
+    data = read_private_ref(
+        source_file_ref,
+        expected_sha256=expected_sha256,
+    )
     if not data:
         raise AIParseError("Source PDF is not available in private storage.")
     return _render_pdf_bytes_images(data)
@@ -1551,6 +2062,27 @@ def _render_pdf_bytes_images(data, *, max_pages=None):
     )
     images = []
     rendered_bytes = 0
+    try:
+        _, inspection = inspect_pdf_attachment(
+            data,
+            # The renderer keeps the lower workflow-specific cap below so its
+            # established error behavior is preserved. Preflight uses the
+            # immutable hard ceiling to reject report-sized PDFs before fitz.
+            max_pages=hard_max_pages,
+        )
+    except ValidationError as exc:
+        messages = getattr(exc, "messages", None) or [str(exc)]
+        raise AIParseError(
+            "PDF rendering was blocked by the attachment safety preflight: "
+            + "; ".join(str(message) for message in messages)
+        ) from exc
+    if not bool(
+        (inspection.get("safety") or {}).get("local_traversal_safe", False)
+    ):
+        raise AIParseError(
+            "PDF rendering was skipped because its streams cannot be decoded "
+            "with a bounded in-process preflight."
+        )
     with fitz.open(stream=data, filetype="pdf") as document:
         if len(document) > effective_max_pages:
             raise AIParseError(

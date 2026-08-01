@@ -147,6 +147,12 @@ const partyDraftFromQuote = (quote = {}) => ({
   contact: quote.contact || '',
 });
 
+const quotationReviewDisplaySignature = (quote = {}) => {
+  const displayed = { ...(quote || {}) };
+  delete displayed.quotation_review_fingerprint;
+  return JSON.stringify(displayed);
+};
+
 const termsDraftsMatch = (left = {}, right = {}) => (
   String(left.payment_terms || '') === String(right.payment_terms || '') &&
   String(left.valid_until || '') === String(right.valid_until || '') &&
@@ -197,6 +203,58 @@ const lpoDraftFromRecord = (lpo = null) => {
 };
 
 const transientLoadStatuses = new Set([408, 500, 502, 503, 504]);
+
+const MATERIAL_LPO_WARNING_PATTERNS = [
+  /stopp(?:ed|ing)?\s+reading/i,
+  /truncat/i,
+  /\blimit(?:ed|s)?\b/i,
+  /\bfallback\b/i,
+  /\bpartial(?:ly)?\b/i,
+  /no cached result/i,
+  /\bnot (?:parsed|imported|refreshed)\b/i,
+  /\bcould not\b/i,
+  /cannot be fully inspected/i,
+  /may appear blank|missing values/i,
+  /not used for row extraction/i,
+  /active[- ]content|embedded|macro|vba|external links?|highly compressed/i,
+];
+
+const isMaterialLpoWarning = (warning) => MATERIAL_LPO_WARNING_PATTERNS.some(
+  (pattern) => pattern.test(String(warning)),
+);
+
+const LpoWarningReview = ({ warnings = [] }) => {
+  const reviewWarnings = Array.isArray(warnings)
+    ? warnings.filter((warning) => String(warning || '').trim())
+    : [];
+  if (!reviewWarnings.length) return null;
+  const alwaysVisibleIndexes = new Set(
+    reviewWarnings.reduce((indexes, warning, index) => {
+      if (index < 3 || isMaterialLpoWarning(warning)) indexes.push(index);
+      return indexes;
+    }, []),
+  );
+  const alwaysVisible = reviewWarnings.filter((warning, index) => alwaysVisibleIndexes.has(index));
+  const remaining = reviewWarnings.filter((warning, index) => !alwaysVisibleIndexes.has(index));
+  return (
+    <div className="qm-lpo-warning" role="alert" aria-label="LPO attachment warnings">
+      <strong>Review attachment warnings</strong>
+      {alwaysVisible.map((warning, index) => (
+        <p key={`lpo-warning-${index}`}>{warning}</p>
+      ))}
+      {remaining.length > 0 && (
+        <details>
+          <summary>
+            Show {remaining.length} more {remaining.length === 1 ? 'warning' : 'warnings'}
+          </summary>
+          {remaining.map((warning, index) => (
+            <p key={`lpo-warning-more-${index}`}>{warning}</p>
+          ))}
+        </details>
+      )}
+    </div>
+  );
+};
 
 export const shouldRetryQuotationGet = (error) => {
   if (error?.code === 'ERR_CANCELED') return false;
@@ -593,6 +651,10 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   }, [load]);
 
   const isEditable = quote && editableStatuses.has(quote.status);
+  const emailPreviewRefreshRequired = emailSendError?.refreshPreview === true || [
+    'stale_email_preview',
+    'email_preview_required',
+  ].includes(String(emailSendError?.code || ''));
   const activeLines = quote?.lines || [];
   const changedLineIds = quote ? (quote.lines || [])
     .filter((line) => !draftsMatch(lineDrafts[line.id], savedLineDrafts[line.id]))
@@ -1354,6 +1416,63 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     window.URL.revokeObjectURL(url);
   };
 
+  const emailPreviewParams = (sourceQuote = quoteRef.current, extra = {}) => ({
+    ...extra,
+    ...(sourceQuote?.quotation_review_fingerprint
+      ? { quotation_review_fingerprint: sourceQuote.quotation_review_fingerprint }
+      : {}),
+  });
+
+  const currentQuoteForEmailReview = async (requestGeneration) => {
+    const displayedQuote = quoteRef.current || {};
+    const latestResponse = await quotationAPI.quotes.retrieve(quote.id);
+    if (emailPreviewGenerationRef.current !== requestGeneration) return null;
+    const latestQuote = latestResponse.data || {};
+    const displayedFingerprint = String(
+      displayedQuote.quotation_review_fingerprint || ''
+    );
+    const latestFingerprint = String(
+      latestQuote.quotation_review_fingerprint || ''
+    );
+    const displayedPayloadChanged = (
+      quotationReviewDisplaySignature(latestQuote)
+      !== quotationReviewDisplaySignature(displayedQuote)
+    );
+    if (!latestFingerprint || latestFingerprint !== displayedFingerprint || displayedPayloadChanged) {
+      if (latestQuote?.id) setLoadedQuote(latestQuote);
+      setEmailPreviewOpen(false);
+      setEmailPreviewLoading(false);
+      setEmailPreview(null);
+      setEmailPreviewError('');
+      setEmailSendError(null);
+      setLineFeedback({
+        type: 'warning',
+        message: latestFingerprint
+          ? 'The quotation changed since this editor loaded. Review the refreshed quotation, then click Finalize or Email Quotation again.'
+          : 'The current quotation review token is unavailable. Reload the editor before preparing an email.',
+      });
+      return null;
+    }
+    return latestQuote;
+  };
+
+  const replaceStaleQuotationReview = (error) => {
+    const responseData = error?.response?.data || {};
+    if (String(responseData.code || '') !== 'stale_quotation_review') return false;
+    if (responseData.quote?.id) setLoadedQuote(responseData.quote);
+    emailPreviewGenerationRef.current += 1;
+    setEmailPreviewOpen(false);
+    setEmailPreviewLoading(false);
+    setEmailPreview(null);
+    setEmailPreviewError('');
+    setEmailSendError(null);
+    setLineFeedback({
+      type: 'warning',
+      message: responseData.detail || 'The quotation changed in another session. Review the refreshed quotation before opening the email preview again.',
+    });
+    return true;
+  };
+
   const loadEmailPreview = async () => {
     if (emailSending || emailReconciling || saving || actionInFlight) return;
     if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
@@ -1372,10 +1491,17 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     emailThreadSearchGenerationRef.current += 1;
     emailReconcileGenerationRef.current += 1;
     try {
-      const response = await quotationAPI.quotes.emailPreview(quote.id);
+      const latestQuote = await currentQuoteForEmailReview(requestGeneration);
+      if (!latestQuote) return;
+      const response = await quotationAPI.quotes.emailPreview(
+        quote.id,
+        emailPreviewParams(latestQuote),
+      );
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
       setEmailPreview(response.data || {});
     } catch (error) {
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(
         error,
         'Prepare quotation email preview',
@@ -1383,6 +1509,54 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       );
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
       setEmailPreviewError(details.detail || 'The server could not prepare the email preview.');
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (emailPreviewGenerationRef.current === requestGeneration) {
+        setEmailPreviewLoading(false);
+      }
+    }
+  };
+
+  const refreshEmailPreview = async () => {
+    if (emailSending || emailReconciling || saving || actionInFlight) return;
+    if (editableStatuses.has(quoteRef.current?.status) && finalizeIssues.length > 0) {
+      setEmailPreviewError('The quotation changed and must be corrected before a new email preview can be prepared.');
+      return;
+    }
+    const requestGeneration = ++emailPreviewGenerationRef.current;
+    const threadSelectionToken = String(emailPreview?.thread_selection_token || '');
+    setEmailPreviewLoading(true);
+    setEmailPreviewError('');
+    try {
+      const latestQuote = await currentQuoteForEmailReview(requestGeneration);
+      if (!latestQuote) return;
+      const response = threadSelectionToken
+        ? await quotationAPI.quotes.emailPreview(quote.id, {
+            ...emailPreviewParams(latestQuote),
+            thread_selection_token: threadSelectionToken,
+          })
+        : await quotationAPI.quotes.emailPreview(
+            quote.id,
+            emailPreviewParams(latestQuote),
+          );
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      setEmailPreview({
+        ...(response.data || {}),
+        ...(threadSelectionToken ? { thread_selection_token: threadSelectionToken } : {}),
+      });
+      setEmailSendError(null);
+      setEmailQuoteFinalized(['finalized', 'sent'].includes(latestQuote.status));
+      setEmailReconcileFeedback(null);
+    } catch (error) {
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      if (replaceStaleQuotationReview(error)) return;
+      const details = await describeQuotationError(
+        error,
+        'Refresh quotation email preview',
+        `GET /quotations/quotes/${quote.id}/email_preview/`
+      );
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      setEmailPreviewError(details.detail || 'The latest email preview could not be prepared.');
       console.error(formatQuotationError(details), error);
     } finally {
       if (emailPreviewGenerationRef.current === requestGeneration) {
@@ -1455,6 +1629,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     emailThreadSearchGenerationRef.current += 1;
     try {
       const response = await quotationAPI.quotes.emailPreview(quote.id, {
+        ...emailPreviewParams(),
         thread_selection_token: candidate.selection_token,
       });
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
@@ -1465,6 +1640,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setEmailThreadCandidates([]);
       setEmailThreadSearchCompleted(false);
     } catch (error) {
+      if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(
         error,
         'Open selected Gmail thread',
@@ -1658,7 +1835,14 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         quoteFinalized: quoteWasFinalized,
         retryable: responseData.retryable === true,
         deliveryStatus,
+        refreshPreview: responseData.refresh_preview === true,
       });
+      if (responseData.delivery?.outbound_snapshot_frozen === true) {
+        setEmailPreview((current) => ({
+          ...(current || {}),
+          ...responseData.delivery,
+        }));
+      }
       if (responseData.quote?.id) setLoadedQuote(responseData.quote);
       else if (quoteWasFinalized || deliveryStatus === 'unknown') await load({ refreshReferences: false });
       console.error(formatQuotationError(details), error);
@@ -2051,11 +2235,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                       })}
                     </div>
                   )}
-                  {latestLpo.warnings?.length > 0 && (
-                    <div className="qm-lpo-warning">
-                      {latestLpo.warnings.slice(0, 3).map((warning) => <p key={warning}>{warning}</p>)}
-                    </div>
-                  )}
+                  <LpoWarningReview warnings={latestLpo.warnings} />
                   <button type="button" className="qm-secondary" disabled={lpoSaving} onClick={saveLpoDetails}>
                     {lpoSaving ? 'Saving LPO...' : 'Save LPO Details'}
                   </button>
@@ -2496,7 +2676,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           gmailReconnectError={emailGmailReconnectError}
           reconciling={emailReconciling}
           reconcileFeedback={emailReconcileFeedback}
-          onRetryPreview={loadEmailPreview}
+          onRetryPreview={emailPreviewRefreshRequired ? refreshEmailPreview : loadEmailPreview}
+          onRefreshPreview={refreshEmailPreview}
           onReconnectGmail={reconnectGmailForSending}
           onReconcileEmail={reconcileQuotationEmail}
           onClearCorrectableError={clearCorrectableEmailError}

@@ -149,6 +149,14 @@ export const importedInquiryLinePayload = (line) => ({
   match_confirmed_by_user: Boolean(line.match_confirmed_by_user),
 });
 
+export const inquiryPreviewHasReviewedPricing = (preview) => (
+  (preview?.lines || []).some((line) => (
+    String(line?.unit_price ?? '').trim() !== ''
+    || normalizeVatRate(line?.vat_rate) === '5'
+    || line?.price_reference_status === 'matched'
+  ))
+);
+
 const shouldShowMatchReason = (reason) => {
   const text = String(reason || '').trim();
   return text && !/no safe deterministic match found/i.test(text);
@@ -652,6 +660,14 @@ const InquiryManager = ({ onOpenQuote }) => {
 
   const runAiCleanParse = async () => {
     if (!importPreview || importWorkflowBusy || !acquireImportOperation()) return;
+    if (inquiryPreviewHasReviewedPricing(importPreview)) {
+      releaseImportOperation();
+      setImportNotice({
+        type: 'warning',
+        message: 'AI cleanup is available before pricing. Clear the reviewed price/VAT first, or keep the current rows so your pricing is not discarded.',
+      });
+      return;
+    }
     const requestContext = captureImportCompanyRequest();
     setAiCleaning(true);
     setErrorInfo(null);
@@ -1439,9 +1455,11 @@ const InquiryManager = ({ onOpenQuote }) => {
                               {line.row_number && <span>Row: {line.row_number}</span>}
                               {line.page_number && <span>Page: {line.page_number}</span>}
                               {line.serial_no && <span>Serial: {line.serial_no}</span>}
-                              {line.unit_price && <span>Unit price: {line.unit_price}</span>}
+                              {line.customer_unit_price && <span>Customer/source unit price: {line.customer_unit_price}</span>}
+                              {line.customer_amount && <span>Customer/source amount: {line.customer_amount}</span>}
+                              {line.customer_vat && <span>Customer/source VAT: {line.customer_vat}</span>}
                               {line.price_reference_match && <span>Price source: {line.price_reference_match.sheet_name} row {line.price_reference_match.row_number}</span>}
-                              {line.line_total && <span>Total: {line.line_total}</span>}
+                              {line.customer_line_total && <span>Customer/source total: {line.customer_line_total}</span>}
                               {line.notes && <span>Notes: {line.notes}</span>}
                             </div>
                           </td>

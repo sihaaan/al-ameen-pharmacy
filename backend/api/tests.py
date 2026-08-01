@@ -1,5 +1,6 @@
 import re
 from decimal import Decimal
+from io import BytesIO
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -9,12 +10,15 @@ from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
+from PIL import Image as PILImage
 from rest_framework import status
+from rest_framework import serializers
 from rest_framework.test import APITestCase
 
 from .emails import send_staff_order_notification_email
-from .models import Cart, CartItem, Order, OrderItem, Product, ProductImage
+from .models import Brand, Cart, CartItem, Order, OrderItem, Product, ProductImage
 from .throttles import LoginRateThrottle, PasswordResetRateThrottle
+from .upload_validation import validate_image_upload
 from pharmacy_api.settings import normalize_origin, unique_origins
 
 
@@ -43,6 +47,117 @@ class DeploymentOriginSettingsTests(SimpleTestCase):
         with self.assertRaises(ImproperlyConfigured):
             normalize_origin("ftp://example.com")
 
+
+class ImageUploadValidationTests(SimpleTestCase):
+    @staticmethod
+    def image_bytes(image_format="PNG", *, size=(12, 12), animated=False):
+        buffer = BytesIO()
+        image = PILImage.new("RGB", size, "white")
+        if animated:
+            second_frame = PILImage.new("RGB", size, "black")
+            image.save(
+                buffer,
+                format=image_format,
+                save_all=True,
+                append_images=[second_frame],
+            )
+        else:
+            image.save(buffer, format=image_format)
+        return buffer.getvalue()
+
+    def test_valid_image_is_fully_decoded_and_rewound(self):
+        upload = SimpleUploadedFile(
+            "product.png",
+            self.image_bytes(),
+            content_type="image/png",
+        )
+        upload.seek(7)
+
+        result = validate_image_upload(upload, label="Product image")
+
+        self.assertIs(result, upload)
+        self.assertEqual(upload.tell(), 0)
+        with PILImage.open(upload) as decoded:
+            decoded.load()
+            self.assertEqual(decoded.format, "PNG")
+        upload.seek(0)
+
+    def test_truncated_and_spoofed_images_are_rejected_and_rewound(self):
+        png_bytes = self.image_bytes()
+        samples = [
+            SimpleUploadedFile(
+                "truncated.png",
+                png_bytes[:24],
+                content_type="image/png",
+            ),
+            SimpleUploadedFile(
+                "spoofed.jpg",
+                png_bytes,
+                content_type="image/jpeg",
+            ),
+        ]
+
+        for upload in samples:
+            with self.subTest(filename=upload.name):
+                with self.assertRaises(serializers.ValidationError):
+                    validate_image_upload(upload, label="Product image")
+                self.assertEqual(upload.tell(), 0)
+
+    @patch("api.upload_validation.DEFAULT_MAX_IMAGE_PIXELS", 100)
+    def test_pixel_limit_is_enforced_before_decode(self):
+        upload = SimpleUploadedFile(
+            "too-many-pixels.png",
+            self.image_bytes(size=(11, 10)),
+            content_type="image/png",
+        )
+
+        with self.assertRaisesMessage(serializers.ValidationError, "too many pixels"):
+            validate_image_upload(upload, label="Product image")
+
+        self.assertEqual(upload.tell(), 0)
+
+    def test_animated_webp_is_rejected(self):
+        try:
+            data = self.image_bytes("WEBP", animated=True)
+        except OSError as exc:  # pragma: no cover - depends on Pillow build features
+            self.skipTest(f"Animated WebP encoder unavailable: {exc}")
+        upload = SimpleUploadedFile(
+            "animated.webp",
+            data,
+            content_type="image/webp",
+        )
+
+        with self.assertRaisesMessage(serializers.ValidationError, "single-frame"):
+            validate_image_upload(upload, label="Product image")
+
+        self.assertEqual(upload.tell(), 0)
+
+
+class BrandLogoUploadValidationTests(APITestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            username="brand-logo-staff",
+            password="pass",
+            is_staff=True,
+        )
+        self.client.force_authenticate(self.staff)
+
+    def test_brand_create_rejects_invalid_logo_without_persisting_brand(self):
+        upload = SimpleUploadedFile(
+            "spoofed.png",
+            b"not-a-complete-image",
+            content_type="image/png",
+        )
+
+        response = self.client.post(
+            reverse("brand-list"),
+            {"name": "Unsafe Brand", "logo": upload},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("logo", response.data)
+        self.assertFalse(Brand.objects.filter(name="Unsafe Brand").exists())
 
 class AuthSafetyTests(APITestCase):
     def setUp(self):

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, connections
 from django.db.backends.postgresql.base import DatabaseWrapper
 from django.test import SimpleTestCase, TransactionTestCase
 from django.urls import reverse
@@ -166,7 +166,7 @@ class ProductAliasConcurrencyTests(TransactionTestCase):
             else:
                 results.put(("created", source_text))
             finally:
-                close_old_connections()
+                connections.close_all()
 
         threads = [
             Thread(target=learn_alias, args=("Customer Special Widget", first_product.id), daemon=True),
@@ -214,7 +214,7 @@ class ProductAliasConcurrencyTests(TransactionTestCase):
             except Exception as exc:  # pragma: no cover - failure detail for PostgreSQL CI
                 results.put(("error", repr(exc)))
             finally:
-                close_old_connections()
+                connections.close_all()
 
         threads = [
             Thread(target=create_alias, args=("API Customer Widget", products[0].id), daemon=True),
@@ -299,7 +299,7 @@ class ProductAliasConcurrencyTests(TransactionTestCase):
             except Exception as exc:  # pragma: no cover - failure detail for PostgreSQL CI
                 results.put(("error", repr(exc)))
             finally:
-                close_old_connections()
+                connections.close_all()
 
         threads = [
             Thread(target=approve_suggestion, args=(suggestion.id,), daemon=True)
@@ -395,7 +395,7 @@ class ProductAliasConcurrencyTests(TransactionTestCase):
             except Exception as exc:  # pragma: no cover - failure detail for PostgreSQL CI
                 results.put(("approve_error", repr(exc)))
             finally:
-                close_old_connections()
+                connections.close_all()
 
         def reject():
             close_old_connections()
@@ -411,7 +411,7 @@ class ProductAliasConcurrencyTests(TransactionTestCase):
             except Exception as exc:  # pragma: no cover - failure detail for PostgreSQL CI
                 results.put(("reject_error", repr(exc)))
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with patch.object(ai_learning, "_apply_one_suggestion", side_effect=delayed_apply), patch.object(
             HistoricalImportAISuggestionViewSet,

@@ -20,8 +20,11 @@ from rest_framework.test import APIClient
 
 from api.models import Product
 
-from .ai_parsing import AIParseError
+from .ai_parsing import AIParseError, ai_parse_contract_descriptor
 from .gmail_inquiry_import import (
+    GMAIL_AI_PIPELINE_VERSION,
+    GMAIL_AI_SCHEMA_NAME,
+    GMAIL_SEMANTIC_CACHE_VERSION,
     GmailInquiryImportError,
     _apply_ai_identity_candidates,
     _attachment_extension,
@@ -33,6 +36,7 @@ from .gmail_inquiry_import import (
     _confirmation_subject,
     _fetch_native_ai_attachment,
     _fetch_analysis_messages,
+    _is_outbound_message,
     _looks_like_inline_image,
     _looks_like_signature_image_bundle_member,
     _thread_message_metadata,
@@ -51,6 +55,7 @@ from .gmail_inquiry_import import (
     update_gmail_inquiry_review_lines,
 )
 from .models import (
+    AIParseCache,
     AIParseLog,
     Company,
     CompanyContact,
@@ -394,6 +399,288 @@ class GmailInquiryImportTests(TestCase):
             inferred.id,
         )
 
+    def test_company_candidates_canonicalize_idn_and_root_dot(self):
+        company = Company.objects.create(
+            name="IDN Customer",
+            email="buyer@bücher.example",
+        )
+        message = gmail_message(
+            "identity-idn",
+            sender="Buyer <BUYER@xn--bcher-kva.example.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], company.id)
+        self.assertTrue(candidates["exact_company_match"])
+        self.assertEqual(
+            candidates["verified_identity_sender_emails"],
+            ["buyer@xn--bcher-kva.example"],
+        )
+
+    def test_canonical_idn_collision_remains_ambiguous(self):
+        first = Company.objects.create(
+            name="First IDN Customer",
+            email="shared@bücher.example",
+        )
+        second = Company.objects.create(
+            name="Second IDN Customer",
+            email="shared@xn--bcher-kva.example",
+        )
+        message = gmail_message(
+            "identity-idn-collision",
+            sender="Buyer <SHARED@BÜCHER.EXAMPLE.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            {row["company_id"] for row in candidates["companies"]},
+            {first.id, second.id},
+        )
+
+    def test_public_domain_root_dot_does_not_enable_domain_inference(self):
+        Company.objects.create(name="Regional Gmail Healthcare")
+        message = gmail_message(
+            "identity-public-root-dot",
+            sender="Health Center <regionalgmailhealthcare@gmail.com.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["companies"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+
+    def test_exact_saved_public_email_still_matches_after_canonicalization(self):
+        company = Company.objects.create(
+            name="Saved Public Mail Customer",
+            email="public.customer@yahoo.fr",
+        )
+        message = gmail_message(
+            "identity-public-exact",
+            sender="Buyer <PUBLIC.CUSTOMER@YAHOO.FR.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], company.id)
+        self.assertTrue(candidates["exact_company_match"])
+
+    def test_plus_address_is_not_an_exact_saved_sender(self):
+        message = gmail_message(
+            "identity-plus",
+            sender="Buyer <buyer+rfq@example.com>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], self.company.id)
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertIsNone(candidates["recommended_contact_id"])
+        self.assertNotIn(
+            "exact_contact_email",
+            {row["match_method"] for row in candidates["companies"]},
+        )
+
+    def test_plus_address_matches_only_when_the_exact_tag_is_saved(self):
+        company = Company.objects.create(
+            name="Tagged Address Customer",
+            email="buyer+rfq@example.com",
+        )
+        message = gmail_message(
+            "identity-plus-exact",
+            sender="Buyer <BUYER+RFQ@EXAMPLE.COM.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], company.id)
+        self.assertTrue(candidates["exact_company_match"])
+
+    def test_multiple_or_duplicate_from_addresses_never_match_exactly(self):
+        cases = [
+            gmail_message(
+                "identity-multiple-from",
+                sender=(
+                    "Buyer <buyer@example.com>, "
+                    "Other <other@unrelated.example>"
+                ),
+            ),
+            {
+                **gmail_message(
+                    "identity-duplicate-from",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {"name": "From", "value": "Buyer <buyer@example.com>"},
+                    {"name": "From", "value": "Buyer <buyer@example.com>"},
+                ],
+            },
+            {
+                **gmail_message(
+                    "identity-empty-malformed-from-token",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {
+                        "name": "From",
+                        "value": "Bad <> , Buyer <buyer@example.com>",
+                    }
+                ],
+            },
+            {
+                **gmail_message(
+                    "identity-duplicate-address-one-field",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {
+                        "name": "From",
+                        "value": "buyer@example.com, buyer@example.com",
+                    }
+                ],
+            },
+            {
+                **gmail_message(
+                    "identity-full-headers-without-from",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {"name": "To", "value": MAILBOX_EMAIL},
+                ],
+            },
+        ]
+
+        for message in cases:
+            with self.subTest(message_id=message["gmail_message_id"]):
+                candidates = _company_contact_candidates(
+                    [message],
+                    MAILBOX_EMAIL,
+                )
+                self.assertIsNone(candidates["recommended_company_id"])
+                self.assertIsNone(candidates["recommended_contact_id"])
+                self.assertFalse(candidates["exact_company_match"])
+                self.assertTrue(candidates["identity_warnings"])
+
+    def test_ambiguous_from_cannot_impersonate_shared_mailbox_direction(self):
+        message = gmail_message(
+            "identity-ambiguous-outbound",
+            sender=(
+                f"Shared Mailbox <{MAILBOX_EMAIL}>, "
+                "Other <other@unrelated.example>"
+            ),
+        )
+        message["full_headers"] = [
+            {"name": "From", "value": message["sender"]},
+        ]
+        message["label_ids"] = []
+
+        self.assertFalse(_is_outbound_message(message, MAILBOX_EMAIL))
+
+        message["label_ids"] = ["SENT"]
+        self.assertTrue(_is_outbound_message(message, MAILBOX_EMAIL))
+
+    def test_forwarder_identity_is_suppressed_but_ai_customer_is_review_only(self):
+        forwarded_company = Company.objects.create(
+            name="Original Customer Medical Services LLC",
+        )
+        CompanyContact.objects.create(
+            company=forwarded_company,
+            name="Original Buyer",
+            email="original@customer.example",
+        )
+        message = gmail_message(
+            "identity-forwarded",
+            sender="Buyer <buyer@example.com>",
+            body="Please prepare the forwarded quotation request.",
+        )
+        message.update(
+            {
+                "contains_unverified_forwarded_content": True,
+                "_forwarded_body_text": (
+                    "---------- Forwarded message ---------\n"
+                    "From: Original Buyer <original@customer.example>\n"
+                    "Date: Fri, 31 Jul 2026 at 10:00\n"
+                    "Subject: RFQ\nTo: quotes@example.com\n\n"
+                    "Original Customer Medical Services LLC\n"
+                    "Sterile Gauze | 20 | BOX"
+                ),
+            }
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["sender_emails"], ["buyer@example.com"])
+        self.assertEqual(candidates["verified_identity_sender_emails"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertNotIn(
+            self.company.id,
+            {row["company_id"] for row in candidates["companies"]},
+        )
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "Original Customer Medical Services LLC",
+                "contact_name": "Original Buyer",
+                "contact_email": "original@customer.example",
+                "source_keys": [
+                    candidates[
+                        "unverified_forwarded_identity_source_keys"
+                    ][0]
+                ],
+                "confidence": 0.99,
+                "reason": "Read from unverified forwarded content.",
+            },
+        )
+
+        self.assertEqual(
+            ranked["recommended_company_id"],
+            forwarded_company.id,
+        )
+        self.assertFalse(ranked["exact_company_match"])
+        self.assertIsNone(ranked["recommended_contact_id"])
+        self.assertEqual(ranked["contacts"], [])
+        self.assertTrue(ranked["ai_identity_unverified_forwarded"])
+
+    def test_reply_to_domain_mismatch_is_visible_but_never_identity_evidence(self):
+        cross_domain = gmail_message(
+            "identity-cross-reply-to",
+            sender="Unknown <unknown@customer.example>",
+        )
+        cross_domain["reply_to"] = "Accounts <accounts@other.example>"
+        same_domain = gmail_message(
+            "identity-same-reply-to",
+            sender="Unknown <unknown@customer.example>",
+        )
+        same_domain["reply_to"] = "Accounts <accounts@customer.example>"
+
+        cross_candidates = _company_contact_candidates(
+            [cross_domain],
+            MAILBOX_EMAIL,
+        )
+        same_candidates = _company_contact_candidates(
+            [same_domain],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertTrue(
+            any(
+                "Reply-To domain differs" in warning
+                for warning in cross_candidates["identity_warnings"]
+            )
+        )
+        self.assertFalse(
+            any(
+                "Reply-To domain differs" in warning
+                for warning in same_candidates["identity_warnings"]
+            )
+        )
+
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
     def test_reply_to_cannot_spoof_exact_identity_or_direct_quote_readiness(
         self,
@@ -442,7 +729,15 @@ class GmailInquiryImportTests(TestCase):
         gmail_import = self.issue_and_claim(
             anchor="identity-spoofed-reply-to",
         )
-        def native_result(messages, sources, _files, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            _files,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             body_source = next(
                 source
                 for source in sources
@@ -884,6 +1179,38 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(match["evidence"][0]["score"], 96)
         self.assertFalse(ranked["exact_company_match"])
 
+    def test_ai_contact_email_uses_same_idn_canonical_form_as_saved_contact(self):
+        company = Company.objects.create(name="Bucher Medical Services LLC")
+        contact = CompanyContact.objects.create(
+            company=company,
+            name="Original Buyer",
+            email="buyer@xn--bcher-kva.example",
+        )
+        candidates = {
+            "sender_emails": [],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "Bucher Medical Services LLC",
+                "contact_name": "Original Buyer",
+                "contact_email": "BUYER@bücher.example.",
+                "source_keys": ["forwarded-body"],
+                "confidence": 0.99,
+                "reason": "Read from unverified forwarded evidence.",
+            },
+        )
+
+        self.assertEqual(ranked["recommended_company_id"], company.id)
+        self.assertEqual(ranked["recommended_contact_id"], contact.id)
+        self.assertFalse(ranked["exact_company_match"])
+
     def test_ai_identity_suppresses_wrong_unique_domain_property_match(self):
         company = Company.objects.create(
             name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
@@ -1311,7 +1638,7 @@ class GmailInquiryImportTests(TestCase):
                     match["evidence"][0]["specificity_conflict"]
                 )
 
-    def test_stored_gmail_identity_is_reranked_once_without_another_ai_call(self):
+    def test_unversioned_stored_identity_requires_reanalysis(self):
         company = Company.objects.create(
             name="RAQ Contracting Company LLC",
         )
@@ -1347,30 +1674,153 @@ class GmailInquiryImportTests(TestCase):
             gmail_import
         )
 
-        self.assertEqual(
-            refreshed.candidates["recommended_company_id"],
-            company.id,
+        self.assertIsNone(refreshed.candidates["recommended_company_id"])
+        self.assertIsNone(refreshed.candidates["recommended_contact_id"])
+        self.assertFalse(refreshed.candidates["exact_company_match"])
+        self.assertEqual(refreshed.candidates["companies"], [])
+        self.assertEqual(refreshed.candidates["contacts"], [])
+        self.assertTrue(
+            refreshed.candidates["identity_reanalysis_required"]
         )
-        self.assertEqual(
-            refreshed.candidates["identity_match_version"],
-            "gmail_identity_v3",
+        self.assertNotIn(
+            "identity_match_version",
+            refreshed.candidates,
         )
         gmail_import.refresh_from_db()
-        self.assertEqual(
-            gmail_import.candidates["recommended_company_id"],
-            company.id,
+        self.assertTrue(
+            gmail_import.candidates["identity_reanalysis_required"]
         )
         with CaptureQueriesContext(django_connection) as captured:
             same = refresh_gmail_inquiry_identity_candidates(
                 gmail_import
             )
         self.assertEqual(len(captured), 0)
-        self.assertEqual(
-            same.candidates["recommended_company_id"],
-            company.id,
+        self.assertTrue(same.candidates["identity_reanalysis_required"])
+
+    def test_direct_confirmation_rejects_stale_identity_without_refresh(self):
+        gmail_import = self.analyzed_record(
+            thread="direct-confirm-stale-identity",
+            rows=[
+                {
+                    "row_key": "d" * 32,
+                    "raw_name": "Sterile Gauze",
+                    "raw_line": "Sterile Gauze | 2 | BOX",
+                    "quantity": "2",
+                    "unit": "BOX",
+                    "unit_price": None,
+                    "vat_rate": "0.00",
+                    "operation": "added",
+                    "parse_status": "parsed",
+                    "parse_confidence": 0.99,
+                    "included": True,
+                    "reviewed_by_user": True,
+                    "_source_keys": ["stored-email-body"],
+                }
+            ],
+        )
+        gmail_import.analysis["thread_analysis"] = {
+            "customer_identity": {
+                "company_name": self.company.name,
+                "contact_name": self.contact.name,
+                "contact_email": self.contact.email,
+                "source_keys": ["stored-email-body"],
+                "confidence": 0.99,
+                "reason": "Stored identity from an older matching version.",
+            }
+        }
+        gmail_import.candidates = {
+            "identity_match_version": "gmail_identity_v3",
+            "companies": [
+                {
+                    "company_id": self.company.id,
+                    "company_name": self.company.name,
+                    "match_method": "verified_email_domain",
+                }
+            ],
+            "contacts": [],
+            "recommended_company_id": self.company.id,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+        gmail_import.save(update_fields=["analysis", "candidates"])
+        quotation_count = Quotation.objects.count()
+
+        with self.assertRaisesRegex(
+            GmailInquiryImportError,
+            "Reanalyze this Gmail inquiry",
+        ):
+            confirm_gmail_inquiry_import(
+                gmail_import,
+                self.staff,
+                company=self.company,
+            )
+
+        gmail_import.refresh_from_db()
+        self.assertIsNone(gmail_import.inquiry_id)
+        self.assertIsNone(gmail_import.quotation_id)
+        self.assertEqual(Quotation.objects.count(), quotation_count)
+
+    def test_v3_identity_suggestion_requires_reanalysis_under_forward_rules(self):
+        gmail_import = self.issue_and_claim(
+            anchor="stored-v3-forward-candidate",
+        )
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.analysis = {
+            "thread_analysis": {
+                "customer_identity": {
+                    "company_name": self.company.name,
+                    "contact_name": self.contact.name,
+                    "contact_email": self.contact.email,
+                    "source_keys": ["stored-body"],
+                    "confidence": 0.99,
+                    "reason": "Previously analyzed identity.",
+                }
+            }
+        }
+        gmail_import.candidates = {
+            "identity_match_version": "gmail_identity_v3",
+            "sender_emails": ["buyer@example.com"],
+            "companies": [
+                {
+                    "company_id": self.company.id,
+                    "company_name": self.company.name,
+                    "confidence": 1.0,
+                    "match_method": "exact_company_email",
+                }
+            ],
+            "contacts": [],
+            "recommended_company_id": self.company.id,
+            "recommended_contact_id": self.contact.id,
+            "exact_company_match": True,
+        }
+        gmail_import.save(
+            update_fields=["status", "analysis", "candidates"]
         )
 
-    def test_stored_wrong_domain_suggestion_is_cleared_on_refresh(self):
+        refreshed = refresh_gmail_inquiry_identity_candidates(gmail_import)
+
+        self.assertIsNone(refreshed.candidates["recommended_company_id"])
+        self.assertIsNone(refreshed.candidates["recommended_contact_id"])
+        self.assertFalse(refreshed.candidates["exact_company_match"])
+        self.assertTrue(
+            refreshed.candidates["identity_reanalysis_required"]
+        )
+        self.assertTrue(
+            any(
+                "Reanalyze this Gmail inquiry" in warning
+                for warning in refreshed.analysis["warnings"]
+            )
+        )
+        self.assertEqual(
+            refreshed.candidates["identity_match_version"],
+            "gmail_identity_v3",
+        )
+        with CaptureQueriesContext(django_connection) as captured:
+            same = refresh_gmail_inquiry_identity_candidates(refreshed)
+        self.assertEqual(len(captured), 0)
+        self.assertTrue(same.candidates["identity_reanalysis_required"])
+
+    def test_unversioned_wrong_domain_suggestion_is_quarantined(self):
         company = Company.objects.create(
             name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
         )
@@ -1421,11 +1871,10 @@ class GmailInquiryImportTests(TestCase):
         self.assertIsNone(
             refreshed.candidates["recommended_company_id"]
         )
-        self.assertEqual(
-            refreshed.candidates["identity_conflict"][
-                "conflicting_company_id"
-            ],
-            company.id,
+        self.assertNotIn("identity_conflict", refreshed.candidates)
+        self.assertEqual(refreshed.candidates["companies"], [])
+        self.assertTrue(
+            refreshed.candidates["identity_reanalysis_required"]
         )
 
     def test_identity_refresh_is_query_free_before_ai_identity_exists(self):
@@ -1695,6 +2144,104 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(reopened.analysis, {})
         self.assertEqual(reopened.message_manifest, [])
 
+    @patch("quotations.gmail_inquiry_import._build_source_analysis")
+    @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
+    @patch("quotations.gmail_inquiry_import._connected_mailbox_for_import")
+    def test_saved_pipeline_version_is_not_reused_without_content_contract(
+        self,
+        mock_connection,
+        mock_fetch,
+        mock_build,
+    ):
+        gmail_import = self.issue_and_claim(anchor="stored-analysis")
+        gmail_import.status = GmailInquiryImport.STATUS_READY
+        gmail_import.analysis = {
+            "version": "gmail_inquiry_v2",
+            "preview": {"lines": [{"raw_name": "Unsafe stale row"}]},
+        }
+        gmail_import.save(update_fields=["status", "analysis", "updated_at"])
+        message = gmail_message("stored-analysis")
+        mock_connection.return_value = self.connection
+        mock_fetch.return_value = (
+            "thread-1",
+            [message],
+            [message],
+            {
+                "total_count": 1,
+                "returned_count": 1,
+                "limit": 50,
+                "truncated": False,
+            },
+        )
+        mock_build.return_value = {
+            "message_manifest": [
+                {
+                    "gmail_message_id": "stored-analysis",
+                    "gmail_thread_id": "thread-1",
+                }
+            ],
+            "attachment_manifest": [],
+            "evidence": [],
+            "candidates": {},
+            "preview": {"lines": [], "warnings": [], "meta": {}},
+            "ready_for_direct_quote": False,
+            "warnings": [],
+            "recommended_source_keys": [],
+            "thread_analysis": {},
+        }
+
+        analyze_gmail_inquiry_import(gmail_import, self.staff)
+
+        mock_fetch.assert_called_once()
+        self.assertTrue(
+            mock_build.call_args.kwargs["allow_semantic_cache_read"]
+        )
+        mock_fetch.reset_mock()
+        mock_build.reset_mock()
+
+        analyze_gmail_inquiry_import(gmail_import, self.staff, force=True)
+
+        mock_fetch.assert_called_once()
+        self.assertFalse(
+            mock_build.call_args.kwargs["allow_semantic_cache_read"]
+        )
+
+    @patch("quotations.gmail_inquiry_import._build_source_analysis")
+    @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
+    @patch("quotations.gmail_inquiry_import._connected_mailbox_for_import")
+    def test_non_force_analysis_never_overwrites_staff_reviewed_rows(
+        self,
+        mock_connection,
+        mock_fetch,
+        mock_build,
+    ):
+        gmail_import = self.issue_and_claim(anchor="reviewed-analysis")
+        reviewed_analysis = {
+            "version": "gmail_inquiry_v2",
+            "reviewed_at": timezone.now().isoformat(),
+            "reviewed_by_user_id": self.staff.pk,
+            "preview": {
+                "lines": [
+                    {
+                        "raw_name": "Employee corrected wording",
+                        "quantity": "12",
+                        "unit": "BOX",
+                        "reviewed_by_user": True,
+                    }
+                ]
+            },
+        }
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.analysis = reviewed_analysis
+        gmail_import.save(update_fields=["status", "analysis", "updated_at"])
+
+        returned = analyze_gmail_inquiry_import(gmail_import, self.staff)
+
+        self.assertEqual(returned.analysis, reviewed_analysis)
+        mock_connection.assert_not_called()
+        mock_fetch.assert_not_called()
+        mock_build.assert_not_called()
+
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
     @patch("quotations.gmail_inquiry_import._fetch_analysis_messages")
     @patch("quotations.gmail_inquiry_import._connected_mailbox_for_import")
@@ -1723,7 +2270,15 @@ class GmailInquiryImportTests(TestCase):
             [selected],
             [selected, unselected],
         )
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(messages[0]["newest_body_text"], "Please quote")
             self.assertEqual(messages[0]["newest_body_html"], html)
@@ -2073,7 +2628,15 @@ class GmailInquiryImportTests(TestCase):
             body="Any update?",
         )
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(
                 [message["newest_body_text"] for message in messages],
@@ -2233,6 +2796,76 @@ class GmailInquiryImportTests(TestCase):
         )
         with self.assertRaisesRegex(AIParseError, "unknown source"):
             _validate_native_thread_result(invalid, [message], evidence)
+
+        identity_without_provenance = native_analysis_result(
+            [native_message_result("prompt-injection")],
+            [],
+            customer_identity={
+                "company_name": "Invented Customer LLC",
+                "contact_name": "Buyer",
+                "contact_email": "buyer@example.com",
+                "source_keys": [],
+                "confidence": 0.99,
+                "reason": "Claimed without evidence.",
+            },
+        )
+        with self.assertRaisesRegex(
+            AIParseError,
+            "identity without source evidence",
+        ):
+            _validate_native_thread_result(
+                identity_without_provenance,
+                [message],
+                evidence,
+            )
+
+    def test_native_context_preserves_forwarded_boundary_as_unverified(self):
+        forwarded = (
+            "---------- Forwarded message ---------\n"
+            "From: Original Buyer <original@customer.example>\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: RFQ 4421\nTo: quotes@example.com\n\n"
+            "Sterile Gauze | 20 | BOX"
+        )
+        message = gmail_message(
+            "forwarded-context",
+            sender="Forwarder <forwarder@internal.example>",
+            body="Please prepare this quotation.",
+        )
+        message.update(
+            {
+                "is_outbound": False,
+                "contains_unverified_forwarded_content": True,
+                "_forwarded_body_text": forwarded,
+                "_forwarded_body_html": "",
+            }
+        )
+        evidence = [
+            {
+                "source_key": "forwarded-body-source",
+                "gmail_message_id": "forwarded-context",
+                "kind": "email_body",
+                "filename": "",
+                "mime_type": "text/plain",
+                "rows": [],
+            }
+        ]
+
+        context = json.loads(
+            _native_thread_context(
+                [message],
+                evidence,
+                GmailInquiryImport.MODE_AI_THREAD,
+            )
+        )["timeline"][0]
+
+        self.assertEqual(context["body_text"], "Please prepare this quotation.")
+        self.assertEqual(context["forwarded_content_trust"], "unverified")
+        self.assertEqual(context["forwarded_body_text"], forwarded)
+        self.assertEqual(
+            context["sender"],
+            "Forwarder <forwarder@internal.example>",
+        )
 
     def test_native_schema_uses_citations_as_the_row_source_list(self):
         schema = _native_thread_schema(
@@ -2483,6 +3116,7 @@ class GmailInquiryImportTests(TestCase):
                 [],
                 gmail_import,
                 self.staff,
+                analysis_timings={"source_preparation": 7.5},
             )
 
         self.assertEqual(parsed["rows"][0]["raw_name"], "Sterile gauze")
@@ -2493,9 +3127,40 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(success_log.source_type, "gmail")
         self.assertEqual(success_log.usage["gmail_import_id"], gmail_import.pk)
         self.assertEqual(success_log.usage["input_tokens"], 120)
+        observation = success_log.usage["observability"]
+        provider_call = get_provider.return_value.clean_rows.call_args.kwargs
+        expected_contract = ai_parse_contract_descriptor(
+            pipeline_version=GMAIL_AI_PIPELINE_VERSION,
+            schema_name=provider_call["schema_name"],
+            instructions=provider_call["instructions"],
+            schema=provider_call["json_schema"],
+        )
+        self.assertEqual(observation["route"], "gmail")
+        self.assertEqual(observation["contract"], expected_contract)
+        self.assertTrue(observation["provider_call_attempted"])
+        self.assertFalse(observation["application_cache_hit"])
+        self.assertEqual(observation["cost_basis"]["input_tokens"], 120)
+        self.assertEqual(observation["cost_basis"]["output_tokens"], 40)
+        self.assertEqual(observation["source_shape"]["message_count"], 1)
+        self.assertEqual(observation["source_shape"]["file_count"], 0)
+        self.assertTrue(
+            {"provider", "validation", "total"}
+            <= set(observation["timings_ms"])
+        )
+        self.assertEqual(observation["timings_ms"]["source_preparation"], 7.5)
+        self.assertGreaterEqual(observation["timings_ms"]["total"], 7.5)
+        safe_metrics = json.dumps(success_log.usage, sort_keys=True)
+        self.assertNotIn("audit-thread", safe_metrics)
+        self.assertNotIn("audit-message", safe_metrics)
+        self.assertNotIn("Please quote 2 boxes", safe_metrics)
         self.assertEqual(
             set(success_log.usage["timings_ms"]),
-            {"ai_provider", "ai_validation", "ai_analysis"},
+            {
+                "source_preparation",
+                "ai_provider",
+                "ai_validation",
+                "ai_analysis",
+            },
         )
         self.assertEqual(
             parsed["_timings_ms"],
@@ -2533,14 +3198,600 @@ class GmailInquiryImportTests(TestCase):
                     [],
                     gmail_import,
                     self.staff,
+                    analysis_timings={"source_preparation": 4.0},
+                    allow_semantic_cache_read=False,
                 )
 
         failed_log = AIParseLog.objects.get(success=False)
         self.assertEqual(failed_log.actor, self.staff)
         self.assertIn("classify every selected message", failed_log.error)
+        self.assertEqual(failed_log.usage["input_tokens"], 25)
+        failed_observation = failed_log.usage["observability"]
+        self.assertEqual(failed_observation["outcome"], "failure")
+        self.assertEqual(failed_observation["failure_stage"], "validation")
+        self.assertEqual(failed_observation["cost_basis"]["input_tokens"], 25)
         self.assertEqual(
             set(failed_log.usage["timings_ms"]),
-            {"ai_provider", "ai_validation", "ai_analysis"},
+            {
+                "source_preparation",
+                "ai_provider",
+                "ai_validation",
+                "ai_analysis",
+            },
+        )
+
+    def test_native_semantic_cache_revalidates_without_provider_cost(self):
+        gmail_import = self.issue_and_claim(anchor="cache-message")
+        message = gmail_message(
+            "cache-message",
+            body=(
+                "Private introduction. Please quote 2 boxes of sterile gauze. "
+                "Private footer that is not row evidence."
+            ),
+        )
+        message["is_outbound"] = False
+        source = {
+            "source_key": "body:cache",
+            "gmail_message_id": "cache-message",
+            "kind": "email_body",
+            "filename": "",
+            "mime_type": "text/plain",
+            "source_sha256": hashlib.sha256(
+                message["newest_body_text"].encode("utf-8")
+            ).hexdigest(),
+            "rows": [],
+        }
+        valid_result = native_analysis_result(
+            [native_message_result("cache-message")],
+            [
+                native_row(
+                    "body:cache",
+                    "Sterile gauze",
+                    "2",
+                    "BOX",
+                    raw_source_text="2 boxes of sterile gauze",
+                )
+            ],
+        )
+        availability = {
+            "provider": "openai",
+            "text_model": "gpt-cache-text",
+            "vision_model": "gpt-cache-vision",
+        }
+        with (
+            patch(
+                "quotations.gmail_inquiry_import.settings_ai_status",
+                return_value={"status": "ai_available"},
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_availability",
+                return_value=availability,
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_provider"
+            ) as get_provider,
+        ):
+            get_provider.return_value.clean_rows.return_value = (
+                valid_result,
+                {"input_tokens": 90, "output_tokens": 30},
+            )
+            first = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+            second = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+
+        self.assertEqual(get_provider.return_value.clean_rows.call_count, 1)
+        self.assertEqual(AIParseCache.objects.count(), 1)
+        self.assertIsNone(first["rows"][0]["unit_price"])
+        self.assertIsNone(second["rows"][0]["unit_price"])
+        self.assertEqual(second["usage"], {})
+        cache_log = AIParseLog.objects.get(cache_hit=True)
+        self.assertEqual(cache_log.actor, self.staff)
+        self.assertEqual(cache_log.usage["gmail_import_id"], gmail_import.pk)
+        observation = cache_log.usage["observability"]
+        self.assertFalse(observation["provider_call_attempted"])
+        self.assertTrue(observation["application_cache_hit"])
+        self.assertEqual(observation["outcome"], "cache_hit")
+        self.assertFalse(observation["cost_basis"]["usage_reported"])
+        self.assertEqual(observation["cost_basis"]["input_tokens"], 0)
+        self.assertEqual(observation["cost_basis"]["output_tokens"], 0)
+        cached_payload = AIParseCache.objects.get().result
+        self.assertEqual(
+            cached_payload["cache_version"],
+            GMAIL_SEMANTIC_CACHE_VERSION,
+        )
+        serialized_cache = json.dumps(cached_payload, sort_keys=True)
+        self.assertNotIn("Private footer", serialized_cache)
+        self.assertNotIn("input_tokens", serialized_cache)
+        self.assertNotIn("_usage", serialized_cache)
+
+    def test_native_semantic_cache_round_trip_preserves_uncertain_rows(self):
+        gmail_import = self.issue_and_claim(anchor="uncertain-cache-message")
+        message = gmail_message(
+            "uncertain-cache-message",
+            body="Please quote the unclear item below.",
+        )
+        message["is_outbound"] = False
+        source = {
+            "source_key": "body:uncertain-cache",
+            "gmail_message_id": "uncertain-cache-message",
+            "kind": "email_body",
+            "filename": "",
+            "mime_type": "text/plain",
+            "source_sha256": hashlib.sha256(
+                message["newest_body_text"].encode("utf-8")
+            ).hexdigest(),
+            "rows": [],
+        }
+        long_invalid_unit = "U" * 60
+        raw_result = native_analysis_result(
+            [native_message_result("uncertain-cache-message")],
+            [
+                native_row(
+                    "body:uncertain-cache",
+                    "Unclear dressing",
+                    "",
+                    long_invalid_unit,
+                    operation="added",
+                    parse_status="parsed",
+                    raw_source_text="Unclear dressing",
+                    reason="Quantity and unit need checking.",
+                )
+            ],
+            customer_identity={
+                "company_name": "Example Medical Center",
+                "contact_name": "Buyer Name",
+                "contact_email": "buyer@example.com",
+                "source_keys": ["body:uncertain-cache"],
+                "confidence": 0.75,
+                "reason": "Read from the signature.",
+            },
+            warnings=["Verify the unclear row."],
+        )
+        availability = {
+            "provider": "openai",
+            "text_model": "gpt-uncertain-text",
+            "vision_model": "gpt-uncertain-vision",
+        }
+        with (
+            patch(
+                "quotations.gmail_inquiry_import.settings_ai_status",
+                return_value={"status": "ai_available"},
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_availability",
+                return_value=availability,
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_provider"
+            ) as get_provider,
+        ):
+            get_provider.return_value.clean_rows.return_value = (raw_result, {})
+            first = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+            cached = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+
+        self.assertEqual(get_provider.return_value.clean_rows.call_count, 1)
+        self.assertEqual(cached["rows"], first["rows"])
+        self.assertEqual(cached["messages"], first["messages"])
+        self.assertEqual(cached["warnings"], first["warnings"])
+        self.assertEqual(
+            cached["customer_identity"], first["customer_identity"]
+        )
+        self.assertEqual(cached["rows"][0]["unit"], long_invalid_unit)
+        self.assertEqual(
+            cached["rows"][0]["semantic_reason"].count(
+                "requires staff review"
+            ),
+            1,
+        )
+        self.assertIsNone(cached["rows"][0]["unit_price"])
+
+    def test_forced_native_analysis_refreshes_cache_for_next_normal_run(self):
+        gmail_import = self.issue_and_claim(anchor="refresh-cache-message")
+        message = gmail_message(
+            "refresh-cache-message",
+            body="Please quote the requested box.",
+        )
+        message["is_outbound"] = False
+        source = {
+            "source_key": "body:refresh-cache",
+            "gmail_message_id": "refresh-cache-message",
+            "kind": "email_body",
+            "filename": "",
+            "mime_type": "text/plain",
+            "source_sha256": hashlib.sha256(
+                message["newest_body_text"].encode("utf-8")
+            ).hexdigest(),
+            "rows": [],
+        }
+        result_a = native_analysis_result(
+            [native_message_result("refresh-cache-message")],
+            [
+                native_row(
+                    "body:refresh-cache",
+                    "Interpretation A",
+                    "1",
+                    "BOX",
+                )
+            ],
+        )
+        result_b = native_analysis_result(
+            [native_message_result("refresh-cache-message")],
+            [
+                native_row(
+                    "body:refresh-cache",
+                    "Interpretation B",
+                    "2",
+                    "BOX",
+                )
+            ],
+        )
+        availability = {
+            "provider": "openai",
+            "text_model": "gpt-refresh-text",
+            "vision_model": "gpt-refresh-vision",
+        }
+        with (
+            patch(
+                "quotations.gmail_inquiry_import.settings_ai_status",
+                return_value={"status": "ai_available"},
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_availability",
+                return_value=availability,
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_provider"
+            ) as get_provider,
+        ):
+            get_provider.return_value.clean_rows.side_effect = [
+                (result_a, {}),
+                (result_b, {}),
+            ]
+            initial = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+            forced = _run_native_thread_analysis(
+                [message],
+                [source],
+                [],
+                gmail_import,
+                self.staff,
+                allow_semantic_cache_read=False,
+            )
+            ordinary = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+
+        self.assertEqual(get_provider.return_value.clean_rows.call_count, 2)
+        self.assertEqual(initial["rows"][0]["raw_name"], "Interpretation A")
+        self.assertEqual(forced["rows"][0]["raw_name"], "Interpretation B")
+        self.assertEqual(ordinary["rows"][0]["raw_name"], "Interpretation B")
+        self.assertEqual(ordinary["rows"][0]["quantity"], "2")
+        self.assertEqual(AIParseLog.objects.filter(cache_hit=True).count(), 1)
+
+    def test_native_semantic_cache_key_covers_every_contract_dimension(self):
+        gmail_import = self.issue_and_claim(anchor="contract-message")
+        message = gmail_message(
+            "contract-message",
+            body="Please quote 4 boxes of masks.",
+        )
+        message["is_outbound"] = False
+
+        def source_for(source_message):
+            body = source_message["newest_body_text"]
+            return {
+                "source_key": "body:contract",
+                "gmail_message_id": "contract-message",
+                "kind": "email_body",
+                "filename": "",
+                "mime_type": "text/plain",
+                "source_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                "rows": [],
+            }
+
+        valid_result = native_analysis_result(
+            [native_message_result("contract-message")],
+            [
+                native_row(
+                    "body:contract",
+                    "Masks",
+                    "4",
+                    "BOX",
+                    raw_source_text="4 boxes of masks",
+                )
+            ],
+        )
+        base_availability = {
+            "provider": "openai",
+            "text_model": "gpt-contract-text",
+            "vision_model": "gpt-contract-vision",
+        }
+        with (
+            patch(
+                "quotations.gmail_inquiry_import.settings_ai_status",
+                return_value={"status": "ai_available"},
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_availability"
+            ) as get_availability,
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_provider"
+            ) as get_provider,
+        ):
+            get_provider.return_value.clean_rows.return_value = (valid_result, {})
+            get_availability.return_value = base_availability
+            _run_native_thread_analysis(
+                [message], [source_for(message)], [], gmail_import, self.staff
+            )
+            # Exact same semantic work is the sole hit in this test.
+            _run_native_thread_analysis(
+                [message], [source_for(message)], [], gmail_import, self.staff
+            )
+
+            changed_message = {
+                **message,
+                "newest_body_text": "Please quote 5 boxes of masks.",
+            }
+            _run_native_thread_analysis(
+                [changed_message],
+                [source_for(changed_message)],
+                [],
+                gmail_import,
+                self.staff,
+            )
+
+            other_mailbox_import = GmailInquiryImport.objects.create(
+                mailbox_email="other-mailbox@example.com",
+                gmail_thread_id=gmail_import.gmail_thread_id,
+                anchor_message_id=gmail_import.anchor_message_id,
+                selected_message_ids=list(gmail_import.selected_message_ids),
+                mode=gmail_import.mode,
+                status=GmailInquiryImport.STATUS_CLAIMED,
+                claimed_by=self.staff,
+                claimed_at=timezone.now(),
+            )
+            _run_native_thread_analysis(
+                [message],
+                [source_for(message)],
+                [],
+                other_mailbox_import,
+                self.staff,
+            )
+
+            get_availability.return_value = {
+                **base_availability,
+                "provider": "other-provider",
+            }
+            _run_native_thread_analysis(
+                [message], [source_for(message)], [], gmail_import, self.staff
+            )
+
+            get_availability.return_value = {
+                **base_availability,
+                "text_model": "gpt-contract-text-v2",
+            }
+            _run_native_thread_analysis(
+                [message], [source_for(message)], [], gmail_import, self.staff
+            )
+            get_availability.return_value = base_availability
+
+            with patch(
+                "quotations.gmail_inquiry_import._native_thread_instructions",
+                return_value=(
+                    _native_thread_instructions(gmail_import.mode)
+                    + "\nSynthetic prompt contract change."
+                ),
+            ):
+                _run_native_thread_analysis(
+                    [message], [source_for(message)], [], gmail_import, self.staff
+                )
+
+            changed_schema = _native_thread_schema(
+                ["contract-message"], ["body:contract"]
+            )
+            changed_schema["description"] = "Synthetic schema contract change."
+            with patch(
+                "quotations.gmail_inquiry_import._native_thread_schema",
+                return_value=changed_schema,
+            ):
+                _run_native_thread_analysis(
+                    [message], [source_for(message)], [], gmail_import, self.staff
+                )
+
+            with patch(
+                "quotations.gmail_inquiry_import.GMAIL_AI_PIPELINE_VERSION",
+                "gmail_inquiry_test_next",
+            ):
+                _run_native_thread_analysis(
+                    [message], [source_for(message)], [], gmail_import, self.staff
+                )
+
+        self.assertEqual(get_provider.return_value.clean_rows.call_count, 8)
+        self.assertEqual(AIParseCache.objects.count(), 8)
+        self.assertEqual(AIParseLog.objects.filter(cache_hit=True).count(), 1)
+
+    def test_native_semantic_cache_hashes_exact_attachment_bytes(self):
+        gmail_import = self.issue_and_claim(anchor="file-cache-message")
+        message = gmail_message(
+            "file-cache-message",
+            body="Please quote the attached item list.",
+        )
+        message["is_outbound"] = False
+        source = {
+            "source_key": "attachment:file-cache",
+            "gmail_message_id": "file-cache-message",
+            "kind": "attachment",
+            "filename": "request.pdf",
+            "mime_type": "application/pdf",
+            "source_sha256": "claimed-digest-is-deliberately-identical",
+            "rows": [],
+        }
+        valid_result = native_analysis_result(
+            [native_message_result("file-cache-message")],
+            [
+                native_row(
+                    "attachment:file-cache",
+                    "First aid kit",
+                    "1",
+                    "EA",
+                    raw_source_text="First aid kit | 1 | EA",
+                )
+            ],
+        )
+        file_metadata = {
+            "source_key": "attachment:file-cache",
+            "filename": "request.pdf",
+            "mime_type": "application/pdf",
+            "source_sha256": "claimed-digest-is-deliberately-identical",
+            "size": 24,
+            "page_count": 1,
+        }
+        availability = {
+            "provider": "openai",
+            "text_model": "gpt-file-text",
+            "vision_model": "gpt-file-vision",
+        }
+        with (
+            patch(
+                "quotations.gmail_inquiry_import.settings_ai_status",
+                return_value={"status": "ai_available"},
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_availability",
+                return_value=availability,
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_provider"
+            ) as get_provider,
+        ):
+            get_provider.return_value.clean_rows.return_value = (valid_result, {})
+            _run_native_thread_analysis(
+                [message],
+                [source],
+                [{**file_metadata, "content": b"%PDF PRIVATE-BINARY-A"}],
+                gmail_import,
+                self.staff,
+            )
+            _run_native_thread_analysis(
+                [message],
+                [source],
+                [{**file_metadata, "content": b"%PDF PRIVATE-BINARY-B"}],
+                gmail_import,
+                self.staff,
+            )
+            _run_native_thread_analysis(
+                [message],
+                [source],
+                [
+                    {
+                        **file_metadata,
+                        "content": b"%PDF PRIVATE-BINARY-B",
+                        "detail": "low",
+                    }
+                ],
+                gmail_import,
+                self.staff,
+            )
+
+        self.assertEqual(get_provider.return_value.clean_rows.call_count, 3)
+        self.assertEqual(AIParseCache.objects.count(), 3)
+        serialized_cache = json.dumps(
+            list(AIParseCache.objects.values_list("result", flat=True)),
+            sort_keys=True,
+        )
+        self.assertNotIn("PRIVATE-BINARY-A", serialized_cache)
+        self.assertNotIn("PRIVATE-BINARY-B", serialized_cache)
+
+    def test_corrupt_cache_falls_through_and_explicit_fresh_run_bypasses(self):
+        gmail_import = self.issue_and_claim(anchor="fresh-cache-message")
+        message = gmail_message(
+            "fresh-cache-message",
+            body="Please quote 1 box of gloves.",
+        )
+        message["is_outbound"] = False
+        source = {
+            "source_key": "body:fresh-cache",
+            "gmail_message_id": "fresh-cache-message",
+            "kind": "email_body",
+            "filename": "",
+            "mime_type": "text/plain",
+            "source_sha256": hashlib.sha256(
+                message["newest_body_text"].encode("utf-8")
+            ).hexdigest(),
+            "rows": [],
+        }
+        valid_result = native_analysis_result(
+            [native_message_result("fresh-cache-message")],
+            [
+                native_row(
+                    "body:fresh-cache",
+                    "Gloves",
+                    "1",
+                    "BOX",
+                    raw_source_text="1 box of gloves",
+                )
+            ],
+        )
+        availability = {
+            "provider": "openai",
+            "text_model": "gpt-fresh-text",
+            "vision_model": "gpt-fresh-vision",
+        }
+        with (
+            patch(
+                "quotations.gmail_inquiry_import.settings_ai_status",
+                return_value={"status": "ai_available"},
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_availability",
+                return_value=availability,
+            ),
+            patch(
+                "quotations.gmail_inquiry_import.get_ai_parse_provider"
+            ) as get_provider,
+        ):
+            get_provider.return_value.clean_rows.return_value = (valid_result, {})
+            _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+            cached = AIParseCache.objects.get()
+            cached.result = {
+                **cached.result,
+                "semantic_result": {"messages": [], "rows": []},
+            }
+            cached.save(update_fields=["result", "updated_at"])
+
+            recovered = _run_native_thread_analysis(
+                [message], [source], [], gmail_import, self.staff
+            )
+            fresh = _run_native_thread_analysis(
+                [message],
+                [source],
+                [],
+                gmail_import,
+                self.staff,
+                allow_semantic_cache_read=False,
+            )
+
+        self.assertEqual(get_provider.return_value.clean_rows.call_count, 3)
+        self.assertEqual(recovered["rows"][0]["raw_name"], "Gloves")
+        self.assertEqual(fresh["rows"][0]["raw_name"], "Gloves")
+        self.assertEqual(AIParseLog.objects.filter(cache_hit=True).count(), 0)
+        self.assertEqual(
+            sum(
+                bool(
+                    log.usage.get("semantic_cache_invalid_fallback")
+                )
+                for log in AIParseLog.objects.all()
+            ),
+            1,
         )
 
     @override_settings(
@@ -2647,7 +3898,15 @@ class GmailInquiryImportTests(TestCase):
             "FULL-BODY-TAIL-7F41"
         )
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(messages[0]["newest_body_text"], full_body)
             self.assertEqual(
                 [file_input["content"] for file_input in file_inputs],
@@ -2873,7 +4132,7 @@ class GmailInquiryImportTests(TestCase):
     )
     @patch("quotations.import_parsers.parse_file_preview")
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
-    def test_native_safety_preflight_skips_oversized_pdf_and_workbook_before_ai(
+    def test_native_safety_preflight_blocks_ai_on_oversized_workbook(
         self,
         mock_native_analysis,
         mock_parse_file,
@@ -2899,16 +4158,6 @@ class GmailInquiryImportTests(TestCase):
 
         attachments = [
             {
-                "filename": "too-many-pages.pdf",
-                "mime_type": "application/pdf",
-                "size": len(pdf_content),
-                "attachment_id": "large-pdf",
-                "part_id": "1",
-                "_inline_data": base64.urlsafe_b64encode(
-                    pdf_content
-                ).decode("ascii"),
-            },
-            {
                 "filename": "too-many-rows.xlsx",
                 "mime_type": (
                     "application/vnd.openxmlformats-officedocument."
@@ -2921,6 +4170,16 @@ class GmailInquiryImportTests(TestCase):
                     xlsx_content
                 ).decode("ascii"),
             },
+            {
+                "filename": "too-many-pages.pdf",
+                "mime_type": "application/pdf",
+                "size": len(pdf_content),
+                "attachment_id": "large-pdf",
+                "part_id": "1",
+                "_inline_data": base64.urlsafe_b64encode(
+                    pdf_content
+                ).decode("ascii"),
+            },
         ]
         message = gmail_message(
             "preflight-message",
@@ -2929,20 +4188,6 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="preflight-message")
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
-            self.assertEqual(file_inputs, [])
-            self.assertEqual(
-                [source["kind"] for source in sources],
-                ["email_body"],
-            )
-            return validated_native_analysis_result(
-                messages,
-                sources,
-                [native_message_result("preflight-message")],
-                [],
-            )
-
-        mock_native_analysis.side_effect = native_result
         result = _build_source_analysis(
             [message],
             self.connection,
@@ -2952,20 +4197,29 @@ class GmailInquiryImportTests(TestCase):
         )
 
         mock_parse_file.assert_not_called()
+        mock_native_analysis.assert_not_called()
         self.assertEqual(
             [
                 attachment["parse_status"]
                 for attachment in result["attachment_manifest"]
             ],
-            ["unsupported", "unsupported"],
+            ["failed", "skipped"],
         )
         reasons = [
             attachment["parse_reason"]
             for attachment in result["attachment_manifest"]
         ]
-        self.assertIn("PDF has 3 pages", reasons[0])
-        self.assertIn("has 1001 rows", reasons[1])
+        self.assertIn("has 1001 rows", reasons[0])
+        self.assertIn("failed required safety inspection", reasons[1])
         self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertTrue(
+            any(
+                source.get("parse_status") == "failed"
+                and source.get("filename") == "too-many-rows.xlsx"
+                for source in result["evidence"]
+            )
+        )
 
     def test_generic_signature_image_bundle_is_skipped_beside_rfq_document(
         self,
@@ -3038,7 +4292,15 @@ class GmailInquiryImportTests(TestCase):
         )
         outbound["label_ids"] = ["SENT"]
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertIn(
                 "Signature Gloves | 100 | PCS",
@@ -3148,7 +4410,15 @@ class GmailInquiryImportTests(TestCase):
             html=html,
         )
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs, [])
             self.assertEqual(messages[0]["newest_body_html"], html)
             body_source = next(
@@ -3285,6 +4555,72 @@ class GmailInquiryImportTests(TestCase):
             ],
         )
 
+    @override_settings(GMAIL_ADDON_MAX_THREAD_MESSAGES=3)
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_ai_thread_old_anchor_respects_visible_limit_and_fetch_boundary(
+        self,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="message-0",
+            thread="long-thread",
+            mode=GmailInquiryImport.MODE_AI_THREAD,
+        )
+        full_messages = {
+            f"message-{index}": gmail_message(
+                f"message-{index}",
+                thread_id="long-thread",
+                body=f"Message body {index}",
+            )
+            for index in range(5)
+        }
+        for index, message in enumerate(full_messages.values()):
+            message["sent_at"] = timezone.now() + timedelta(minutes=index)
+        metadata_messages = []
+        for index in (2, 3, 4):
+            metadata_messages.append(
+                {
+                    **full_messages[f"message-{index}"],
+                    "newest_body_text": "",
+                    "newest_body_html": "",
+                    "attachment_manifest": [],
+                    "_metadata_only": True,
+                }
+            )
+        mock_fetch_message.side_effect = lambda _connection, message_id, **_kwargs: (
+            full_messages[message_id]
+        )
+        mock_thread_metadata.return_value = {
+            "messages": metadata_messages,
+            "total_count": 5,
+            "returned_count": 3,
+            "limit": 3,
+            "truncated": True,
+            "gmail_thread_id": "long-thread",
+            "message_ids": [f"message-{index}" for index in range(5)],
+        }
+
+        thread_id, messages, timeline, timeline_meta = (
+            _fetch_analysis_messages(gmail_import, self.connection)
+        )
+
+        self.assertEqual(thread_id, "long-thread")
+        self.assertEqual(
+            [message["gmail_message_id"] for message in messages],
+            ["message-0", "message-3", "message-4"],
+        )
+        self.assertEqual(
+            [message["gmail_message_id"] for message in timeline],
+            ["message-0", "message-3", "message-4"],
+        )
+        self.assertEqual(timeline_meta["returned_count"], 3)
+        self.assertEqual(
+            [call.args[1] for call in mock_fetch_message.call_args_list],
+            ["message-0", "message-3", "message-4"],
+        )
+
     @patch("quotations.gmail_inquiry_import._thread_message_metadata")
     @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
     def test_legacy_addon_aliases_resolve_to_one_canonical_ai_message(
@@ -3343,6 +4679,7 @@ class GmailInquiryImportTests(TestCase):
         mock_fetch_message.assert_called_once_with(
             self.connection,
             gmail_import.anchor_message_id,
+            preserve_forwarded=True,
         )
         mock_thread_metadata.assert_called_once_with(
             self.connection,
@@ -3421,6 +4758,145 @@ class GmailInquiryImportTests(TestCase):
 
     @patch("quotations.gmail_inquiry_import._thread_message_metadata")
     @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_current_mode_fetches_only_open_message_body(
+        self,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="current-message",
+            thread="current-thread",
+            mode=GmailInquiryImport.MODE_CURRENT_MESSAGE,
+        )
+        current = gmail_message(
+            "current-message",
+            thread_id="current-thread",
+            body="Please quote one first aid kit.",
+        )
+        current["sent_at"] = timezone.now() - timedelta(minutes=2)
+        current_metadata = {
+            **current,
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "_metadata_only": True,
+        }
+        other_metadata = {
+            **gmail_message(
+                "other-message",
+                thread_id="current-thread",
+                body="This body must remain metadata-only.",
+            ),
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "_metadata_only": True,
+        }
+        other_metadata["sent_at"] = timezone.now() - timedelta(minutes=1)
+        mock_fetch_message.return_value = current
+        mock_thread_metadata.return_value = {
+            "messages": [current_metadata, other_metadata],
+            "total_count": 2,
+            "returned_count": 2,
+            "limit": 50,
+            "truncated": False,
+            "gmail_thread_id": "current-thread",
+            "message_ids": ["current-message", "other-message"],
+        }
+
+        _thread_id, messages, timeline, _timeline_meta = (
+            _fetch_analysis_messages(gmail_import, self.connection)
+        )
+
+        self.assertEqual(
+            [message["gmail_message_id"] for message in messages],
+            ["current-message"],
+        )
+        self.assertEqual(
+            [message["gmail_message_id"] for message in timeline],
+            ["current-message", "other-message"],
+        )
+        mock_fetch_message.assert_called_once_with(
+            self.connection,
+            "current-message",
+            preserve_forwarded=True,
+        )
+
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    @patch("quotations.gmail_inquiry_import._message_metadata")
+    def test_selected_mode_does_not_fetch_unselected_anchor_body(
+        self,
+        mock_anchor_metadata,
+        mock_fetch_message,
+        mock_thread_metadata,
+    ):
+        gmail_import = self.issue_and_claim(
+            anchor="open-anchor",
+            thread="selected-thread",
+            mode=GmailInquiryImport.MODE_SELECTED_MESSAGES,
+            selected=["chosen-message"],
+        )
+        anchor_metadata = {
+            **gmail_message(
+                "open-anchor",
+                thread_id="selected-thread",
+                body="This excluded anchor body must not be retrieved.",
+            ),
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "attachment_manifest": [],
+            "_metadata_only": True,
+        }
+        chosen = gmail_message(
+            "chosen-message",
+            thread_id="selected-thread",
+            body="Please quote 3 boxes of gauze.",
+        )
+        anchor_metadata["sent_at"] = timezone.now() - timedelta(minutes=2)
+        chosen["sent_at"] = timezone.now() - timedelta(minutes=1)
+        chosen_metadata = {
+            **chosen,
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "attachment_manifest": [],
+            "_metadata_only": True,
+        }
+        mock_anchor_metadata.return_value = anchor_metadata
+        mock_fetch_message.return_value = chosen
+        mock_thread_metadata.return_value = {
+            "messages": [anchor_metadata, chosen_metadata],
+            "total_count": 2,
+            "returned_count": 2,
+            "limit": 50,
+            "truncated": False,
+            "gmail_thread_id": "selected-thread",
+            "message_ids": ["open-anchor", "chosen-message"],
+        }
+
+        _thread_id, messages, timeline, _timeline_meta = (
+            _fetch_analysis_messages(gmail_import, self.connection)
+        )
+
+        mock_anchor_metadata.assert_called_once_with(
+            self.connection,
+            "open-anchor",
+        )
+        mock_fetch_message.assert_called_once_with(
+            self.connection,
+            "chosen-message",
+            preserve_forwarded=True,
+        )
+        self.assertEqual(
+            [message["gmail_message_id"] for message in messages],
+            ["chosen-message"],
+        )
+        self.assertEqual(
+            [message["gmail_message_id"] for message in timeline],
+            ["open-anchor", "chosen-message"],
+        )
+        self.assertEqual(timeline[0]["newest_body_text"], "")
+
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
     def test_reversed_selected_message_ids_are_analyzed_oldest_to_newest(
         self,
         mock_fetch_message,
@@ -3445,6 +4921,18 @@ class GmailInquiryImportTests(TestCase):
         )
         initial["sent_at"] = timezone.now() - timedelta(hours=2)
         latest["sent_at"] = timezone.now() - timedelta(hours=1)
+        unselected_metadata = {
+            **gmail_message(
+                "unselected-message",
+                thread_id="chronology-thread",
+                body="This body must never be fetched for selected mode.",
+            ),
+            "sent_at": timezone.now() - timedelta(minutes=90),
+            "newest_body_text": "",
+            "newest_body_html": "",
+            "attachment_manifest": [],
+            "_metadata_only": True,
+        }
         initial_metadata = {
             **initial,
             "newest_body_text": "",
@@ -3459,13 +4947,21 @@ class GmailInquiryImportTests(TestCase):
         }
         mock_fetch_message.side_effect = [latest, initial]
         mock_thread_metadata.return_value = {
-            "messages": [initial_metadata, latest_metadata],
-            "total_count": 2,
-            "returned_count": 2,
+            "messages": [
+                initial_metadata,
+                unselected_metadata,
+                latest_metadata,
+            ],
+            "total_count": 3,
+            "returned_count": 3,
             "limit": 50,
             "truncated": False,
             "gmail_thread_id": "chronology-thread",
-            "message_ids": ["initial-message", "latest-message"],
+            "message_ids": [
+                "initial-message",
+                "unselected-message",
+                "latest-message",
+            ],
         }
 
         thread_id, messages, timeline, _timeline_meta = (
@@ -3483,7 +4979,7 @@ class GmailInquiryImportTests(TestCase):
         )
         self.assertEqual(
             [message["gmail_message_id"] for message in timeline],
-            ["initial-message", "latest-message"],
+            ["initial-message", "unselected-message", "latest-message"],
         )
         self.assertEqual(
             [message["newest_body_text"] for message in messages],
@@ -3491,6 +4987,10 @@ class GmailInquiryImportTests(TestCase):
                 "Please quote 10 boxes of gloves.",
                 "Change the gloves quantity to 20 boxes.",
             ],
+        )
+        self.assertEqual(
+            [call.args[1] for call in mock_fetch_message.call_args_list],
+            ["latest-message", "initial-message"],
         )
 
     @patch("quotations.gmail_inquiry_import._thread_message_metadata")
@@ -3560,6 +5060,141 @@ class GmailInquiryImportTests(TestCase):
     @override_settings(QUOTATION_MAILBOX_AI_VISION_ENABLED=True)
     @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_forwarded_attachment_keeps_outer_provenance_and_blank_prices(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        content = b"%PDF-1.4 forwarded-rfq"
+        attachment = {
+            "filename": "forwarded-rfq.pdf",
+            "mime_type": "application/pdf",
+            "size": len(content),
+            "attachment_id": "forwarded-rfq-attachment",
+            "part_id": "2",
+        }
+        mock_native_fetch.return_value = (
+            {
+                "filename": attachment["filename"],
+                "mime_type": attachment["mime_type"],
+                "content": content,
+                "source_sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+                "detail": "high",
+            },
+            "",
+        )
+        message = gmail_message(
+            "outer-forward-message",
+            sender="Forwarder <forwarder@internal.example>",
+            body="Please quote the forwarded request.",
+            attachments=[attachment],
+        )
+        message.update(
+            {
+                "snippet": (
+                    "Forwarded From Buyer buyer@customer.example: "
+                    "Sterile Gauze 20 BOX"
+                ),
+                "contains_unverified_forwarded_content": True,
+                "_forwarded_body_text": (
+                    "---------- Forwarded message ---------\n"
+                    "From: Buyer <buyer@customer.example>\n"
+                    "Date: Fri, 31 Jul 2026 at 10:00\n"
+                    "Subject: RFQ\nTo: quotes@example.com\n\n"
+                    "See attached request."
+                ),
+                "_forwarded_body_html": "",
+            }
+        )
+        gmail_import = self.issue_and_claim(anchor="outer-forward-message")
+
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
+            self.assertEqual(file_inputs[0]["content"], content)
+            attachment_source = next(
+                source for source in sources if source["kind"] == "attachment"
+            )
+            self.assertEqual(
+                attachment_source["gmail_message_id"],
+                "outer-forward-message",
+            )
+            return validated_native_analysis_result(
+                messages,
+                sources,
+                [native_message_result("outer-forward-message")],
+                [
+                    native_row(
+                        attachment_source["source_key"],
+                        "Sterile Gauze",
+                        "20",
+                        "BOX",
+                        raw_source_text="Sterile Gauze | 20 | BOX",
+                        page_number=1,
+                    )
+                ],
+                customer_identity={
+                    "company_name": "Original Customer Medical Services LLC",
+                    "contact_name": "Buyer",
+                    "contact_email": "buyer@customer.example",
+                    "source_keys": [attachment_source["source_key"]],
+                    "confidence": 0.90,
+                    "reason": "Read from forwarded attachment evidence.",
+                },
+            )
+
+        mock_native_analysis.side_effect = native_result
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        row = result["preview"]["lines"][0]
+        self.assertIsNone(row["unit_price"])
+        self.assertIsNone(row["line_total"])
+        self.assertEqual(
+            result["attachment_manifest"][0]["gmail_message_id"],
+            "outer-forward-message",
+        )
+        self.assertTrue(
+            result["message_manifest"][0][
+                "contains_unverified_forwarded_content"
+            ]
+        )
+        self.assertNotIn(
+            "Sterile Gauze",
+            json.dumps(result["message_manifest"]),
+        )
+        self.assertEqual(
+            result["message_manifest"][0]["snippet"],
+            "Please quote the forwarded request.",
+        )
+        self.assertNotIn(
+            "buyer@customer.example",
+            json.dumps(result["message_manifest"]),
+        )
+        self.assertTrue(
+            any(
+                "forwarded inquiry" in warning.lower()
+                for warning in result["warnings"]
+            )
+        )
+        self.assertFalse(result["candidates"]["exact_company_match"])
+
+    @override_settings(QUOTATION_MAILBOX_AI_VISION_ENABLED=True)
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
     def test_gmail_xlsx_attachment_uses_native_ai_and_preserves_all_ai_rows(
         self,
         mock_native_analysis,
@@ -3603,7 +5238,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="xlsx-message")
 
-        def native_result(messages, sources, file_inputs, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(file_inputs[0]["content"], content)
             self.assertIn(
                 "Please find attached updated quotation request.",
@@ -3686,7 +5329,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="typed-item-message")
 
-        def native_result(messages, sources, _files, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            _files,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(messages[0]["newest_body_text"], body)
             body_source = next(
                 source
@@ -3752,7 +5403,15 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="generic-rfq-prose")
 
-        def native_result(messages, sources, _files, _gmail_import, _actor):
+        def native_result(
+            messages,
+            sources,
+            _files,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
             self.assertEqual(messages[0]["newest_body_text"], body)
             return validated_native_analysis_result(
                 messages,
@@ -3787,7 +5446,7 @@ class GmailInquiryImportTests(TestCase):
     @patch("quotations.import_parsers.parse_file_preview")
     @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
-    def test_attachment_manifest_is_complete_and_global_parse_cap_is_enforced(
+    def test_native_file_count_cap_fails_closed_for_the_selection(
         self,
         mock_native_analysis,
         mock_native_fetch,
@@ -3838,27 +5497,6 @@ class GmailInquiryImportTests(TestCase):
 
         mock_native_fetch.side_effect = native_fetch
 
-        def native_result(
-            semantic_messages,
-            _sources,
-            file_inputs,
-            _gmail_import,
-            _actor,
-        ):
-            self.assertEqual(len(file_inputs), 12)
-            return validated_native_analysis_result(
-                semantic_messages,
-                _sources,
-                [
-                    native_message_result(
-                        message["gmail_message_id"],
-                    )
-                    for message in semantic_messages
-                ],
-                [],
-            )
-
-        mock_native_analysis.side_effect = native_result
         result = _build_source_analysis(
             messages,
             self.connection,
@@ -3869,13 +5507,570 @@ class GmailInquiryImportTests(TestCase):
 
         self.assertEqual(len(result["attachment_manifest"]), 35)
         self.assertEqual(mock_native_fetch.call_count, 12)
+        mock_native_analysis.assert_not_called()
         mock_parse_file.assert_not_called()
         self.assertEqual(
             sum(
                 row["parse_status"] == "skipped"
                 for row in result["attachment_manifest"]
             ),
-            23,
+            34,
+        )
+        self.assertEqual(
+            sum(
+                row["parse_status"] == "failed"
+                for row in result["attachment_manifest"]
+            ),
+            1,
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        failed = next(
+            row
+            for row in result["attachment_manifest"]
+            if row["parse_status"] == "failed"
+        )
+        self.assertIn("Per-import attachment limit reached", failed["parse_reason"])
+        self.assertTrue(
+            any(
+                source.get("source_key") == failed["source_key"]
+                and source.get("parse_status") == "failed"
+                for source in result["evidence"]
+            )
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_IMPORT_MAX_UPLOAD_BYTES=10,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+        QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES=20,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_native_per_file_byte_limit_fails_closed_with_valid_sibling(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": "valid.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": "valid",
+                "part_id": "1",
+            },
+            {
+                "filename": "too-large.xlsx",
+                "mime_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "size": 11,
+                "attachment_id": "too-large",
+                "part_id": "2",
+            },
+        ]
+        valid_content = b"12345678"
+        mock_native_fetch.return_value = (
+            {
+                "filename": "valid.pdf",
+                "mime_type": "application/pdf",
+                "content": valid_content,
+                "source_sha256": hashlib.sha256(valid_content).hexdigest(),
+                "size": len(valid_content),
+                "detail": "high",
+            },
+            "",
+        )
+        gmail_import = self.issue_and_claim(anchor="per-file-limit")
+        message = gmail_message(
+            "per-file-limit",
+            body="Please quote both attached documents.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        mock_native_fetch.assert_called_once()
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(
+            [row["parse_status"] for row in result["attachment_manifest"]],
+            ["skipped", "failed"],
+        )
+        self.assertIn(
+            "exceeds the 10-byte",
+            result["attachment_manifest"][1]["parse_reason"],
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(
+            [
+                source["parse_status"]
+                for source in result["evidence"]
+                if source.get("kind") == "attachment"
+            ],
+            ["skipped", "failed"],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_IMPORT_MAX_UPLOAD_BYTES=10,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+        QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES=15,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_native_combined_byte_limit_fails_closed_with_valid_sibling(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"request-{index}.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": f"request-{index}",
+                "part_id": str(index),
+            }
+            for index in range(1, 3)
+        ]
+
+        def native_fetch(_connection, _message_id, attachment, *, max_bytes):
+            content = attachment["attachment_id"].encode("ascii")[:8]
+            content = content.ljust(8, b"x")
+            self.assertLessEqual(len(content), max_bytes)
+            return (
+                {
+                    "filename": attachment["filename"],
+                    "mime_type": attachment["mime_type"],
+                    "content": content,
+                    "source_sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                    "detail": "high",
+                },
+                "",
+            )
+
+        mock_native_fetch.side_effect = native_fetch
+        gmail_import = self.issue_and_claim(anchor="combined-limit")
+        message = gmail_message(
+            "combined-limit",
+            body="Please quote both attached documents.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertEqual(mock_native_fetch.call_count, 2)
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(
+            [row["parse_status"] for row in result["attachment_manifest"]],
+            ["skipped", "failed"],
+        )
+        self.assertIn(
+            "Combined original attachments exceed",
+            result["attachment_manifest"][1]["parse_reason"],
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(
+            [
+                source["parse_status"]
+                for source in result["evidence"]
+                if source.get("kind") == "attachment"
+            ],
+            ["skipped", "failed"],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_IMPORT_MAX_UPLOAD_BYTES=1024,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+        QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES=2048,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_native_fetch_failure_fails_closed_with_valid_sibling(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": "valid.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": "valid",
+                "part_id": "1",
+            },
+            {
+                "filename": "unavailable.xlsx",
+                "mime_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "size": 8,
+                "attachment_id": "unavailable",
+                "part_id": "2",
+            },
+        ]
+        valid_content = b"validpdf"
+        mock_native_fetch.side_effect = [
+            (
+                {
+                    "filename": "valid.pdf",
+                    "mime_type": "application/pdf",
+                    "content": valid_content,
+                    "source_sha256": hashlib.sha256(valid_content).hexdigest(),
+                    "size": len(valid_content),
+                    "detail": "high",
+                },
+                "",
+            ),
+            GmailInquiryImportError("Gmail attachment download failed."),
+        ]
+        gmail_import = self.issue_and_claim(anchor="fetch-failure")
+        message = gmail_message(
+            "fetch-failure",
+            body="Please quote both attached documents.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertEqual(mock_native_fetch.call_count, 2)
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(
+            [row["parse_status"] for row in result["attachment_manifest"]],
+            ["skipped", "failed"],
+        )
+        self.assertIn(
+            "could not be fetched or prepared",
+            result["attachment_manifest"][1]["parse_reason"],
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(
+            [
+                source["parse_status"]
+                for source in result["evidence"]
+                if source.get("kind") == "attachment"
+            ],
+            ["skipped", "failed"],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_inbound_attachment_metadata_overflow_blocks_analysis_and_confirmation(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"signature-{index}.png",
+                "mime_type": "image/png",
+                "size": 800,
+                "attachment_id": f"signature-{index}",
+                "part_id": str(index),
+            }
+            for index in range(100)
+        ]
+        attachments.append(
+            {
+                "filename": "customer-rfq.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": "customer-rfq",
+                "part_id": "101",
+            }
+        )
+        gmail_import = self.issue_and_claim(anchor="metadata-overflow")
+        message = gmail_message(
+            "metadata-overflow",
+            body="Please quote the attached RFQ.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(len(result["attachment_manifest"]), 100)
+        self.assertTrue(
+            all(
+                attachment["parse_status"] == "skipped"
+                for attachment in result["attachment_manifest"]
+            )
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertEqual(
+            result["message_manifest"][0]["attachment_analysis_status"],
+            "failed",
+        )
+        self.assertIn(
+            "101 attachments",
+            result["message_manifest"][0]["attachment_analysis_reason"],
+        )
+        overflow_evidence = [
+            source
+            for source in result["evidence"]
+            if source.get("parse_status") == "failed"
+        ]
+        self.assertEqual(len(overflow_evidence), 1)
+        self.assertEqual(
+            overflow_evidence[0]["filename"],
+            "Additional Gmail attachments",
+        )
+        self.assertIn(
+            "bounded window",
+            overflow_evidence[0]["parse_reason"],
+        )
+
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.analysis = {
+            "preview": result["preview"],
+            "thread_analysis": result["thread_analysis"],
+        }
+        gmail_import.message_manifest = result["message_manifest"]
+        gmail_import.attachment_manifest = result["attachment_manifest"]
+        gmail_import.evidence = result["evidence"]
+        gmail_import.save(
+            update_fields=[
+                "status",
+                "analysis",
+                "message_manifest",
+                "attachment_manifest",
+                "evidence",
+                "updated_at",
+            ]
+        )
+        with self.assertRaisesRegex(
+            GmailInquiryImportError,
+            "No reviewed item rows",
+        ):
+            confirm_gmail_inquiry_import(
+                gmail_import,
+                self.staff,
+                company=self.company,
+            )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_outbound_attachment_metadata_overflow_remains_context_only(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        outbound_attachments = [
+            {
+                "filename": f"our-document-{index}.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": f"our-document-{index}",
+                "part_id": str(index),
+            }
+            for index in range(101)
+        ]
+        outbound = gmail_message(
+            "outbound-overflow",
+            sender=f"AI Ameen <{MAILBOX_EMAIL}>",
+            body="Please find our documents.",
+            attachments=outbound_attachments,
+        )
+        outbound["label_ids"] = ["SENT"]
+        inbound = gmail_message(
+            "inbound-body",
+            body="Please quote ten boxes of sterile gauze.",
+        )
+        gmail_import = self.issue_and_claim(anchor="inbound-body")
+
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
+            self.assertEqual(file_inputs, [])
+            return validated_native_analysis_result(
+                messages,
+                sources,
+                [
+                    native_message_result(
+                        "outbound-overflow",
+                        classification="our_reply",
+                        usage="context",
+                    ),
+                    native_message_result("inbound-body"),
+                ],
+                [],
+            )
+
+        mock_native_analysis.side_effect = native_result
+        result = _build_source_analysis(
+            [outbound, inbound],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[outbound, inbound],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_called_once()
+        self.assertTrue(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(len(result["attachment_manifest"]), 100)
+        self.assertTrue(
+            all(
+                attachment["parse_status"] == "excluded"
+                for attachment in result["attachment_manifest"]
+            )
+        )
+        self.assertNotIn(
+            "attachment_analysis_status",
+            result["message_manifest"][0],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_mailbox_from_without_sent_label_does_not_bypass_overflow_block(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"attachment-{index}.png",
+                "mime_type": "image/png",
+                "size": 800,
+                "attachment_id": f"attachment-{index}",
+                "part_id": str(index),
+            }
+            for index in range(101)
+        ]
+        spoofed = gmail_message(
+            "spoofed-mailbox-from",
+            sender=f"Spoofed Sender <{MAILBOX_EMAIL}>",
+            body="Please quote the hidden attachment.",
+            attachments=attachments,
+        )
+        spoofed["label_ids"] = ["INBOX"]
+        gmail_import = self.issue_and_claim(anchor="spoofed-mailbox-from")
+
+        result = _build_source_analysis(
+            [spoofed],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[spoofed],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_not_called()
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(
+            result["message_manifest"][0]["attachment_analysis_status"],
+            "failed",
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_sent_label_with_mismatched_from_does_not_bypass_overflow_block(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"attachment-{index}.png",
+                "mime_type": "image/png",
+                "size": 800,
+                "attachment_id": f"attachment-{index}",
+                "part_id": str(index),
+            }
+            for index in range(101)
+        ]
+        mismatched = gmail_message(
+            "mismatched-sent-from",
+            sender="Different Sender <different@example.com>",
+            body="Please quote the hidden attachment.",
+            attachments=attachments,
+        )
+        mismatched["label_ids"] = ["SENT"]
+        gmail_import = self.issue_and_claim(anchor="mismatched-sent-from")
+
+        result = _build_source_analysis(
+            [mismatched],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[mismatched],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_not_called()
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(
+            result["message_manifest"][0]["attachment_analysis_status"],
+            "failed",
         )
 
     def test_extensionless_supported_mime_types_receive_safe_parse_names(self):

@@ -1183,6 +1183,9 @@ class MailboxAIVisionMatchingSafetyTests(TestCase):
         inventory = MailboxPOMessage(
             gmail_message_id="ai-reference-message",
             sender="Acme Buyer <buyer@acme.example>",
+            full_headers=[
+                {"name": "From", "value": "Acme Buyer <buyer@acme.example>"},
+            ],
             subject="Purchase Order attached",
             newest_body_text="Please proceed with the attached order.",
             sent_at=received_at,

@@ -27,9 +27,83 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - run: python manage.py makemigrations --check --dry-run
-      - run: python manage.py check
-      - run: python manage.py test --keepdb
+      - name: Verify Python dependency integrity
+        run: python -m pip check
+      - name: Verify migration drift
+        run: python manage.py makemigrations --check --dry-run
+      - name: Run Django system checks
+        run: python manage.py check
+      - name: Run documentation contract tests
+        run: python manage.py test quotations.test_documentation_contract --keepdb
+      - name: Build static asset manifest
+        run: python manage.py collectstatic --noinput
+      - name: Run full SQLite backend suite
+        run: python manage.py test --keepdb
+
+  postgres-concurrency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:17.10-alpine
+        env:
+          POSTGRES_USER: pharmacy_ci
+          POSTGRES_PASSWORD: pharmacy_ci
+          POSTGRES_DB: pharmacy_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pharmacy_ci -d pharmacy_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DEBUG: "1"
+      DJANGO_SECRET_KEY: ci-postgres-only-secret
+      DATABASE_URL: postgresql://pharmacy_ci:pharmacy_ci@127.0.0.1:5432/pharmacy_ci
+      # Threaded tests explicitly use separate short-lived connections. A zero
+      # age prevents worker sessions from surviving test-database teardown.
+      DATABASE_CONN_MAX_AGE_SECONDS: "0"
+      DATABASE_CONN_HEALTH_CHECKS: "1"
+      DATABASE_DISABLE_SERVER_SIDE_CURSORS: "1"
+      DATABASE_CONNECT_TIMEOUT_SECONDS: "8"
+      QUOTATION_AI_PARSE_GLOBAL_ENABLED: "0"
+      EMAIL_BACKEND: django.core.mail.backends.locmem.EmailBackend
+      PGOPTIONS: "-c lock_timeout=5s -c statement_timeout=30s"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Verify Python dependency integrity
+        run: python -m pip check
+      - name: Verify PostgreSQL test target
+        run: >-
+          python manage.py shell -c "from django.db import connection;
+          assert connection.vendor == 'postgresql', connection.vendor;
+          cursor = connection.cursor();
+          cursor.execute('SHOW server_version_num');
+          assert int(cursor.fetchone()[0]) == 170010;
+          cursor.execute('SHOW default_transaction_isolation');
+          assert cursor.fetchone()[0] == 'read committed'"
+      - name: Run PostgreSQL migration compatibility suite
+        run: >-
+          python manage.py test
+          quotations.test_migration_0036_compatibility
+          --noinput --verbosity 2
+      - name: Run PostgreSQL concurrency suite
+        run: >-
+          python manage.py test
+          quotations.test_product_matching_rework.ProductAliasConcurrencyTests
+          quotations.test_quotation_concurrency
+          --noinput --verbosity 2
 
   frontend:
     runs-on: ubuntu-latest
@@ -43,6 +117,13 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm run test:ci
-      - run: npm run build
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Verify frontend dependency tree
+        run: npm ls --all
+      - name: Enforce zero Critical production advisories
+        run: npm audit --omit=dev --audit-level=critical
+      - name: Run frontend tests
+        run: npm run test:ci
+      - name: Build production frontend
+        run: npm run build

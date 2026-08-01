@@ -2279,7 +2279,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
               <textarea rows="4" disabled={outcomeMutationInProgress} value={poText} onChange={(event) => setPoText(event.target.value)} placeholder="Paste accepted PO lines here..." />
             </label>
             <label className="span-two">Or upload PO file
-              <input type="file" disabled={outcomeMutationInProgress} accept=".xlsx,.xls,.xlsb,.pdf,.png,.jpg,.jpeg,.webp" onChange={(event) => setPoFile(event.target.files?.[0] || null)} />
+              <input type="file" disabled={outcomeMutationInProgress} accept=".xlsx,.xls,.xlsb,.pdf" onChange={(event) => setPoFile(event.target.files?.[0] || null)} />
             </label>
             <label className="qm-checkbox span-two">
               <input type="checkbox" disabled={outcomeMutationInProgress} checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />

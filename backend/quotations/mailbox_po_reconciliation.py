@@ -44,7 +44,10 @@ from .models import (
 )
 
 
-ALGORITHM_VERSION = "mailbox_match_v5"
+# Sender-header multiplicity is part of the matching evidence from v6 onward.
+# The version rollover prevents an already-completed v5 run from reusing an
+# automatic proposal that was produced from a collapsed/ambiguous From field.
+ALGORITHM_VERSION = "mailbox_match_v6"
 MAX_ACTIVE_EVIDENCE_PER_QUOTE = 3
 MAX_MATCH_ERRORS = 500
 DEFAULT_MATCH_PAGE_SIZE = 5
@@ -1345,9 +1348,20 @@ def _variant_message(
     document_text="",
     document_filename="",
 ):
+    stored_headers = inventory.full_headers if isinstance(inventory.full_headers, list) else []
+    from_header_values = tuple(
+        str(header.get("value") or "")
+        for header in stored_headers
+        if isinstance(header, dict)
+        and str(header.get("name") or "").strip().casefold() == "from"
+    )
     return CanonicalMailboxMessage(
         message_id=inventory.gmail_message_id,
         sender=inventory.sender,
+        # An absent header inventory cannot prove that the persisted sender
+        # was the only physical From field, so historical/incomplete records
+        # fail closed to staff review until they are rescanned.
+        from_header_values=from_header_values,
         recipients=tuple(filter(None, [inventory.recipients, inventory.cc])),
         subject=inventory.subject,
         body=text,

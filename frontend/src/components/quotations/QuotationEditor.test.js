@@ -53,6 +53,7 @@ const quote = {
   status: 'draft',
   status_display: 'Draft',
   version: 1,
+  quotation_review_fingerprint: 'quotation-review-fingerprint-1',
   currency: 'AED',
   payment_terms: 'as_per_agreement',
   valid_until: '2026-08-01',
@@ -153,6 +154,7 @@ describe('QuotationEditor Product price context', () => {
         subject: 'Re: RFQ',
         body: 'Please find attached our quotation.',
         attachment_filename: 'CUSTOMER-Q-0021.pdf',
+        preview_fingerprint: 'preview-fingerprint-1',
         trusted_source: { sender_email: 'buyer@example.com', subject: 'RFQ' },
       },
     });
@@ -379,7 +381,9 @@ describe('QuotationEditor Product price context', () => {
     fireEvent.click(finalizeButtons[0]);
 
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
-    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+    });
     expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
     expect(within(dialog).getByDisplayValue('buyer@example.com')).toHaveAttribute('readonly');
     fireEvent.change(within(dialog).getByLabelText(/Message/), {
@@ -394,9 +398,126 @@ describe('QuotationEditor Product price context', () => {
       body: 'Dear Buyer,\n\nPlease find attached quotation Q-0021.',
       confirm_recipient: true,
       delivery_mode: 'gmail_reply',
+      preview_fingerprint: 'preview-fingerprint-1',
     }));
     expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+  });
+
+  test('refreshes a remotely changed quotation and requires a second explicit preview action', async () => {
+    const remotelyChangedQuote = {
+      ...readyQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...readyQuote.lines[0],
+        item_name_snapshot: 'Gloves changed by another employee',
+      }],
+    };
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValue({ data: remotelyChangedQuote });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+
+    expect(await screen.findByText(/changed since this editor loaded/i)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('Gloves changed by another employee')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+  });
+
+  test('rejects a hybrid displayed payload even when its review fingerprint is current', async () => {
+    const hybridQuote = {
+      ...readyQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    };
+    const atomicCurrentQuote = {
+      ...hybridQuote,
+      lines: [{
+        ...hybridQuote.lines[0],
+        item_name_snapshot: 'Current locked quotation line',
+      }],
+    };
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: hybridQuote })
+      .mockResolvedValue({ data: atomicCurrentQuote });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+
+    expect(await screen.findByText(/changed since this editor loaded/i)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('Current locked quotation line')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+  });
+
+  test('runs stale-preview refresh through the same atomic quotation gate', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const hybridErrorQuote = {
+      ...readyQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    };
+    const atomicCurrentQuote = {
+      ...hybridErrorQuote,
+      lines: [{
+        ...hybridErrorQuote.lines[0],
+        item_name_snapshot: 'Changed before stale preview refresh',
+      }],
+    };
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValue({ data: atomicCurrentQuote });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_email_preview',
+          detail: 'The quotation changed after this preview was prepared.',
+          quote_finalized: false,
+          retryable: false,
+          delivery_status: 'not_sent',
+          quote: hybridErrorQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Finalize & Send Quotation' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh preview' }));
+
+    expect(await screen.findByText(/changed since this editor loaded/i)).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('Changed before stale preview refresh')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    await within(dialog).findByRole('button', { name: 'Finalize & Send Quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenLastCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+    consoleError.mockRestore();
   });
 
   test('requires staff to enter and confirm a recipient for a manual quotation', async () => {
@@ -572,6 +693,7 @@ describe('QuotationEditor Product price context', () => {
           subject: 'Re: RFQ - Clinic supplies',
           body: 'Dear Maria,\n\nPlease find attached our quotation.',
           attachment_filename: 'CUSTOMER-Q-0021.pdf',
+          preview_fingerprint: 'selected-preview-fingerprint',
           trusted_source: {
             sender_name: 'Maria Buyer',
             sender_email: 'buyer@example.com',
@@ -596,6 +718,7 @@ describe('QuotationEditor Product price context', () => {
     dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     expect(await within(dialog).findByText('Replying in the verified Gmail thread')).toBeInTheDocument();
     expect(quotationAPI.quotes.emailPreview).toHaveBeenLastCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       thread_selection_token: 'signed-thread-token',
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
@@ -605,16 +728,208 @@ describe('QuotationEditor Product price context', () => {
       expect.objectContaining({
         to: ['buyer@example.com'],
         delivery_mode: 'gmail_reply',
+        preview_fingerprint: 'selected-preview-fingerprint',
         thread_selection_token: 'signed-thread-token',
       })
     ));
+  });
+
+  test('refreshes a stale selected-thread preview and requires another explicit send with the new fingerprint', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const threadCandidate = {
+      selection_token: 'signed-thread-token',
+      gmail_message_id: 'message-1',
+      gmail_thread_id: 'thread-1',
+      sender_name: 'Maria Buyer',
+      sender_email: 'buyer@example.com',
+      subject: 'RFQ - Clinic supplies',
+      received_at: '31 Jul 2026, 10:30',
+      snippet: 'Please quote the attached list.',
+    };
+    const manualPreview = {
+      delivery_mode: 'new_email',
+      to: [],
+      cc: [],
+      subject: 'Quotation Q-0021',
+      body: 'Please find attached our quotation.',
+      attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      preview_fingerprint: 'manual-preview-fingerprint',
+    };
+    const selectedPreview = {
+      delivery_mode: 'gmail_reply',
+      to: ['buyer@example.com'],
+      cc: [],
+      subject: 'Re: RFQ - Clinic supplies',
+      body: 'First reviewed email body.',
+      attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      preview_fingerprint: 'stale-selected-fingerprint',
+      trusted_source: {
+        sender_name: 'Maria Buyer',
+        sender_email: 'buyer@example.com',
+        subject: 'RFQ - Clinic supplies',
+      },
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+    quotationAPI.quotes.emailPreview
+      .mockResolvedValueOnce({ data: manualPreview })
+      .mockResolvedValueOnce({ data: selectedPreview })
+      .mockRejectedValueOnce({
+        response: {
+          status: 503,
+          data: { detail: 'The latest preview is temporarily unavailable.' },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          ...selectedPreview,
+          body: 'Updated preview after the quotation changed.',
+          preview_fingerprint: 'fresh-selected-fingerprint',
+        },
+      });
+    quotationAPI.quotes.emailThreadCandidates.mockResolvedValueOnce({
+      data: { recipient: 'buyer@example.com', candidates: [threadCandidate] },
+    });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_email_preview',
+          detail: 'The quotation changed after this preview was prepared.',
+          quote_finalized: false,
+          retryable: true,
+          delivery_status: 'not_sent',
+          quote: readyQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.change(within(dialog).getByLabelText(/To/), {
+      target: { value: 'buyer@example.com' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Find original Gmail thread' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Reply to this thread' }));
+
+    dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(await within(dialog).findByText('Replying in the verified Gmail thread')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+    expect(await screen.findByText('Refresh and review the quotation email before sending.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+    await waitFor(() => expect(quotationAPI.quotes.emailPreview).toHaveBeenLastCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      thread_selection_token: 'signed-thread-token',
+    }));
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(3);
+    expect(await screen.findByText('The latest preview is temporarily unavailable.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry preview' }));
+    await waitFor(() => expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(4));
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenLastCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      thread_selection_token: 'signed-thread-token',
+    });
+    dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(await within(dialog).findByDisplayValue('Updated preview after the quotation changed.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+    await waitFor(() => expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(2));
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenLastCalledWith(21, expect.objectContaining({
+      preview_fingerprint: 'fresh-selected-fingerprint',
+      thread_selection_token: 'signed-thread-token',
+    }));
+    consoleError.mockRestore();
+  });
+
+  test('merges a first failed frozen delivery, requires refresh, and retries its exact read-only email', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
+    const initialPreview = {
+      delivery_mode: 'gmail_reply',
+      to: ['buyer@example.com'],
+      cc: [],
+      subject: 'Re: RFQ',
+      body: 'Initially reviewed body.',
+      attachment_filename: 'CUSTOMER-Q-0021.pdf',
+      preview_fingerprint: 'initial-preview-fingerprint',
+      trusted_source: { sender_email: 'buyer@example.com', subject: 'RFQ' },
+    };
+    const frozenDelivery = {
+      ...initialPreview,
+      status: 'failed',
+      outbound_snapshot_frozen: true,
+      body: 'Exact frozen body.',
+      last_error: 'Gmail rejected the first provider call.',
+    };
+    const refreshedFrozenPreview = {
+      ...frozenDelivery,
+      preview_fingerprint: 'frozen-preview-fingerprint',
+    };
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValue({ data: finalizedQuote });
+    quotationAPI.quotes.emailPreview
+      .mockResolvedValueOnce({ data: initialPreview })
+      .mockResolvedValueOnce({ data: refreshedFrozenPreview });
+    quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: {
+          code: 'gmail_send_failed',
+          detail: 'Gmail rejected the first provider call.',
+          quote_finalized: true,
+          retryable: true,
+          refresh_preview: true,
+          delivery_status: 'failed',
+          quote: finalizedQuote,
+          delivery: frozenDelivery,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
+
+    expect(await screen.findByText(/failed provider attempt created an exact frozen email/i)).toBeInTheDocument();
+    dialog = screen.getByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByDisplayValue('Exact frozen body.')).toHaveAttribute('readonly');
+    expect(within(dialog).getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Refresh preview' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(2));
+    dialog = await screen.findByRole('dialog', { name: 'Review and send quotation' });
+    expect(within(dialog).getByDisplayValue('Exact frozen body.')).toHaveAttribute('readonly');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Send Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.sendEmail).toHaveBeenCalledWith(21, {
+      to: ['buyer@example.com'],
+      cc: [],
+      subject: 'Re: RFQ',
+      body: 'Exact frozen body.',
+      confirm_recipient: true,
+      delivery_mode: 'gmail_reply',
+      preview_fingerprint: 'frozen-preview-fingerprint',
+    }));
+    expect(quotationAPI.quotes.finalizeAndSend).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
   });
 
   test('retries only the email when finalization succeeded but a definite delivery failure occurred', async () => {
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
     quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
-    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.retrieve
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValueOnce({ data: readyQuote });
     quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
       response: {
         status: 503,
@@ -646,7 +961,9 @@ describe('QuotationEditor Product price context', () => {
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     const finalizedQuote = { ...readyQuote, status: 'finalized', status_display: 'Finalized' };
     quotationAPI.quotes.retrieve.mockResolvedValue({ data: finalizedQuote });
-    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.retrieve
+      .mockResolvedValueOnce({ data: readyQuote })
+      .mockResolvedValueOnce({ data: readyQuote });
     quotationAPI.quotes.finalizeAndSend.mockRejectedValueOnce({
       response: {
         status: 504,
@@ -861,6 +1178,54 @@ describe('QuotationEditor Product price context', () => {
       status: 'confirmed',
       applied_outcome_line_ids: [31],
     }));
+  });
+
+  test('keeps every attachment warning reviewable when an LPO has more than three', async () => {
+    const sentQuote = {
+      ...readyQuote,
+      status: 'sent',
+      status_display: 'Sent',
+    };
+    const warnings = [
+      'Workbook contains formula cells; verify quantities and prices.',
+      'Workbook contains hidden sheets, rows, or columns.',
+      'Workbook contains merged cells; verify extracted row alignment.',
+      "Stopped reading sheet 'Items' after 500 rows.",
+      "Stopped reading columns in sheet 'Items' after 100 columns.",
+      'Workbook has more than 10 visible sheets; later visible sheets were not parsed.',
+      'Workbook contains explicit date cells; verify item codes.',
+    ];
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: sentQuote });
+    quotationAPI.quotes.lpos.mockResolvedValueOnce({
+      data: [{
+        id: 92,
+        lpo_number: 'LPO-WARN-92',
+        lpo_date: '2026-07-31',
+        notes: '',
+        status: 'needs_review',
+        status_display: 'Needs review',
+        source_filename: 'warning-source.xlsx',
+        source_type_display: 'File',
+        parsed_row_count: 1,
+        received_at: '2026-07-31T08:00:00Z',
+        warnings,
+        parsed_meta: {},
+      }],
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const warningPanel = await screen.findByRole('alert', { name: 'LPO attachment warnings' });
+    expect(within(warningPanel).getByText(warnings[0])).toBeVisible();
+    expect(within(warningPanel).getByText(warnings[2])).toBeVisible();
+    // Material completeness warnings stay visible even when they occur after
+    // the original three-warning display limit.
+    expect(within(warningPanel).getByText(warnings[3])).toBeVisible();
+    expect(within(warningPanel).getByText(warnings[4])).toBeVisible();
+    expect(within(warningPanel).getByText(warnings[5])).toBeVisible();
+    const expansion = within(warningPanel).getByText('Show 1 more warning');
+    fireEvent.click(expansion);
+    expect(within(warningPanel).getByText(warnings[6])).toBeVisible();
   });
 
   test('never overwrites a price typed while history is loading', async () => {

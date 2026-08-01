@@ -223,6 +223,10 @@ class MailboxPOReconciliationAdversarialTests(TestCase):
             gmail_thread_id=f"thread-{message_id}",
             mailbox_email=self.connection.email,
             label_ids=["INBOX"],
+            full_headers=[
+                {"name": "From", "value": "Acme Buyer <buyer@acme.example>"},
+                {"name": "To", "value": self.connection.email},
+            ],
             subject=subject,
             sender="Acme Buyer <buyer@acme.example>",
             recipients=self.connection.email,

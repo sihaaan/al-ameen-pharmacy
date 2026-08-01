@@ -66,7 +66,33 @@ const formatDateTime = (value) => {
 
 const percent = (value) => `${Math.round(Number(value || 0) * 100)}%`;
 
-const ContractIntelligenceManager = () => {
+export const ContractWarningReview = ({ warnings = [] }) => {
+  const reviewWarnings = Array.isArray(warnings)
+    ? warnings.filter((warning) => String(warning || '').trim())
+    : [];
+  if (!reviewWarnings.length) return null;
+  const visibleWarnings = reviewWarnings.slice(0, 3);
+  const additionalWarnings = reviewWarnings.slice(3);
+  return (
+    <section className="qm-helper warning" role="alert" aria-label="Contract analysis warnings">
+      {visibleWarnings.map((warning, index) => (
+        <div key={`${warning}-${index}`}>{warning}</div>
+      ))}
+      {!!additionalWarnings.length && (
+        <details>
+          <summary>
+            Show {additionalWarnings.length} more {additionalWarnings.length === 1 ? 'warning' : 'warnings'}
+          </summary>
+          {additionalWarnings.map((warning, index) => (
+            <div key={`${warning}-${index + visibleWarnings.length}`}>{warning}</div>
+          ))}
+        </details>
+      )}
+    </section>
+  );
+};
+
+export const ContractIntelligenceManager = () => {
   const [gmail, setGmail] = useState(null);
   const [companies, setCompanies] = useState([]);
   const [runs, setRuns] = useState([]);
@@ -585,8 +611,10 @@ const ContractIntelligenceManager = () => {
   if (loading) return <div className="qm-loading">Loading contract intelligence...</div>;
 
   const gmailConnected = gmail?.connection?.is_connected;
+  const gmailReconnectRequired = Boolean(gmail?.reconnect_required);
   const gmailConfigured = gmail?.configured;
   const gmailCanManage = gmail?.can_manage !== false;
+  const gmailCanReconnect = gmail?.can_reconnect !== false;
 
   return (
     <div className="qm-section qm-contract-intel">
@@ -603,7 +631,13 @@ const ContractIntelligenceManager = () => {
         </div>
         <div className="qm-contract-gmail-card">
           <span>Shared Gmail mailbox</span>
-          <strong>{gmailConnected ? gmail.connection.email : gmailConfigured ? 'Ready to connect' : 'Not configured'}</strong>
+          <strong>
+            {gmailConnected
+              ? gmail.connection.email
+              : gmailReconnectRequired
+                ? 'Reconnect required'
+                : gmailConfigured ? 'Ready to connect' : 'Not configured'}
+          </strong>
           <small>
             Scope: Gmail read + send. AI suggestions remain review-only; quotation emails always require a staff preview and explicit Send click.
             {gmail?.connection?.credential_owner_username ? ` Credential owner: ${gmail.connection.credential_owner_username}.` : ''}
@@ -614,20 +648,24 @@ const ContractIntelligenceManager = () => {
                 {busyAction === 'gmail-disconnect' ? 'Disconnecting...' : 'Disconnect'}
               </button>
             ) : (
-              <button type="button" className="qm-primary small" onClick={connectGmail} disabled={!gmailConfigured || !gmailCanManage || busyAction === 'gmail-connect'}>
-                {busyAction === 'gmail-connect' ? 'Opening Google...' : 'Connect Gmail'}
+              <button type="button" className="qm-primary small" onClick={connectGmail} disabled={!gmailConfigured || !gmailCanManage || !gmailCanReconnect || busyAction === 'gmail-connect'}>
+                {busyAction === 'gmail-connect'
+                  ? 'Opening Google...'
+                  : gmailReconnectRequired ? 'Reconnect Gmail' : 'Connect Gmail'}
               </button>
             )}
           </div>
           {!gmailCanManage && <p className="qm-field-warning">Only the credential owner or a superuser can replace or disconnect this shared mailbox.</p>}
           {gmail?.reconnect_required && (
             <p className="qm-field-warning">
-              Reconnect this mailbox once to approve the new Gmail send permission.
+              {gmail?.connection_unavailable_reason
+                || 'Reconnect this mailbox once to approve the new Gmail send permission.'}
             </p>
           )}
           {!gmailConfigured && (
             <p className="qm-field-warning">
-              Add GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI on the Railway backend.
+              {gmail?.configuration_error
+                || 'Add GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI on the Railway backend.'}
             </p>
           )}
         </div>
@@ -871,13 +909,7 @@ const ContractIntelligenceManager = () => {
                 </div>
               </section>
 
-              {!!(selectedRun.warnings || []).length && (
-                <section className="qm-helper warning">
-                  {(selectedRun.warnings || []).slice(0, 3).map((warning, index) => (
-                    <div key={`${warning}-${index}`}>{warning}</div>
-                  ))}
-                </section>
-              )}
+              <ContractWarningReview warnings={selectedRun.warnings} />
 
               <section className="qm-grid-two qm-contract-panels">
                 <div className="qm-panel">

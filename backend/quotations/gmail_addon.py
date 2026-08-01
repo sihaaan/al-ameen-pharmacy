@@ -422,7 +422,14 @@ def _fetch_thread_message_summaries(
         )
 
     summaries = []
-    for message in payload.get("messages") or []:
+    ordered_messages = sorted(
+        payload.get("messages") or [],
+        key=lambda message: (
+            int(message.get("internalDate") or 0),
+            str(message.get("id") or ""),
+        ),
+    )
+    for message in ordered_messages:
         try:
             message_id = _valid_gmail_id(
                 message.get("id"),
@@ -467,9 +474,15 @@ def _fetch_thread_message_summaries(
             "Close and reopen the add-on."
         )
 
-    maximum = max(
-        1,
-        int(getattr(settings, "GMAIL_ADDON_MAX_THREAD_MESSAGES", 50) or 50),
+    maximum = min(
+        100,
+        max(
+            1,
+            int(
+                getattr(settings, "GMAIL_ADDON_MAX_THREAD_MESSAGES", 50)
+                or 50
+            ),
+        ),
     )
     all_summaries = summaries
     summaries = all_summaries[-maximum:]
@@ -842,16 +855,23 @@ def gmail_addon_action(request):
 
         try:
             connection = _shared_connection(config["mailbox_email"])
-            (
-                anchor_message_id,
-                thread_id,
-                summaries,
-            ) = _canonical_gmail_context(
+            anchor_message_id, thread_id = _fetch_message_identity(
                 connection,
                 event_message_id,
-                event_thread_id,
             )
             if mode == MODE_SELECTED_MESSAGES:
+                # Selected IDs are form input, so verify them against a fresh
+                # canonical thread membership read. Current-message and
+                # AI-thread actions need only the canonical anchor identity;
+                # their website analysis performs its own bounded membership
+                # fetch, so repeating the full sidebar summary call here adds
+                # latency without strengthening their selection boundary.
+                summaries = _fetch_thread_message_summaries(
+                    connection,
+                    event_thread_id,
+                    required_message_id=anchor_message_id,
+                    required_thread_id=thread_id,
+                )
                 thread_message_ids = {
                     item["message_id"]
                     for item in summaries

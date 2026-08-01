@@ -20,12 +20,18 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from email.utils import getaddresses
 from functools import lru_cache
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from rapidfuzz.fuzz import ratio as rapidfuzz_ratio
+
+from .email_identity import (
+    canonical_email_addresses,
+    canonical_singleton_from_address,
+    canonicalize_email_address,
+    is_private_email_domain as _is_private_email_domain,
+)
 
 
 AUTOMATIC = "automatic"
@@ -256,34 +262,6 @@ _CORE_NOISE = {
     "pcs",
     "nos",
 }
-_PUBLIC_EMAIL_DOMAINS = {
-    "aol.com",
-    "fastmail.com",
-    "gmail.com",
-    "gmx.com",
-    "gmx.net",
-    "googlemail.com",
-    "hotmail.com",
-    "icloud.com",
-    "inbox.com",
-    "live.com",
-    "mail.com",
-    "mail.ru",
-    "me.com",
-    "msn.com",
-    "outlook.com",
-    "proton.me",
-    "protonmail.com",
-    "rediffmail.com",
-    "tuta.com",
-    "tutanota.com",
-    "yahoo.com",
-    "yahoo.co.uk",
-    "yandex.com",
-    "yandex.ru",
-    "ymail.com",
-    "zoho.com",
-}
 _COMPANY_NOISE = {
     "company",
     "contracting",
@@ -355,6 +333,10 @@ class MailboxPOLine:
 class CanonicalMailboxMessage:
     message_id: str = ""
     sender: str = ""
+    # ``None`` means the source exposed only one raw sender field.  A tuple
+    # preserves every physical From field when the mailbox inventory has full
+    # headers, including an explicit empty or duplicate set.
+    from_header_values: tuple[str, ...] | None = None
     recipients: tuple[str, ...] = ()
     subject: str = ""
     body: str = ""
@@ -664,9 +646,27 @@ def canonicalize_message(value: CanonicalMailboxMessage | Mapping[str, Any]) -> 
         )
     )
     recipients = _mapping_value(value, "recipients", "to", default=())
+    raw_from_header_values = _mapping_value(
+        value,
+        "from_header_values",
+        "sender_header_values",
+        default=None,
+    )
+    if raw_from_header_values is None and isinstance(value, Mapping) and "full_headers" in value:
+        raw_from_header_values = tuple(
+            str(header.get("value") or "")
+            for header in _as_sequence(value.get("full_headers"))
+            if isinstance(header, Mapping)
+            and str(header.get("name") or "").strip().casefold() == "from"
+        )
     return CanonicalMailboxMessage(
         message_id=str(_mapping_value(value, "message_id", "gmail_message_id", "id", default="") or ""),
         sender=str(_mapping_value(value, "sender", "from_address", "from", default="") or ""),
+        from_header_values=(
+            tuple(str(item or "") for item in _as_sequence(raw_from_header_values))
+            if raw_from_header_values is not None
+            else None
+        ),
         recipients=tuple(str(item) for item in _as_sequence(recipients) if item),
         subject=str(_mapping_value(value, "subject", default="") or ""),
         body=str(_mapping_value(value, "body", "body_text", "snippet", default="") or ""),
@@ -1132,23 +1132,16 @@ def _quotation_reference_keys(message: CanonicalMailboxMessage) -> frozenset[str
 
 
 def _addresses(value: str | Sequence[str]) -> frozenset[str]:
-    values = [value] if isinstance(value, str) else [str(item) for item in value]
-    return frozenset(
-        address.lower()
-        for _name, address in getaddresses(values)
-        if address and "@" in address
-    )
+    return canonical_email_addresses(value)
 
 
 def _domain(address: str) -> str:
-    return address.rsplit("@", 1)[-1].lower() if "@" in address else ""
+    canonical = canonicalize_email_address(address)
+    return canonical.rsplit("@", 1)[-1] if canonical else ""
 
 
 def _private_domain(domain: str) -> bool:
-    return bool(
-        domain
-        and not any(domain == public or domain.endswith(f".{public}") for public in _PUBLIC_EMAIL_DOMAINS)
-    )
+    return _is_private_email_domain(domain)
 
 
 def _domain_identity_label(
@@ -1184,7 +1177,7 @@ def _domain_identity_label(
 def is_private_email_domain(domain: str) -> bool:
     """Return whether a sender domain is safe to use as private-company evidence."""
 
-    return _private_domain(str(domain or "").casefold())
+    return _private_domain(domain)
 
 
 def normalize_company_identity_text(value: str) -> str:
@@ -1413,7 +1406,11 @@ def company_private_sender_domain_identity(
 def _customer_component(
     message: CanonicalMailboxMessage, quote: EligibleQuotation
 ) -> tuple[ScoreComponent, bool]:
-    senders = _addresses(message.sender)
+    physical_sender = canonical_singleton_from_address(
+        message.sender,
+        from_header_values=message.from_header_values,
+    )
+    senders = frozenset({physical_sender}) if physical_sender else frozenset()
     expected = _addresses(quote.customer_emails)
     exact_sender = bool(senders & expected)
     sender_domains = {_domain(address) for address in senders}
@@ -2247,9 +2244,18 @@ def _automatic_blockers(
         or len(candidate.matched_lines) >= 2
         or (candidate.exact_sender and commercially_corroborated)
     )
-    has_identity = candidate.exact_quote_reference or candidate.exact_sender or any(
-        component.signal == "customer_identity" and component.score >= 6.0
+    customer_identity_details = [
+        component.detail
         for component in candidate.components
+        if component.signal == "customer_identity"
+    ]
+    has_identity = bool(
+        candidate.exact_quote_reference
+        or candidate.exact_sender
+        or any(
+            "customer company name appears in the selected attachment" in detail
+            for detail in customer_identity_details
+        )
     )
 
     if candidate.parser_warnings:
@@ -2295,7 +2301,9 @@ def _automatic_blockers(
     elif candidate.document_total_provided and candidate.document_total_result == "unknown":
         blockers.append("the provided document total could not be verified")
     if not has_identity:
-        blockers.append("no exact quotation or trustworthy customer identity signal")
+        blockers.append(
+            "no exact quotation, exact saved sender, or selected-attachment customer identity"
+        )
     if not sufficiently_specific:
         blockers.append("the evidence is not specific enough to one quotation")
 
@@ -2477,6 +2485,14 @@ def rank_message_to_quotations(
         ),
         *_document_review_blockers(canonical_message),
     )
+    if not canonical_singleton_from_address(
+        canonical_message.sender,
+        from_header_values=canonical_message.from_header_values,
+    ):
+        blockers = (
+            *blockers,
+            "physical From header is missing, malformed, or ambiguous",
+        )
     automatic = not blockers
     if automatic:
         # Automatic callers may still use the bounded ranking for diagnostics;

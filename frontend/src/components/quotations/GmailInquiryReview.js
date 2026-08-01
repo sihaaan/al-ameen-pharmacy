@@ -1253,6 +1253,19 @@ const GmailInquiryReview = ({
   const aiIdentityEmail = String(aiIdentity.contact_email || '').trim();
   const aiIdentityReason = String(aiIdentity.reason || '').trim();
   const aiIdentityConfidence = confidencePercent(aiIdentity);
+  const identityReanalysisRequired = Boolean(
+    record?.candidates?.identity_reanalysis_required
+  );
+  const aiIdentityFromForward = Boolean(
+    record?.candidates?.ai_identity_unverified_forwarded
+  );
+  const aiIdentitySourceLabel = firstDefined(
+    identityReanalysisRequired
+      ? 'Previous analysis — reanalyze before relying on it'
+      : null,
+    aiIdentityFromForward ? 'Read from unverified forwarded content' : null,
+    'Read from the customer email and signature'
+  );
   const hasAiIdentity = Boolean(
     aiIdentityCompany
     || aiIdentityContact
@@ -1355,6 +1368,21 @@ const GmailInquiryReview = ({
             </button>
           </div>
         )}
+        {identityReanalysisRequired && !analysisUiActive && !readOnlyImport && (
+          <div className="qm-feedback warning" role="status">
+            <span>
+              Customer identity matching was upgraded. The previous suggestion was cleared; reanalyze before relying on it.
+            </span>
+            <button
+              type="button"
+              className="qm-secondary"
+              disabled={!messageSelectionValid || Boolean(busyAction)}
+              onClick={() => runAnalysis(recordId, { reanalyze: true })}
+            >
+              Reanalyze Gmail inquiry
+            </button>
+          </div>
+        )}
         {warnings.length > 0 && (
           <div className="qm-gmail-analysis-warnings" role="status">
             <strong>Review warnings</strong>
@@ -1453,7 +1481,7 @@ const GmailInquiryReview = ({
             <div className="qm-gmail-ai-identity-heading">
               <div>
                 <span>AI-detected identity</span>
-                <small>Read from the customer email and signature</small>
+                <small>{aiIdentitySourceLabel}</small>
               </div>
               {aiIdentityConfidence !== null && (
                 <strong>{aiIdentityConfidence}% confidence</strong>
@@ -1496,6 +1524,12 @@ const GmailInquiryReview = ({
           <div>
             <span>Match explanation</span>
             <strong>{firstDefined(
+              identityReanalysisRequired
+                ? 'Reanalysis required before using the previous suggestion'
+                : null,
+              aiIdentityFromForward
+                ? 'Suggested from unverified forwarded content; confirm manually'
+                : null,
               record?.company_match_reason,
               record?.identity?.company_reason,
               companySuggestionEvidence,

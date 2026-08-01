@@ -3,6 +3,7 @@ import React, { useCallback, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation, useNavigate } from 'react-router-dom';
 import axiosInstance from '../utils/axios';
+import { internalPathOrHome } from '../utils/internalRedirect';
 import ProductManagement from '../components/ProductManagement';
 import OrderManagement from '../components/OrderManagement';
 import QuotationModule from '../components/quotations/QuotationModule';
@@ -91,7 +92,7 @@ const AdminDashboard = () => {
       return;
     }
     if (!user) {
-      const next = `${location.pathname}${location.search}`;
+      const next = internalPathOrHome(`${location.pathname}${location.search}`);
       navigate(`/login?next=${encodeURIComponent(next)}`);
     } else if (!user.is_staff) {
       alert('You do not have permission to access this page');

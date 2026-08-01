@@ -105,6 +105,10 @@ class MailboxPOReconciliationTests(TestCase):
             gmail_thread_id=f"thread-{message_id}",
             mailbox_email=self.connection.email,
             label_ids=labels or ["INBOX"],
+            full_headers=[
+                {"name": "From", "value": "Acme Buyer <buyer@acme.example>"},
+                {"name": "To", "value": self.connection.email},
+            ],
             subject=subject,
             sender="Acme Buyer <buyer@acme.example>",
             recipients=self.connection.email,
@@ -120,6 +124,49 @@ class MailboxPOReconciliationTests(TestCase):
             full_message_fetched_at=timezone.now(),
             attachments_audited_at=timezone.now(),
             last_audited_at=timezone.now(),
+        )
+
+    def test_document_variant_preserves_duplicate_from_fields_and_blocks_automatic(self):
+        inventory = self.message(
+            "ambiguous-physical-from",
+            body=(
+                f"Purchase Order for {self.quote.quotation_number}\n"
+                "Item | Qty | Unit Price | Total\n"
+                "Nitrile Gloves Blue Size M Box 100 | 10 | 10 | 100\n"
+                "Grand Total: 100"
+            ),
+            rows=[
+                {
+                    "raw_name": "Nitrile Gloves Blue Size M Box 100",
+                    "quantity": "10",
+                    "unit_price": "10",
+                    "line_total": "100",
+                }
+            ],
+        )
+        inventory.full_headers = [
+            {"name": "From", "value": "Acme Buyer <buyer@acme.example>"},
+            {"name": "From", "value": "Acme Buyer <buyer@acme.example>"},
+            {"name": "To", "value": self.connection.email},
+        ]
+        inventory.save(update_fields=["full_headers", "updated_at"])
+
+        variant = document_variants(inventory)[0]
+        result = rank_message_to_quotations(variant.message, eligible_quotations())
+
+        self.assertEqual(
+            variant.message.from_header_values,
+            (
+                "Acme Buyer <buyer@acme.example>",
+                "Acme Buyer <buyer@acme.example>",
+            ),
+        )
+        self.assertEqual(result.status, AMBIGUOUS, result.reason)
+        self.assertIsNone(result.automatic_winner)
+        self.assertFalse(result.candidates[0].exact_sender)
+        self.assertIn(
+            "physical From header is missing, malformed, or ambiguous",
+            result.automatic_blockers,
         )
 
     def evidence(
@@ -1584,7 +1631,7 @@ class MailboxPOAuditAPITests(TestCase):
 
     @patch("quotations.views.mailbox_po_audit_repair_remaining", return_value=4)
     def test_completed_legacy_match_does_not_stop_current_algorithm_rollover(self, repair_remaining):
-        self.assertNotEqual(ALGORITHM_VERSION, "mailbox_match_v2")
+        self.assertNotEqual(ALGORITHM_VERSION, "mailbox_match_v5")
         run = MailboxPOAuditRun.objects.create(
             gmail_connection=self.connection,
             requested_by=self.staff,
@@ -1597,7 +1644,7 @@ class MailboxPOAuditAPITests(TestCase):
         legacy = MailboxPOMatchRun.objects.create(
             audit_run=run,
             requested_by=self.staff,
-            algorithm_version="mailbox_match_v2",
+            algorithm_version="mailbox_match_v5",
             status=MailboxPOMatchRun.STATUS_COMPLETED,
             completed_at=timezone.now(),
         )

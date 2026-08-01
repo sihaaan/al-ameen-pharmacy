@@ -1,5 +1,10 @@
 # Quotation Module
 
+> Historical implementation log. Some exclusions and roadmap statements below
+> describe earlier phases and are no longer current. For the implemented
+> Gmail/manual intake and delivery architecture as of 2026-08-01, use
+> [GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md](GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md).
+
 ## Business Problem
 
 Al Ameen Pharmacy receives company inquiries and LPOs for pharmacy items. Staff currently use separate, unstructured Excel files per company to look up previous prices, match requested item names, copy prices into quotations, and manually update history after sending.

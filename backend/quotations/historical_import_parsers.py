@@ -10,6 +10,15 @@ from django.core.exceptions import ValidationError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
+from .attachment_inspection import (
+    PDFResourceLimitError,
+    inspect_pdf_attachment,
+    max_pdf_table_cells,
+    max_pdf_table_rows,
+    validate_pdf_page_geometry,
+    validate_pdf_text_count,
+    validate_pdf_text_output,
+)
 from .import_parsers import PDF_MIME, _validate_upload_type, max_pdf_pages, read_upload_bytes
 from .import_rules import UNIT_WORDS, normalize_header, normalize_import_line
 from .private_storage import store_import_source
@@ -205,17 +214,40 @@ def _parse_table_row(row, mapping, *, page_number, row_number, sort_order):
     }
 
 
-def _extract_pdf_text(data):
+def _extract_pdf_text(data, *, reader=None):
+    if reader is None:
+        try:
+            reader = PdfReader(BytesIO(data))
+        except PdfReadError as exc:
+            raise ValidationError(f"Could not read PDF: {exc}") from exc
+        if reader.is_encrypted:
+            raise ValidationError("Encrypted PDF files are not supported. Please upload an unlocked PDF.")
     try:
-        reader = PdfReader(BytesIO(data))
-    except PdfReadError as exc:
-        raise ValidationError(f"Could not read PDF: {exc}") from exc
-    if reader.is_encrypted:
-        raise ValidationError("Encrypted PDF files are not supported. Please upload an unlocked PDF.")
-    page_count = len(reader.pages)
+        page_count = len(reader.pages)
+    except Exception as exc:
+        raise ValidationError(
+            "Could not safely read the historical PDF page structure."
+        ) from exc
     if page_count > max_pdf_pages():
         raise ValidationError(f"PDF has {page_count} pages. Maximum supported pages: {max_pdf_pages()}.")
-    return "\n".join(page.extract_text() or "" for page in reader.pages), page_count
+    chunks = []
+    total_text_length = 0
+    for page_number, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except PDFResourceLimitError:
+            raise
+        except Exception as exc:
+            raise ValidationError(
+                f"Could not safely extract text from historical PDF page {page_number}."
+            ) from exc
+        total_text_length = validate_pdf_text_output(
+            text,
+            current_total=total_text_length,
+            page_number=page_number,
+        )
+        chunks.append(text)
+    return "\n".join(chunks), page_count
 
 
 def _extract_document_number(text):
@@ -259,30 +291,106 @@ def _suggest_company_from_filename(filename):
 def parse_historical_pdf_upload(uploaded_file):
     data = read_upload_bytes(uploaded_file)
     filename = Path(uploaded_file.name or "").name
+    declared_content_type = str(getattr(uploaded_file, "content_type", "") or "")
     extension, sniffed_mime = _validate_upload_type(data, filename)
     if extension != ".pdf":
         raise ValidationError("Historical price backfill currently supports finalized quotation PDF files only.")
+    reader, inspection = inspect_pdf_attachment(
+        data,
+        declared_mime_type=declared_content_type,
+        max_pages=max_pdf_pages(),
+    )
 
     sha256 = hashlib.sha256(data).hexdigest()
-    text, page_count = _extract_pdf_text(data)
+    warnings = list(inspection.get("warnings") or [])
+    if not bool((inspection.get("safety") or {}).get("local_traversal_safe", True)):
+        warnings.append(
+            "Local historical-PDF extraction was skipped because one or more "
+            "stream filter chains cannot be decoded with a bounded in-process "
+            "preflight. Convert the document to a standard PDF before retrying."
+        )
+        source_file_ref = store_import_source(
+            data,
+            filename=filename,
+            sha256=sha256,
+        )
+        return {
+            "source_type": "pdf",
+            "source_filename": filename,
+            "source_mime_type": sniffed_mime or PDF_MIME,
+            "source_sha256": sha256,
+            "source_file_ref": source_file_ref,
+            "source_file_size": len(data),
+            "parse_method": "bounded_pdf_local_extraction_skipped_v1",
+            "document_number": "",
+            "document_date": None,
+            "suggested_company_name": _suggest_company_from_filename(filename),
+            "currency": "AED",
+            "subtotal": None,
+            "vat_total": None,
+            "total": None,
+            "lines": [],
+            "warnings": warnings,
+            "meta": {
+                "page_count": (inspection.get("fidelity") or {}).get("page_count", 0),
+                "page_metadata": [],
+                "table_rows_seen": 0,
+                "detected_columns": {},
+                "attachment_safety": inspection.get("safety") or {},
+                "pdf_fidelity": inspection.get("fidelity") or {},
+            },
+        }
+    text, page_count = _extract_pdf_text(data, reader=reader)
     document_number = _extract_document_number(text)
     document_date = _extract_document_date(text)
     source_file_ref = ""
 
     lines = []
-    warnings = []
     page_metadata = []
     totals = {"subtotal": None, "vat_total": None, "total": None}
     current_mapping = None
     current_labels = {}
     table_rows_seen = 0
+    total_table_rows = 0
+    table_cells_seen = 0
+    total_table_text_length = 0
 
     try:
         with pdfplumber.open(BytesIO(data)) as pdf:
             for page_index, page in enumerate(pdf.pages, start=1):
+                validate_pdf_page_geometry(
+                    page.width,
+                    page.height,
+                    page_number=page_index,
+                )
                 page_tables = page.extract_tables() or []
                 page_metadata.append({"page_number": page_index, "tables_seen": len(page_tables)})
+                page_table_text_length = 0
                 for table in page_tables:
+                    total_table_rows += len(table)
+                    table_cells_seen += sum(len(row or []) for row in table)
+                    if total_table_rows > max_pdf_table_rows():
+                        raise PDFResourceLimitError(
+                            "Historical PDF table extraction exceeds the safe row limit."
+                        )
+                    if table_cells_seen > max_pdf_table_cells():
+                        raise PDFResourceLimitError(
+                            "Historical PDF table extraction exceeds the safe cell limit."
+                        )
+                    table_text_length = sum(
+                        len(str(cell or ""))
+                        for row in table
+                        for cell in (row or [])
+                    )
+                    page_table_text_length += table_text_length
+                    validate_pdf_text_count(
+                        page_table_text_length,
+                        page_number=page_index,
+                    )
+                    total_table_text_length = validate_pdf_text_count(
+                        table_text_length,
+                        current_total=total_table_text_length,
+                    )
                     mapping = None
                     labels = {}
                     start_index = 0
@@ -319,6 +427,8 @@ def parse_historical_pdf_upload(uploaded_file):
                         )
                         if parsed:
                             lines.append(parsed)
+    except PDFResourceLimitError:
+        raise
     except Exception as exc:
         raise ValidationError(f"Could not parse historical quotation PDF tables: {exc}") from exc
 
@@ -353,5 +463,7 @@ def parse_historical_pdf_upload(uploaded_file):
             "page_metadata": page_metadata,
             "table_rows_seen": table_rows_seen,
             "detected_columns": current_labels,
+            "attachment_safety": inspection.get("safety") or {},
+            "pdf_fidelity": inspection.get("fidelity") or {},
         },
     }

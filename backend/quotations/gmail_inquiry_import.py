@@ -19,20 +19,25 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
-from email.utils import getaddresses
 from io import BytesIO
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
-from pypdf import PdfReader
 from python_calamine import load_workbook as load_calamine_workbook
 
+from .attachment_inspection import (
+    inspect_pdf_attachment,
+    inspect_spreadsheet_attachment,
+)
 from .ai_parsing import (
     AIParseError,
+    ai_parse_contract_descriptor,
+    build_ai_parse_observation,
     get_ai_parse_availability,
     get_ai_parse_provider,
+    sanitize_ai_provider_usage,
     settings_ai_status,
 )
 from .contract_intelligence import (
@@ -46,6 +51,12 @@ from .contract_intelligence import (
     resolve_gmail_connection,
 )
 from .company_matching import score_company_name
+from .email_identity import (
+    canonical_email_addresses,
+    canonical_singleton_from_address,
+    canonicalize_email_address,
+    is_private_email_domain,
+)
 from .import_parsers import (
     ALLOWED_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -53,7 +64,6 @@ from .import_parsers import (
 from .mailbox_po_audit import fetch_mailbox_message
 from .mailbox_po_matching import (
     company_private_sender_domain_identity,
-    is_private_email_domain,
     normalize_company_identity_text,
 )
 from .matching import (
@@ -61,6 +71,7 @@ from .matching import (
     preload_company_history_match_context,
 )
 from .models import (
+    AIParseCache,
     AIParseLog,
     Company,
     CompanyContact,
@@ -86,12 +97,19 @@ MAX_AI_VISION_ATTACHMENTS = 3
 MAX_ORIGINAL_TEXT_CHARS = 120_000
 DEFAULT_MAX_NATIVE_AI_INPUT_BYTES = 20 * 1024 * 1024
 DEFAULT_MAX_NATIVE_AI_INPUT_FILES = 12
+HARD_MAX_NATIVE_AI_SPREADSHEET_VISIBLE_SHEETS = 10
+HARD_MAX_NATIVE_AI_SPREADSHEET_COLUMNS_PER_SHEET = 100
+HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_ROWS = 5_000
+HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_CELLS = 500_000
 ANALYSIS_STALE_AFTER = timedelta(minutes=10)
 SUPPORTED_GMAIL_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
 # Gmail V2 deliberately sends only documents that normally contain item
 # tables. Images commonly embedded in email signatures are never submitted.
 # Manual inquiry image upload remains supported by the existing vision flow.
 NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
+GMAIL_AI_PIPELINE_VERSION = "gmail_inquiry_v2"
+GMAIL_AI_SCHEMA_NAME = "gmail_inquiry_native_v2"
+GMAIL_SEMANTIC_CACHE_VERSION = "gmail_semantic_cache_v1"
 ANALYSIS_TIMING_KEYS = (
     "gmail_thread_fetch",
     "source_preparation",
@@ -115,6 +133,39 @@ NATIVE_MIME_BY_EXTENSION = {
     ".pdf": "application/pdf",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xls": "application/vnd.ms-excel",
+}
+PUBLIC_ATTACHMENT_SAFETY_KEYS = {
+    "active_content_markers",
+    "archive_entry_count",
+    "archive_uncompressed_bytes",
+    "container",
+    "embedded_file_markers",
+    "encrypted",
+    "hard_limits_applied",
+    "suspicious_compression_part_count",
+    "validated_format",
+    "validation_failed",
+}
+PUBLIC_PDF_FIDELITY_KEYS = {
+    "form_field_markers",
+}
+PUBLIC_SPREADSHEET_FIDELITY_KEYS = {
+    "date_cell_count",
+    "embedded_object_count",
+    "error_cell_count",
+    "external_link_count",
+    "formula_cell_count",
+    "formula_without_cached_value_count",
+    "hidden_column_count",
+    "hidden_row_count",
+    "hidden_sheet_count",
+    "inspection_level",
+    "limited_worksheet_xml_count",
+    "macro_part_count",
+    "merged_range_count",
+    "protected_sheet_count",
+    "visible_sheet_count",
+    "workbook_protected",
 }
 INLINE_IMAGE_HINT = re.compile(
     r"(?:^|[_\-. ])(?:logo|signature|footer|banner|icon|spacer|image00|social)(?:[_\-. ]|$)",
@@ -650,22 +701,95 @@ def _thread_message_metadata(connection, thread_id):
     }
 
 
-def _email_addresses(value):
+def _message_metadata(connection, message_id):
+    """Resolve one Gmail message without retrieving its body or MIME parts."""
+
+    token = get_valid_access_token(connection)
+    query = urllib.parse.urlencode(
+        [
+            ("format", "metadata"),
+            ("metadataHeaders", "Subject"),
+            ("metadataHeaders", "From"),
+            ("metadataHeaders", "To"),
+            ("metadataHeaders", "Cc"),
+            ("metadataHeaders", "Reply-To"),
+        ]
+    )
+    payload = _json_request(
+        f"{GMAIL_API_BASE}/messages/"
+        f"{urllib.parse.quote(str(message_id))}?{query}",
+        token=token,
+    )
+    headers = (payload.get("payload") or {}).get("headers") or []
     return {
-        address.strip().lower()
-        for _name, address in getaddresses([str(value or "")])
-        if address and "@" in address
+        "gmail_message_id": _normalize_gmail_id(
+            payload.get("id") or message_id
+        ),
+        "gmail_thread_id": _normalize_gmail_id(payload.get("threadId")),
+        "label_ids": list(payload.get("labelIds") or []),
+        "subject": _header(headers, "Subject"),
+        "sender": _header(headers, "From"),
+        "recipients": _header(headers, "To"),
+        "cc": _header(headers, "Cc"),
+        "reply_to": _header(headers, "Reply-To"),
+        "sent_at": _message_datetime(payload),
+        "snippet": str(payload.get("snippet") or ""),
+        "newest_body_text": "",
+        "newest_body_html": "",
+        "attachment_manifest": [],
+        "_metadata_only": True,
     }
 
 
+def _email_addresses(value):
+    return set(canonical_email_addresses(str(value or "")))
+
+
+def _single_physical_from_address(message):
+    """Return one canonical RFC From address, or fail closed as ambiguous."""
+
+    if "full_headers" in message:
+        header_values = tuple(
+            str(header.get("value") or "")
+            for header in message.get("full_headers") or []
+            if isinstance(header, dict)
+            and str(header.get("name") or "").strip().casefold() == "from"
+        )
+    else:
+        header_values = None
+    return canonical_singleton_from_address(
+        message.get("sender"),
+        from_header_values=header_values,
+    )
+
+
 def _is_outbound_message(message, mailbox_email):
+    mailbox_email = (
+        canonicalize_email_address(mailbox_email)
+        or str(mailbox_email or "").strip().casefold()
+    )
     labels = {
         str(value or "").strip().upper()
         for value in message.get("label_ids") or []
     }
     return (
         "SENT" in labels
-        or mailbox_email in _email_addresses(message.get("sender"))
+        or _single_physical_from_address(message) == mailbox_email
+    )
+
+
+def _is_verified_mailbox_sent_message(message, mailbox_email):
+    """Use Gmail provenance plus an exact From identity for overflow trust."""
+
+    mailbox_email = canonicalize_email_address(mailbox_email)
+    labels = {
+        str(value or "").strip().upper()
+        for value in message.get("label_ids") or []
+    }
+    return bool(
+        mailbox_email
+        and "SENT" in labels
+        and _single_physical_from_address(message) == mailbox_email
     )
 
 
@@ -779,8 +903,14 @@ def _is_clear_non_item_email_prose_row(row):
 def _public_message_manifest(message, mailbox_email):
     body = str(message.get("newest_body_text") or "")
     body_html = str(message.get("newest_body_html") or "")
+    forwarded_body = str(message.get("_forwarded_body_text") or "")
+    forwarded_body_html = str(message.get("_forwarded_body_html") or "")
+    contains_forwarded = bool(
+        message.get("contains_unverified_forwarded_content")
+        and (forwarded_body or forwarded_body_html)
+    )
     attachments = message.get("attachment_manifest") or []
-    return {
+    manifest = {
         "gmail_message_id": message.get("gmail_message_id") or "",
         "gmail_thread_id": message.get("gmail_thread_id") or "",
         "label_ids": message.get("label_ids") or [],
@@ -790,7 +920,14 @@ def _public_message_manifest(message, mailbox_email):
         "cc": str(message.get("cc") or ""),
         "reply_to": str(message.get("reply_to") or "")[:500],
         "sent_at": _json_safe(message.get("sent_at")),
-        "snippet": str(message.get("snippet") or "")[:1000],
+        # Gmail's snippet is generated from the raw message and can include
+        # unverified forwarded headers/body text. Once a forward is
+        # recognized, persist only a preview derived from the sanitized outer
+        # message body; the forwarded material itself is represented below by
+        # bounded hashes and lengths.
+        "snippet": (
+            body if contains_forwarded else str(message.get("snippet") or "")
+        )[:1000],
         "body_sha256": hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest(),
         "body_length": len(body),
         "body_html_sha256": (
@@ -806,6 +943,32 @@ def _public_message_manifest(message, mailbox_email):
         "analysis_reason": "Awaiting thread analysis.",
         "analysis_confidence": 0.0,
     }
+    if contains_forwarded:
+        manifest.update(
+            {
+                "contains_unverified_forwarded_content": True,
+                "forwarded_content_truncated": bool(
+                    message.get("_forwarded_content_truncated")
+                ),
+                "forwarded_body_sha256": (
+                    hashlib.sha256(
+                        forwarded_body.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    if forwarded_body
+                    else ""
+                ),
+                "forwarded_body_length": len(forwarded_body),
+                "forwarded_body_html_sha256": (
+                    hashlib.sha256(
+                        forwarded_body_html.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    if forwarded_body_html
+                    else ""
+                ),
+                "forwarded_body_html_length": len(forwarded_body_html),
+            }
+        )
+    return manifest
 
 
 def _public_attachment_manifest(message):
@@ -839,13 +1002,36 @@ def _public_attachment_manifest(message):
                 "source_sha256": "",
                 "line_count": 0,
                 "result_source": "",
+                "warnings": [],
+                "attachment_safety": {},
+                "pdf_fidelity": {},
+                "spreadsheet_fidelity": {},
             }
         )
     return public
 
 
 def _fetch_analysis_messages(gmail_import, connection):
-    anchor = fetch_mailbox_message(connection, gmail_import.anchor_message_id)
+    selected_ids = _normalize_message_ids(
+        gmail_import.selected_message_ids,
+        fallback=gmail_import.anchor_message_id,
+    )
+    anchor_is_selected = (
+        gmail_import.mode != GmailInquiryImport.MODE_SELECTED_MESSAGES
+        or gmail_import.anchor_message_id in selected_ids
+    )
+    anchor = (
+        fetch_mailbox_message(
+            connection,
+            gmail_import.anchor_message_id,
+            preserve_forwarded=True,
+        )
+        if anchor_is_selected
+        else _message_metadata(
+            connection,
+            gmail_import.anchor_message_id,
+        )
+    )
     canonical_anchor_id = _normalize_gmail_id(
         anchor.get("gmail_message_id") or gmail_import.anchor_message_id
     )
@@ -894,15 +1080,22 @@ def _fetch_analysis_messages(gmail_import, connection):
         for message in timeline_messages
     }
     if canonical_anchor_id not in timeline_ids:
-        timeline_messages.append(anchor)
+        # Match the add-on's visible boundary exactly: an older open message
+        # occupies one slot and the remaining slots contain the newest thread
+        # messages.  Previously the anchor was appended after truncation,
+        # allowing AI-thread mode to fetch/analyze ``limit + 1`` messages even
+        # though the employee could see only ``limit`` in Gmail.
+        limit = max(1, int(timeline_result.get("limit") or 1))
+        timeline_messages = (
+            [anchor]
+            if limit == 1
+            else [anchor, *timeline_messages[-(limit - 1) :]]
+        )
 
     if gmail_import.mode == GmailInquiryImport.MODE_CURRENT_MESSAGE:
         requested_message_ids = [gmail_import.anchor_message_id]
     elif gmail_import.mode == GmailInquiryImport.MODE_SELECTED_MESSAGES:
-        requested_message_ids = _normalize_message_ids(
-            gmail_import.selected_message_ids,
-            fallback=gmail_import.anchor_message_id,
-        )
+        requested_message_ids = selected_ids
     else:
         if not thread_id:
             raise GmailInquiryImportError(
@@ -921,14 +1114,18 @@ def _fetch_analysis_messages(gmail_import, connection):
     for requested_message_id in requested_message_ids:
         message = (
             anchor
-            if requested_message_id
-            in {
+            if (
+                not anchor.get("_metadata_only")
+                and requested_message_id
+                in {
                 gmail_import.anchor_message_id,
                 canonical_anchor_id,
-            }
+                }
+            )
             else fetch_mailbox_message(
                 connection,
                 requested_message_id,
+                preserve_forwarded=True,
             )
         )
         canonical_message_id = _normalize_gmail_id(
@@ -986,7 +1183,7 @@ AI_COMPANY_NAME_STRONG_SCORE = 88
 AI_COMPANY_NAME_MIN_MARGIN = 8
 AI_IDENTITY_MIN_CONFIDENCE = 0.65
 AI_IDENTITY_STRONG_CONFIDENCE = 0.85
-GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v3"
+GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v4"
 COMPANY_IDENTITY_LEGAL_SUFFIXES = {
     "co",
     "company",
@@ -1044,8 +1241,8 @@ CONTACT_NAME_NOISE = {
 
 
 def _email_domain(value):
-    value = str(value or "").strip().casefold()
-    return value.rsplit("@", 1)[-1] if "@" in value else ""
+    canonical = canonicalize_email_address(value)
+    return canonical.rsplit("@", 1)[-1] if canonical else ""
 
 
 def _saved_contact_emails(contact):
@@ -1057,9 +1254,9 @@ def _saved_contact_emails(contact):
     """
 
     values = {
-        str(contact.email or "").strip().casefold(),
+        canonicalize_email_address(contact.email),
         *(
-            match.group(0).strip().casefold()
+            canonicalize_email_address(match.group(0))
             for match in SAVED_CONTACT_EMAIL_RE.finditer(
                 str(contact.name or "")
             )
@@ -1275,7 +1472,10 @@ def _inbound_signature_identity_by_message(
 ):
     signatures = {}
     for message in messages:
-        if _is_outbound_message(message, mailbox_email):
+        if (
+            _is_outbound_message(message, mailbox_email)
+            or message.get("contains_unverified_forwarded_content")
+        ):
             continue
         message_id = str(message.get("gmail_message_id") or "")
         if not message_id:
@@ -1342,20 +1542,71 @@ def _company_contact_candidates(
     active_companies=None,
     active_contacts=None,
 ):
-    mailbox_email = str(mailbox_email or "").strip().casefold()
+    mailbox_email = (
+        canonicalize_email_address(mailbox_email)
+        or str(mailbox_email or "").strip().casefold()
+    )
     sender_evidence = {}
+    observed_sender_evidence = {}
+    identity_warnings = []
+    unverified_forwarded_source_keys = set()
     for message in messages:
         if _is_outbound_message(message, mailbox_email):
             continue
         message_id = str(message.get("gmail_message_id") or "")
+        observed_addresses = _email_addresses(message.get("sender"))
+        for address in observed_addresses:
+            if address != mailbox_email:
+                observed_sender_evidence.setdefault(address, set()).add(
+                    message_id
+                )
+
+        physical_from = _single_physical_from_address(message)
+        if message.get("contains_unverified_forwarded_content"):
+            unverified_forwarded_source_keys.add(
+                _source_key(message_id, "body", "newest")
+            )
+            for attachment in message.get("attachment_manifest") or []:
+                if not isinstance(attachment, dict):
+                    continue
+                unverified_forwarded_source_keys.add(
+                    _source_key(
+                        message_id,
+                        "attachment",
+                        attachment.get("attachment_id")
+                        or attachment.get("part_id")
+                        or os.path.basename(
+                            str(attachment.get("filename") or "")
+                        )[:255],
+                    )
+                )
+            identity_warnings.append(
+                "A forwarded inquiry was included. Its embedded From and "
+                "Reply-To details are unverified evidence and were not used "
+                "for deterministic customer matching."
+            )
+        elif not physical_from:
+            identity_warnings.append(
+                "An inbound message has an ambiguous or invalid From header; "
+                "it was not used for deterministic customer matching."
+            )
+        elif physical_from != mailbox_email:
+            sender_evidence.setdefault(physical_from, set()).add(message_id)
+
+        reply_to_addresses = _email_addresses(message.get("reply_to"))
+        if physical_from and len(reply_to_addresses) == 1:
+            from_domain = _email_domain(physical_from)
+            reply_domain = _email_domain(next(iter(reply_to_addresses)))
+            if from_domain and reply_domain and from_domain != reply_domain:
+                identity_warnings.append(
+                    "An inbound Reply-To domain differs from its physical From "
+                    "domain. Reply-To remains routing-only and was not used for "
+                    "customer matching."
+                )
         # Reply-To is controlled by the sender and can point at an unrelated
         # saved customer. Without authenticated alignment evidence it must not
-        # participate in customer identity or direct-quote readiness. V1 uses
-        # only the actual inbound From address.
-        for address in _email_addresses(message.get("sender")):
-            if address == mailbox_email:
-                continue
-            sender_evidence.setdefault(address, set()).add(message_id)
+        # participate in customer identity or direct-quote readiness. The
+        # matcher uses only one canonical, unambiguous physical From address.
 
     if active_companies is None or active_contacts is None:
         active_companies, active_contacts = (
@@ -1439,14 +1690,14 @@ def _company_contact_candidates(
 
     normalized_contact_email = {}
     for contact in active_contacts:
-        structured_email = str(contact.email or "").strip().casefold()
+        structured_email = canonicalize_email_address(contact.email)
         for email in _saved_contact_emails(contact):
             normalized_contact_email.setdefault(email, []).append(
                 (contact, bool(structured_email and email == structured_email))
             )
     normalized_company_email = {}
     for company in active_companies:
-        email = str(company.email or "").strip().casefold()
+        email = canonicalize_email_address(company.email)
         if email:
             normalized_company_email.setdefault(email, []).append(company)
 
@@ -1719,7 +1970,12 @@ def _company_contact_candidates(
         else None
     )
     return {
-        "sender_emails": sorted(sender_evidence),
+        "sender_emails": sorted(observed_sender_evidence),
+        "verified_identity_sender_emails": sorted(sender_evidence),
+        "identity_warnings": list(dict.fromkeys(identity_warnings)),
+        "unverified_forwarded_identity_source_keys": sorted(
+            unverified_forwarded_source_keys
+        ),
         "companies": company_rows,
         "contacts": contact_rows,
         "recommended_company_id": recommended_company_id,
@@ -1805,6 +2061,62 @@ def _attachment_parse_filename(attachment, fallback="gmail-inquiry"):
     return filename or f"{fallback}{extension}"
 
 
+def _public_inspection_values(values, allowed_keys):
+    """Return bounded scalar inspection metadata safe for persisted evidence."""
+
+    if not isinstance(values, dict):
+        return {}
+    return {
+        key: value
+        for key, value in values.items()
+        if key in allowed_keys
+        and (
+            value is None
+            or isinstance(value, (bool, int, float))
+            or isinstance(value, str)
+        )
+    }
+
+
+def _public_attachment_inspection(inspection, extension):
+    inspection = inspection if isinstance(inspection, dict) else {}
+    public = {
+        "inspection_warnings": [
+            str(value).strip()[:1000]
+            for value in (inspection.get("warnings") or [])
+            if str(value).strip()
+        ][:50],
+        "attachment_safety": _public_inspection_values(
+            inspection.get("safety"),
+            PUBLIC_ATTACHMENT_SAFETY_KEYS,
+        ),
+        "pdf_fidelity": {},
+        "spreadsheet_fidelity": {},
+    }
+    fidelity_key = (
+        "pdf_fidelity" if extension == ".pdf" else "spreadsheet_fidelity"
+    )
+    allowed_keys = (
+        PUBLIC_PDF_FIDELITY_KEYS
+        if extension == ".pdf"
+        else PUBLIC_SPREADSHEET_FIDELITY_KEYS
+    )
+    public[fidelity_key] = _public_inspection_values(
+        inspection.get("fidelity"),
+        allowed_keys,
+    )
+    return public
+
+
+def _validation_error_text(exc):
+    messages = getattr(exc, "messages", None) or [str(exc)]
+    return " ".join(
+        str(value).strip()
+        for value in messages
+        if str(value).strip()
+    )[:500]
+
+
 def _fetch_native_ai_attachment(
     connection,
     message_id,
@@ -1857,11 +2169,32 @@ def _fetch_native_ai_attachment(
         raise GmailInquiryImportError(
             f"{attachment.get('filename') or 'Gmail attachment'} is too large."
         )
+    content = bytes(content)
+    source_sha256 = hashlib.sha256(content).hexdigest()
     page_count = 0
     spreadsheet_rows = {}
+    spreadsheet_columns = {}
+    spreadsheet_total_rows = 0
+    spreadsheet_total_cells = 0
+    inspection = {}
+
+    def inspected_rejection(reason, *, hard_validation_failed=False):
+        return {
+            "filename": _attachment_parse_filename(attachment),
+            "mime_type": NATIVE_MIME_BY_EXTENSION[extension],
+            "source_sha256": source_sha256,
+            "size": len(content),
+            "hard_validation_failed": bool(hard_validation_failed),
+            **_public_attachment_inspection(inspection, extension),
+        }, reason
+
     try:
         if extension == ".pdf":
-            page_count = len(PdfReader(BytesIO(content)).pages)
+            reader, inspection = inspect_pdf_attachment(
+                content,
+                declared_mime_type=attachment.get("mime_type") or "",
+            )
+            page_count = len(reader.pages)
             max_pdf_pages = max(
                 1,
                 int(
@@ -1873,11 +2206,16 @@ def _fetch_native_ai_attachment(
                 ),
             )
             if page_count > max_pdf_pages:
-                return None, (
+                return inspected_rejection(
                     f"PDF has {page_count} pages; the safe Gmail AI limit is "
                     f"{max_pdf_pages}. Select a smaller document."
                 )
         elif extension in {".xlsx", ".xls"}:
+            inspection = inspect_spreadsheet_attachment(
+                content,
+                extension=extension,
+                declared_mime_type=attachment.get("mime_type") or "",
+            )
             max_rows = min(
                 1000,
                 max(
@@ -1891,20 +2229,135 @@ def _fetch_native_ai_attachment(
                     ),
                 ),
             )
+            max_visible_sheets = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_VISIBLE_SHEETS,
+                max(
+                    1,
+                    int(
+                        getattr(
+                            settings,
+                            "QUOTATION_IMPORT_MAX_EXCEL_SHEETS",
+                            HARD_MAX_NATIVE_AI_SPREADSHEET_VISIBLE_SHEETS,
+                        )
+                    ),
+                ),
+            )
+            max_columns = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_COLUMNS_PER_SHEET,
+                max(
+                    1,
+                    int(
+                        getattr(
+                            settings,
+                            "QUOTATION_IMPORT_MAX_EXCEL_COLUMNS",
+                            HARD_MAX_NATIVE_AI_SPREADSHEET_COLUMNS_PER_SHEET,
+                        )
+                    ),
+                ),
+            )
+            max_total_rows = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_ROWS,
+                max_rows * max_visible_sheets,
+            )
+            max_total_cells = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_CELLS,
+                max_total_rows * max_columns,
+            )
             workbook = load_calamine_workbook(BytesIO(content))
             try:
-                for sheet_name in workbook.sheet_names:
+                metadata_by_name = {
+                    str(metadata.name): metadata
+                    for metadata in (
+                        getattr(workbook, "sheets_metadata", None) or []
+                    )
+                }
+                visible_sheet_names = [
+                    sheet_name
+                    for sheet_name in workbook.sheet_names
+                    if str(
+                        getattr(
+                            metadata_by_name.get(sheet_name),
+                            "visible",
+                            "visible",
+                        )
+                    )
+                    .rsplit(".", 1)[-1]
+                    .lower()
+                    == "visible"
+                ]
+                fidelity = dict(inspection.get("fidelity") or {})
+                fidelity["visible_sheet_count"] = len(visible_sheet_names)
+                fidelity["hidden_sheet_count"] = max(
+                    0,
+                    len(workbook.sheet_names) - len(visible_sheet_names),
+                )
+                inspection = {**inspection, "fidelity": fidelity}
+                if len(visible_sheet_names) > max_visible_sheets:
+                    return inspected_rejection(
+                        "Spreadsheet has "
+                        f"{len(visible_sheet_names)} visible sheets; the safe "
+                        f"Gmail AI limit is {max_visible_sheets}. Split the "
+                        "workbook and retry.",
+                        hard_validation_failed=True,
+                    )
+                for sheet_name in visible_sheet_names:
                     sheet = workbook.get_sheet_by_name(sheet_name)
                     row_count = int(getattr(sheet, "height", 0) or 0)
+                    column_count = int(getattr(sheet, "width", 0) or 0)
                     spreadsheet_rows[str(sheet_name)[:120]] = row_count
+                    spreadsheet_columns[str(sheet_name)[:120]] = column_count
                     if row_count > max_rows:
-                        return None, (
+                        return inspected_rejection(
                             f"Spreadsheet sheet '{sheet_name}' has {row_count} "
                             f"rows; native AI reads at most {max_rows} rows per "
-                            "sheet. Split the workbook and retry."
+                            "sheet. Split the workbook and retry.",
+                            hard_validation_failed=True,
+                        )
+                    if column_count > max_columns:
+                        return inspected_rejection(
+                            f"Spreadsheet sheet '{sheet_name}' has "
+                            f"{column_count} columns; the safe Gmail AI limit "
+                            f"is {max_columns} columns per sheet. Split the "
+                            "workbook and retry.",
+                            hard_validation_failed=True,
+                        )
+                    spreadsheet_total_rows += row_count
+                    spreadsheet_total_cells += row_count * column_count
+                    if spreadsheet_total_rows > max_total_rows:
+                        return inspected_rejection(
+                            "Spreadsheet has "
+                            f"{spreadsheet_total_rows} aggregate visible rows; "
+                            f"the safe Gmail AI limit is {max_total_rows}. "
+                            "Split the workbook and retry.",
+                            hard_validation_failed=True,
+                        )
+                    if spreadsheet_total_cells > max_total_cells:
+                        return inspected_rejection(
+                            "Spreadsheet has "
+                            f"{spreadsheet_total_cells} aggregate visible cells; "
+                            f"the safe Gmail AI limit is {max_total_cells}. "
+                            "Split the workbook and retry.",
+                            hard_validation_failed=True,
                         )
             finally:
                 workbook.close()
+    except ValidationError as exc:
+        public_inspection = _public_attachment_inspection({}, extension)
+        public_inspection["attachment_safety"] = {
+            "hard_limits_applied": True,
+            "validation_failed": True,
+        }
+        return {
+            "filename": _attachment_parse_filename(attachment),
+            "mime_type": NATIVE_MIME_BY_EXTENSION[extension],
+            "source_sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "hard_validation_failed": True,
+            **public_inspection,
+        }, (
+            "Attachment failed the required safety inspection: "
+            f"{_validation_error_text(exc)}"
+        )
     except Exception as exc:
         return None, (
             "The attachment could not pass the native AI safety check: "
@@ -1925,15 +2378,23 @@ def _fetch_native_ai_attachment(
     # has passed its format-specific preflight, so submit the canonical MIME
     # type expected by the native document API.
     mime_type = NATIVE_MIME_BY_EXTENSION[extension]
+    public_inspection = _public_attachment_inspection(
+        inspection,
+        extension,
+    )
     return {
         "filename": filename,
         "mime_type": mime_type,
-        "content": bytes(content),
-        "source_sha256": hashlib.sha256(bytes(content)).hexdigest(),
+        "content": content,
+        "source_sha256": source_sha256,
         "size": len(content),
         "detail": "high",
         "page_count": page_count,
         "spreadsheet_rows": spreadsheet_rows,
+        "spreadsheet_columns": spreadsheet_columns,
+        "spreadsheet_total_rows": spreadsheet_total_rows,
+        "spreadsheet_total_cells": spreadsheet_total_cells,
+        **public_inspection,
     }, ""
 
 
@@ -2210,25 +2671,45 @@ def _native_thread_context(messages, sources, mode):
         message_id = str(message.get("gmail_message_id") or "")
         body_text = str(message.get("newest_body_text") or "")
         body_html = str(message.get("newest_body_html") or "")
-        timeline.append(
-            {
-                "sequence": sequence,
-                "gmail_message_id": message_id,
-                "direction": (
-                    "outbound" if message.get("is_outbound") else "inbound"
-                ),
-                "sent_at": _json_safe(message.get("sent_at")) or "",
-                "subject": str(message.get("subject") or ""),
-                "sender": str(message.get("sender") or ""),
-                "recipients": str(message.get("recipients") or ""),
-                "body_text": body_text,
-                # Preserve HTML tables when Gmail supplies them; otherwise the
-                # plain body is authoritative and avoids duplicate signature
-                # markup/noise.
-                "body_html": body_html if "<table" in body_html.lower() else "",
-                "sources": sources_by_message.get(message_id, []),
-            }
+        forwarded_body_text = str(message.get("_forwarded_body_text") or "")
+        forwarded_body_html = str(message.get("_forwarded_body_html") or "")
+        contains_forwarded = bool(
+            message.get("contains_unverified_forwarded_content")
+            and (forwarded_body_text or forwarded_body_html)
         )
+        timeline_entry = {
+            "sequence": sequence,
+            "gmail_message_id": message_id,
+            "direction": (
+                "outbound" if message.get("is_outbound") else "inbound"
+            ),
+            "sent_at": _json_safe(message.get("sent_at")) or "",
+            "subject": str(message.get("subject") or ""),
+            "sender": str(message.get("sender") or ""),
+            "recipients": str(message.get("recipients") or ""),
+            "body_text": body_text,
+            # Preserve HTML tables when Gmail supplies them; otherwise the
+            # plain body is authoritative and avoids duplicate signature
+            # markup/noise.
+            "body_html": body_html if "<table" in body_html.lower() else "",
+            "sources": sources_by_message.get(message_id, []),
+        }
+        if contains_forwarded:
+            # A structurally recognized forward is useful request evidence,
+            # but its embedded headers are never promoted to verified Gmail
+            # sender identity. Keep the boundary explicit for the analyzer.
+            timeline_entry.update(
+                {
+                    "forwarded_content_trust": "unverified",
+                    "forwarded_body_text": forwarded_body_text,
+                    "forwarded_body_html": (
+                        forwarded_body_html
+                        if "<table" in forwarded_body_html.lower()
+                        else ""
+                    ),
+                }
+            )
+        timeline.append(timeline_entry)
     payload = {
         "mode": mode,
         "timeline": timeline,
@@ -2246,6 +2727,159 @@ def _native_thread_context(messages, sources, mode):
     return encoded
 
 
+def _gmail_semantic_source_sha256(
+    *,
+    gmail_import,
+    message_ids,
+    sources,
+    file_inputs,
+    context_hash,
+):
+    """Hash the exact reusable Gmail semantic boundary without raw content."""
+
+    file_descriptors = []
+    for file_input in file_inputs:
+        content = file_input.get("content")
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            raise AIParseError(
+                "A Gmail native attachment is missing its validated source bytes."
+            )
+        file_descriptors.append(
+            {
+                "source_key": str(file_input.get("source_key") or ""),
+                "filename": str(file_input.get("filename") or ""),
+                "mime_type": str(file_input.get("mime_type") or ""),
+                "size": len(content),
+                "detail": str(file_input.get("detail") or "high"),
+                # Recompute from the exact provider input. Never trust a
+                # caller-supplied digest as the semantic cache boundary.
+                "source_sha256": hashlib.sha256(bytes(content)).hexdigest(),
+            }
+        )
+    mailbox_email = (
+        canonicalize_email_address(gmail_import.mailbox_email)
+        or str(gmail_import.mailbox_email or "").strip().casefold()
+    )
+    descriptor = {
+        "cache_version": GMAIL_SEMANTIC_CACHE_VERSION,
+        "mailbox_email": mailbox_email,
+        "mode": str(gmail_import.mode or ""),
+        "context_hash": context_hash,
+        "message_ids": list(message_ids),
+        "sources": [
+            {
+                "source_key": str(source.get("source_key") or ""),
+                "gmail_message_id": str(
+                    source.get("gmail_message_id") or ""
+                ),
+                "kind": str(source.get("kind") or ""),
+                "filename": str(source.get("filename") or ""),
+                "mime_type": str(source.get("mime_type") or ""),
+                "source_sha256": str(source.get("source_sha256") or ""),
+            }
+            for source in sources
+        ],
+        "files": file_descriptors,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            descriptor,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _cacheable_gmail_semantic_result(raw_result):
+    """Sanitize the provider schema without changing validation semantics."""
+
+    identity = raw_result.get("customer_identity") or {}
+    return {
+        "messages": [
+            {
+                "gmail_message_id": str(
+                    message_result.get("gmail_message_id") or ""
+                ),
+                "classification": str(
+                    message_result.get("classification") or ""
+                ),
+                "usage": str(message_result.get("usage") or ""),
+                "reason": str(message_result.get("reason") or "")[:500],
+                "confidence": message_result.get("confidence") or 0,
+            }
+            for message_result in (raw_result.get("messages") or [])
+            if isinstance(message_result, dict)
+        ],
+        "rows": [
+            {
+                "item_name": str(row.get("item_name") or "").strip()[:255],
+                "quantity": str(row.get("quantity") or "").strip(),
+                # Preserve invalid units as invalid on replay. Truncating to
+                # 50 here would incorrectly turn a >50-character unit into a
+                # valid one on a cache hit; the validator retains up to 200.
+                "unit": str(row.get("unit") or "").strip()[:200],
+                "customer_unit_price": str(
+                    row.get("customer_unit_price") or ""
+                ).strip(),
+                "customer_line_total": str(
+                    row.get("customer_line_total") or ""
+                ).strip(),
+                "customer_vat": str(
+                    row.get("customer_vat") or ""
+                ).strip(),
+                "operation": str(row.get("operation") or ""),
+                "citations": [
+                    {
+                        "source_key": str(
+                            citation.get("source_key") or ""
+                        ).strip(),
+                        "page_number": str(
+                            citation.get("page_number") or ""
+                        )[:40],
+                        "sheet_name": str(
+                            citation.get("sheet_name") or ""
+                        )[:120],
+                        "cell_range": str(
+                            citation.get("cell_range") or ""
+                        )[:80],
+                        "raw_source_text": str(
+                            citation.get("raw_source_text") or ""
+                        )[:2000],
+                    }
+                    for citation in (row.get("citations") or [])
+                    if isinstance(citation, dict)
+                ],
+                "confidence": row.get("confidence") or 0,
+                "parse_status": str(row.get("parse_status") or ""),
+                "reason": str(row.get("reason") or "")[:1000],
+            }
+            for row in (raw_result.get("rows") or [])[:250]
+            if isinstance(row, dict)
+        ],
+        "customer_identity": {
+            "company_name": str(identity.get("company_name") or "")[:255],
+            "contact_name": str(identity.get("contact_name") or "")[:255],
+            "contact_email": str(identity.get("contact_email") or "")[:254],
+            "source_keys": [
+                str(value or "").strip()
+                for value in (identity.get("source_keys") or [])
+                if str(value or "").strip()
+            ],
+            "confidence": identity.get("confidence") or 0,
+            "reason": str(identity.get("reason") or "")[:1000],
+        },
+        "warnings": [
+            str(value).strip()
+            for value in (raw_result.get("warnings") or [])
+            if str(value).strip()
+        ],
+        "thread_summary": str(
+            raw_result.get("thread_summary") or ""
+        )[:2000],
+    }
+
+
 def _run_native_thread_analysis(
     messages,
     sources,
@@ -2254,6 +2888,7 @@ def _run_native_thread_analysis(
     actor,
     *,
     analysis_timings=None,
+    allow_semantic_cache_read=True,
 ):
     analysis_timings = (
         analysis_timings if isinstance(analysis_timings, dict) else {}
@@ -2279,7 +2914,6 @@ def _run_native_thread_analysis(
         raise AIParseError(status.get("label") or "AI parsing is unavailable.")
     availability = get_ai_parse_availability()
     provider_name = availability.get("provider") or ""
-    provider = get_ai_parse_provider(provider_name)
     model = (
         availability.get("vision_model")
         if file_inputs
@@ -2290,28 +2924,55 @@ def _run_native_thread_analysis(
         sources,
         gmail_import.mode,
     )
-    source_hash_material = json.dumps(
-        {
-            "gmail_import_id": gmail_import.pk,
-            "message_ids": message_ids,
-            "source_hashes": [
-                str(source.get("source_sha256") or "")
-                for source in sources
-            ],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
+    instructions = _native_thread_instructions(gmail_import.mode)
+    native_schema = _native_thread_schema(message_ids, source_keys)
+    contract = ai_parse_contract_descriptor(
+        pipeline_version=GMAIL_AI_PIPELINE_VERSION,
+        schema_name=GMAIL_AI_SCHEMA_NAME,
+        instructions=instructions,
+        schema=native_schema,
     )
-    source_sha256 = hashlib.sha256(
-        source_hash_material.encode("utf-8")
-    ).hexdigest()
     context_hash = hashlib.sha256(text_context.encode("utf-8")).hexdigest()
+    source_sha256 = _gmail_semantic_source_sha256(
+        gmail_import=gmail_import,
+        message_ids=message_ids,
+        sources=sources,
+        file_inputs=file_inputs,
+        context_hash=context_hash,
+    )
     log_mode = (
         AIParseLog.MODE_VISION if file_inputs else AIParseLog.MODE_TEXT
     )
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "cache_version": GMAIL_SEMANTIC_CACHE_VERSION,
+                "source_sha256": source_sha256,
+                "provider": provider_name,
+                "model": model,
+                "mode": log_mode,
+                "pipeline_version": contract["pipeline_version"],
+                "schema_name": contract["schema_name"],
+                "prompt_sha256": contract["prompt_sha256"],
+                "schema_sha256": contract["schema_sha256"],
+                "contract_sha256": contract["contract_sha256"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    cache_contract = {
+        key: contract[key]
+        for key in (
+            "pipeline_version",
+            "schema_name",
+            "prompt_sha256",
+            "schema_sha256",
+            "contract_sha256",
+        )
+    }
     audit_usage = {
         "gmail_import_id": gmail_import.pk,
-        "gmail_thread_id": gmail_import.gmail_thread_id or "",
         "message_count": len(message_ids),
         "native_file_count": len(file_inputs),
         "native_file_bytes": sum(
@@ -2322,23 +2983,143 @@ def _run_native_thread_analysis(
             int(file_input.get("page_count") or 0)
             for file_input in file_inputs
         ),
+        "semantic_cache_invalid_fallback": False,
     }
-    usage = {}
+    source_shape = {
+        "text_chars": len(text_context),
+        "input_rows": sum(
+            len(source.get("rows") or [])
+            for source in sources
+            if isinstance(source, dict)
+        ),
+        "source_bytes": audit_usage["native_file_bytes"],
+        "page_count": audit_usage["native_pdf_pages"],
+        "image_count": 0,
+        "message_count": len(message_ids),
+        "file_count": len(file_inputs),
+        "source_count": len(sources),
+    }
+
+    def instrumented_usage(
+        provider_usage,
+        *,
+        provider_call_attempted=True,
+        application_cache_hit=False,
+        outcome="success",
+        failure_stage="",
+        output_rows=0,
+    ):
+        safe_usage = sanitize_ai_provider_usage(provider_usage)
+        comparable_total = 0.0
+        for timing_key in ("source_preparation", "ai_analysis"):
+            try:
+                comparable_total += max(
+                    0.0,
+                    float(analysis_timings.get(timing_key) or 0),
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+        common_timings = {
+            "source_preparation": analysis_timings.get("source_preparation"),
+            "provider": analysis_timings.get("ai_provider"),
+            "validation": analysis_timings.get("ai_validation"),
+            "total": comparable_total,
+        }
+        observation = build_ai_parse_observation(
+            route="gmail",
+            contract=contract,
+            provider_usage=safe_usage,
+            timings_ms=common_timings,
+            source_shape={**source_shape, "output_rows": output_rows},
+            provider_call_attempted=provider_call_attempted,
+            application_cache_hit=application_cache_hit,
+            outcome=outcome,
+            failure_stage=failure_stage,
+        )
+        return {
+            **audit_usage,
+            **safe_usage,
+            "timings_ms": _analysis_timing_snapshot(analysis_timings),
+            "observability": observation,
+        }
+
     ai_started = time.perf_counter()
+    if allow_semantic_cache_read:
+        cached = AIParseCache.objects.filter(cache_key=cache_key).first()
+        cached_envelope = cached.result if cached else {}
+        if (
+            isinstance(cached_envelope, dict)
+            and cached_envelope.get("cache_version")
+            == GMAIL_SEMANTIC_CACHE_VERSION
+            and cached_envelope.get("contract") == cache_contract
+            and isinstance(cached_envelope.get("semantic_result"), dict)
+        ):
+            cache_validation_started = time.perf_counter()
+            try:
+                validated_result = _validate_native_thread_result(
+                    cached_envelope["semantic_result"],
+                    messages,
+                    sources,
+                )
+            except Exception:
+                # A stale, malformed, or manually altered cache entry is never
+                # trusted. Fall through to a fresh provider call, whose
+                # successful result will replace this entry.
+                audit_usage["semantic_cache_invalid_fallback"] = True
+            else:
+                analysis_timings["ai_provider"] = 0.0
+                analysis_timings["ai_validation"] = _elapsed_ms(
+                    cache_validation_started
+                )
+                analysis_timings["ai_analysis"] = _elapsed_ms(ai_started)
+                AIParseLog.objects.create(
+                    actor=(
+                        actor
+                        if getattr(actor, "is_authenticated", False)
+                        else None
+                    ),
+                    provider=provider_name,
+                    model=model,
+                    mode=log_mode,
+                    source_type=Inquiry.SOURCE_TYPE_GMAIL,
+                    source_sha256=source_sha256,
+                    context_hash=context_hash,
+                    cache_hit=True,
+                    text_length=len(text_context),
+                    page_count=audit_usage["native_pdf_pages"],
+                    image_count=0,
+                    usage=instrumented_usage(
+                        {},
+                        provider_call_attempted=False,
+                        application_cache_hit=True,
+                        outcome="cache_hit",
+                        output_rows=len(validated_result.get("rows") or []),
+                    ),
+                    success=True,
+                )
+                validated_result["_timings_ms"] = (
+                    _analysis_timing_snapshot(analysis_timings)
+                )
+                return validated_result
+
+    provider = get_ai_parse_provider(provider_name)
+    usage = {}
     provider_started = ai_started
     validation_started = None
+    failure_stage = "provider"
     try:
         result, usage = provider.clean_rows(
             mode="gmail_native_thread",
             model=model,
-            instructions=_native_thread_instructions(gmail_import.mode),
+            instructions=instructions,
             text_context=text_context,
             image_data_urls=[],
             file_inputs=file_inputs,
-            json_schema=_native_thread_schema(message_ids, source_keys),
-            schema_name="gmail_inquiry_native_v2",
+            json_schema=native_schema,
+            schema_name=GMAIL_AI_SCHEMA_NAME,
         )
         analysis_timings["ai_provider"] = _elapsed_ms(provider_started)
+        failure_stage = "validation"
         validation_started = time.perf_counter()
         if not isinstance(result, dict):
             raise AIParseError("Gmail AI analysis returned an invalid object.")
@@ -2350,6 +3131,24 @@ def _run_native_thread_analysis(
         )
         analysis_timings["ai_validation"] = _elapsed_ms(
             validation_started
+        )
+        failure_stage = "cache_write"
+        AIParseCache.objects.update_or_create(
+            cache_key=cache_key,
+            defaults={
+                "source_sha256": source_sha256,
+                "context_hash": context_hash,
+                "mode": log_mode,
+                "provider": provider_name,
+                "model": model,
+                "result": {
+                    "cache_version": GMAIL_SEMANTIC_CACHE_VERSION,
+                    "contract": cache_contract,
+                    "semantic_result": _cacheable_gmail_semantic_result(
+                        result
+                    ),
+                },
+            },
         )
         analysis_timings["ai_analysis"] = _elapsed_ms(ai_started)
     except Exception as exc:
@@ -2373,12 +3172,11 @@ def _run_native_thread_analysis(
             text_length=len(text_context),
             page_count=audit_usage["native_pdf_pages"],
             image_count=0,
-            usage={
-                **audit_usage,
-                "timings_ms": _analysis_timing_snapshot(
-                    analysis_timings
-                ),
-            },
+            usage=instrumented_usage(
+                usage,
+                outcome="failure",
+                failure_stage=failure_stage,
+            ),
             success=False,
             error=str(exc)[:1000],
         )
@@ -2394,13 +3192,10 @@ def _run_native_thread_analysis(
         text_length=len(text_context),
         page_count=audit_usage["native_pdf_pages"],
         image_count=0,
-        usage={
-            **audit_usage,
-            **(usage or {}),
-            "timings_ms": _analysis_timing_snapshot(
-                analysis_timings
-            ),
-        },
+        usage=instrumented_usage(
+            usage,
+            output_rows=len(validated_result.get("rows") or []),
+        ),
         success=True,
     )
     validated_result["_timings_ms"] = _analysis_timing_snapshot(
@@ -2717,6 +3512,17 @@ def _validate_native_thread_result(raw_result, messages, evidence):
     )
     if any(key not in sources for key in identity_source_keys):
         raise AIParseError("Gmail AI returned an unknown customer identity source.")
+    identity_company_name = str(identity.get("company_name") or "")[:255]
+    identity_contact_name = str(identity.get("contact_name") or "")[:255]
+    identity_contact_email = str(identity.get("contact_email") or "")[:254]
+    if (
+        identity_company_name
+        or identity_contact_name
+        or identity_contact_email
+    ) and not identity_source_keys:
+        raise AIParseError(
+            "Gmail AI returned customer identity without source evidence."
+        )
     return {
         "messages": message_results,
         "rows": final_rows,
@@ -2724,9 +3530,9 @@ def _validate_native_thread_result(raw_result, messages, evidence):
         "thread_summary": str(raw_result.get("thread_summary") or "")[:2000],
         "usage": raw_result.get("_usage") or {},
         "customer_identity": {
-            "company_name": str(identity.get("company_name") or "")[:255],
-            "contact_name": str(identity.get("contact_name") or "")[:255],
-            "contact_email": str(identity.get("contact_email") or "")[:254],
+            "company_name": identity_company_name,
+            "contact_name": identity_contact_name,
+            "contact_email": identity_contact_email,
             "source_keys": identity_source_keys,
             "confidence": max(
                 0.0,
@@ -2772,8 +3578,17 @@ def _apply_ai_identity_candidates(
 
     company_name = str(identity.get("company_name") or "").strip()
     contact_name = str(identity.get("contact_name") or "").strip()
-    contact_email = str(identity.get("contact_email") or "").strip().casefold()
+    contact_email = canonicalize_email_address(identity.get("contact_email"))
     source_keys = list(identity.get("source_keys") or [])
+    identity_uses_unverified_forward = bool(
+        set(source_keys)
+        & set(
+            candidates.get("unverified_forwarded_identity_source_keys")
+            or []
+        )
+    )
+    if identity_uses_unverified_forward:
+        candidates["ai_identity_unverified_forwarded"] = True
     ai_reason = (
         str(identity.get("reason") or "").strip()
         or "AI read this identity from the selected customer evidence."
@@ -2823,7 +3638,7 @@ def _apply_ai_identity_candidates(
             saved_emails = _saved_contact_emails(contact)
             if contact_email not in saved_emails:
                 continue
-            structured_email = str(contact.email or "").strip().casefold()
+            structured_email = canonicalize_email_address(contact.email)
             if structured_email and structured_email == contact_email:
                 structured_email_contacts.append(contact)
             else:
@@ -2975,6 +3790,10 @@ def _apply_ai_identity_candidates(
     recommended_company_id = candidates.get("recommended_company_id")
     if not recommended_company_id:
         return candidates
+    if identity_uses_unverified_forward:
+        # The forwarded name can remain a company review suggestion, but an
+        # embedded forwarded person/email must never auto-select a purchaser.
+        return candidates
 
     company_contacts = [
         contact
@@ -3055,12 +3874,72 @@ def _apply_ai_identity_candidates(
     return candidates
 
 
-def refresh_gmail_inquiry_identity_candidates(gmail_import):
-    """Apply the current zero-AI identity ranker once to a stored analysis.
+GMAIL_IDENTITY_REANALYSIS_WARNING = (
+    "Customer identity matching rules changed. Reanalyze this Gmail inquiry "
+    "before relying on a company or contact suggestion."
+)
 
-    This makes already-analyzed reviews benefit from matcher fixes without
-    resending customer content to the AI. The version marker keeps normal
-    polling reads query-free after the one-time refresh.
+
+def _stored_gmail_identity_exists(candidates, analysis):
+    candidates = candidates or {}
+    identity = dict(
+        candidates.get("ai_identity")
+        or ((analysis or {}).get("thread_analysis") or {}).get(
+            "customer_identity"
+        )
+        or {}
+    )
+    return bool(
+        any(
+            str(identity.get(field) or "").strip()
+            for field in ("company_name", "contact_name", "contact_email")
+        )
+        or candidates.get("companies")
+        or candidates.get("contacts")
+        or candidates.get("recommended_company_id")
+        or candidates.get("recommended_contact_id")
+        or candidates.get("exact_company_match")
+    )
+
+
+def _gmail_identity_requires_reanalysis(candidates, analysis):
+    candidates = candidates or {}
+    return bool(
+        candidates.get("identity_reanalysis_required")
+        or (
+            candidates.get("identity_match_version")
+            != GMAIL_IDENTITY_MATCH_VERSION
+            and _stored_gmail_identity_exists(candidates, analysis)
+        )
+    )
+
+
+def _quarantine_stale_gmail_identity(candidates, analysis):
+    candidates = dict(candidates or {})
+    analysis = dict(analysis or {})
+    candidates["companies"] = []
+    candidates["contacts"] = []
+    candidates["recommended_company_id"] = None
+    candidates["recommended_contact_id"] = None
+    candidates["exact_company_match"] = False
+    candidates["identity_reanalysis_required"] = True
+    candidates.pop("identity_conflict", None)
+    identity_warnings = list(candidates.get("identity_warnings") or [])
+    identity_warnings.append(GMAIL_IDENTITY_REANALYSIS_WARNING)
+    candidates["identity_warnings"] = list(dict.fromkeys(identity_warnings))
+    analysis_warnings = list(analysis.get("warnings") or [])
+    analysis_warnings.append(GMAIL_IDENTITY_REANALYSIS_WARNING)
+    analysis["warnings"] = list(dict.fromkeys(analysis_warnings))
+    return _json_safe(candidates), _json_safe(analysis)
+
+
+def refresh_gmail_inquiry_identity_candidates(gmail_import):
+    """Quarantine unconfirmed identity results from older matching rules.
+
+    Forwarded-origin trust and canonical address handling cannot be
+    reconstructed reliably from the privacy-safe stored manifest. Any
+    unconfirmed identity result without the current version is therefore
+    cleared and must be reanalyzed from Gmail source evidence.
     """
 
     refreshable_statuses = {
@@ -3071,19 +3950,12 @@ def refresh_gmail_inquiry_identity_candidates(gmail_import):
         return gmail_import
 
     current_candidates = dict(gmail_import.candidates or {})
-    if (
-        current_candidates.get("identity_match_version")
-        == GMAIL_IDENTITY_MATCH_VERSION
+    if not _gmail_identity_requires_reanalysis(
+        current_candidates,
+        gmail_import.analysis,
     ):
         return gmail_import
-    current_identity = dict(
-        current_candidates.get("ai_identity")
-        or (
-            (gmail_import.analysis or {}).get("thread_analysis") or {}
-        ).get("customer_identity")
-        or {}
-    )
-    if not current_identity:
+    if current_candidates.get("identity_reanalysis_required"):
         return gmail_import
 
     with transaction.atomic():
@@ -3093,67 +3965,18 @@ def refresh_gmail_inquiry_identity_candidates(gmail_import):
         if locked.status not in refreshable_statuses:
             return locked
         candidates = dict(locked.candidates or {})
-        if (
-            candidates.get("identity_match_version")
-            == GMAIL_IDENTITY_MATCH_VERSION
-        ):
-            return locked
-
-        identity = dict(
-            candidates.get("ai_identity")
-            or (
-                (locked.analysis or {}).get("thread_analysis") or {}
-            ).get("customer_identity")
-            or {}
-        )
-        if not identity:
-            return locked
-        companies = [
-            {**row}
-            for row in candidates.get("companies") or []
-            if not str(row.get("match_method") or "").startswith("ai_")
-        ]
-        contacts = [
-            {**row}
-            for row in candidates.get("contacts") or []
-            if not str(row.get("match_method") or "").startswith("ai_")
-        ]
-        retained_company_ids = {
-            row.get("company_id")
-            for row in companies
-        }
-        retained_contact_ids = {
-            row.get("contact_id")
-            for row in contacts
-        }
-        candidates["companies"] = companies
-        candidates["contacts"] = contacts
-        if (
-            candidates.get("recommended_company_id")
-            not in retained_company_ids
-        ):
-            candidates["recommended_company_id"] = None
-        if (
-            candidates.get("recommended_contact_id")
-            not in retained_contact_ids
-        ):
-            candidates["recommended_contact_id"] = None
-        candidates.pop("identity_conflict", None)
-
-        active_companies, active_contacts = (
-            _active_customer_identity_records()
-        )
-        candidates = _apply_ai_identity_candidates(
+        if not _gmail_identity_requires_reanalysis(
             candidates,
-            identity,
-            active_companies=active_companies,
-            active_contacts=active_contacts,
+            locked.analysis,
+        ):
+            return locked
+        if candidates.get("identity_reanalysis_required"):
+            return locked
+        locked.candidates, locked.analysis = _quarantine_stale_gmail_identity(
+            candidates,
+            locked.analysis,
         )
-        candidates["identity_match_version"] = (
-            GMAIL_IDENTITY_MATCH_VERSION
-        )
-        locked.candidates = _json_safe(candidates)
-        locked.save(update_fields=["candidates"])
+        locked.save(update_fields=["candidates", "analysis"])
         return locked
 
 
@@ -3166,6 +3989,7 @@ def _build_source_analysis(
     timeline_messages=None,
     timeline_meta=None,
     analysis_timings=None,
+    allow_semantic_cache_read=True,
 ):
     """Analyze complete selected bodies and original attachments in one AI pass."""
 
@@ -3215,11 +4039,17 @@ def _build_source_analysis(
     if timeline_meta.get("truncated"):
         warnings.append(
             "This Gmail thread has "
-            f"{timeline_meta.get('total_count')} messages; only the newest "
-            f"{timeline_meta.get('limit')} are shown/analyzed. Select messages "
-            "manually if older context is required."
+            f"{timeline_meta.get('total_count')} messages; only the open message "
+            "and the newest other messages are shown (up to "
+            f"{timeline_meta.get('limit')} total). Analysis remains limited to "
+            "the chosen mode. Select messages manually if older context is required."
         )
     for message in messages:
+        if message.get("_forwarded_content_truncated"):
+            warnings.append(
+                "A forwarded email body exceeded the safe analysis bound and "
+                "was truncated. Staff must verify the original Gmail message."
+            )
         attachment_count = len(message.get("attachment_manifest") or [])
         if attachment_count > MAX_ATTACHMENT_METADATA_PER_MESSAGE:
             warnings.append(
@@ -3272,7 +4102,188 @@ def _build_source_analysis(
     file_inputs = []
     fetched_attachment_count = 0
     total_input_bytes = 0
+    required_attachment_failed = False
+    hard_validation_failed = False
     semantic_messages = []
+
+    def append_attachment_evidence(
+        *,
+        attachment_key,
+        message_id,
+        message_sequence,
+        message,
+        attachment,
+        filename,
+        status,
+        reason,
+        inspection_data=None,
+        result_source="attachment_preparation",
+    ):
+        inspection_data = (
+            inspection_data if isinstance(inspection_data, dict) else {}
+        )
+        inspection_warnings = list(
+            inspection_data.get("inspection_warnings") or []
+        )[:50]
+        source = {
+            "source_key": attachment_key,
+            "gmail_message_id": message_id,
+            "kind": "attachment",
+            "filename": str(
+                inspection_data.get("filename") or filename
+            )[:255],
+            "mime_type": str(
+                inspection_data.get("mime_type")
+                or attachment.get("mime_type")
+                or ""
+            )[:255],
+            "attachment_id": str(
+                attachment.get("attachment_id") or ""
+            )[:500],
+            "part_id": str(attachment.get("part_id") or "")[:120],
+            "source_sha256": str(
+                inspection_data.get("source_sha256") or ""
+            )[:64],
+            "parse_method": (
+                "attachment_inspection_v1"
+                if result_source == "attachment_inspection"
+                else "attachment_preparation_v1"
+            ),
+            "parse_status": status,
+            "parse_reason": str(reason or "")[:1000],
+            "line_count": 0,
+            "warnings": inspection_warnings,
+            "attachment_safety": dict(
+                inspection_data.get("attachment_safety") or {}
+            ),
+            "pdf_fidelity": dict(
+                inspection_data.get("pdf_fidelity") or {}
+            ),
+            "spreadsheet_fidelity": dict(
+                inspection_data.get("spreadsheet_fidelity") or {}
+            ),
+            "result_source": result_source,
+            "rows": [],
+            "message_sequence": message_sequence,
+            "source_subject": str(message.get("subject") or "")[:500],
+            "source_sender": str(message.get("sender") or "")[:500],
+            "source_sent_at": _json_safe(message.get("sent_at")),
+        }
+        evidence.append(source)
+        return source
+
+    def record_required_attachment_failure(
+        *,
+        manifest,
+        attachment_key,
+        message_id,
+        message_sequence,
+        message,
+        attachment,
+        filename,
+        reason,
+        inspection_data=None,
+    ):
+        nonlocal required_attachment_failed, hard_validation_failed
+        inspection_data = (
+            inspection_data if isinstance(inspection_data, dict) else {}
+        )
+        is_hard_failure = bool(
+            inspection_data.get("hard_validation_failed")
+        )
+        result_source = (
+            "attachment_inspection"
+            if is_hard_failure
+            else "attachment_preparation"
+        )
+        inspection_warnings = list(
+            inspection_data.get("inspection_warnings") or []
+        )[:50]
+        manifest.update(
+            {
+                "parse_status": "failed",
+                "parse_reason": str(reason or "")[:1000],
+                "source_sha256": str(
+                    inspection_data.get("source_sha256") or ""
+                )[:64],
+                "warnings": inspection_warnings,
+                "attachment_safety": dict(
+                    inspection_data.get("attachment_safety") or {}
+                ),
+                "pdf_fidelity": dict(
+                    inspection_data.get("pdf_fidelity") or {}
+                ),
+                "spreadsheet_fidelity": dict(
+                    inspection_data.get("spreadsheet_fidelity") or {}
+                ),
+                "result_source": result_source,
+            }
+        )
+        append_attachment_evidence(
+            attachment_key=attachment_key,
+            message_id=message_id,
+            message_sequence=message_sequence,
+            message=message,
+            attachment=attachment,
+            filename=filename,
+            status="failed",
+            reason=reason,
+            inspection_data=inspection_data,
+            result_source=result_source,
+        )
+        required_attachment_failed = True
+        hard_validation_failed = hard_validation_failed or is_hard_failure
+        warnings.append(f"{filename or 'Gmail attachment'}: {reason}")
+        warnings.extend(
+            f"{filename}: {warning}"
+            for warning in inspection_warnings
+        )
+
+    def record_blocked_attachment(
+        *,
+        manifest,
+        attachment_key,
+        message_id,
+        message_sequence,
+        message,
+        attachment,
+        filename,
+        reason,
+    ):
+        result_source = (
+            "attachment_inspection"
+            if hard_validation_failed
+            else "attachment_preparation"
+        )
+        manifest.update(
+            {
+                "parse_status": "skipped",
+                "parse_reason": reason,
+                "result_source": result_source,
+            }
+        )
+        append_attachment_evidence(
+            attachment_key=attachment_key,
+            message_id=message_id,
+            message_sequence=message_sequence,
+            message=message,
+            attachment=attachment,
+            filename=filename,
+            status="skipped",
+            reason=reason,
+            result_source=result_source,
+        )
+
+    def blocked_attachment_reason():
+        if hard_validation_failed:
+            return (
+                "AI analysis was not started because another selected "
+                "attachment failed required safety inspection."
+            )
+        return (
+            "AI analysis was not started because another selected supported "
+            "attachment could not be included completely."
+        )
 
     for message_sequence, original_message in enumerate(messages, start=1):
         message = {**original_message}
@@ -3282,10 +4293,47 @@ def _build_source_analysis(
         semantic_messages.append(message)
         body_text = str(message.get("newest_body_text") or "")
         body_html = str(message.get("newest_body_html") or "")
-        if not outbound and (body_text or body_html):
+        forwarded_body_text = str(message.get("_forwarded_body_text") or "")
+        forwarded_body_html = str(message.get("_forwarded_body_html") or "")
+        contains_forwarded = bool(
+            message.get("contains_unverified_forwarded_content")
+            and (forwarded_body_text or forwarded_body_html)
+        )
+        if not outbound and (
+            body_text
+            or body_html
+            or (contains_forwarded and (forwarded_body_text or forwarded_body_html))
+        ):
             body_source_key = _source_key(message_id, "body", "newest")
-            body_material = (
-                body_text + ("\n" + body_html if "<table" in body_html.lower() else "")
+            if contains_forwarded:
+                body_material = json.dumps(
+                    {
+                        "body_text": body_text,
+                        "body_html": (
+                            body_html if "<table" in body_html.lower() else ""
+                        ),
+                        "forwarded_content_trust": "unverified",
+                        "forwarded_body_text": forwarded_body_text,
+                        "forwarded_body_html": (
+                            forwarded_body_html
+                            if "<table" in forwarded_body_html.lower()
+                            else ""
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            else:
+                body_material = body_text + (
+                    "\n" + body_html if "<table" in body_html.lower() else ""
+                )
+            has_html_table = bool(
+                "<table" in body_html.lower()
+                or (
+                    contains_forwarded
+                    and "<table" in forwarded_body_html.lower()
+                )
             )
             evidence.append(
                 {
@@ -3295,7 +4343,7 @@ def _build_source_analysis(
                     "filename": "",
                     "mime_type": (
                         "text/html"
-                        if "<table" in body_html.lower()
+                        if has_html_table
                         else "text/plain"
                     ),
                     "attachment_id": "",
@@ -3312,12 +4360,71 @@ def _build_source_analysis(
                     "source_subject": str(message.get("subject") or "")[:500],
                     "source_sender": str(message.get("sender") or "")[:500],
                     "source_sent_at": _json_safe(message.get("sent_at")),
+                    "contains_unverified_forwarded_content": contains_forwarded,
                 }
             )
 
-        message_attachments = (
-            message.get("attachment_manifest") or []
-        )[:MAX_ATTACHMENT_METADATA_PER_MESSAGE]
+        all_message_attachments = message.get("attachment_manifest") or []
+        message_attachments = all_message_attachments[
+            :MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ]
+        if (
+            not _is_verified_mailbox_sent_message(message, mailbox_email)
+            and len(all_message_attachments)
+            > MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ):
+            overflow_reason = (
+                f"Selected inbound Gmail message has "
+                f"{len(all_message_attachments)} attachments; only "
+                f"{MAX_ATTACHMENT_METADATA_PER_MESSAGE} attachment metadata "
+                "records can be inspected safely. Analysis was blocked because "
+                "a supported inquiry document may be outside that bounded window."
+            )
+            overflow_source_key = _source_key(
+                message_id,
+                "attachment",
+                "metadata-overflow",
+            )
+            overflow_manifest = {}
+            record_required_attachment_failure(
+                manifest=overflow_manifest,
+                attachment_key=overflow_source_key,
+                message_id=message_id,
+                message_sequence=message_sequence,
+                message=message,
+                attachment={
+                    "mime_type": "application/octet-stream",
+                    "attachment_id": "",
+                    "part_id": "",
+                },
+                filename="Additional Gmail attachments",
+                reason=overflow_reason,
+            )
+            public_message = manifest_by_id.get(message_id)
+            if public_message is not None:
+                public_message.update(
+                    {
+                        "attachment_analysis_status": "failed",
+                        "attachment_analysis_reason": overflow_reason,
+                    }
+                )
+            for public_attachment in attachment_manifest:
+                if (
+                    str(public_attachment.get("gmail_message_id") or "")
+                    != message_id
+                ):
+                    continue
+                public_attachment.update(
+                    {
+                        "parse_status": "skipped",
+                        "parse_reason": overflow_reason,
+                        "result_source": "attachment_preparation",
+                    }
+                )
+            # Do not inspect or fetch any attachment from an inbound message
+            # whose metadata set is incomplete. The bounded marker above is
+            # enough for staff review without widening the metadata cap.
+            continue
         for attachment in message_attachments:
             if not isinstance(attachment, dict):
                 continue
@@ -3397,33 +4504,46 @@ def _build_source_analysis(
                     "Original Gmail attachment AI processing is disabled. "
                     "Enable mailbox AI vision/file processing and retry."
                 )
-            if declared_size and declared_size > max_bytes:
-                manifest.update(
-                    {
-                        "parse_status": "over_limit",
-                        "parse_reason": (
-                            f"Attachment exceeds the {max_bytes}-byte "
-                            "inquiry analysis limit."
-                        ),
-                    }
+            if required_attachment_failed:
+                record_blocked_attachment(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=blocked_attachment_reason(),
                 )
-                warnings.append(
-                    f"{filename or 'Gmail attachment'} is over the file-size limit."
+                continue
+            if declared_size and declared_size > max_bytes:
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        f"Attachment exceeds the {max_bytes}-byte inquiry "
+                        "analysis limit."
+                    ),
                 )
                 continue
             if fetched_attachment_count >= max_native_files:
-                manifest.update(
-                    {
-                        "parse_status": "skipped",
-                        "parse_reason": (
-                            "Per-import attachment limit reached; select fewer "
-                            "messages and reanalyze."
-                        ),
-                    }
-                )
-                warnings.append(
-                    "Some Gmail attachments were not sent because the "
-                    "per-import attachment limit was reached."
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        "Per-import attachment limit reached; select fewer "
+                        "messages and reanalyze."
+                    ),
                 )
                 continue
             private_attachment = next(
@@ -3443,40 +4563,80 @@ def _build_source_analysis(
                 ),
                 attachment,
             )
-            native_input, skipped_reason = _fetch_native_ai_attachment(
-                connection,
-                message_id,
-                private_attachment,
-                max_bytes=max_bytes,
-            )
-            if skipped_reason:
-                manifest.update(
-                    {
-                        "parse_status": "unsupported",
-                        "parse_reason": skipped_reason,
-                    }
+            try:
+                native_input, skipped_reason = _fetch_native_ai_attachment(
+                    connection,
+                    message_id,
+                    private_attachment,
+                    max_bytes=max_bytes,
                 )
-                warnings.append(f"{filename}: {skipped_reason}")
+            except Exception as exc:
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        "Attachment could not be fetched or prepared for "
+                        f"analysis: {str(exc)[:300]}"
+                    ),
+                )
+                continue
+            if skipped_reason:
+                inspection_data = (
+                    native_input if isinstance(native_input, dict) else {}
+                )
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=skipped_reason,
+                    inspection_data=inspection_data,
+                )
                 continue
             if total_input_bytes + native_input["size"] > max_total_bytes:
-                manifest.update(
-                    {
-                        "parse_status": "over_limit",
-                        "parse_reason": (
-                            "Combined original attachments exceed the safe "
-                            "single-analysis limit; select fewer messages."
-                        ),
-                    }
-                )
-                warnings.append(
-                    "Some Gmail attachments were not sent because their "
-                    "combined size exceeds the safe AI request limit."
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        "Combined original attachments exceed the safe "
+                        "single-analysis limit; select fewer messages."
+                    ),
+                    inspection_data=native_input,
                 )
                 continue
             fetched_attachment_count += 1
             total_input_bytes += native_input["size"]
             native_input["source_key"] = attachment_key
             file_inputs.append(native_input)
+            inspection_warnings = list(
+                native_input.get("inspection_warnings") or []
+            )
+            attachment_safety = dict(
+                native_input.get("attachment_safety") or {}
+            )
+            pdf_fidelity = dict(
+                native_input.get("pdf_fidelity") or {}
+            )
+            spreadsheet_fidelity = dict(
+                native_input.get("spreadsheet_fidelity") or {}
+            )
+            warnings.extend(
+                f"{filename}: {warning}"
+                for warning in inspection_warnings
+            )
             source = {
                 "source_key": attachment_key,
                 "gmail_message_id": message_id,
@@ -3487,8 +4647,13 @@ def _build_source_analysis(
                 "part_id": attachment.get("part_id") or "",
                 "source_sha256": native_input["source_sha256"],
                 "parse_method": "openai_native_input_v2",
+                "parse_status": "submitted",
+                "parse_reason": "Original attachment sent for AI analysis.",
                 "line_count": 0,
-                "warnings": [],
+                "warnings": inspection_warnings,
+                "attachment_safety": attachment_safety,
+                "pdf_fidelity": pdf_fidelity,
+                "spreadsheet_fidelity": spreadsheet_fidelity,
                 "result_source": "ai_native_file",
                 "rows": [],
                 "message_sequence": message_sequence,
@@ -3504,19 +4669,98 @@ def _build_source_analysis(
                     "source_sha256": native_input["source_sha256"],
                     "line_count": 0,
                     "result_source": "ai_native_file",
+                    "warnings": inspection_warnings,
+                    "attachment_safety": attachment_safety,
+                    "pdf_fidelity": pdf_fidelity,
+                    "spreadsheet_fidelity": spreadsheet_fidelity,
                 }
             )
 
     analysis_timings["source_preparation"] = _elapsed_ms(
         preparation_started
     )
-    semantic_result = _run_native_thread_analysis(
-        semantic_messages,
-        evidence,
-        file_inputs,
-        gmail_import,
-        actor,
-    )
+    provider_invoked = not required_attachment_failed
+    if required_attachment_failed:
+        if hard_validation_failed:
+            blocked_reason = (
+                "AI analysis was not started because a selected attachment "
+                "failed required safety inspection. Remove or replace that "
+                "attachment and retry."
+            )
+            blocked_result_source = "attachment_inspection"
+        else:
+            blocked_reason = (
+                "AI analysis was not started because every selected supported "
+                "attachment must be included completely. Select fewer files, "
+                "or remove or replace the failed attachment, and retry."
+            )
+            blocked_result_source = "attachment_preparation"
+        warnings.append(blocked_reason)
+        for manifest in attachment_manifest:
+            if manifest.get("parse_status") == "submitted":
+                manifest.update(
+                    {
+                        "parse_status": "skipped",
+                        "parse_reason": blocked_reason,
+                        "result_source": blocked_result_source,
+                    }
+                )
+        for source in evidence:
+            if (
+                source.get("kind") == "attachment"
+                and source.get("parse_status") == "submitted"
+            ):
+                source.update(
+                    {
+                        "parse_status": "skipped",
+                        "parse_reason": blocked_reason,
+                        "result_source": blocked_result_source,
+                    }
+                )
+        file_inputs = []
+        total_input_bytes = 0
+        semantic_result = {
+            "messages": {
+                str(message.get("gmail_message_id") or ""): {
+                    "classification": (
+                        "our_reply"
+                        if message.get("is_outbound")
+                        else "context"
+                    ),
+                    "usage": "context",
+                    "reason": blocked_reason,
+                    "confidence": 1.0,
+                }
+                for message in semantic_messages
+                if message.get("gmail_message_id")
+            },
+            "rows": [],
+            "warnings": [],
+            "thread_summary": blocked_reason,
+            "usage": {},
+            "customer_identity": {
+                "company_name": "",
+                "contact_name": "",
+                "contact_email": "",
+                "source_keys": [],
+                "confidence": 0.0,
+                "reason": blocked_reason,
+            },
+        }
+    else:
+        native_analysis_options = {
+            "analysis_timings": analysis_timings,
+        }
+        if not allow_semantic_cache_read:
+            native_analysis_options["allow_semantic_cache_read"] = False
+        semantic_result = _run_native_thread_analysis(
+            semantic_messages,
+            evidence,
+            file_inputs,
+            gmail_import,
+            actor,
+            **native_analysis_options,
+        )
     analysis_timings.update(semantic_result.pop("_timings_ms", {}) or {})
     post_ai_started = time.perf_counter()
     warnings.extend(semantic_result["warnings"])
@@ -3568,6 +4812,7 @@ def _build_source_analysis(
         active_contacts=active_contacts,
     )
     candidates["identity_match_version"] = GMAIL_IDENTITY_MATCH_VERSION
+    warnings.extend(candidates.get("identity_warnings") or [])
     recommended_company = None
     if candidates.get("recommended_company_id"):
         recommended_company = Company.objects.filter(
@@ -3625,6 +4870,7 @@ def _build_source_analysis(
                 [
                     str(message.get("subject") or ""),
                     str(message.get("newest_body_text") or "")[:2000],
+                    str(message.get("_forwarded_body_text") or "")[:2000],
                 ]
             )
         )
@@ -3633,6 +4879,7 @@ def _build_source_analysis(
                 [
                     str(message.get("subject") or ""),
                     str(message.get("newest_body_text") or "")[:2000],
+                    str(message.get("_forwarded_body_text") or "")[:2000],
                 ]
             )
         )
@@ -3689,9 +4936,9 @@ def _build_source_analysis(
             "selected_message_ids": sorted(selected_ids),
             "multiple_distinct_sources": False,
             "low_confidence": low_confidence,
-            "ai_used": True,
-            "semantic_ai_used": True,
-            "native_file_ai_used": bool(file_inputs),
+            "ai_used": provider_invoked,
+            "semantic_ai_used": provider_invoked,
+            "native_file_ai_used": bool(file_inputs) and provider_invoked,
             "native_file_count": len(file_inputs),
             "native_file_bytes": total_input_bytes,
             "obvious_order": obvious_order,
@@ -4076,16 +5323,22 @@ def analyze_gmail_inquiry_import(
             return _record(locked)
         if (
             not force
-            and locked.analysis
-            and str((locked.analysis or {}).get("version") or "")
-            == "gmail_inquiry_v2"
             and locked.status
             in {
                 GmailInquiryImport.STATUS_READY,
                 GmailInquiryImport.STATUS_REVIEW_REQUIRED,
             }
+            and (locked.analysis or {}).get("reviewed_at")
         ):
+            # Staff-reviewed rows are user-authored workflow data, not an AI
+            # cache entry. A duplicate/non-force request must never replace
+            # those edits. The explicit Reanalyze action remains the only path
+            # that may intentionally rebuild them from source evidence.
             return _record(locked)
+        # A pipeline version alone cannot prove semantic equivalence. Fetch
+        # the immutable Gmail sources and let the content/contract-bound cache
+        # decide reuse after it has verified provider, model, prompt, schema,
+        # pipeline, selected messages, source ownership, and attachment bytes.
         if (
             locked.status == GmailInquiryImport.STATUS_ANALYZING
             and locked.analysis_started_at
@@ -4150,6 +5403,7 @@ def analyze_gmail_inquiry_import(
             timeline_messages=timeline_messages,
             timeline_meta=timeline_meta,
             analysis_timings=analysis_timings,
+            allow_semantic_cache_read=not force,
         )
         content_fingerprint = _content_fingerprint(
             connection.email,
@@ -4525,6 +5779,14 @@ def confirm_gmail_inquiry_import(
         }:
             raise GmailInquiryImportError(
                 "Analyze this Gmail inquiry before creating a quotation."
+            )
+        if _gmail_identity_requires_reanalysis(
+            locked.candidates,
+            locked.analysis,
+        ):
+            raise GmailInquiryImportError(
+                "Customer identity matching rules changed. Reanalyze this "
+                "Gmail inquiry before creating the quotation."
             )
 
         if company is None:

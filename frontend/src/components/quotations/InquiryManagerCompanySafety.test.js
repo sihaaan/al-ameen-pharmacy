@@ -203,12 +203,18 @@ describe('InquiryManager company-scoped async safety', () => {
     expect(screen.queryByRole('button', { name: 'Save & Open Quotation' })).not.toBeInTheDocument();
   });
 
-  test('blurs imported inquiry quantity and unit price on wheel so scrolling cannot change them', async () => {
+  test('keeps extracted customer price as evidence while protecting manually typed price from wheel changes', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({
       data: {
         ...parsedPreview,
         ai_candidate: null,
-        lines: [{ raw_name: 'Priced item', quantity: '1.000', unit_price: '12.50', parse_status: 'parsed' }],
+        lines: [{
+          raw_name: 'Priced item',
+          quantity: '1.000',
+          unit_price: null,
+          customer_unit_price: '12.50',
+          parse_status: 'parsed',
+        }],
       },
     });
     render(<InquiryManager />);
@@ -219,14 +225,41 @@ describe('InquiryManager company-scoped async safety', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
     const quantity = await screen.findByLabelText('Quantity row 1');
     const price = screen.getByLabelText('Unit price row 1');
+    expect(price).toHaveValue(null);
+    fireEvent.click(screen.getByRole('button', { name: 'View Raw' }));
+    expect(screen.getByText('Customer/source unit price: 12.50')).toBeInTheDocument();
     quantity.focus();
     fireEvent.wheel(quantity, { deltaY: 100 });
     expect(document.activeElement).not.toBe(quantity);
     expect(quantity).toHaveValue(1);
 
+    fireEvent.change(price, { target: { value: '12.50' } });
     price.focus();
     fireEvent.wheel(price, { deltaY: 100 });
     expect(document.activeElement).not.toBe(price);
+    expect(price).toHaveValue(12.5);
+  });
+
+  test('does not run AI cleanup after employee pricing has begun', async () => {
+    quotationAPI.inquiries.parseText.mockResolvedValue({
+      data: {
+        ...parsedPreview,
+        ai_candidate: null,
+        lines: [{ raw_name: 'Priced item', quantity: '1.000', unit_price: null, parse_status: 'parsed' }],
+      },
+    });
+    render(<InquiryManager />);
+
+    fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
+      target: { value: 'Priced item' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
+    const price = await screen.findByLabelText('Unit price row 1');
+    fireEvent.change(price, { target: { value: '12.50' } });
+    fireEvent.click(screen.getByRole('button', { name: /AI Clean/i }));
+
+    expect(await screen.findByText(/AI cleanup is available before pricing/i)).toBeInTheDocument();
+    expect(quotationAPI.inquiries.aiCleanParse).not.toHaveBeenCalled();
     expect(price).toHaveValue(12.5);
   });
 

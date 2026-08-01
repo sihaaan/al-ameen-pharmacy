@@ -1,17 +1,19 @@
 import re
 from decimal import Decimal
 
-from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from rest_framework import serializers
 
 from api.models import Product, ProductImage
 from api.serializers import ProductListSerializer
+from api.upload_validation import validate_image_upload
 
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
+from .private_storage import is_valid_private_ref
+from .quotation_email_delivery import quotation_review_fingerprint
 from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
 from .models import (
     Company,
@@ -47,37 +49,12 @@ from .models import (
 )
 
 
-SAFE_BRANDING_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
-SAFE_BRANDING_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
-
-
 def validate_branding_image_upload(image, label):
-    if not image:
-        return image
-    max_bytes = int(
-        getattr(
-            settings,
-            "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
-            getattr(settings, "QUOTATION_LOGO_MAX_UPLOAD_BYTES", 2 * 1024 * 1024),
-        )
+    return validate_image_upload(
+        image,
+        label=label,
+        max_bytes_setting="QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
     )
-    if image.size > max_bytes:
-        raise serializers.ValidationError(f"{label} file is too large. Maximum size is {max_bytes // (1024 * 1024)} MB.")
-    extension = image.name.rsplit(".", 1)[-1].lower() if "." in image.name else ""
-    if extension not in SAFE_BRANDING_IMAGE_EXTENSIONS:
-        raise serializers.ValidationError(f"Unsupported {label.lower()} type. Upload png, jpg, jpeg, or webp only.")
-    if getattr(image, "content_type", "") and image.content_type not in SAFE_BRANDING_IMAGE_CONTENT_TYPES:
-        raise serializers.ValidationError(f"Unsupported {label.lower()} content type.")
-    header = image.read(512)
-    image.seek(0)
-    if extension == "webp":
-        if not (header.startswith(b"RIFF") and b"WEBP" in header[:16]):
-            raise serializers.ValidationError("Uploaded file does not look like a valid WebP image.")
-    elif extension == "png" and not header.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise serializers.ValidationError("Uploaded file does not look like a valid PNG image.")
-    elif extension in {"jpg", "jpeg"} and not header.startswith(b"\xff\xd8\xff"):
-        raise serializers.ValidationError("Uploaded file does not look like a valid image.")
-    return image
 
 
 def format_unit_price_value(value):
@@ -219,6 +196,7 @@ class CompanyListSerializer(serializers.ModelSerializer):
 
 class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
     is_connected = serializers.SerializerMethodField()
+    mailbox_matches_designated = serializers.SerializerMethodField()
     credential_owner_username = serializers.CharField(source="user.username", read_only=True)
 
     class Meta:
@@ -231,6 +209,7 @@ class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
             "google_subject",
             "status",
             "is_connected",
+            "mailbox_matches_designated",
             "last_error",
             "scopes",
             "token_expiry",
@@ -241,7 +220,20 @@ class GmailOAuthConnectionSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def get_is_connected(self, obj):
-        return obj.status == GmailOAuthConnection.STATUS_CONNECTED
+        return bool(
+            obj.status == GmailOAuthConnection.STATUS_CONNECTED
+            and self.get_mailbox_matches_designated(obj)
+        )
+
+    def get_mailbox_matches_designated(self, obj):
+        # Lazy import avoids coupling the large Gmail service module into
+        # serializer import time while keeping every status projection aligned
+        # with the operational token/send gate.
+        from .contract_intelligence import (
+            gmail_connection_matches_designated_mailbox,
+        )
+
+        return gmail_connection_matches_designated_mailbox(obj)
 
 
 class GmailInquiryImportSerializer(serializers.ModelSerializer):
@@ -1509,7 +1501,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
     lines = ImportedInquiryLineSerializer(many=True, allow_empty=False)
 
     def validate_source_file_ref(self, value):
-        if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
+        if not is_valid_private_ref(value):
             raise serializers.ValidationError("Invalid private source file reference.")
         return value
 
@@ -1674,7 +1666,7 @@ class HistoricalPriceImportSerializer(serializers.ModelSerializer):
         ]
 
     def validate_source_file_ref(self, value):
-        if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
+        if not is_valid_private_ref(value):
             raise serializers.ValidationError("Invalid private source file reference.")
         return value
 
@@ -2218,6 +2210,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     latest_lpo = serializers.SerializerMethodField()
     lpo_count = serializers.SerializerMethodField()
     lines = QuotationLineSerializer(many=True, read_only=True)
+    quotation_review_fingerprint = serializers.SerializerMethodField()
 
     class Meta:
         model = Quotation
@@ -2276,6 +2269,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "lpo_count",
             "is_historical_import",
             "lines",
+            "quotation_review_fingerprint",
             "created_at",
             "updated_at",
         ]
@@ -2321,6 +2315,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "lpo_count",
             "is_historical_import",
             "lines",
+            "quotation_review_fingerprint",
             "created_at",
             "updated_at",
         ]
@@ -2346,6 +2341,9 @@ class QuotationSerializer(serializers.ModelSerializer):
 
     def get_lpo_count(self, obj):
         return obj.lpos.count()
+
+    def get_quotation_review_fingerprint(self, obj):
+        return quotation_review_fingerprint(obj)
 
 
 class QuotationListSerializer(serializers.ModelSerializer):
@@ -2718,6 +2716,7 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "parse_method",
             "status",
             "parsed_rows",
+            "parsed_meta",
             "suggestions",
             "unmatched_po_rows",
             "missing_quote_line_ids",

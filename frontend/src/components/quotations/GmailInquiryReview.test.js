@@ -733,6 +733,62 @@ describe('GmailInquiryReview', () => {
     )).toBeInTheDocument();
   });
 
+  test('labels identity read from forwarded content as unverified', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...reviewedRecord,
+        candidates: {
+          ...reviewedRecord.candidates,
+          ai_identity_unverified_forwarded: true,
+          ai_identity: {
+            company_name: 'Forwarded Customer LLC',
+            contact_name: 'Original Buyer',
+            contact_email: 'buyer@forwarded.example',
+            confidence: 0.91,
+            reason: 'Read from the forwarded request.',
+          },
+        },
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const aiIdentityPanel = await screen.findByLabelText('AI-detected customer identity');
+    expect(within(aiIdentityPanel).getByText(
+      'Read from unverified forwarded content'
+    )).toBeInTheDocument();
+    expect(screen.getByText(
+      'Suggested from unverified forwarded content; confirm manually'
+    )).toBeInTheDocument();
+  });
+
+  test('prompts for and starts reanalysis of stale identity suggestions', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...reviewedRecord,
+        candidates: {
+          ...reviewedRecord.candidates,
+          identity_reanalysis_required: true,
+          recommended_company_id: null,
+          recommended_contact_id: null,
+        },
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(
+      /customer identity matching was upgraded/i
+    )).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Reanalyze Gmail inquiry',
+    }));
+
+    await waitFor(() => expect(
+      quotationAPI.gmailInquiryImports.analyze
+    ).toHaveBeenCalledWith(31, { force: true }));
+  });
+
   test('uses included rows as the source decision without a separate evidence selector', async () => {
     const conflictRecord = {
       ...reviewedRecord,

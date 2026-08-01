@@ -19,6 +19,7 @@ const gmailPreview = {
   subject: 'Re: RFQ - First aid supplies',
   body: 'Dear Maria,\n\nPlease find attached our quotation.',
   attachment_filename: 'CUSTOMER-QT-20260731-0001.pdf',
+  preview_fingerprint: 'preview-fingerprint-1',
 };
 
 const defaultProps = {
@@ -68,6 +69,7 @@ describe('QuotationEmailPreviewDialog', () => {
       body: 'Updated approved wording.',
       confirm_recipient: true,
       delivery_mode: 'gmail_reply',
+      preview_fingerprint: 'preview-fingerprint-1',
     });
   });
 
@@ -255,6 +257,59 @@ describe('QuotationEmailPreviewDialog', () => {
     expect(screen.getByText('The finalized PDF no longer matches the reviewed attachment.')).toBeInTheDocument();
   });
 
+  test('hard-blocks a frozen outbound mismatch and directs staff to a revision', () => {
+    render(
+      <QuotationEmailPreviewDialog
+        {...defaultProps}
+        quoteIsFinalized
+        sendError={{
+          code: 'outbound_snapshot_mismatch',
+          detail: 'The retry no longer matches the frozen email.',
+          quoteFinalized: true,
+          retryable: false,
+          deliveryStatus: 'failed',
+        }}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    expect(screen.getByText(/Create and review a quotation revision/)).toBeInTheDocument();
+  });
+
+  test.each(['stale_email_preview', 'email_preview_required'])(
+    'hard-blocks %s until staff explicitly refreshes and reviews again',
+    (code) => {
+      const onRefreshPreview = jest.fn();
+      const onClearCorrectableError = jest.fn();
+      render(
+        <QuotationEmailPreviewDialog
+          {...defaultProps}
+          sendError={{
+            code,
+            detail: 'The quotation no longer matches the reviewed preview.',
+            quoteFinalized: false,
+            retryable: true,
+            deliveryStatus: 'not_sent',
+          }}
+          onRefreshPreview={onRefreshPreview}
+          onClearCorrectableError={onClearCorrectableError}
+        />
+      );
+
+      expect(screen.getByText('Refresh and review the quotation email before sending.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+      fireEvent.change(screen.getByLabelText(/Message/), {
+        target: { value: 'Editing this must not unlock an outdated preview.' },
+      });
+      expect(onClearCorrectableError).not.toHaveBeenCalled();
+      expect(defaultProps.onSend).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+      expect(onRefreshPreview).toHaveBeenCalledTimes(1);
+      expect(defaultProps.onSend).not.toHaveBeenCalled();
+    }
+  );
+
   test('allows a definite failed delivery to be retried without finalizing again', () => {
     render(
       <QuotationEmailPreviewDialog
@@ -373,6 +428,115 @@ describe('QuotationEmailPreviewDialog', () => {
     expect(sendButton).toBeEnabled();
     fireEvent.click(sendButton);
     expect(defaultProps.onSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('shows an exact frozen retry as read-only while requiring manual recipient confirmation', () => {
+    const onFindThread = jest.fn();
+    render(
+      <QuotationEmailPreviewDialog
+        {...defaultProps}
+        quoteIsFinalized
+        preview={{
+          delivery_mode: 'new_email',
+          status: 'failed',
+          outbound_snapshot_frozen: true,
+          to: ['buyer@example.com'],
+          cc: ['accounts@example.com'],
+          subject: 'Reviewed quotation subject',
+          body: 'Reviewed quotation message.',
+          attachment_filename: 'FROZEN-QT.pdf',
+          preview_fingerprint: 'frozen-preview-fingerprint',
+        }}
+        onFindThread={onFindThread}
+      />
+    );
+
+    expect(screen.getByText(/Frozen retry: recipient, CC, subject, message/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/To/)).toHaveAttribute('readonly');
+    expect(screen.getByLabelText('CC')).toHaveAttribute('readonly');
+    expect(screen.getByLabelText(/Subject/)).toHaveAttribute('readonly');
+    expect(screen.getByLabelText(/Message/)).toHaveAttribute('readonly');
+    expect(screen.queryByRole('button', { name: 'Find original Gmail thread' })).not.toBeInTheDocument();
+    expect(screen.getByText('The exact previously reviewed PDF and email bytes will be reused.')).toBeInTheDocument();
+    expect(screen.getByText('Frozen and verified')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send Quotation' }));
+    expect(defaultProps.onSend).not.toHaveBeenCalled();
+    expect(screen.getByText('Confirm the manually entered recipient before sending.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /I checked this address/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send Quotation' }));
+    expect(defaultProps.onSend).toHaveBeenCalledWith({
+      to: ['buyer@example.com'],
+      cc: ['accounts@example.com'],
+      subject: 'Reviewed quotation subject',
+      body: 'Reviewed quotation message.',
+      confirm_recipient: true,
+      delivery_mode: 'new_email',
+      preview_fingerprint: 'frozen-preview-fingerprint',
+    });
+    expect(onFindThread).not.toHaveBeenCalled();
+  });
+
+  test('keeps a frozen Gmail reply on its original read-only thread fields', () => {
+    render(
+      <QuotationEmailPreviewDialog
+        {...defaultProps}
+        quoteIsFinalized
+        preview={{
+          delivery_mode: 'gmail_reply',
+          status: 'failed',
+          outbound_snapshot_frozen: true,
+          to: ['verified@example.com'],
+          cc: ['accounts@example.com'],
+          subject: 'Re: Original RFQ',
+          body: 'Frozen reply body.',
+          attachment_filename: 'FROZEN-REPLY.pdf',
+          preview_fingerprint: 'frozen-reply-fingerprint',
+          trusted_source: { sender_email: 'verified@example.com' },
+        }}
+      />
+    );
+
+    expect(screen.getByLabelText(/To/)).toHaveAttribute('readonly');
+    expect(screen.getByLabelText('CC')).toHaveAttribute('readonly');
+    expect(screen.getByLabelText(/Subject/)).toHaveAttribute('readonly');
+    expect(screen.getByLabelText(/Message/)).toHaveAttribute('readonly');
+    expect(screen.queryByText(/I checked this address/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Send Quotation' }));
+    expect(defaultProps.onSend).toHaveBeenCalledWith(expect.objectContaining({
+      delivery_mode: 'gmail_reply',
+      preview_fingerprint: 'frozen-reply-fingerprint',
+    }));
+  });
+
+  test('requires an explicit preview refresh after the first failed frozen send', () => {
+    const onRefreshPreview = jest.fn();
+    render(
+      <QuotationEmailPreviewDialog
+        {...defaultProps}
+        quoteIsFinalized
+        preview={{
+          ...defaultProps.preview,
+          status: 'failed',
+          outbound_snapshot_frozen: true,
+        }}
+        sendError={{
+          code: 'gmail_send_failed',
+          detail: 'Gmail rejected the request.',
+          quoteFinalized: true,
+          retryable: true,
+          deliveryStatus: 'failed',
+          refreshPreview: true,
+        }}
+        onRefreshPreview={onRefreshPreview}
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'Sending disabled' })).toBeDisabled();
+    expect(screen.getByText(/failed provider attempt created an exact frozen email/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+    expect(onRefreshPreview).toHaveBeenCalledTimes(1);
   });
 
   test('keeps Finalize Only available if preview generation fails', () => {

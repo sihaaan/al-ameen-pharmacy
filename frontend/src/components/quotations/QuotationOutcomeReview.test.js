@@ -90,6 +90,16 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     });
   });
 
+  test('only advertises PO file types accepted by the server', async () => {
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+
+    expect(await screen.findByText('LPO for Q-0021')).toBeInTheDocument();
+    expect(screen.getByLabelText(/or upload po file/i)).toHaveAttribute(
+      'accept',
+      '.xlsx,.xls,.xlsb,.pdf',
+    );
+  });
+
   test('requires review and sends explicit approval before parsing an email link', async () => {
     render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
 

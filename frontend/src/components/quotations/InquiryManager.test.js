@@ -3,6 +3,7 @@ import {
   importCompanyRequestIsCurrent,
   importedInquiryLinePayload,
   importedLineNameEditPatch,
+  inquiryPreviewHasReviewedPricing,
   inquiryUploadModeForFile,
   insertInquiryRow,
   moveInquiryRow,
@@ -36,6 +37,21 @@ describe('InquiryManager imported match provenance', () => {
       ...baseLine,
       match_confirmed_by_user: true,
     }).match_confirmed_by_user).toBe(true);
+  });
+
+  test('detects employee or price-reference pricing before AI cleanup', () => {
+    expect(inquiryPreviewHasReviewedPricing({
+      lines: [{ raw_name: 'Unpriced', unit_price: null, vat_rate: null }],
+    })).toBe(false);
+    expect(inquiryPreviewHasReviewedPricing({
+      lines: [{ raw_name: 'Typed price', unit_price: '12.50', vat_rate: '0' }],
+    })).toBe(true);
+    expect(inquiryPreviewHasReviewedPricing({
+      lines: [{ raw_name: 'VAT reviewed', unit_price: null, vat_rate: '5' }],
+    })).toBe(true);
+    expect(inquiryPreviewHasReviewedPricing({
+      lines: [{ raw_name: 'Reference', price_reference_status: 'matched' }],
+    })).toBe(true);
   });
 
   test('changing company clears every company-scoped imported match', () => {

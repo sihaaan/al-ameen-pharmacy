@@ -23,6 +23,7 @@ class PostgreSQLPoolerSettingsTests(SimpleTestCase):
         setting_names = (
             "DATABASE_CONN_HEALTH_CHECKS",
             "DATABASE_CONN_MAX_AGE_SECONDS",
+            "DATABASE_CONNECT_TIMEOUT_SECONDS",
             "DATABASE_DISABLE_SERVER_SIDE_CURSORS",
         )
         for name in setting_names:
@@ -39,6 +40,7 @@ class PostgreSQLPoolerSettingsTests(SimpleTestCase):
                     "print(json.dumps({"
                     "'health_checks': db.get('CONN_HEALTH_CHECKS'), "
                     "'max_age': db.get('CONN_MAX_AGE'), "
+                    "'connect_timeout': db.get('OPTIONS', {}).get('connect_timeout'), "
                     "'server_side_cursors_disabled': db.get('DISABLE_SERVER_SIDE_CURSORS')"
                     "}))"
                 ),
@@ -58,6 +60,7 @@ class PostgreSQLPoolerSettingsTests(SimpleTestCase):
             {
                 "health_checks": True,
                 "max_age": 60,
+                "connect_timeout": 8,
                 "server_side_cursors_disabled": True,
             },
         )
@@ -67,11 +70,13 @@ class PostgreSQLPoolerSettingsTests(SimpleTestCase):
             self.settings_values(
                 DATABASE_CONN_HEALTH_CHECKS="0",
                 DATABASE_CONN_MAX_AGE_SECONDS="0",
+                DATABASE_CONNECT_TIMEOUT_SECONDS="3",
                 DATABASE_DISABLE_SERVER_SIDE_CURSORS="0",
             ),
             {
                 "health_checks": False,
                 "max_age": 0,
+                "connect_timeout": 3,
                 "server_side_cursors_disabled": False,
             },
         )

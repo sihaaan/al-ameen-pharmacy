@@ -159,7 +159,735 @@ class MailboxPOAuditTests(TestCase):
         self.assertEqual(result["label_ids"], ["INBOX", "IMPORTANT"])
         self.assertEqual(result["attachment_manifest"][0]["attachment_id"], "gmail-attachment")
         self.assertNotIn("_inline_data", result["attachment_manifest"][0])
+        self.assertFalse(result["contains_unverified_forwarded_content"])
+        self.assertEqual(result["_forwarded_body_text"], "")
+        self.assertEqual(result["_forwarded_body_html"], "")
         self.assertEqual(request.call_count, 1)
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_forwarded_plain_gmail_body_is_strict_and_opt_in(
+        self,
+        request,
+        _token,
+    ):
+        body = (
+            "Please prepare this quotation.\n"
+            "---------- Forwarded message ---------\n"
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: RFQ 4421\n"
+            "To: Accounts <accounts@example.test>\n\n"
+            "Sterile Gauze | 20 | BOX"
+        )
+        encoded_body = base64.urlsafe_b64encode(body.encode()).decode(
+            "ascii"
+        ).rstrip("=")
+        request.return_value = {
+            "id": "forwarded-gmail-plain",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "Subject", "value": "Fwd: RFQ 4421"},
+                    {
+                        "name": "From",
+                        "value": "Forwarder <forwarder@internal.example>",
+                    },
+                ],
+                "body": {"data": encoded_body},
+            },
+        }
+
+        default_result = fetch_mailbox_message(
+            self.connection,
+            "forwarded-gmail-plain",
+        )
+        preserved_result = fetch_mailbox_message(
+            self.connection,
+            "forwarded-gmail-plain",
+            preserve_forwarded=True,
+        )
+
+        self.assertEqual(
+            default_result["newest_body_text"],
+            "Please prepare this quotation.\n"
+            "---------- Forwarded message ---------",
+        )
+        self.assertFalse(
+            default_result["contains_unverified_forwarded_content"]
+        )
+        self.assertEqual(default_result["_forwarded_body_text"], "")
+        self.assertEqual(
+            preserved_result["newest_body_text"],
+            default_result["newest_body_text"],
+        )
+        self.assertTrue(
+            preserved_result["contains_unverified_forwarded_content"]
+        )
+        self.assertTrue(
+            preserved_result["_forwarded_body_text"].startswith(
+                "---------- Forwarded message ---------"
+            )
+        )
+        self.assertIn(
+            "Sterile Gauze | 20 | BOX",
+            preserved_result["_forwarded_body_text"],
+        )
+        self.assertEqual(
+            preserved_result["sender"],
+            "Forwarder <forwarder@internal.example>",
+        )
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_forwarded_plain_outlook_original_message_is_preserved(
+        self,
+        request,
+        _token,
+    ):
+        body = (
+            "Please quote the request below.\n"
+            "-----Original Message-----\n"
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Sent: Friday, July 31, 2026 10:00 AM\n"
+            "To: Accounts <accounts@example.test>\n"
+            "Subject: Emergency supplies\n\n"
+            "First Aid Kit | 3 | PCS"
+        )
+        request.return_value = {
+            "id": "forwarded-outlook-plain",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "Subject", "value": "FW: Emergency supplies"},
+                    {"name": "From", "value": "staff@example.test"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(body.encode())
+                    .decode("ascii")
+                    .rstrip("=")
+                },
+            },
+        }
+
+        result = fetch_mailbox_message(
+            self.connection,
+            "forwarded-outlook-plain",
+            preserve_forwarded=True,
+        )
+
+        self.assertEqual(
+            result["newest_body_text"],
+            "Please quote the request below.",
+        )
+        self.assertTrue(result["contains_unverified_forwarded_content"])
+        self.assertIn(
+            "-----Original Message-----",
+            result["_forwarded_body_text"],
+        )
+        self.assertIn(
+            "First Aid Kit | 3 | PCS",
+            result["_forwarded_body_text"],
+        )
+
+    @patch(
+        "quotations.mailbox_po_audit.MAX_PRESERVED_FORWARDED_TEXT_CHARS",
+        160,
+    )
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_forwarded_plain_body_reports_bounded_truncation(
+        self,
+        request,
+        _token,
+    ):
+        body = (
+            "Please quote this request.\n"
+            "---------- Forwarded message ---------\n"
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: RFQ 4421\n"
+            "To: Accounts <accounts@example.test>\n\n"
+            + ("Sterile Gauze | 20 | BOX\n" * 20)
+        )
+        request.return_value = {
+            "id": "forwarded-truncated",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "Subject", "value": "Fwd: RFQ 4421"},
+                    {"name": "From", "value": "staff@example.test"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(body.encode())
+                    .decode("ascii")
+                    .rstrip("=")
+                },
+            },
+        }
+
+        result = fetch_mailbox_message(
+            self.connection,
+            "forwarded-truncated",
+            preserve_forwarded=True,
+        )
+
+        self.assertTrue(result["contains_unverified_forwarded_content"])
+        self.assertTrue(result["_forwarded_content_truncated"])
+        self.assertEqual(len(result["_forwarded_body_text"]), 160)
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_html_only_gmail_and_outlook_forwards_preserve_tables(
+        self,
+        request,
+        _token,
+    ):
+        gmail_html = (
+            "<div>Please prepare this quotation.</div>"
+            "<div class='gmail_quote gmail_quote_container'>"
+            "<div class='gmail_attr'>"
+            "---------- Forwarded message ---------<br>"
+            "From: Original Buyer &lt;buyer@customer.example&gt;<br>"
+            "Date: Fri, 31 Jul 2026 at 10:00<br>"
+            "Subject: RFQ 4421<br>"
+            "To: Accounts &lt;accounts@example.test&gt;<br><br>"
+            "</div>"
+            "<table><tr><th>Item</th><th>Qty</th></tr>"
+            "<tr><td>Sterile Gauze</td><td>20</td></tr></table>"
+            "</div>"
+        )
+        outlook_html = (
+            "<div>Please prepare this quotation.</div><br>"
+            "<div id='divRplyFwdMsg'>"
+            "<div><b>From:</b> Original Buyer "
+            "&lt;buyer@customer.example&gt;</div>"
+            "<div><b>Sent:</b> Friday, July 31, 2026 10:00 AM</div>"
+            "<div><b>To:</b> Accounts &lt;accounts@example.test&gt;</div>"
+            "<div><b>Subject:</b> RFQ 4421</div><br>"
+            "<table><tr><th>Item</th><th>Qty</th></tr>"
+            "<tr><td>First Aid Kit</td><td>3</td></tr></table>"
+            "</div>"
+        )
+        payloads = []
+        for message_id, subject, body_html in (
+            ("forwarded-gmail-html", "Fwd: RFQ 4421", gmail_html),
+            ("forwarded-outlook-html", "FW: RFQ 4421", outlook_html),
+        ):
+            payloads.append(
+                {
+                    "id": message_id,
+                    "payload": {
+                        "mimeType": "text/html",
+                        "headers": [
+                            {"name": "Subject", "value": subject},
+                            {
+                                "name": "From",
+                                "value": "staff@example.test",
+                            },
+                        ],
+                        "body": {
+                            "data": base64.urlsafe_b64encode(
+                                body_html.encode()
+                            )
+                            .decode("ascii")
+                            .rstrip("=")
+                        },
+                    },
+                }
+            )
+        request.side_effect = payloads
+
+        for message_id in (
+            "forwarded-gmail-html",
+            "forwarded-outlook-html",
+        ):
+            with self.subTest(message_id=message_id):
+                result = fetch_mailbox_message(
+                    self.connection,
+                    message_id,
+                    preserve_forwarded=True,
+                )
+                self.assertTrue(
+                    result["contains_unverified_forwarded_content"]
+                )
+                self.assertIn(
+                    "<table>",
+                    result["_forwarded_body_html"],
+                )
+                self.assertNotIn(
+                    "Please prepare this quotation.",
+                    result["_forwarded_body_html"],
+                )
+                self.assertNotIn(
+                    "<table>",
+                    result["newest_body_html"],
+                )
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_malformed_or_nested_forwarded_blocks_remain_trimmed(
+        self,
+        request,
+        _token,
+    ):
+        malformed = (
+            "Please quote this.\n"
+            "---------- Forwarded message ---------\n"
+            "From: buyer@customer.example\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: Missing recipient\n\n"
+            "Sterile Gauze | 20 | BOX"
+        )
+        nested = (
+            "Any update?\n"
+            "On Fri, 31 Jul 2026 at 11:00, Staff wrote:\n"
+            "---------- Forwarded message ---------\n"
+            "From: buyer@customer.example\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: RFQ 4421\n"
+            "To: accounts@example.test\n\n"
+            "Sterile Gauze | 20 | BOX"
+        )
+        request.side_effect = [
+            {
+                "id": message_id,
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [
+                        {"name": "Subject", "value": subject},
+                        {"name": "From", "value": "staff@example.test"},
+                    ],
+                    "body": {
+                        "data": base64.urlsafe_b64encode(body.encode())
+                        .decode("ascii")
+                        .rstrip("=")
+                    },
+                },
+            }
+            for message_id, subject, body in (
+                ("malformed-forward", "Fwd: incomplete", malformed),
+                ("nested-forward", "Re: prior thread", nested),
+            )
+        ]
+
+        malformed_result = fetch_mailbox_message(
+            self.connection,
+            "malformed-forward",
+            preserve_forwarded=True,
+        )
+        nested_result = fetch_mailbox_message(
+            self.connection,
+            "nested-forward",
+            preserve_forwarded=True,
+        )
+
+        self.assertFalse(
+            malformed_result["contains_unverified_forwarded_content"]
+        )
+        self.assertEqual(malformed_result["_forwarded_body_text"], "")
+        self.assertFalse(
+            nested_result["contains_unverified_forwarded_content"]
+        )
+        self.assertEqual(nested_result["_forwarded_body_text"], "")
+        self.assertEqual(nested_result["newest_body_text"], "Any update?")
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_outlook_reply_original_message_ancestry_is_not_a_current_forward(
+        self,
+        request,
+        _token,
+    ):
+        plain_body = (
+            "Thanks, we will review this.\n"
+            "-----Original Message-----\n"
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Sent: Friday, July 31, 2026 10:00 AM\n"
+            "To: Accounts <accounts@example.test>\n"
+            "Subject: Emergency supplies\n\n"
+            "First Aid Kit | 3 | PCS"
+        )
+        html_body = (
+            "<div>Thanks, we will review this.</div>"
+            "<div id='divRplyFwdMsg'>"
+            "<div>-----Original Message-----</div>"
+            "<div><b>From:</b> Original Buyer "
+            "&lt;buyer@customer.example&gt;</div>"
+            "<div><b>Sent:</b> Friday, July 31, 2026 10:00 AM</div>"
+            "<div><b>To:</b> Accounts &lt;accounts@example.test&gt;</div>"
+            "<div><b>Subject:</b> Emergency supplies</div><br>"
+            "<div>First Aid Kit | 3 | PCS</div>"
+            "</div>"
+        )
+        request.side_effect = [
+            {
+                "id": message_id,
+                "payload": {
+                    "mimeType": mime_type,
+                    "headers": [
+                        {"name": "Subject", "value": "Re: Emergency supplies"},
+                        {"name": "From", "value": "staff@example.test"},
+                    ],
+                    "body": {
+                        "data": base64.urlsafe_b64encode(body.encode())
+                        .decode("ascii")
+                        .rstrip("=")
+                    },
+                },
+            }
+            for message_id, mime_type, body in (
+                ("outlook-reply-plain", "text/plain", plain_body),
+                ("outlook-reply-html", "text/html", html_body),
+            )
+        ]
+
+        for message_id in ("outlook-reply-plain", "outlook-reply-html"):
+            with self.subTest(message_id=message_id):
+                result = fetch_mailbox_message(
+                    self.connection,
+                    message_id,
+                    preserve_forwarded=True,
+                )
+                self.assertFalse(
+                    result["contains_unverified_forwarded_content"]
+                )
+                self.assertEqual(result["_forwarded_body_text"], "")
+                self.assertEqual(result["_forwarded_body_html"], "")
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_outlook_header_only_forward_is_not_duplicated_in_newest_body(
+        self,
+        request,
+        _token,
+    ):
+        body = (
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Sent: Friday, July 31, 2026 10:00 AM\n"
+            "To: Accounts <accounts@example.test>\n"
+            "Subject: Emergency supplies\n\n"
+            "First Aid Kit | 3 | PCS"
+        )
+        html_body = (
+            "<div id='divRplyFwdMsg'>"
+            "<div><b>From:</b> Original Buyer "
+            "&lt;buyer@customer.example&gt;</div>"
+            "<div><b>Sent:</b> Friday, July 31, 2026 10:00 AM</div>"
+            "<div><b>To:</b> Accounts &lt;accounts@example.test&gt;</div>"
+            "<div><b>Subject:</b> Emergency supplies</div><br>"
+            "<div>First Aid Kit | 3 | PCS</div>"
+            "</div>"
+        )
+        request.side_effect = [
+            {
+                "id": message_id,
+                "payload": {
+                    "mimeType": mime_type,
+                    "headers": [
+                        {"name": "Subject", "value": "FW: Emergency supplies"},
+                        {"name": "From", "value": "staff@example.test"},
+                    ],
+                    "body": {
+                        "data": base64.urlsafe_b64encode(message_body.encode())
+                        .decode("ascii")
+                        .rstrip("=")
+                    },
+                },
+            }
+            for message_id, mime_type, message_body in (
+                ("outlook-header-only-forward", "text/plain", body),
+                ("outlook-header-only-forward-html", "text/html", html_body),
+            )
+        ]
+
+        for message_id in (
+            "outlook-header-only-forward",
+            "outlook-header-only-forward-html",
+        ):
+            with self.subTest(message_id=message_id):
+                result = fetch_mailbox_message(
+                    self.connection,
+                    message_id,
+                    preserve_forwarded=True,
+                )
+                self.assertTrue(
+                    result["contains_unverified_forwarded_content"]
+                )
+                self.assertEqual(result["newest_body_text"], "")
+                self.assertNotIn("First Aid Kit", result["newest_body_html"])
+                forwarded_value = (
+                    result["_forwarded_body_html"]
+                    if message_id.endswith("html")
+                    else result["_forwarded_body_text"]
+                )
+                self.assertIn("First Aid Kit | 3 | PCS", forwarded_value)
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_forwarded_headers_allow_empty_optional_cc_and_bcc(
+        self,
+        request,
+        _token,
+    ):
+        body = (
+            "Please quote the request below.\n"
+            "-----Original Message-----\n"
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Sent: Friday, July 31, 2026 10:00 AM\n"
+            "To: Accounts <accounts@example.test>\n"
+            "Cc:\n"
+            "Bcc:   \n"
+            "Subject: Emergency supplies\n\n"
+            "First Aid Kit | 3 | PCS"
+        )
+        request.return_value = {
+            "id": "forward-with-empty-copy-headers",
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "Subject", "value": "FW: Emergency supplies"},
+                    {"name": "From", "value": "staff@example.test"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(body.encode())
+                    .decode("ascii")
+                    .rstrip("=")
+                },
+            },
+        }
+
+        result = fetch_mailbox_message(
+            self.connection,
+            "forward-with-empty-copy-headers",
+            preserve_forwarded=True,
+        )
+
+        self.assertTrue(result["contains_unverified_forwarded_content"])
+        self.assertIn("Cc:", result["_forwarded_body_text"])
+        self.assertIn("Bcc:", result["_forwarded_body_text"])
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_attachment_only_forward_requires_supported_non_inline_document(
+        self,
+        request,
+        _token,
+    ):
+        header_only_body = (
+            "-----Original Message-----\n"
+            "From: Original Buyer <buyer@customer.example>\n"
+            "Sent: Friday, July 31, 2026 10:00 AM\n"
+            "To: Accounts <accounts@example.test>\n"
+            "Subject: Emergency supplies\n\n"
+        )
+        encoded_body = (
+            base64.urlsafe_b64encode(header_only_body.encode())
+            .decode("ascii")
+            .rstrip("=")
+        )
+
+        def payload(message_id, filename, disposition, mime_type):
+            return {
+                "id": message_id,
+                "payload": {
+                    "mimeType": "multipart/mixed",
+                    "headers": [
+                        {"name": "Subject", "value": "FW: Emergency supplies"},
+                        {"name": "From", "value": "staff@example.test"},
+                    ],
+                    "parts": [
+                        {"mimeType": "text/plain", "body": {"data": encoded_body}},
+                        {
+                            "filename": filename,
+                            "mimeType": mime_type,
+                            "headers": [
+                                {
+                                    "name": "Content-Disposition",
+                                    "value": disposition,
+                                }
+                            ],
+                            "body": {"attachmentId": f"attachment-{message_id}", "size": 1000},
+                        },
+                    ],
+                },
+            }
+
+        request.side_effect = [
+            payload(
+                "attachment-only-supported",
+                "RFQ.pdf",
+                'attachment; filename="RFQ.pdf"',
+                "application/pdf",
+            ),
+            payload(
+                "attachment-only-inline",
+                "RFQ.pdf",
+                'inline; filename="RFQ.pdf"',
+                "application/pdf",
+            ),
+            payload(
+                "attachment-only-unsupported",
+                "signature.jpg",
+                'attachment; filename="signature.jpg"',
+                "image/jpeg",
+            ),
+        ]
+
+        supported = fetch_mailbox_message(
+            self.connection,
+            "attachment-only-supported",
+            preserve_forwarded=True,
+        )
+        inline = fetch_mailbox_message(
+            self.connection,
+            "attachment-only-inline",
+            preserve_forwarded=True,
+        )
+        unsupported = fetch_mailbox_message(
+            self.connection,
+            "attachment-only-unsupported",
+            preserve_forwarded=True,
+        )
+
+        self.assertTrue(supported["contains_unverified_forwarded_content"])
+        self.assertIn("Subject: Emergency supplies", supported["_forwarded_body_text"])
+        self.assertFalse(inline["contains_unverified_forwarded_content"])
+        self.assertFalse(unsupported["contains_unverified_forwarded_content"])
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_forwarded_content_stops_before_nested_later_history(
+        self,
+        request,
+        _token,
+    ):
+        plain_body = (
+            "Please quote this request.\n"
+            "---------- Forwarded message ---------\n"
+            "From: Current Buyer <buyer@customer.example>\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: Current RFQ\n"
+            "To: Accounts <accounts@example.test>\n\n"
+            "Sterile Gauze | 20 | BOX\n\n"
+            "-----Original Message-----\n"
+            "From: Older Buyer <old@other.example>\n"
+            "Sent: Thu, 30 Jul 2026 at 09:00\n"
+            "To: Current Buyer <buyer@customer.example>\n"
+            "Subject: Older request\n\n"
+            "Old Masks | 999 | BOX"
+        )
+        html_body = (
+            "<div>Please quote this request.</div>"
+            "<div class='gmail_quote gmail_quote_container'>"
+            "<div>---------- Forwarded message ---------</div>"
+            "<div>From: Current Buyer &lt;buyer@customer.example&gt;</div>"
+            "<div>Date: Fri, 31 Jul 2026 at 10:00</div>"
+            "<div>Subject: Current RFQ</div>"
+            "<div>To: Accounts &lt;accounts@example.test&gt;</div><br>"
+            "<div>Sterile Gauze | 20 | BOX</div>"
+            "<div>-----Original Message-----</div>"
+            "<div>From: Older Buyer &lt;old@other.example&gt;</div>"
+            "<div>Sent: Thu, 30 Jul 2026 at 09:00</div>"
+            "<div>To: Current Buyer &lt;buyer@customer.example&gt;</div>"
+            "<div>Subject: Older request</div><br>"
+            "<div>Old Masks | 999 | BOX</div>"
+            "</div>"
+        )
+        request.side_effect = [
+            {
+                "id": message_id,
+                "payload": {
+                    "mimeType": mime_type,
+                    "headers": [
+                        {"name": "Subject", "value": "Fwd: Current RFQ"},
+                        {"name": "From", "value": "staff@example.test"},
+                    ],
+                    "body": {
+                        "data": base64.urlsafe_b64encode(body.encode())
+                        .decode("ascii")
+                        .rstrip("=")
+                    },
+                },
+            }
+            for message_id, mime_type, body in (
+                ("nested-history-plain", "text/plain", plain_body),
+                ("nested-history-html", "text/html", html_body),
+            )
+        ]
+
+        for message_id in ("nested-history-plain", "nested-history-html"):
+            with self.subTest(message_id=message_id):
+                result = fetch_mailbox_message(
+                    self.connection,
+                    message_id,
+                    preserve_forwarded=True,
+                )
+                self.assertTrue(
+                    result["contains_unverified_forwarded_content"]
+                )
+                forwarded_value = (
+                    result["_forwarded_body_html"]
+                    if message_id.endswith("html")
+                    else result["_forwarded_body_text"]
+                )
+                self.assertIn("Sterile Gauze | 20 | BOX", forwarded_value)
+                self.assertNotIn(
+                    "Old Masks | 999 | BOX",
+                    result["_forwarded_body_text"],
+                )
+                self.assertNotIn(
+                    "Old Masks | 999 | BOX",
+                    result["_forwarded_body_html"],
+                )
+
+    @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
+    @patch("quotations.mailbox_po_audit._json_request")
+    def test_forwarded_html_omits_later_on_wrote_table_history(
+        self,
+        request,
+        _token,
+    ):
+        html_body = (
+            "<div>Please quote this request.</div>"
+            "<div class='gmail_quote gmail_quote_container'>"
+            "<div>---------- Forwarded message ---------</div>"
+            "<div>From: Current Buyer &lt;buyer@customer.example&gt;</div>"
+            "<div>Date: Fri, 31 Jul 2026 at 10:00</div>"
+            "<div>Subject: Current RFQ</div>"
+            "<div>To: Accounts &lt;accounts@example.test&gt;</div><br>"
+            "<table><tr><td>Sterile Gauze</td><td>20</td><td>BOX</td></tr></table>"
+            "<div>On Thu, 30 Jul 2026 at 09:00, Older Buyer wrote:</div>"
+            "<blockquote><table><tr><td>Old Masks</td><td>999</td>"
+            "<td>BOX</td></tr></table></blockquote>"
+            "</div>"
+        )
+        request.return_value = {
+            "id": "nested-on-wrote-html",
+            "payload": {
+                "mimeType": "text/html",
+                "headers": [
+                    {"name": "Subject", "value": "Fwd: Current RFQ"},
+                    {"name": "From", "value": "staff@example.test"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(html_body.encode())
+                    .decode("ascii")
+                    .rstrip("=")
+                },
+            },
+        }
+
+        result = fetch_mailbox_message(
+            self.connection,
+            "nested-on-wrote-html",
+            preserve_forwarded=True,
+        )
+
+        self.assertTrue(result["contains_unverified_forwarded_content"])
+        self.assertIn("Sterile Gauze", result["_forwarded_body_text"])
+        self.assertNotIn("Old Masks", result["_forwarded_body_text"])
+        self.assertEqual(result["_forwarded_body_html"], "")
 
     @patch("quotations.mailbox_po_audit.get_valid_access_token", return_value="token")
     @patch("quotations.mailbox_po_audit._json_request")

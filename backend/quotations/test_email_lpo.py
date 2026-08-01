@@ -1,5 +1,6 @@
 import base64
 import importlib
+import json
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
@@ -891,6 +892,188 @@ class GmailMimeParsingTests(TestCase):
 
     @patch("quotations.contract_intelligence.get_valid_access_token", return_value="token")
     @patch("quotations.contract_intelligence._json_request")
+    def test_full_message_retains_attachments_after_processing_cap_without_fetching_them(
+        self,
+        request_json,
+        _token,
+    ):
+        attachment_parts = []
+        for index in range(10):
+            attachment_parts.extend(
+                [
+                    {
+                        "partId": f"noise-{index}",
+                        "mimeType": "image/png",
+                        "filename": f"signature-{index}.png",
+                        "body": {
+                            "attachmentId": f"attachment-noise-{index}",
+                            "size": 8,
+                        },
+                    },
+                    {
+                        "partId": f"eligible-{index}",
+                        "mimeType": "application/pdf",
+                        "filename": f"parsed-{index}.pdf",
+                        "body": {
+                            "attachmentId": f"attachment-parsed-{index}",
+                            "size": 8,
+                        },
+                    },
+                ]
+            )
+        attachment_parts.append(
+            {
+                "partId": "oversized",
+                "mimeType": "application/pdf",
+                "filename": "oversized.pdf",
+                "body": {
+                    "attachmentId": "attachment-oversized",
+                    "size": 5 * 1024 * 1024 + 1,
+                },
+            }
+        )
+        attachment_parts.extend(
+            [
+                {
+                    "partId": "after-cap-1",
+                    "mimeType": "application/pdf",
+                    "filename": "after-cap-1.pdf",
+                    "body": {"attachmentId": "attachment-after-cap-1", "size": 8},
+                },
+                {
+                    "partId": "after-cap-2",
+                    "mimeType": "application/pdf",
+                    "filename": "after-cap-2.pdf",
+                    "body": {"attachmentId": "attachment-after-cap-2", "size": 8},
+                },
+            ]
+        )
+        message_payload = {
+            "id": "message-many",
+            "threadId": "thread-many",
+            "internalDate": str(int(timezone.now().timestamp() * 1000)),
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{"name": "Subject", "value": "Many attachments"}],
+                "parts": attachment_parts,
+            },
+        }
+
+        def request_side_effect(url, **_kwargs):
+            if "?format=full" in url:
+                return message_payload
+            if "/attachments/attachment-parsed-" in url:
+                return {"data": gmail_data("fake-pdf")}
+            raise AssertionError(f"Unexpected attachment-byte fetch: {url}")
+
+        request_json.side_effect = request_side_effect
+        parsed_preview = {
+            "source_file_ref": "private:many-1",
+            "source_sha256": "b" * 64,
+            "source_mime_type": "application/pdf",
+            "parse_method": "pymupdf_text_v1",
+            "original_text": "PURCHASE ORDER",
+            "meta": {"page_count": 1},
+            "lines": [{"raw_name": "Bandage", "quantity": "1"}],
+            "warnings": [],
+        }
+        with patch(
+            "quotations.contract_intelligence.parse_file_preview",
+            return_value=parsed_preview,
+        ) as parse_preview:
+            result = gmail_fetch_message(self.connection, "message-many", include_attachments=True)
+
+        attachments = result["attachments"]
+        self.assertEqual(len(attachments), 23)
+        for index in range(0, 20, 2):
+            self.assertEqual(attachments[index]["status"], "skipped")
+            self.assertIn(
+                "Unsupported attachment type",
+                attachments[index]["reason"],
+            )
+            self.assertEqual(attachments[index + 1]["status"], "parsed")
+        self.assertEqual(attachments[20]["status"], "skipped")
+        self.assertIn("too large", attachments[20]["reason"])
+        for attachment in attachments[21:]:
+            self.assertEqual(attachment["status"], "skipped")
+            self.assertIn("processing limit reached", attachment["reason"])
+            self.assertNotIn("_inline_data", attachment)
+        requested_urls = [call.args[0] for call in request_json.call_args_list]
+        self.assertEqual(len(requested_urls), 11)
+        self.assertFalse(any("attachment-after-cap" in url for url in requested_urls))
+        self.assertEqual(parse_preview.call_count, 10)
+
+    @patch("quotations.contract_intelligence.get_valid_access_token", return_value="token")
+    @patch("quotations.contract_intelligence._json_request")
+    def test_unsupported_inline_noise_does_not_hide_later_supported_document(
+        self,
+        request_json,
+        _token,
+    ):
+        parts = [
+            {
+                "partId": str(index + 1),
+                "mimeType": "text/plain",
+                "filename": f"unsupported-{index}.txt",
+                "body": {"data": gmail_data("inline-text"), "size": 11},
+            }
+            for index in range(10)
+        ]
+        parts.append(
+            {
+                "partId": "11",
+                "mimeType": "application/pdf",
+                "filename": "inline-after-cap.pdf",
+                "body": {"data": gmail_data("inline-pdf-bytes"), "size": 16},
+            }
+        )
+        request_json.return_value = {
+            "id": "message-inline-many",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{"name": "Subject", "value": "Inline attachments"}],
+                "parts": parts,
+            },
+        }
+
+        parsed_preview = {
+            "source_file_ref": "private:inline-supported",
+            "source_sha256": "c" * 64,
+            "source_mime_type": "application/pdf",
+            "parse_method": "pymupdf_text_v1",
+            "original_text": "PURCHASE ORDER",
+            "meta": {"page_count": 1},
+            "lines": [{"raw_name": "Bandage", "quantity": "1"}],
+            "warnings": [],
+        }
+        with patch(
+            "quotations.contract_intelligence.parse_file_preview",
+            return_value=parsed_preview,
+        ) as parse_preview:
+            result = gmail_fetch_message(
+                self.connection,
+                "message-inline-many",
+                include_attachments=True,
+            )
+
+        self.assertEqual(len(result["attachments"]), 11)
+        tail = result["attachments"][-1]
+        self.assertEqual(tail["status"], "parsed")
+        self.assertEqual(tail["source_file_ref"], "private:inline-supported")
+        self.assertNotIn("_inline_data", tail)
+        json.dumps(result["attachments"])
+        self.assertFalse(
+            any(
+                isinstance(value, (bytes, bytearray))
+                for attachment in result["attachments"]
+                for value in attachment.values()
+            )
+        )
+        request_json.assert_called_once()
+        parse_preview.assert_called_once()
+
+    @patch("quotations.contract_intelligence.get_valid_access_token", return_value="token")
+    @patch("quotations.contract_intelligence._json_request")
     def test_metadata_uses_full_mime_tree_for_attachment_discovery(self, request_json, _token):
         request_json.return_value = {
             "id": "message-2",
@@ -1233,6 +1416,10 @@ class GmailEvidenceReviewTests(TestCase):
                     "size": 100,
                     "status": "parsed",
                     "source_file_ref": "private:po-coverage",
+                    "meta": {
+                        "attachment_safety": {"validated_format": "pdf"},
+                        "pdf_fidelity": {"form_field_markers": True},
+                    },
                     "lines": [
                         {"requested_item_name": "Fire Warden Jacket", "quantity": "20"},
                         {"requested_item_name": "Small Drinking Water 500ml", "quantity": "30"},
@@ -1255,6 +1442,15 @@ class GmailEvidenceReviewTests(TestCase):
             {jacket.id, water.id},
         )
         self.assertIn(AI_QUOTE_COVERAGE_GUARD_WARNING, lpo.warnings)
+        self.assertEqual(
+            po_import.parsed_meta["attachment_safety"]["validated_format"],
+            "pdf",
+        )
+        self.assertTrue(po_import.parsed_meta["pdf_fidelity"]["form_field_markers"])
+        self.assertEqual(
+            lpo.parsed_meta["attachment_safety"]["validated_format"],
+            "pdf",
+        )
         self.assertEqual(lpo.lpo_number, "PO112_110916")
         for line in (self.line, jacket, water):
             line.refresh_from_db()

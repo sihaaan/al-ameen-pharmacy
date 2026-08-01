@@ -94,6 +94,9 @@ class BrandSerializer(serializers.ModelSerializer):
             return obj.logo.url
         return None
 
+    def validate_logo(self, value):
+        return validate_image_upload(value, label="Brand logo")
+
 
 # ====================
 # CATEGORY SERIALIZERS
