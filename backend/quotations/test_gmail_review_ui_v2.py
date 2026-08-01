@@ -710,5 +710,7 @@ class GmailReviewUIV2Tests(TransactionTestCase):
         self.assertIs(payload["workflow_features"]["gmail_review_ui_v2"], True)
         self.assertFalse(payload["identity_review_approved"])
         self.assertRegex(payload["identity_review_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertRegex(payload["review_rows_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("Gloves", payload["review_rows_fingerprint"])
         self.assertTrue(payload["identity_review"]["suggestion_approvable"])
         self.assertNotIn("buyer@verified-customer.example", str(payload["identity_review"]))

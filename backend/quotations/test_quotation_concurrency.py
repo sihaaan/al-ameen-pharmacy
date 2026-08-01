@@ -31,9 +31,18 @@ from .contract_intelligence import (
     exchange_gmail_code,
     transfer_shared_gmail_credential_owner,
 )
+from .gmail_inquiry_import import (
+    GMAIL_IDENTITY_MATCH_VERSION,
+    approve_gmail_inquiry_company,
+)
+from .gmail_review_state import (
+    gmail_identity_evidence_fingerprint,
+    gmail_review_rows_fingerprint,
+)
 from .models import (
     Company,
     CompanyContact,
+    GmailInquiryImport,
     GmailOAuthConnection,
     Quotation,
     QuotationAuditLog,
@@ -48,7 +57,11 @@ from .quotation_email_delivery import (
     _validate_editable_fields,
 )
 from .serializers import QuotationSerializer
-from .views import QuotationLineViewSet, QuotationViewSet
+from .views import (
+    GmailInquiryImportViewSet,
+    QuotationLineViewSet,
+    QuotationViewSet,
+)
 
 
 @skipUnless(
@@ -804,6 +817,410 @@ class QuotationConcurrencyTests(TransactionTestCase):
         )
         self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT, stale.data)
         self.assertEqual(stale.data["code"], "stale_quotation_review")
+
+    @override_settings(
+        QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
+    )
+    def test_bound_bulk_save_serializes_new_review_state_before_unlock(self):
+        quotation, line = self.create_quote()
+        initial_client = APIClient()
+        initial_client.force_authenticate(self.staff)
+        initial = initial_client.get(reverse("quotation-detail", args=[quotation.pk]))
+        self.assertEqual(initial.status_code, status.HTTP_200_OK, initial.data)
+
+        fingerprint_started = Event()
+        release_response = Event()
+        competing_mutation_finished = Event()
+        results = Queue()
+        original_fingerprint = QuotationSerializer.get_quotation_review_fingerprint
+
+        def paused_fingerprint(serializer, instance):
+            if current_thread().name == "bound-quotation-save":
+                fingerprint_started.set()
+                if not release_response.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release bound save serialization.")
+            return original_fingerprint(serializer, instance)
+
+        def save_lines():
+            close_old_connections()
+            try:
+                staff = User.objects.get(pk=self.staff.pk)
+                client = APIClient()
+                client.force_authenticate(staff)
+                response = client.post(
+                    reverse("quotation-bulk-update-lines", args=[quotation.pk]),
+                    {
+                        "lines": [{"id": line.pk, "unit_price": "12.000"}],
+                        "quotation_review_fingerprint": initial.data[
+                            "quotation_review_fingerprint"
+                        ],
+                    },
+                    format="json",
+                )
+                results.put(("save", response.status_code, response.data))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("save", "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        def mutate_line():
+            close_old_connections()
+            try:
+                QuotationLine.objects.filter(pk=line.pk).update(
+                    item_name_snapshot="Changed after bound serialization"
+                )
+                results.put(("line", "updated"))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("line", "error", repr(exc)))
+            finally:
+                competing_mutation_finished.set()
+                connections.close_all()
+
+        save_worker = Thread(
+            target=save_lines,
+            name="bound-quotation-save",
+            daemon=True,
+        )
+        mutation_worker = Thread(target=mutate_line, daemon=True)
+        with patch.object(
+            QuotationSerializer,
+            "get_quotation_review_fingerprint",
+            paused_fingerprint,
+        ):
+            try:
+                save_worker.start()
+                self.assertTrue(fingerprint_started.wait(timeout=10))
+                mutation_worker.start()
+                self.assertFalse(
+                    competing_mutation_finished.wait(timeout=1),
+                    "A quotation line changed before the bound response snapshot committed.",
+                )
+            finally:
+                release_response.set()
+                save_worker.join(timeout=10)
+                if mutation_worker.ident is not None:
+                    mutation_worker.join(timeout=10)
+
+        self.assertFalse(save_worker.is_alive() or mutation_worker.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        save_outcome = next(row for row in outcomes if row[0] == "save")
+        self.assertEqual(save_outcome[1], status.HTTP_200_OK, save_outcome)
+        saved_quote = save_outcome[2]["quotation"]
+        self.assertEqual(saved_quote["lines"][0]["item_name_snapshot"], self.product.name)
+        self.assertTrue(saved_quote["quotation_review_fingerprint"])
+        self.assertIn(("line", "updated"), outcomes)
+
+        preview_client = APIClient()
+        preview_client.force_authenticate(self.staff)
+        stale = preview_client.get(
+            reverse("quotation-email-preview", args=[quotation.pk]),
+            {
+                "quotation_review_fingerprint": saved_quote[
+                    "quotation_review_fingerprint"
+                ]
+            },
+        )
+        self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT, stale.data)
+        self.assertEqual(stale.data["code"], "stale_quotation_review")
+
+    @override_settings(
+        QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
+    )
+    def test_two_bound_saves_with_one_starting_fingerprint_yield_success_and_409(self):
+        quotation, line = self.create_quote()
+        initial_client = APIClient()
+        initial_client.force_authenticate(self.staff)
+        initial = initial_client.get(reverse("quotation-detail", args=[quotation.pk]))
+        self.assertEqual(initial.status_code, status.HTTP_200_OK, initial.data)
+        starting_fingerprint = initial.data["quotation_review_fingerprint"]
+
+        first_serializing = Event()
+        release_first = Event()
+        results = Queue()
+        original_fingerprint = QuotationSerializer.get_quotation_review_fingerprint
+
+        def paused_first_fingerprint(serializer, instance):
+            if current_thread().name == "first-bound-save":
+                first_serializing.set()
+                if not release_first.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release first bound save.")
+            return original_fingerprint(serializer, instance)
+
+        url = reverse("quotation-bulk-update-lines", args=[quotation.pk])
+        first = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "first",
+                "post",
+                url,
+                {
+                    "lines": [{"id": line.pk, "unit_price": "12.000"}],
+                    "quotation_review_fingerprint": starting_fingerprint,
+                },
+            ),
+            name="first-bound-save",
+            daemon=True,
+        )
+        second = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "second",
+                "post",
+                url,
+                {
+                    "lines": [{"id": line.pk, "unit_price": "13.000"}],
+                    "quotation_review_fingerprint": starting_fingerprint,
+                },
+            ),
+            name="second-bound-save",
+            daemon=True,
+        )
+
+        with patch.object(
+            QuotationSerializer,
+            "get_quotation_review_fingerprint",
+            paused_first_fingerprint,
+        ):
+            try:
+                first.start()
+                self.assertTrue(first_serializing.wait(timeout=10))
+                second.start()
+                self.assertEqual(
+                    results.qsize(),
+                    0,
+                    "The competing save returned before the first transaction committed.",
+                )
+            finally:
+                release_first.set()
+                first.join(timeout=10)
+                if second.ident is not None:
+                    second.join(timeout=10)
+
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        self.assertCountEqual(
+            [(outcome[0], outcome[2], outcome[3]) for outcome in outcomes],
+            [
+                ("first", status.HTTP_200_OK, ""),
+                ("second", status.HTTP_409_CONFLICT, "stale_quotation_review"),
+            ],
+        )
+        line.refresh_from_db()
+        self.assertEqual(line.unit_price, Decimal("12.000"))
+
+    @override_settings(
+        QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
+    )
+    def test_two_gmail_row_saves_from_one_snapshot_yield_success_and_409(self):
+        gmail_import = GmailInquiryImport.objects.create(
+            gmail_connection=self.gmail_connection,
+            mailbox_email=self.gmail_connection.email,
+            gmail_thread_id="thread-concurrent-row-review",
+            anchor_message_id="message-concurrent-row-review",
+            selected_message_ids=["message-concurrent-row-review"],
+            mode=GmailInquiryImport.MODE_CURRENT_MESSAGE,
+            source_fingerprint="a" * 64,
+            status=GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+            analysis_attempts=2,
+            claimed_by=self.staff,
+            claimed_at=timezone.now(),
+            analysis={
+                "version": "gmail_inquiry_v2",
+                "content_fingerprint": "c" * 64,
+                "thread_analysis": {
+                    "customer_identity": {
+                        "company_name": self.company.name,
+                        "source_keys": ["body:identity"],
+                        "confidence": 0.99,
+                    }
+                },
+                "preview": {
+                    "parse_method": "gmail_native_ai_v2",
+                    "original_text": "Synthetic concurrency source",
+                    "warnings": [],
+                    "meta": {},
+                    "lines": [
+                        {
+                            "row_key": "a" * 32,
+                            "raw_name": "Initial row",
+                            "raw_line": "Initial row | 2 | PCS",
+                            "quantity": "2",
+                            "unit": "PCS",
+                            "unit_price": None,
+                            "vat_rate": "0.00",
+                            "operation": "added",
+                            "parse_status": "parsed",
+                            "parse_confidence": 0.99,
+                            "included": True,
+                            "reviewed_by_user": False,
+                            "_source_keys": ["body:item"],
+                        }
+                    ],
+                },
+            },
+            candidates={
+                "identity_match_version": GMAIL_IDENTITY_MATCH_VERSION,
+                "recommended_company_id": self.company.pk,
+                "recommended_contact_id": None,
+                "exact_company_match": False,
+                "verified_identity_sender_emails": ["accounts@example.com"],
+                "companies": [
+                    {
+                        "company_id": self.company.pk,
+                        "company_name": self.company.name,
+                        "confidence": 0.99,
+                        "match_method": "verified_email_domain",
+                        "evidence": [
+                            {
+                                "signal": "verified_email_domain",
+                                "value": "example.com",
+                                "message_ids": ["message-concurrent-row-review"],
+                            }
+                        ],
+                    }
+                ],
+                "contacts": [],
+                "ai_identity": {
+                    "company_name": self.company.name,
+                    "source_keys": ["body:identity"],
+                    "confidence": 0.99,
+                },
+            },
+            message_manifest=[
+                {
+                    "gmail_message_id": "message-concurrent-row-review",
+                    "subject": "Synthetic RFQ",
+                    "sender": "Buyer <accounts@example.com>",
+                    "sent_at": timezone.now().isoformat(),
+                    "is_outbound": False,
+                }
+            ],
+        )
+        gmail_import = approve_gmail_inquiry_company(
+            gmail_import,
+            self.staff,
+            company=self.company,
+            contact=None,
+            suggested=True,
+            identity_review_fingerprint=gmail_identity_evidence_fingerprint(
+                gmail_import
+            ),
+        )
+        binding = {
+            "expected_source_fingerprint": gmail_import.source_fingerprint,
+            "expected_analysis_attempt": gmail_import.analysis_attempts,
+            "expected_review_rows_fingerprint": gmail_review_rows_fingerprint(
+                gmail_import
+            ),
+            "identity_review_fingerprint": gmail_identity_evidence_fingerprint(
+                gmail_import
+            ),
+        }
+        url = reverse(
+            "quotation-gmail-inquiry-import-detail",
+            args=[gmail_import.pk],
+        )
+        first_in_transaction = Event()
+        release_first = Event()
+        second_read_import = Event()
+        results = Queue()
+        original_get_object = GmailInquiryImportViewSet.get_object
+
+        def pause_after_first_save(*_args, **_kwargs):
+            if current_thread().name == "first-gmail-row-save":
+                first_in_transaction.set()
+                if not release_first.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release first Gmail row save.")
+            return None
+
+        def observed_get_object(view):
+            value = original_get_object(view)
+            if current_thread().name == "second-gmail-row-save":
+                second_read_import.set()
+            return value
+
+        def payload(raw_name):
+            return {
+                "review_lines": [
+                    {
+                        "row_key": "a" * 32,
+                        "raw_name": raw_name,
+                        "quantity": "2.000",
+                        "unit": "PCS",
+                        "included": True,
+                        "reviewed": True,
+                    }
+                ],
+                **binding,
+            }
+
+        first = Thread(
+            target=self._api_worker,
+            args=(results, "first", "patch", url, payload("First review")),
+            name="first-gmail-row-save",
+            daemon=True,
+        )
+        second = Thread(
+            target=self._api_worker,
+            args=(results, "second", "patch", url, payload("Stale overwrite")),
+            name="second-gmail-row-save",
+            daemon=True,
+        )
+
+        with patch(
+            "quotations.gmail_inquiry_import.record_gmail_workflow_metric",
+            side_effect=pause_after_first_save,
+        ), patch.object(
+            GmailInquiryImportViewSet,
+            "get_object",
+            observed_get_object,
+        ):
+            try:
+                first.start()
+                self.assertTrue(first_in_transaction.wait(timeout=10))
+                second.start()
+                self.assertTrue(second_read_import.wait(timeout=10))
+                self.assertEqual(results.qsize(), 0)
+            finally:
+                release_first.set()
+                first.join(timeout=10)
+                if second.ident is not None:
+                    second.join(timeout=10)
+
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        self.assertCountEqual(
+            [(outcome[0], outcome[2]) for outcome in outcomes],
+            [
+                ("first", status.HTTP_200_OK),
+                ("second", status.HTTP_409_CONFLICT),
+            ],
+        )
+        gmail_import.refresh_from_db()
+        self.assertEqual(
+            gmail_import.analysis["preview"]["lines"][0]["raw_name"],
+            "First review",
+        )
 
     def test_email_bytes_are_built_while_customer_dependency_lock_is_held(self):
         quotation, _line = self.create_quote()

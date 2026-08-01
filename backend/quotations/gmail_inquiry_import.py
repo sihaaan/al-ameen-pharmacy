@@ -99,10 +99,14 @@ from .gmail_review_state import (
     clear_gmail_identity_approval,
     gmail_identity_approval_is_current,
     gmail_identity_evidence_fingerprint,
+    gmail_review_rows_fingerprint,
     gmail_suggested_company_is_approvable,
 )
 from .services import create_imported_inquiry, create_quotation_from_inquiry
-from .workflow_features import gmail_review_ui_v2_enabled
+from .workflow_features import (
+    gmail_chained_actions_enabled,
+    gmail_review_ui_v2_enabled,
+)
 
 
 HANDOFF_TOKEN_BYTES = 32
@@ -5431,7 +5435,84 @@ def approve_gmail_inquiry_company(
         return locked
 
 
-def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
+def _require_current_gmail_chained_review_binding(
+    gmail_import,
+    *,
+    expected_source_fingerprint=None,
+    expected_analysis_attempt=None,
+    expected_review_rows_fingerprint=None,
+    identity_review_fingerprint=None,
+    require_company_approval=False,
+):
+    """Fail closed on a complete chained-action browser snapshot.
+
+    The caller must hold the Gmail import row lock. Legacy Save/Confirm calls
+    omit the tuple and retain their existing behavior, including while the
+    feature is enabled. A partially supplied tuple is rejected defensively in
+    case a service caller bypasses the API serializer.
+    """
+
+    if not gmail_chained_actions_enabled():
+        return
+    supplied = (
+        expected_source_fingerprint not in (None, ""),
+        expected_analysis_attempt is not None,
+        expected_review_rows_fingerprint not in (None, ""),
+        identity_review_fingerprint not in (None, ""),
+    )
+    # The identity fingerprint predates chained confirm requests. Any new
+    # expected-state field opts a service call into this stricter tuple.
+    if not any(supplied[:3]):
+        return
+    if not all(supplied):
+        raise GmailInquiryImportError(
+            "Reload the Gmail review before using the chained action."
+        )
+    try:
+        expected_attempt = int(expected_analysis_attempt)
+    except (TypeError, ValueError) as exc:
+        raise GmailInquiryImportError(
+            "Reload the Gmail review before using the chained action."
+        ) from exc
+    source_matches = hmac.compare_digest(
+        str(expected_source_fingerprint),
+        str(gmail_import.source_fingerprint or ""),
+    )
+    identity_matches = hmac.compare_digest(
+        str(identity_review_fingerprint),
+        gmail_identity_evidence_fingerprint(gmail_import),
+    )
+    rows_match = hmac.compare_digest(
+        str(expected_review_rows_fingerprint),
+        gmail_review_rows_fingerprint(gmail_import),
+    )
+    if (
+        not source_matches
+        or expected_attempt != gmail_import.analysis_attempts
+        or not rows_match
+        or not identity_matches
+    ):
+        raise GmailInquiryImportStale(
+            "The Gmail review changed in another session. Reload it before continuing."
+        )
+    if require_company_approval and not gmail_identity_approval_is_current(
+        gmail_import
+    ):
+        raise GmailInquiryImportError(
+            "Approve the current customer company before using the chained action."
+        )
+
+
+def update_gmail_inquiry_review_lines(
+    gmail_import,
+    actor,
+    *,
+    review_lines,
+    expected_source_fingerprint=None,
+    expected_analysis_attempt=None,
+    expected_review_rows_fingerprint=None,
+    identity_review_fingerprint=None,
+):
     """Merge a bounded set of explicit staff edits into analyzed rows.
 
     Only customer-facing item wording, quantity, unit and inclusion may
@@ -5456,6 +5537,13 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
             raise GmailInquiryImportError(
                 "Analyze this Gmail inquiry before reviewing its rows."
             )
+        _require_current_gmail_chained_review_binding(
+            locked,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_analysis_attempt=expected_analysis_attempt,
+            expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+            identity_review_fingerprint=identity_review_fingerprint,
+        )
         analysis = dict(locked.analysis or {})
         preview = dict(analysis.get("preview") or {})
         rows = [dict(row) for row in (preview.get("lines") or [])]
@@ -6048,6 +6136,9 @@ def confirm_gmail_inquiry_import(
     contact=None,
     selected_source_keys=None,
     identity_review_fingerprint=None,
+    expected_source_fingerprint=None,
+    expected_analysis_attempt=None,
+    expected_review_rows_fingerprint=None,
 ):
     """Create one inquiry and its first quotation, or return the existing pair."""
 
@@ -6157,6 +6248,14 @@ def confirm_gmail_inquiry_import(
                 "Customer identity matching rules changed. Reanalyze this "
                 "Gmail inquiry before creating the quotation."
             )
+        _require_current_gmail_chained_review_binding(
+            locked,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_analysis_attempt=expected_analysis_attempt,
+            expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+            identity_review_fingerprint=identity_review_fingerprint,
+            require_company_approval=True,
+        )
 
         if company is None:
             raise GmailInquiryImportError(

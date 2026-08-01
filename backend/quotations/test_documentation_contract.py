@@ -202,6 +202,7 @@ class DocumentationContractTests(SimpleTestCase):
             "DJANGO_REQUEST_LOG_LEVEL",
             "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
             "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
+            "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -239,6 +240,18 @@ class DocumentationContractTests(SimpleTestCase):
                     content,
                     rf"(?m)^# {re.escape(name)}={re.escape(value)}$",
                 )
+
+    def test_gmail_chained_actions_are_documented_as_fail_closed_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            with self.subTest(document="deployment" if content is deployment else "operations"):
+                self.assertIn("QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED", content)
+                self.assertIn("QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED", content)
+                self.assertIn("409", content)
+                self.assertIn("no migration", content.lower())
+        self.assertIn("Neither path\nfinalizes a quotation", deployment)
+        self.assertIn("or sends email", deployment)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

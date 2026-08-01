@@ -75,6 +75,22 @@ missing identities require manual company selection and approval. Monitor 409
 stale-review responses and rejected suggestion attempts during rollout. Set
 the flag back to `0` for immediate rollback; no database reversal is needed.
 
+### Gmail chained review actions
+
+`QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED` defaults to `0` and is projected as
+enabled only when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is also strictly
+enabled. With both flags enabled, chained row-save/create requests carry the
+current source fingerprint, analysis attempt, keyed complete reviewed-row
+fingerprint, and keyed identity-review fingerprint. Chained quotation-line
+saves carry the current quotation review fingerprint. The backend validates
+each value while holding the owning record and review-dependency locks; stale
+state returns 409 without saving or creating anything.
+
+Monitor stale-response rates and save latency during rollout. A chained action
+never finalizes or sends, and a save failure must stop before the existing
+secure preview route is called. Set the chained-actions flag to `0` for
+immediate rollback. There is no migration and no stored data to reverse.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

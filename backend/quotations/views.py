@@ -96,7 +96,10 @@ from .gmail_workflow_metrics import (
     workflow_elapsed_ms,
 )
 from .import_parsers import parse_file_preview, parse_text_preview
-from .workflow_features import gmail_review_ui_v2_enabled
+from .workflow_features import (
+    gmail_chained_actions_enabled,
+    gmail_review_ui_v2_enabled,
+)
 from .mailbox_po_audit import (
     assert_mailbox_po_audit_repairable,
     mailbox_po_audit_repair_remaining,
@@ -4067,8 +4070,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         metric_started = time.perf_counter()
         submitted_rows = request.data.get("lines") or []
         gmail_import = gmail_import_for_quotation(quotation)
-        price_before = None
-        if gmail_import:
+
+        def pricing_snapshot(current):
+            if not gmail_import:
+                return None
             try:
                 price_line_ids = {
                     int(row.get("id"))
@@ -4077,26 +4082,67 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     and "unit_price" in row
                     and row.get("id") not in (None, "")
                 }
-                price_before = dict(
-                    quotation.lines.filter(pk__in=price_line_ids).values_list(
+                return dict(
+                    current.lines.filter(pk__in=price_line_ids).values_list(
                         "pk",
                         "unit_price",
                     )
                 )
             except (TypeError, ValueError):
-                price_before = {}
+                return {}
             except Exception:
-                price_before = None
                 logger.warning("Gmail pricing workflow metric was not prepared.")
-        try:
-            quotation, updated_lines = bulk_update_quotation_lines(
-                quotation,
-                submitted_rows,
-                request.user,
-            )
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
-        quotation.refresh_from_db()
+                return None
+
+        price_before = None
+        serialized_quotation = None
+        review_fingerprint = request.data.get("quotation_review_fingerprint")
+        stale_bound_save = bool(
+            gmail_chained_actions_enabled()
+            and review_fingerprint not in (None, "")
+        )
+        if stale_bound_save:
+            try:
+                with transaction.atomic():
+                    try:
+                        quotation = _quotations_for_update().get(pk=quotation.pk)
+                    except Quotation.DoesNotExist as exc:
+                        raise Http404 from exc
+                    # Quote-first dependency locking makes the supplied review
+                    # fingerprint and the complete returned quotation one
+                    # atomic snapshot. No stale save can mutate a line before
+                    # this check, and the new fingerprint is materialized
+                    # before the locks are released.
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
+                    price_before = pricing_snapshot(quotation)
+                    quotation, updated_lines = bulk_update_quotation_lines(
+                        quotation,
+                        submitted_rows,
+                        request.user,
+                    )
+                    quotation.refresh_from_db()
+                    lock_quotation_review_dependencies(quotation)
+                    serialized_quotation = self.get_serializer(quotation).data
+            except QuotationEmailError as exc:
+                return self._quotation_email_error_response(exc)
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
+        else:
+            price_before = pricing_snapshot(quotation)
+            try:
+                quotation, updated_lines = bulk_update_quotation_lines(
+                    quotation,
+                    submitted_rows,
+                    request.user,
+                )
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
+            quotation.refresh_from_db()
+            serialized_quotation = self.get_serializer(quotation).data
         if gmail_import and price_before is not None:
             try:
                 changed_price_count = sum(
@@ -4120,10 +4166,9 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     )
             except Exception:
                 logger.warning("Gmail pricing workflow metric was not recorded.")
-        serializer = self.get_serializer(quotation)
         return Response(
             {
-                "quotation": serializer.data,
+                "quotation": serialized_quotation,
                 "updated_line_ids": [line.id for line in updated_lines],
                 "message": f"Saved {len(updated_lines)} line(s).",
             }

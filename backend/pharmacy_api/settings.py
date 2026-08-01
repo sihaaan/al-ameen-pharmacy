@@ -387,6 +387,13 @@ QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED = env_bool(
     "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
     False,
 )
+# Optional chained review/save actions. The API remains backward compatible;
+# stale-state bindings are enforced only when this rollout flag is explicitly
+# enabled and a complete binding tuple is supplied.
+QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

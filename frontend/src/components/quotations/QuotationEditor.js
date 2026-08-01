@@ -8,6 +8,11 @@ import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
+const UNSAVED_LINES_FINALIZE_ISSUE = 'Save all line changes before finalizing.';
+
+const gmailChainedActionsEnabled = (quote = {}) => (
+  quote?.workflow_features?.gmail_chained_actions === true
+);
 const statusSteps = [
   { id: 'draft', label: 'Draft' },
   { id: 'pending_review', label: 'Pending Review' },
@@ -118,6 +123,14 @@ const normalizeDraft = (draft = {}) => ({
 });
 
 const draftsMatch = (left, right) => JSON.stringify(normalizeDraft(left)) === JSON.stringify(normalizeDraft(right));
+
+const snapshotLineDrafts = (sourceQuote = {}, drafts = {}) => Object.fromEntries(
+  (sourceQuote.lines || []).map((line) => [line.id, normalizeDraft(drafts[line.id])])
+);
+
+const lineDraftSnapshotMatches = (snapshot = {}, drafts = {}) => (
+  Object.entries(snapshot).every(([lineId, expected]) => draftsMatch(drafts[lineId], expected))
+);
 
 const draftFromLine = (line) => ({
   product: line.product || '',
@@ -342,6 +355,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const emailPreviewGenerationRef = useRef(0);
   const emailThreadSearchGenerationRef = useRef(0);
   const emailReconcileGenerationRef = useRef(0);
+  const reviewEmailGenerationRef = useRef(0);
+  const reviewEmailInFlightRef = useRef(false);
   const quoteRef = useRef(null);
   const quotePartyDraftRef = useRef(quotePartyDraft);
   const quoteTermsDraftRef = useRef(quoteTermsDraft);
@@ -647,10 +662,13 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       emailPreviewGenerationRef.current += 1;
       emailThreadSearchGenerationRef.current += 1;
       emailReconcileGenerationRef.current += 1;
+      reviewEmailGenerationRef.current += 1;
+      reviewEmailInFlightRef.current = false;
     };
   }, [load]);
 
   const isEditable = quote && editableStatuses.has(quote.status);
+  const chainedActionsEnabled = gmailChainedActionsEnabled(quote);
   const emailPreviewRefreshRequired = emailSendError?.refreshPreview === true || [
     'stale_email_preview',
     'email_preview_required',
@@ -776,7 +794,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     if (!quote.lines?.length) issues.push('Add at least one quotation line.');
     if (hasUnsavedQuoteParty) issues.push('Save customer/contact before finalizing.');
     if (hasUnsavedQuoteTerms) issues.push('Save quotation terms and layout before finalizing.');
-    if (hasUnsavedLines) issues.push('Save all line changes before finalizing.');
+    if (hasUnsavedLines) issues.push(UNSAVED_LINES_FINALIZE_ISSUE);
     (quote.lines || []).forEach((line, index) => {
       const draft = lineDrafts[line.id] || {};
       const name = draft.item_name_snapshot || `Line ${index + 1}`;
@@ -788,6 +806,12 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     });
     return issues;
   })();
+  const reviewEmailIssues = chainedActionsEnabled
+    ? finalizeIssues.filter((issue) => issue !== UNSAVED_LINES_FINALIZE_ISSUE)
+    : finalizeIssues;
+  const primaryEmailActionIssues = chainedActionsEnabled
+    ? reviewEmailIssues
+    : finalizeIssues;
 
   const updateLineDraft = (lineId, patch) => {
     setLineFeedback(null);
@@ -965,23 +989,34 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     match_status: draft.product && draft.match_status === 'unresolved' ? 'confirmed' : draft.match_status,
   });
 
-  const mergeSavedQuote = (quoteData, savedIds = []) => {
+  const mergeSavedQuote = (quoteData, savedIds = [], preserveCurrentDrafts = false) => {
     const savedSet = new Set(savedIds);
+    const currentDrafts = lineDraftsRef.current || {};
+    const currentSavedDrafts = savedLineDraftsRef.current || {};
+    const nextDrafts = {};
+    const nextSavedDrafts = {};
+    (quoteData.lines || []).forEach((line) => {
+      const savedDraft = draftFromLine(line);
+      if (preserveCurrentDrafts) {
+        nextDrafts[line.id] = currentDrafts[line.id] || savedDraft;
+      } else if (savedSet.has(line.id)) {
+        nextDrafts[line.id] = savedDraft;
+      } else {
+        nextDrafts[line.id] = currentDrafts[line.id] || savedDraft;
+      }
+      nextSavedDrafts[line.id] = savedSet.has(line.id)
+        ? savedDraft
+        : (currentSavedDrafts[line.id] || savedDraft);
+    });
+    // A chained preview must use the exact authoritative quote returned by
+    // the successful save, not the pre-save render captured by React.
+    quoteRef.current = quoteData;
+    lineDraftsRef.current = nextDrafts;
+    savedLineDraftsRef.current = nextSavedDrafts;
     setQuote(quoteData);
-    setLineDrafts((current) => {
-      const next = {};
-      (quoteData.lines || []).forEach((line) => {
-        next[line.id] = savedSet.has(line.id) ? draftFromLine(line) : (current[line.id] || draftFromLine(line));
-      });
-      return next;
-    });
-    setSavedLineDrafts((current) => {
-      const next = {};
-      (quoteData.lines || []).forEach((line) => {
-        next[line.id] = savedSet.has(line.id) ? draftFromLine(line) : (current[line.id] || draftFromLine(line));
-      });
-      return next;
-    });
+    setLineDrafts(nextDrafts);
+    setSavedLineDrafts(nextSavedDrafts);
+    return quoteData;
   };
 
   const saveLine = async (lineId) => {
@@ -1448,7 +1483,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setLineFeedback({
         type: 'warning',
         message: latestFingerprint
-          ? 'The quotation changed since this editor loaded. Review the refreshed quotation, then click Finalize or Email Quotation again.'
+          ? `The quotation changed since this editor loaded. Review the refreshed quotation, then click ${gmailChainedActionsEnabled(latestQuote) ? 'Review Email' : 'Finalize or Email Quotation'} again.`
           : 'The current quotation review token is unavailable. Reload the editor before preparing an email.',
       });
       return null;
@@ -1473,16 +1508,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     return true;
   };
 
-  const loadEmailPreview = async () => {
-    if (emailSending || emailReconciling || saving || actionInFlight) return;
-    if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
+  const requestEmailPreview = async (authoritativeQuote = null, isStillCurrent = null) => {
     const requestGeneration = ++emailPreviewGenerationRef.current;
+    const sourceQuote = authoritativeQuote || quoteRef.current || quote;
     setEmailPreviewOpen(true);
     setEmailPreviewLoading(true);
     setEmailPreview(null);
     setEmailPreviewError('');
     setEmailSendError(null);
-    setEmailQuoteFinalized(['finalized', 'sent'].includes(quote.status));
+    setEmailQuoteFinalized(['finalized', 'sent'].includes(sourceQuote?.status));
     setEmailThreadCandidates([]);
     setEmailThreadCandidatesError('');
     setEmailThreadSearchCompleted(false);
@@ -1490,14 +1524,30 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setEmailReconcileFeedback(null);
     emailThreadSearchGenerationRef.current += 1;
     emailReconcileGenerationRef.current += 1;
+    const stopForNewLocalEdits = () => {
+      if (!isStillCurrent || isStillCurrent()) return false;
+      setEmailPreviewOpen(false);
+      setEmailPreviewLoading(false);
+      setEmailPreview(null);
+      setEmailPreviewError('');
+      setEmailSendError(null);
+      setLineFeedback({
+        type: 'warning',
+        message: 'Quotation lines changed while the email review was being prepared. Review the changes, then click Review Email again.',
+      });
+      return true;
+    };
     try {
-      const latestQuote = await currentQuoteForEmailReview(requestGeneration);
+      const latestQuote = authoritativeQuote
+        || await currentQuoteForEmailReview(requestGeneration);
       if (!latestQuote) return;
+      if (stopForNewLocalEdits()) return;
       const response = await quotationAPI.quotes.emailPreview(
         quote.id,
         emailPreviewParams(latestQuote),
       );
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      if (stopForNewLocalEdits()) return;
       setEmailPreview(response.data || {});
     } catch (error) {
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
@@ -1513,6 +1563,115 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     } finally {
       if (emailPreviewGenerationRef.current === requestGeneration) {
         setEmailPreviewLoading(false);
+      }
+    }
+  };
+
+  const loadEmailPreview = async () => {
+    if (emailSending || emailReconciling || saving || actionInFlight) return;
+    if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
+    await requestEmailPreview();
+  };
+
+  const reviewEmail = async () => {
+    if (!chainedActionsEnabled) {
+      await loadEmailPreview();
+      return;
+    }
+    if (
+      reviewEmailInFlightRef.current
+      || emailSending
+      || emailReconciling
+      || saving
+      || actionInFlight
+      || reviewEmailIssues.length > 0
+    ) return;
+
+    const currentQuote = quoteRef.current || quote;
+    const currentFingerprint = String(
+      currentQuote?.quotation_review_fingerprint || ''
+    );
+    const lineIdsToSave = [...changedLineIds];
+    const draftsAtActionStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
+    if (lineIdsToSave.length && !currentFingerprint) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'Reload the quotation before saving and reviewing its email.',
+      });
+      return;
+    }
+
+    reviewEmailInFlightRef.current = true;
+    const actionGeneration = ++reviewEmailGenerationRef.current;
+    setActionInFlight('Review Email');
+    if (lineIdsToSave.length) setSaving(true);
+    setLineFeedback(null);
+    setErrorInfo(null);
+
+    try {
+      let savedQuote = currentQuote;
+      if (lineIdsToSave.length) {
+        const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
+          quotation_review_fingerprint: currentFingerprint,
+          lines: lineIdsToSave.map((lineId) => ({
+            id: lineId,
+            ...payloadForLine(lineDraftsRef.current[lineId] || {}),
+          })),
+        });
+        if (reviewEmailGenerationRef.current !== actionGeneration) return;
+        savedQuote = response.data?.quotation;
+        if (
+          !savedQuote?.id
+          || String(savedQuote.id) !== String(quote.id)
+          || !savedQuote.quotation_review_fingerprint
+        ) {
+          throw new Error(
+            'The quotation was saved, but the server did not return a current review fingerprint.'
+          );
+        }
+        if (!lineDraftSnapshotMatches(draftsAtActionStart, lineDraftsRef.current)) {
+          mergeSavedQuote(savedQuote, lineIdsToSave, true);
+          setLineFeedback({
+            type: 'warning',
+            message: 'Quotation lines changed while saving. The saved response was applied without discarding your newer edits; click Review Email again after checking them.',
+          });
+          return;
+        }
+        mergeSavedQuote(savedQuote, lineIdsToSave);
+        setLineFeedback({
+          type: 'success',
+          message: `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}. Opening the email review...`,
+        });
+      }
+
+      if (reviewEmailGenerationRef.current !== actionGeneration) return;
+      // A save response is an authoritative locked server snapshot. With no
+      // changes, retain the existing retrieve-and-compare gate before preview.
+      const draftsBeforePreview = snapshotLineDrafts(savedQuote, lineDraftsRef.current);
+      await requestEmailPreview(
+        lineIdsToSave.length ? savedQuote : null,
+        () => lineDraftSnapshotMatches(draftsBeforePreview, lineDraftsRef.current),
+      );
+    } catch (error) {
+      if (reviewEmailGenerationRef.current !== actionGeneration) return;
+      if (replaceStaleQuotationReview(error)) return;
+      const details = await describeQuotationError(
+        error,
+        'Save quotation and review email',
+        `POST /quotations/quotes/${quote.id}/bulk_update_lines/`
+      );
+      if (reviewEmailGenerationRef.current !== actionGeneration) return;
+      setErrorInfo(details);
+      setLineFeedback({
+        type: 'error',
+        message: details.detail || 'The quotation could not be saved. The email preview was not opened.',
+      });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (reviewEmailGenerationRef.current === actionGeneration) {
+        reviewEmailInFlightRef.current = false;
+        setSaving(false);
+        setActionInFlight('');
       }
     }
   };
@@ -2090,7 +2249,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           )}
         </div>
         <div className="qm-action-row">
-          {['draft', 'pending_review', 'approved'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={loadEmailPreview}>Finalize</button>}
+          {['draft', 'pending_review', 'approved'].includes(quote.status) && (
+            <button
+              type="button"
+              className="qm-primary"
+              disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
+              onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
+            >
+              {chainedActionsEnabled
+                ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
+                : 'Finalize'}
+            </button>
+          )}
           {quote.status === 'finalized' && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
           {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
@@ -2357,12 +2527,12 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         </div>
       </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
-      {finalizeIssues.length > 0 && (
+      {primaryEmailActionIssues.length > 0 && (
         <div className="qm-notice">
-          <strong>Finalize is blocked until:</strong>
+          <strong>{chainedActionsEnabled ? 'Review Email is blocked until:' : 'Finalize is blocked until:'}</strong>
           <ul>
-            {finalizeIssues.slice(0, 5).map((issue) => <li key={issue}><button type="button" className="qm-link-button" onClick={() => setLineFilter('active')}>{issue}</button></li>)}
-            {finalizeIssues.length > 5 && <li>{finalizeIssues.length - 5} more issue(s).</li>}
+            {primaryEmailActionIssues.slice(0, 5).map((issue) => <li key={issue}><button type="button" className="qm-link-button" onClick={() => setLineFilter('active')}>{issue}</button></li>)}
+            {primaryEmailActionIssues.length > 5 && <li>{primaryEmailActionIssues.length - 5} more issue(s).</li>}
           </ul>
         </div>
       )}
@@ -2399,7 +2569,16 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             </button>
             <span className="qm-sticky-action-divider" aria-hidden="true" />
             {['draft', 'pending_review', 'approved'].includes(quote.status) && (
-              <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={loadEmailPreview}>Finalize</button>
+              <button
+                type="button"
+                className="qm-primary"
+                disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
+                onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
+              >
+                {chainedActionsEnabled
+                  ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
+                  : 'Finalize'}
+              </button>
             )}
             {!['revised', 'cancelled'].includes(quote.status) && (
               <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>

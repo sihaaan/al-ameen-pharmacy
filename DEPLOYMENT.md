@@ -285,6 +285,29 @@ then enable for a controlled mailbox cohort. Roll back by setting the flag to
 Disabling the flag does not delete approval audit data and does not change any
 Inquiry, Quotation, Product, price, preview, or delivery record.
 
+### Gmail chained review actions (disabled by default)
+
+`QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=0` preserves the separate Gmail row
+save, confirmation, quotation-line save, and email-preview requests. The
+server projects this feature as enabled only when both this setting and
+`QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` are strictly enabled; a partial rollout
+fails closed.
+
+When enabled, the optional chained Gmail save/create contract binds both the
+row save and confirmation to the current source fingerprint, analysis attempt,
+keyed complete reviewed-row fingerprint, and keyed identity-review fingerprint
+while holding the Gmail import lock. A
+stale tuple returns HTTP 409 and performs no mutation. The optional quotation
+line-save contract accepts the current `quotation_review_fingerprint`, checks
+it after locking the quotation and all review dependencies, and serializes the
+new quotation fingerprint before releasing those locks. Neither path
+finalizes a quotation, opens a preview after a failed save, or sends email.
+
+No migration is required. Roll out review UI V2 first, then enable chained
+actions for a controlled cohort. Roll back by setting the chained-actions flag
+to `0`; legacy requests that omit the optional stale bindings retain their
+existing behavior and no database reversal is needed.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

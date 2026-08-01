@@ -25,6 +25,10 @@ const gmailReviewUiV2Enabled = (record) => (
   record?.workflow_features?.gmail_review_ui_v2 === true
 );
 
+const gmailChainedActionsEnabled = (record) => (
+  record?.workflow_features?.gmail_chained_actions === true
+);
+
 const identityReviewState = (record) => {
   const nested = firstDefined(record?.identity_review, record?.analysis?.identity_review, {}) || {};
   const approvalValues = [
@@ -586,6 +590,7 @@ const GmailInquiryReview = ({
   const actionGenerationRef = useRef(0);
   const companyPatchGenerationRef = useRef(0);
   const autoAnalyzeImportRef = useRef('');
+  const chainedActionLockRef = useRef(false);
 
   const applyPayload = useCallback((payload, { preserveSelection = false } = {}) => {
     const incoming = gmailImportRecordFromPayload(payload);
@@ -650,6 +655,7 @@ const GmailInquiryReview = ({
       mountedRef.current = false;
       actionGenerationRef.current += 1;
       companyPatchGenerationRef.current += 1;
+      chainedActionLockRef.current = false;
     };
   }, []);
 
@@ -933,6 +939,7 @@ const GmailInquiryReview = ({
   const recordId = entityId(record);
   const status = importStatus(record || {});
   const gmailReviewUiV2 = gmailReviewUiV2Enabled(record || {});
+  const gmailChainedActions = gmailChainedActionsEnabled(record || {});
   const identityReview = identityReviewState(record || {});
   const messages = useMemo(() => importMessages(record || {}), [record]);
   const messagesById = useMemo(
@@ -1174,16 +1181,33 @@ const GmailInquiryReview = ({
     setReviewDirty(true);
   };
 
-  const saveReviewLines = async () => {
-    if (!recordId || !reviewDirty || busyAction) return;
+  const workflowConcurrencyPayload = (sourceRecord) => ({
+    expected_source_fingerprint: String(sourceRecord?.source_fingerprint || ''),
+    expected_analysis_attempt: firstDefined(sourceRecord?.analysis_attempts, null),
+    identity_review_fingerprint: identityReviewState(sourceRecord || {}).fingerprint,
+    expected_review_rows_fingerprint: String(sourceRecord?.review_rows_fingerprint || ''),
+  });
+
+  const completeWorkflowConcurrencyPayload = (payload) => Boolean(
+    payload.expected_source_fingerprint
+    && payload.expected_analysis_attempt !== null
+    && payload.expected_analysis_attempt !== undefined
+    && payload.identity_review_fingerprint
+    && payload.expected_review_rows_fingerprint
+  );
+
+  const persistDirtyReviewLines = async ({ actionGeneration, announce = true }) => {
+    if (!reviewDirty) return recordRef.current;
     if (invalidIncludedLines.length) {
       setNotice({
         type: 'warning',
         message: 'Every included row needs an item name, a quantity above zero, and a unit before it can be saved.',
       });
-      return;
+      return null;
     }
-    const reviewUiV2 = gmailReviewUiV2Enabled(recordRef.current || {});
+    const sourceRecord = recordRef.current || {};
+    const reviewUiV2 = gmailReviewUiV2Enabled(sourceRecord);
+    const chainedActions = gmailChainedActionsEnabled(sourceRecord);
     const linesToSave = reviewUiV2
       ? reviewLines.filter((line, index) => (
         dirtyReviewRowKeys.has(reviewRowKey(line))
@@ -1196,34 +1220,57 @@ const GmailInquiryReview = ({
         type: 'error',
         message: 'These rows do not yet have stable review keys. Import the email again from Gmail, then try again.',
       });
-      return;
+      return null;
     }
+    const payload = {
+      review_lines: linesToSave.map((line) => ({
+        row_key: reviewRowKey(line),
+        raw_name: String(line.raw_name || '').trim(),
+        quantity: line.quantity === '' || line.quantity === null ? null : line.quantity,
+        unit: String(line.unit || '').trim(),
+        included: Boolean(line.included),
+        ...(reviewUiV2 ? { reviewed: Boolean(line.staff_reviewed) } : {}),
+      })),
+    };
+    if (chainedActions) {
+      const concurrency = workflowConcurrencyPayload(sourceRecord);
+      if (!completeWorkflowConcurrencyPayload(concurrency)) {
+        setNotice({
+          type: 'error',
+          message: 'This review is missing current safety fingerprints. Refresh the Gmail inquiry before continuing.',
+        });
+        return null;
+      }
+      Object.assign(payload, concurrency);
+    }
+    const response = await quotationAPI.gmailInquiryImports.update(recordId, payload);
+    if (!actionIsCurrent(actionGeneration)) return null;
+    const incoming = applyPayload(response.data, { preserveSelection: true });
+    const effectiveImportId = entityId(incoming) || recordId;
+    const authoritativeRecord = recordRef.current || incoming;
+    setReviewLines(normalizeReviewLines(authoritativeRecord));
+    setReviewDirty(false);
+    setDirtyReviewRowKeys(new Set());
+    if (String(effectiveImportId) !== String(recordId)) onClaimed?.(effectiveImportId);
+    if (announce) {
+      setNotice({
+        type: 'success',
+        message: 'Reviewed Gmail inquiry rows were saved.',
+      });
+    }
+    return authoritativeRecord;
+  };
+
+  const saveReviewLines = async () => {
+    if (!recordId || !reviewDirty || busyAction || chainedActionLockRef.current) return;
+    const useSynchronousLock = gmailChainedActionsEnabled(recordRef.current || {});
+    if (useSynchronousLock) chainedActionLockRef.current = true;
     const actionGeneration = ++actionGenerationRef.current;
     setBusyAction('review-lines');
     setErrorInfo(null);
     setNotice(null);
     try {
-      const response = await quotationAPI.gmailInquiryImports.update(recordId, {
-        review_lines: linesToSave.map((line) => ({
-          row_key: reviewRowKey(line),
-          raw_name: String(line.raw_name || '').trim(),
-          quantity: line.quantity === '' || line.quantity === null ? null : line.quantity,
-          unit: String(line.unit || '').trim(),
-          included: Boolean(line.included),
-          ...(reviewUiV2 ? { reviewed: Boolean(line.staff_reviewed) } : {}),
-        })),
-      });
-      if (!actionIsCurrent(actionGeneration)) return;
-      const incoming = applyPayload(response.data, { preserveSelection: true });
-      const effectiveImportId = entityId(incoming) || recordId;
-      setReviewLines(normalizeReviewLines(recordRef.current || incoming));
-      setReviewDirty(false);
-      setDirtyReviewRowKeys(new Set());
-      if (String(effectiveImportId) !== String(recordId)) onClaimed?.(effectiveImportId);
-      setNotice({
-        type: 'success',
-        message: 'Reviewed Gmail inquiry rows were saved.',
-      });
+      await persistDirtyReviewLines({ actionGeneration });
     } catch (error) {
       if (actionIsCurrent(actionGeneration)) {
         await handleError(
@@ -1233,6 +1280,7 @@ const GmailInquiryReview = ({
         );
       }
     } finally {
+      if (useSynchronousLock) chainedActionLockRef.current = false;
       if (actionIsCurrent(actionGeneration)) setBusyAction('');
     }
   };
@@ -1403,6 +1451,105 @@ const GmailInquiryReview = ({
     }
   };
 
+  const confirmAuthoritativeImport = async (authoritativeRecord, actionGeneration) => {
+    if (!authoritativeRecord || !actionIsCurrent(actionGeneration)) return null;
+    const authoritativeImportId = entityId(authoritativeRecord) || recordId;
+    const authoritativeCompanyId = String(entityId(firstDefined(
+      authoritativeRecord.selected_company,
+      authoritativeRecord.company,
+      authoritativeRecord.company_id,
+      ''
+    )) || '');
+    const authoritativeContactId = String(entityId(firstDefined(
+      authoritativeRecord.selected_contact,
+      authoritativeRecord.contact,
+      authoritativeRecord.contact_id,
+      ''
+    )) || '');
+    const concurrency = workflowConcurrencyPayload(authoritativeRecord);
+    if (
+      !authoritativeImportId
+      || !authoritativeCompanyId
+      || !completeWorkflowConcurrencyPayload(concurrency)
+      || (
+        gmailReviewUiV2Enabled(authoritativeRecord)
+        && !identityReviewState(authoritativeRecord).approved
+      )
+    ) {
+      setNotice({
+        type: 'error',
+        message: 'The saved review is no longer current. Refresh it and approve the customer company again.',
+      });
+      return null;
+    }
+    const authoritativeLines = normalizeReviewLines(authoritativeRecord);
+    const includedSourceKeys = authoritativeLines
+      .filter((line) => line.included)
+      .flatMap(sourceKeysForLine)
+      .filter((key, index, values) => key && values.indexOf(key) === index);
+    const payload = {
+      company: authoritativeCompanyId,
+      contact: authoritativeContactId || null,
+      ...concurrency,
+    };
+    if (includedSourceKeys.length) payload.selected_source_keys = includedSourceKeys;
+    if (!actionIsCurrent(actionGeneration)) return null;
+    const response = await quotationAPI.gmailInquiryImports.confirm(
+      authoritativeImportId,
+      payload
+    );
+    if (!actionIsCurrent(actionGeneration)) return null;
+    applyPayload(response.data);
+    const exactQuoteId = quotationIdFromGmailImportPayload(response.data);
+    if (!exactQuoteId) {
+      throw new Error('The Gmail inquiry was confirmed, but the backend did not return its quotation ID.');
+    }
+    if (!actionIsCurrent(actionGeneration)) return null;
+    onOpenQuote?.(exactQuoteId);
+    return response.data;
+  };
+
+  const saveReviewAndCreateQuotation = async () => {
+    if (
+      !recordId
+      || busyAction
+      || analysisActive
+      || chainedActionLockRef.current
+    ) return;
+    chainedActionLockRef.current = true;
+    const actionGeneration = ++actionGenerationRef.current;
+    let endpoint = `POST /quotations/gmail-inquiry-imports/${recordId}/confirm/`;
+    setBusyAction('save-create');
+    setErrorInfo(null);
+    setNotice(null);
+    try {
+      let authoritativeRecord = recordRef.current;
+      if (reviewDirty) {
+        endpoint = `PATCH /quotations/gmail-inquiry-imports/${recordId}/`;
+        authoritativeRecord = await persistDirtyReviewLines({
+          actionGeneration,
+          announce: false,
+        });
+      }
+      if (!authoritativeRecord || !actionIsCurrent(actionGeneration)) return;
+      endpoint = `POST /quotations/gmail-inquiry-imports/${entityId(authoritativeRecord) || recordId}/confirm/`;
+      await confirmAuthoritativeImport(authoritativeRecord, actionGeneration);
+    } catch (error) {
+      if (actionIsCurrent(actionGeneration)) {
+        await handleError(
+          error,
+          reviewDirty
+            ? 'Save Gmail review and create quotation'
+            : 'Create quotation from Gmail review',
+          endpoint
+        );
+      }
+    } finally {
+      chainedActionLockRef.current = false;
+      if (actionIsCurrent(actionGeneration)) setBusyAction('');
+    }
+  };
+
   const usableLines = reviewLines.filter((line) => line.included);
   const invalidIncludedLines = reviewLines.filter(reviewLineInvalid);
   const uncertainIncludedLines = reviewLines.filter(reviewLineUncertain);
@@ -1476,7 +1623,7 @@ const GmailInquiryReview = ({
   const confirmDisabled = Boolean(
     busyAction
     || analysisActive
-    || reviewDirty
+    || (reviewDirty && !gmailChainedActions)
     || !companyId
     || !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
     || !messageSelectionValid
@@ -2054,12 +2201,25 @@ const GmailInquiryReview = ({
             <p>The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.</p>
             <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
           </div>
-          <button type="button" className="qm-primary" disabled={confirmDisabled} onClick={confirmImport}>
-            {busyAction === 'confirm' ? 'Creating quotation...' : 'Confirm & Open Quotation'}
+          <button
+            type="button"
+            className="qm-primary"
+            disabled={confirmDisabled}
+            onClick={gmailChainedActions ? saveReviewAndCreateQuotation : confirmImport}
+          >
+            {busyAction === 'save-create'
+              ? 'Saving review & creating quotation...'
+              : busyAction === 'confirm'
+                ? 'Creating quotation...'
+                : gmailChainedActions && reviewDirty
+                  ? 'Save Review & Create Quotation'
+                  : gmailChainedActions
+                    ? 'Create Quotation'
+                    : 'Confirm & Open Quotation'}
           </button>
           {confirmDisabled && (
             <small>
-              {reviewDirty
+              {reviewDirty && !gmailChainedActions
                 ? 'Save the reviewed rows before confirming.'
                   : invalidIncludedLines.length
                     ? 'Correct or exclude every invalid row first.'

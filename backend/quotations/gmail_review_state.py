@@ -11,6 +11,8 @@ GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v4"
 GMAIL_IDENTITY_REVIEW_FINGERPRINT_SALT = (
     "quotations.gmail_identity_review_fingerprint.v1"
 )
+GMAIL_REVIEW_ROWS_FINGERPRINT_CONTRACT = "gmail_review_rows_v1"
+GMAIL_REVIEW_ROWS_FINGERPRINT_SALT = "quotations.gmail_review_rows_fingerprint.v1"
 TRUSTED_PHYSICAL_IDENTITY_SIGNALS = frozenset(
     {
         "exact_contact_email",
@@ -90,6 +92,38 @@ def gmail_identity_evidence_fingerprint(gmail_import):
     )
     return salted_hmac(
         GMAIL_IDENTITY_REVIEW_FINGERPRINT_SALT,
+        encoded,
+        algorithm="sha256",
+    ).hexdigest()
+
+
+def gmail_review_rows_fingerprint(gmail_import):
+    """Key the complete server-owned row state used by confirmation.
+
+    The digest deliberately covers the full ordered preview-line dictionaries,
+    rather than a client-selected subset, so additions, exclusions, review
+    decisions, matches, evidence keys, quantities, units, or any future
+    confirm-relevant line field invalidate an older chained request. Source and
+    analysis-attempt bindings remain explicit fields in the API contract.
+    """
+
+    preview = dict((gmail_import.analysis or {}).get("preview") or {})
+    lines = preview.get("lines") or []
+    if not isinstance(lines, list):
+        lines = []
+    encoded = json.dumps(
+        {
+            "contract": GMAIL_REVIEW_ROWS_FINGERPRINT_CONTRACT,
+            "gmail_import_id": gmail_import.pk,
+            "lines": lines,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return salted_hmac(
+        GMAIL_REVIEW_ROWS_FINGERPRINT_SALT,
         encoded,
         algorithm="sha256",
     ).hexdigest()

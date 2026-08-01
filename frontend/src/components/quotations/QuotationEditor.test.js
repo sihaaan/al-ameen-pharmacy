@@ -89,6 +89,14 @@ const readyQuote = {
   }],
 };
 
+const withGmailChainedActions = (sourceQuote = readyQuote) => ({
+  ...sourceQuote,
+  workflow_features: {
+    ...(sourceQuote.workflow_features || {}),
+    gmail_chained_actions: true,
+  },
+});
+
 const priceContext = (product, productName, price) => ({
   product,
   product_name: productName,
@@ -402,6 +410,234 @@ describe('QuotationEditor Product price context', () => {
     }));
     expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+  });
+
+  test('keeps the existing Finalize action unless the strict server flag is true', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...readyQuote,
+        workflow_features: { gmail_chained_actions: 'true' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect((await screen.findAllByRole('button', { name: 'Finalize' })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
+  });
+
+  test('saves only changed lines once and previews the authoritative returned fingerprint', async () => {
+    const initialQuote = withGmailChainedActions({
+      ...readyQuote,
+      subtotal: '30.00',
+      total: '30.00',
+      lines: [
+        readyQuote.lines[0],
+        {
+          ...readyQuote.lines[0],
+          id: 32,
+          sort_order: 1,
+          product: 12,
+          product_name: 'Gloves B',
+          item_name_snapshot: 'Imported masks',
+          unit_price: '20.00',
+        },
+      ],
+    });
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      subtotal: '32.00',
+      total: '32.00',
+      lines: [
+        { ...initialQuote.lines[0], unit_price: '12.00' },
+        initialQuote.lines[1],
+      ],
+    };
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    const reviewButton = (await screen.findAllByRole('button', { name: 'Review Email' }))[0];
+    fireEvent.click(reviewButton);
+    fireEvent.click(reviewButton);
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      lines: [expect.objectContaining({
+        id: 31,
+        product: 11,
+        item_name_snapshot: 'Imported gloves',
+        quantity: '1.000',
+        unit: 'box',
+        unit_price: '12',
+        vat_rate: '0',
+        match_status: 'confirmed',
+      })],
+    }));
+    expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+
+    await act(async () => {
+      saveRequest.resolve({ data: { quotation: savedQuote } });
+      await saveRequest.promise;
+    });
+
+    await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('preserves edits made during a chained save and requires a fresh review action', async () => {
+    const initialQuote = withGmailChainedActions();
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      subtotal: '12.00',
+      total: '12.00',
+      lines: [{ ...initialQuote.lines[0], unit_price: '12.00' }],
+    };
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    fireEvent.change(priceInput, { target: { value: '12' } });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(priceInput, { target: { value: '13' } });
+    await act(async () => {
+      saveRequest.resolve({ data: { quotation: savedQuote } });
+      await saveRequest.promise;
+    });
+
+    expect(await screen.findByText(/saved response was applied without discarding your newer edits/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(13);
+    expect(screen.getByText('1 unsaved line change(s)')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+  });
+
+  test('discards a chained preview response when lines change while it is loading', async () => {
+    const initialQuote = withGmailChainedActions();
+    const previewRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: initialQuote });
+    quotationAPI.quotes.emailPreview.mockReturnValueOnce(previewRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+    await waitFor(() => expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), {
+      target: { value: '13' },
+    });
+    await act(async () => {
+      previewRequest.resolve({ data: {} });
+      await previewRequest.promise;
+    });
+
+    expect(await screen.findByText(/lines changed while the email review was being prepared/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('does not open an email preview when the chained line save fails', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: { detail: 'The quotation line could not be saved.' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+
+    await waitFor(() => expect(screen.getAllByText('The quotation line could not be saved.').length).toBeGreaterThan(0));
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('refreshes stale chained saves without opening an email preview', async () => {
+    const staleQuote = {
+      ...withGmailChainedActions(),
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...readyQuote.lines[0],
+        item_name_snapshot: 'Changed by another employee',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed in another session.',
+          quote: staleQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+
+    expect(await screen.findByText('The quotation changed in another session.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+  });
+
+  test('does not preview a chained action that finishes saving after unmount', async () => {
+    const saveRequest = deferred();
+    const initialQuote = withGmailChainedActions();
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{ ...initialQuote.lines[0], unit_price: '12.00' }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    const { unmount } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+    unmount();
+
+    await act(async () => {
+      saveRequest.resolve({ data: { quotation: savedQuote } });
+      await saveRequest.promise;
+    });
+
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
   });
 
   test('refreshes a remotely changed quotation and requires a second explicit preview action', async () => {

@@ -10,7 +10,7 @@ import GmailInquiryReview, {
   gmailImportRecordFromPayload,
   quotationIdFromGmailImportPayload,
 } from './GmailInquiryReview';
-import quotationAPI from '../../api/quotations';
+import quotationAPI, { describeQuotationError } from '../../api/quotations';
 
 jest.mock('../../api/quotations', () => ({
   __esModule: true,
@@ -187,6 +187,30 @@ const reviewedRecord = {
     },
   },
 };
+
+const CHAIN_SOURCE_BEFORE = 'a'.repeat(64);
+const CHAIN_SOURCE_AFTER = 'b'.repeat(64);
+const CHAIN_IDENTITY_BEFORE = 'c'.repeat(64);
+const CHAIN_IDENTITY_AFTER = 'd'.repeat(64);
+const CHAIN_ROWS_BEFORE = 'e'.repeat(64);
+const CHAIN_ROWS_AFTER = 'f'.repeat(64);
+
+const chainedRecord = (source = reviewedRecord, overrides = {}) => ({
+  ...source,
+  company: 7,
+  contact: null,
+  source_fingerprint: CHAIN_SOURCE_BEFORE,
+  analysis_attempts: 2,
+  review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+  workflow_features: {
+    ...(source.workflow_features || {}),
+    gmail_review_ui_v2: true,
+    gmail_chained_actions: true,
+  },
+  identity_review_approved: true,
+  identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+  ...overrides,
+});
 
 describe('GmailInquiryReview', () => {
   beforeEach(() => {
@@ -1358,5 +1382,277 @@ describe('GmailInquiryReview', () => {
       suggested: false,
       identity_review_fingerprint: 'identity-fingerprint-conflict',
     }));
+  });
+
+  test('saves dirty review rows then creates from the authoritative returned fingerprints', async () => {
+    const onOpenQuote = jest.fn();
+    const initialRecord = chainedRecord(baseRecord);
+    const savedRecord = chainedRecord(initialRecord, {
+      source_fingerprint: CHAIN_SOURCE_AFTER,
+      analysis_attempts: 3,
+      identity_review_fingerprint: CHAIN_IDENTITY_AFTER,
+      review_rows_fingerprint: CHAIN_ROWS_AFTER,
+      analysis: {
+        ...initialRecord.analysis,
+        preview: {
+          ...initialRecord.analysis.preview,
+          lines: [{
+            ...initialRecord.analysis.preview.lines[0],
+            raw_name: 'Sterile Bandage',
+            reviewed_by_user: true,
+          }],
+        },
+      },
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: initialRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: savedRecord });
+    quotationAPI.gmailInquiryImports.confirm.mockResolvedValueOnce({
+      data: {
+        ...savedRecord,
+        status: 'confirmed',
+        quotation_id: 99,
+      },
+    });
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    const chainedButton = screen.getByRole('button', {
+      name: 'Save Review & Create Quotation',
+    });
+    expect(chainedButton).toBeEnabled();
+    fireEvent.click(chainedButton);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      review_lines: [{
+        row_key: 'row-key-000000000001',
+        raw_name: 'Sterile Bandage',
+        quantity: '10.000',
+        unit: 'Pcs',
+        included: true,
+        reviewed: true,
+      }],
+      expected_source_fingerprint: CHAIN_SOURCE_BEFORE,
+      expected_analysis_attempt: 2,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+    }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      expected_source_fingerprint: CHAIN_SOURCE_AFTER,
+      expected_analysis_attempt: 3,
+      identity_review_fingerprint: CHAIN_IDENTITY_AFTER,
+      expected_review_rows_fingerprint: CHAIN_ROWS_AFTER,
+      selected_source_keys: ['attachment:opaque-1'],
+    }));
+    expect(onOpenQuote).toHaveBeenCalledWith(99);
+  });
+
+  test('skips the review PATCH when the chained review is already clean', async () => {
+    const onOpenQuote = jest.fn();
+    const cleanRecord = chainedRecord(reviewedRecord);
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: cleanRecord });
+    quotationAPI.gmailInquiryImports.confirm.mockResolvedValueOnce({
+      data: { ...cleanRecord, status: 'confirmed', quotation_id: 99 },
+    });
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      expected_source_fingerprint: CHAIN_SOURCE_BEFORE,
+      expected_analysis_attempt: 2,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+      selected_source_keys: ['attachment:opaque-1'],
+    }));
+    expect(quotationAPI.gmailInquiryImports.update).not.toHaveBeenCalled();
+    expect(onOpenQuote).toHaveBeenCalledWith(99);
+  });
+
+  test('fails closed before saving when the current review-row fingerprint is missing', async () => {
+    const initialRecord = chainedRecord(baseRecord, {
+      review_rows_fingerprint: '',
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: initialRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Save Review & Create Quotation',
+    }));
+
+    expect(await screen.findByText(/missing current safety fingerprints/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.update).not.toHaveBeenCalled();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+  });
+
+  test('does not confirm when an authoritative save response omits its new review-row fingerprint', async () => {
+    const initialRecord = chainedRecord(baseRecord);
+    const incompleteSavedRecord = chainedRecord(reviewedRecord, {
+      source_fingerprint: CHAIN_SOURCE_AFTER,
+      analysis_attempts: 3,
+      identity_review_fingerprint: CHAIN_IDENTITY_AFTER,
+      review_rows_fingerprint: '',
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: initialRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: incompleteSavedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Save Review & Create Quotation',
+    }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/saved review is no longer current/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+  });
+
+  test('does not confirm a clean review when its review-row fingerprint is missing', async () => {
+    const cleanRecord = chainedRecord(reviewedRecord, {
+      review_rows_fingerprint: null,
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: cleanRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Quotation' }));
+
+    expect(await screen.findByText(/saved review is no longer current/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.update).not.toHaveBeenCalled();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+  });
+
+  test('does not confirm or navigate when the chained review save is stale', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const onOpenQuote = jest.fn();
+    const initialRecord = chainedRecord(baseRecord);
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: initialRecord });
+    quotationAPI.gmailInquiryImports.update.mockRejectedValueOnce(
+      Object.assign(new Error('The Gmail review changed.'), {
+        response: { status: 409 },
+      })
+    );
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Save Review & Create Quotation',
+    }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledTimes(1));
+    expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, expect.objectContaining({
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+    }));
+    await waitFor(() => expect(describeQuotationError).toHaveBeenCalledWith(
+      expect.objectContaining({ response: { status: 409 } }),
+      'Save Gmail review and create quotation',
+      'PATCH /quotations/gmail-inquiry-imports/31/'
+    ));
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+    expect(onOpenQuote).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('does not navigate when confirmation rejects a stale review-row fingerprint', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const onOpenQuote = jest.fn();
+    const cleanRecord = chainedRecord(reviewedRecord);
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: cleanRecord });
+    quotationAPI.gmailInquiryImports.confirm.mockRejectedValueOnce(
+      Object.assign(new Error('The reviewed rows changed.'), {
+        response: {
+          status: 409,
+          data: { code: 'stale_review_rows' },
+        },
+      })
+    );
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Quotation' }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(
+      31,
+      expect.objectContaining({
+        expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+      })
+    ));
+    await waitFor(() => expect(describeQuotationError).toHaveBeenCalledWith(
+      expect.objectContaining({ response: expect.objectContaining({ status: 409 }) }),
+      'Create quotation from Gmail review',
+      'POST /quotations/gmail-inquiry-imports/31/confirm/'
+    ));
+    expect(quotationAPI.gmailInquiryImports.update).not.toHaveBeenCalled();
+    expect(onOpenQuote).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('a synchronous double click starts only one chained save and one confirmation', async () => {
+    const initialRecord = chainedRecord(baseRecord);
+    const savedRecord = chainedRecord(reviewedRecord);
+    let resolveSave;
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: initialRecord });
+    quotationAPI.gmailInquiryImports.update.mockReturnValueOnce(new Promise((resolve) => {
+      resolveSave = resolve;
+    }));
+    quotationAPI.gmailInquiryImports.confirm.mockResolvedValueOnce({
+      data: { ...savedRecord, status: 'confirmed', quotation_id: 99 },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    const button = screen.getByRole('button', { name: 'Save Review & Create Quotation' });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveSave({ data: savedRecord });
+    });
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledTimes(1));
+  });
+
+  test('does not continue a chained action after the review unmounts', async () => {
+    const initialRecord = chainedRecord(baseRecord);
+    let resolveSave;
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: initialRecord });
+    quotationAPI.gmailInquiryImports.update.mockReturnValueOnce(new Promise((resolve) => {
+      resolveSave = resolve;
+    }));
+
+    const { unmount } = render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Save Review & Create Quotation',
+    }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => {
+      resolveSave({ data: chainedRecord(reviewedRecord) });
+    });
+
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
   });
 });
