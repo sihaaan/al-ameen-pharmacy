@@ -8,6 +8,34 @@
   headers, send idempotency, ambiguous-send lockout, and reconciliation-only
   behavior must remain intact.
 
+## Task-to-commit ledger
+
+This ledger is reconciled against the branch's actual first-parent history.
+Hashes are complete rather than display abbreviations.
+
+| Task | Commit | Subject |
+|---|---|---|
+| 1.1 | `01d47c21ab669d1a1e8d9951405844314040378b` | `test: add PostgreSQL quotation concurrency coverage` |
+| 1.2 | `70932b675000d634cfddf088e0d87e1f5af6ec63` | `fix: serialize quotation mutations on PostgreSQL` |
+| 1.3 | `1f230de414c37492f3f2030f162d48590154f059` | `fix: harden Gmail delivery reconciliation` |
+| 1.4 | `d29a6f3832008c0a2cfc14af8114280ed30b4008` | `feat: add AI intake observability` |
+| 1.5 | `a6548aa41fd30950ab113838919d57f915222037` | `fix: bind AI cache hits to current uploads` |
+| 1.6 | `d88b76750d42db50f13c77e9a0a74f8361c39aa1` | `test: add synthetic quotation intake evaluation` |
+| 1.7 | `dcb2b96e4715d1dee2e707851886c4e8dc8aaf2b` | `docs: correct quotation operations guidance` |
+| 1.8 | `801d045306a267750ae754245ff086a2d09a1374` | `fix: protect admin audit history` |
+| 2.1 | `644a7c5c4ccfab7fed11a11f4b1c48b104fdb8fd` | `fix: reject stale quotation email previews` |
+| 2.2 | `5f4bc6e9460d915ef8279b2d38f2605f25faf56a` | `feat: freeze quotation email delivery attempts` |
+| 2.3 | `fc4c77cf8d57eebdf86cdc5147ec995def47a9c6` | `feat: abstract private quotation evidence storage` |
+| 2.4 | `f9a583568feed632d1366ba2387c1045c44dd45e` | `fix: harden quotation attachment parsing` |
+| 2.5 | `d80c557ac508ce7b428fd8c0c101906e1a158e73` | `fix: harden forwarded Gmail identity` |
+| 2.6 | `3da9b5c23cb5d24d697799f53077584659f4169d` | `perf: bind Gmail semantic reuse to source contract` |
+| 2.7 | `7bc70549861d3b1ce95f2ac171b7c304057c3d26` | `fix: guard shared Gmail credential ownership` |
+| 2.8 | `6f4fdfae77b93cfc1723d89ae049e0bc468900de` | `fix: guard deployment migrations and database interruptions` |
+| Phase 1/2 finalization | `f1b37f93ba19d4e1ec89c70d6c255d25ec6b0489` | `docs: finalize technical hardening progress` |
+| Release remediation 1 | `619d99b177f4d32bd47b6debe9df6c721495ea16` | `fix: preserve PO import metadata default` |
+| Release remediation 2 | `7f42cd3ba5c041a4409bf90e77062d9c414e16b0` | `fix: validate internal login redirects` |
+| Release remediation 3 | `edf4dd102b7a71601db762813160ae62670a1e46` | `chore: remediate frontend dependency risks` |
+
 ## Phase 1
 
 ### 1.1 — Production-equivalent PostgreSQL concurrency tests
@@ -494,7 +522,8 @@
 ### 2.1 — Reject sends from stale quotation-email previews
 
 - Status: completed.
-- Commit: `644a7c5` (`fix: reject stale quotation email previews`).
+- Commit: `644a7c5c4ccfab7fed11a11f4b1c48b104fdb8fd`
+  (`fix: reject stale quotation email previews`).
 - Files changed:
   - `backend/quotations/quotation_email_delivery.py`
   - `backend/quotations/pdf.py`
@@ -631,7 +660,8 @@
 ### 2.2 — Freeze outbound snapshots and preserve provider-attempt history
 
 - Status: completed in the branch; production migration/deployment not performed.
-- Commit: this task checkpoint (`feat: freeze quotation email delivery attempts`).
+- Commit: `5f4bc6e9460d915ef8279b2d38f2605f25faf56a`
+  (`feat: freeze quotation email delivery attempts`).
 - Files changed:
   - `backend/quotations/models.py`
   - `backend/quotations/quotation_email_delivery.py`
@@ -767,7 +797,8 @@
 - Status: completed in code; live durable-provider configuration is explicitly
   deferred because the repository has no approved provider package, bucket,
   credentials, volume, residency decision, or backup/restore evidence.
-- Commit: this task checkpoint (`feat: abstract private quotation evidence storage`).
+- Commit: `fc4c77cf8d57eebdf86cdc5147ec995def47a9c6`
+  (`feat: abstract private quotation evidence storage`).
 - Finding verified:
   - All application-managed quotation-source writes already converged on
     `store_import_source`, and all rereads used `read_private_ref`, but those
@@ -876,7 +907,8 @@
 ### 2.4 — Harden attachment checks and spreadsheet fidelity
 
 - Status: completed in code; not deployed.
-- Commit: this task checkpoint (`fix: harden quotation attachment parsing`).
+- Commit: `f9a583568feed632d1366ba2387c1045c44dd45e`
+  (`fix: harden quotation attachment parsing`).
 - Finding verified:
   - Supported Office uploads were checked mainly by filename/signature before
     openpyxl/calamine, so archive expansion, unsafe/duplicate package members,
@@ -1017,11 +1049,15 @@
   - `python manage.py check`, `python manage.py makemigrations --check --dry-run`,
     `python -m compileall -q api quotations pharmacy_api`, and
     `git diff --check` — passed (line-ending notices only where noted by Git).
-- Migration: `0036_quotationoutcomepoimport_parsed_meta` adds one
-  empty-default JSON field to `QuotationOutcomePOImport`; it deletes no record
-  and has no customer-content backfill. It must run before Task 2.4 code. Once
-  structured evidence exists, reversing it would delete that evidence, so keep
-  the column and prefer a forward fix.
+- Migration: `0036_quotationoutcomepoimport_parsed_meta` adds one JSON field to
+  `QuotationOutcomePOImport` with both independent Python `{}` values and a
+  persistent database `{}` default for old-application INSERT compatibility;
+  it deletes no record and has no customer-content backfill. Forward-only
+  `0038_ensure_po_import_parsed_meta_db_default` repairs a target that may have
+  recorded the original `0036` without retaining that database default. These
+  must run before Task 2.4 code. Once structured evidence exists, reversing
+  `0036` would delete that evidence, so retain the column/default and prefer a
+  forward fix.
 - API/frontend changes: no endpoint or request shape changed. The outcome-PO
   serializer adds the read-only `parsed_meta` response field. Preview, Gmail
   manifest/evidence, price-reference, and historical responses gain additive
@@ -1059,7 +1095,8 @@
 ### 2.5 — Preserve forwarded RFQs and canonicalize matching identities
 
 - Status: completed in code; not deployed.
-- Commit: this task checkpoint (`fix: harden forwarded Gmail identity`).
+- Commit: `d80c557ac508ce7b428fd8c0c101906e1a158e73`
+  (`fix: harden forwarded Gmail identity`).
 - Finding verified:
   - Gmail fetch removed valid forwarded RFQ text/HTML, while permissive edge
     cases could duplicate or retain nested Outlook reply history.
@@ -1199,7 +1236,8 @@
 ### 2.6 — Bind Gmail semantic reuse to the complete source contract
 
 - Status: completed in code; not deployed.
-- Commit: this task checkpoint (`perf: bind Gmail semantic reuse to source contract`).
+- Commit: `3da9b5c23cb5d24d697799f53077584659f4169d`
+  (`perf: bind Gmail semantic reuse to source contract`).
 - Finding verified:
   - Gmail analysis could reuse an unreviewed result based only on the pipeline
     version, without proving that content, mailbox, selected messages,
@@ -1282,7 +1320,8 @@
 
 - Status: completed in code behind a disabled-by-default rollout flag; not
   enabled or deployed.
-- Commit: this task checkpoint (`fix: guard shared Gmail credential ownership`).
+- Commit: `7bc70549861d3b1ce95f2ac171b7c304057c3d26`
+  (`fix: guard shared Gmail credential ownership`).
 - Finding verified:
   - Google-signed add-on requests already required the configured shared
     mailbox, but website OAuth/manual Gmail operations could designate or use a
@@ -1416,8 +1455,8 @@
 - Status: completed and tested on the branch; repository configuration is
   prepared but no Railway setting, credential, production migration, or
   deployment was changed.
-- Commit: `6f4fdfa` (`fix: guard deployment migrations and database
-  interruptions`).
+- Commit: `6f4fdfae77b93cfc1723d89ae049e0bc468900de`
+  (`fix: guard deployment migrations and database interruptions`).
 - Files changed:
   - `backend/railway.json`
   - `backend/run_deploy_migrations.py`
@@ -1502,9 +1541,10 @@
     Railway variable-boundary findings were fixed; final focused and broad
     suites passed with no remaining critical/high-severity issue.
 - Migration: none added by Task 2.8. Against the dated deployed baseline, the
-  complete branch is expected to include existing migrations `0035`, `0036`,
-  and `0037`; the operator must verify the current live plan and a recovery
-  point before activation. No production migration was run.
+  complete remediated branch is expected to include migrations `0035`, `0036`,
+  `0037`, and the forward compatibility repair `0038`; the operator must verify
+  the current live plan and a recovery point before activation. No production
+  migration was run.
 - API/frontend changes: no endpoint, OAuth scope, AI model/prompt/schema, or
   frontend contract changed. Unexpected exact database interruptions now
   receive additive generic HTTP 503 classification instead of the generic 500;
