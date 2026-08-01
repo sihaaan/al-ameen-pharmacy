@@ -35,6 +35,8 @@ jobs:
         run: python manage.py check
       - name: Run documentation contract tests
         run: python manage.py test quotations.test_documentation_contract --keepdb
+      - name: Build static asset manifest
+        run: python manage.py collectstatic --noinput
       - name: Run full SQLite backend suite
         run: python manage.py test --keepdb
 
