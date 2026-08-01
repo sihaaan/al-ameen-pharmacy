@@ -308,6 +308,19 @@ actions for a controlled cohort. Roll back by setting the chained-actions flag
 to `0`; legacy requests that omit the optional stale bindings retain their
 existing behavior and no database reversal is needed.
 
+### Quotation editor progressive loading (disabled by default)
+
+`QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED=0` preserves the existing quotation
+editor rendering path. When strictly enabled, the server projects
+`quotation_editor_progressive_load=true` in the existing quotation workflow
+feature object so the editor can progressively reveal already-fetched content.
+The flag does not add an API endpoint or change quotation data, validation,
+pricing, PDF output, finalization, preview, or email delivery behavior.
+
+This flag is independent of both Gmail review feature flags. No migration is
+required. Roll back immediately by setting it to `0`; there is no stored data
+or schema change to reverse.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

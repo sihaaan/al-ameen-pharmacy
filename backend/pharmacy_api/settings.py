@@ -394,6 +394,12 @@ QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED = env_bool(
     "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
     False,
 )
+# Optional quotation-editor progressive rendering. This controls presentation
+# only; no quotation write, validation, or delivery behavior depends on it.
+QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED = env_bool(
+    "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

@@ -6,6 +6,9 @@ from django.conf import settings
 WORKFLOW_FEATURE_SETTINGS = {
     "gmail_review_ui_v2": "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
     "gmail_chained_actions": "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
+    "quotation_editor_progressive_load": (
+        "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED"
+    ),
 }
 
 

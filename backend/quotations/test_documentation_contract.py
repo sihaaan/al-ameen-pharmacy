@@ -203,6 +203,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
             "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
             "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
+            "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -252,6 +253,16 @@ class DocumentationContractTests(SimpleTestCase):
                 self.assertIn("no migration", content.lower())
         self.assertIn("Neither path\nfinalizes a quotation", deployment)
         self.assertIn("or sends email", deployment)
+
+    def test_quotation_editor_progressive_load_is_documented_as_optional(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no migration", content.lower())
+        self.assertIn("change quotation data", deployment)
+        self.assertIn("independently", operations)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

@@ -3512,6 +3512,50 @@
   word-break: break-word;
 }
 
+.qm-supporting-data-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.qm-supporting-data-status > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.qm-supporting-data-item {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
+  font-weight: 700;
+}
+
+.qm-supporting-data-item.error {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.qm-supporting-panel-loading p {
+  margin: 5px 0 0;
+  color: #64748b;
+}
+
+@media (max-width: 760px) {
+  .qm-supporting-data-status {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .qm-inline-feedback {
   grid-column: 1 / -1;
   margin-top: 8px;

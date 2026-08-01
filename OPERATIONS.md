@@ -91,6 +91,19 @@ never finalizes or sends, and a save failure must stop before the existing
 secure preview route is called. Set the chained-actions flag to `0` for
 immediate rollback. There is no migration and no stored data to reverse.
 
+### Quotation editor progressive loading
+
+`QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED` is disabled by default and is
+projected as a strict Boolean in each quotation's existing workflow-feature
+object. It can be rolled out and rolled back independently of Gmail review and
+chained-action flags. It changes only frontend rendering behavior; quotation
+writes, validation, finalization, document generation, and email safety
+controls remain unchanged.
+
+Monitor editor load/render errors and time-to-interactive during rollout. Set
+the flag to `0` for immediate rollback. No migration or stored-data reversal is
+required.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |
