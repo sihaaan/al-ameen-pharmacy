@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.1.0 |
+| Document version | 2.2.0 |
 | Status | Operator guide; live values require independent verification |
 | Owner | Al Ameen platform maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints |
+| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This guide separates repository behavior from live provider configuration. A
@@ -131,8 +131,11 @@ inventory. Never commit filled values. At minimum verify these groups:
 - Django: `DJANGO_SECRET_KEY`, `DEBUG=0`, `ALLOWED_HOSTS`, frontend/CORS/CSRF URLs;
 - database: `DATABASE_URL`, connection lifetime/health checks, connect timeout,
   and disabled server-side cursors;
-- media/private evidence: `CLOUDINARY_URL` where used and
-  `QUOTATION_PRIVATE_STORAGE_ROOT`;
+- media/private evidence: `CLOUDINARY_URL` where used, plus the separate
+  `QUOTATION_EVIDENCE_STORAGE_BACKEND`,
+  `QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON`, and local fallback
+  `QUOTATION_PRIVATE_STORAGE_ROOT`, with
+  `QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES` as the read/write ceiling;
 - email/Gmail: SMTP variables and/or website `GOOGLE_OAUTH_*` settings;
 - Gmail add-on: only the variables documented in
   [gmail_addon/README.md](gmail_addon/README.md);
@@ -183,22 +186,45 @@ that an apex domain supports a CNAME. After domains are active, verify:
 Certificate and DNS propagation times are provider-dependent; do not use a
 fixed completion estimate as a release guarantee.
 
-## 7. Private-source durability warning
+## 7. Private-source storage and durability warning
 
-Cloudinary-backed Django media does not include quotation import sources.
-Manual source retention defaults to the local path
-`backend/private_media/quotations` unless `QUOTATION_PRIVATE_STORAGE_ROOT` is
-set. A Railway filesystem without a mounted volume is ephemeral. In the
-inspected deployment there was no volume, so private evidence files may be lost
-on redeploy while PostgreSQL references remain.
+Task 2.3 routes quotation evidence through the dedicated
+`quotation_evidence` Django storage alias. It never uses the public/default
+Cloudinary media storage. New objects use opaque, content-addressed
+`inquiry_sources/v1/...` keys, are SHA-256 checked, bounded on read/write, and
+retain no customer filename in the key. Existing unversioned references remain
+readable from the confined legacy root and, after an operator-controlled copy,
+from the active backend under their unchanged keys. After a definite active
+backend miss, a versioned key may also use the previous confined local copy,
+but only when its bytes match the full digest embedded in the key. A backend
+error never permits fallback.
 
-Until Task 2.3 supplies a durable abstraction and a provider is explicitly
-chosen/configured:
+The repository deliberately selects no remote provider. The default
+`QUOTATION_EVIDENCE_STORAGE_BACKEND` is still a private local filesystem rooted
+at `QUOTATION_PRIVATE_STORAGE_ROOT`. A Railway filesystem without a mounted
+volume is ephemeral, and the inspected deployment had no volume. Therefore
+application abstraction is implemented but live durability remains unverified.
 
-- do not describe those sources as durable or backed up;
+Before activating an approved durable backend:
+
+1. install and pin its Django storage package in a separate reviewed change;
+2. verify private-by-default access, encryption, residency, timeouts, object
+   size behavior, stable exact-key synchronous `save/open/exists` semantics,
+   and a maximum returned key length of 500;
+3. inventory **all** surviving safe references, including versioned and legacy
+   keys, and copy each source under the same relative key, verifying the
+   embedded/recorded SHA-256 where available before switching backends;
+4. configure `QUOTATION_EVIDENCE_STORAGE_BACKEND` and the JSON-object
+   `QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON` without exposing credentials;
+5. smoke-test new writes, versioned reads, legacy reads, failure reporting,
+   backup, and restore before declaring the source durable.
+
+Until those steps are approved and evidenced:
+
+- do not describe private sources as durable or backed up;
 - verify critical evidence against the canonical customer email/document;
 - monitor for database references whose file is missing;
-- do not mount or purchase storage as part of an unrelated release.
+- do not mount, purchase, or select storage as part of an unrelated release.
 
 ## 8. Deployment and smoke test
 

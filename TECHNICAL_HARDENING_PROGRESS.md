@@ -126,7 +126,7 @@
     — 43/43 passed.
   - Local isolated PostgreSQL 17 / `READ COMMITTED`:
     `python manage.py test quotations.test_product_matching_rework.ProductAliasConcurrencyTests quotations.test_quotation_concurrency --noinput --verbosity 2`
-    — 12/12 passed.
+    — 16/16 passed.
   - SQLite quotation regressions:
     `python manage.py test quotations.tests.QuotationPermissionTests quotations.tests.QuotationWorkflowTests quotations.test_quotation_email_delivery quotations.test_product_matching_rework.ProductMatchingReworkTests --noinput --verbosity 1`
     — 164/164 passed.
@@ -761,6 +761,117 @@
   until a compatibility guard that honors existing frozen snapshots is
   restored; old send code can otherwise rebuild a failed retry. No OAuth, AI
   model/prompt/schema, provider, or production infrastructure changed.
+
+### 2.3 — Abstract durable private evidence storage with dual-read compatibility
+
+- Status: completed in code; live durable-provider configuration is explicitly
+  deferred because the repository has no approved provider package, bucket,
+  credentials, volume, residency decision, or backup/restore evidence.
+- Commit: this task checkpoint (`feat: abstract private quotation evidence storage`).
+- Finding verified:
+  - All application-managed quotation-source writes already converged on
+    `store_import_source`, and all rereads used `read_private_ref`, but those
+    helpers directly wrote/read `QUOTATION_PRIVATE_STORAGE_ROOT` with `Path`.
+  - The inspected Railway service has no volume and no explicit private root,
+    so database references can outlive local bytes. Default Cloudinary media is
+    public-media oriented and is not an acceptable private-evidence backend.
+  - Gmail inquiry and mailbox-PO binaries intentionally remain canonical in
+    Gmail; exact outbound email MIME/PDF remains in its immutable PostgreSQL
+    snapshot and is outside this task.
+- Files changed:
+  - `backend/quotations/private_storage.py`
+  - `backend/pharmacy_api/settings.py`
+  - `backend/quotations/ai_parsing.py`
+  - `backend/quotations/ai_learning.py`
+  - `backend/quotations/serializers.py`
+  - `backend/quotations/views.py`
+  - `backend/quotations/test_private_storage.py`
+  - `backend/quotations/tests.py`
+  - `backend/quotations/test_documentation_contract.py`
+  - `backend/.env.example`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `DEPLOYMENT.md`
+  - `SECURITY.md`
+  - `OPERATIONS.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added a dedicated `quotation_evidence` Django storage alias. Its default is
+    a private filesystem backend whose root follows
+    `QUOTATION_PRIVATE_STORAGE_ROOT`; it never uses the default
+    media/Cloudinary alias and never requests a public URL.
+  - Added provider-neutral backend/options configuration hooks without adding
+    a provider dependency or configuring live infrastructure.
+  - New writes use stable `inquiry_sources/v1/...` content-addressed keys with
+    the full SHA-256 and a bounded extension. Customer filenames and absolute
+    paths are not retained in keys. Supplied digests, existing objects, and
+    every versioned read are integrity checked.
+  - Writes are bounded, idempotent for existing identical content, immediately
+    read back, and fail closed on corruption/backend errors. A backend-returned
+    alternate key is validated and content-checked but never automatically
+    deleted; stable exact-key save semantics are a provider cutover prerequisite.
+    Local files/directories default to private permission modes.
+  - Versioned refs prefer the active backend and may use a previous local copy
+    only after a definite miss and verification of the embedded full digest.
+    Existing unversioned refs remain local-first, then read an operator-copied
+    active-backend object under the same legacy key after definite local
+    absence or a recorded-hash mismatch. Backend failure is never converted to
+    not-found or permission to fall back.
+  - Absolute, traversal, URL, Windows-path, NUL, Gmail pseudo-, malformed,
+    unknown-version, control-character, and non-evidence-namespace refs are
+    rejected before storage access.
+  - Historical source previews now return controlled `503` for storage outage
+    or integrity failure, retain `404` for definite absence, and add
+    private/no-store/nosniff response headers.
+- Tests run:
+  - Focused private-storage and historical-preview suite:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_private_storage --noinput --verbosity 2`
+    — 19/19 passed, including file-backed outcome, LPO, and proforma routes.
+  - Private storage, inquiry, historical import, AI parsing, image import,
+    mailbox-PO, PO attachment, LPO parsing, and documentation regressions:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_private_storage quotations.tests.InquiryImportTests quotations.tests.HistoricalPriceImportTests quotations.tests.AIImportParsingTests quotations.test_inquiry_image_import quotations.test_mailbox_po_audit.MailboxPOAuditTests quotations.test_po_evidence_attachment quotations.test_lpo_parser_regressions.LPOTextParserRegressionTests quotations.test_documentation_contract --noinput --verbosity 1`
+    — 167/167 passed.
+  - Final workflow, Gmail-intake, outbound-delivery, and mailbox-vision safety
+    regressions were split into three commands to avoid the shell command-time
+    ceiling:
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.tests.QuotationWorkflowTests quotations.test_quotation_email_delivery --noinput --verbosity 1`
+    — 134/134 passed;
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_gmail_inquiry_import --noinput --verbosity 1`
+    — 77/77 passed; and
+    `DATABASE_URL=sqlite:///db.sqlite3 python manage.py test quotations.test_mailbox_po_vision --noinput --verbosity 1`
+    — 77/77 passed (288/288 total).
+  - `python manage.py check`, `python manage.py makemigrations --check --dry-run`,
+    `python -m compileall -q pharmacy_api quotations`, and `git diff --check`
+    — all passed.
+- Migrations: none. Existing max-500 `source_file_ref` fields hold both legacy
+  and new versioned keys; no row rewrite or backfill is performed.
+- API/frontend changes: no request/response schema, route, or frontend change.
+  The staff-only historical preview endpoint adds cache-safety headers and a
+  precise `503` storage-unavailable result instead of an unhandled server error.
+- Accuracy/security impact: manual and Gmail workflows, employee review, blank
+  selling prices, suggestion-only matching, row evidence, preview-before-send,
+  verified reply headers, single-send guarantees, ambiguous-send lockout, and
+  no-send reconciliation are unchanged. Content identity is stronger and
+  private keys disclose less customer information.
+- Remaining risks/deferred configuration:
+  - The default backend is still ephemeral on unmounted Railway. Live
+    durability requires a separately approved provider/volume, pinned package,
+    credentials, private-access/residency policy, complete versioned-and-legacy
+    copy with hash verification, and backup/restore drill.
+  - Files already lost from the ephemeral filesystem cannot be recreated by
+    this abstraction.
+  - Abandoned manual previews and price-reference parsing can leave
+    unreferenced objects; contract-intelligence may retain supported Gmail
+    attachments. No destructive purge was added without approved retention and
+    legal-hold rules.
+  - A future remote-backend outage in most upload actions still reaches the
+    generic server-error boundary, and automatic PDF AI fallback does not yet
+    present a dedicated storage warning. These are availability/UX gaps, not
+    evidence or send-safety bypasses, and live remote configuration is blocked.
+- Rollback: while the default local backend remains active, revert this commit;
+  the versioned keys are ordinary relative local paths and the pre-Task 2.3
+  reader can still resolve them. After any remote-only write, do not roll below
+  the dual reader until exact hash-verified objects are restored to the legacy
+  root; prefer a configuration rollback or forward fix with uploads paused.
 
 ## Phase 3
 

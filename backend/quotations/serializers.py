@@ -12,6 +12,7 @@ from api.serializers import ProductListSerializer
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
+from .private_storage import is_valid_private_ref
 from .quotation_email_delivery import quotation_review_fingerprint
 from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
 from .models import (
@@ -1510,7 +1511,7 @@ class ImportedInquiryCreateSerializer(serializers.Serializer):
     lines = ImportedInquiryLineSerializer(many=True, allow_empty=False)
 
     def validate_source_file_ref(self, value):
-        if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
+        if not is_valid_private_ref(value):
             raise serializers.ValidationError("Invalid private source file reference.")
         return value
 
@@ -1675,7 +1676,7 @@ class HistoricalPriceImportSerializer(serializers.ModelSerializer):
         ]
 
     def validate_source_file_ref(self, value):
-        if value and (".." in value.replace("\\", "/").split("/") or value.startswith(("/", "\\"))):
+        if not is_valid_private_ref(value):
             raise serializers.ValidationError("Invalid private source file reference.")
         return value
 

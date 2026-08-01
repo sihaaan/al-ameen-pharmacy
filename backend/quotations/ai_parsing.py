@@ -781,7 +781,10 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
                     "meta": {**(preview.get("meta") or {}), **image_meta},
                 }
             else:
-                images, rendered_page_count = _render_pdf_images(preview.get("source_file_ref", ""))
+                images, rendered_page_count = _render_pdf_images(
+                    preview.get("source_file_ref", ""),
+                    expected_sha256=preview.get("source_sha256") or "",
+                )
         except AIParseError:
             if image_preview or requested_mode != "auto":
                 raise
@@ -998,7 +1001,10 @@ def clean_historical_import_with_ai(historical_import, actor=None, *, requested_
     images = []
     page_count = _safe_int(historical_import.parse_meta.get("page_count"), default=0)
     if mode == AIParseCache.MODE_VISION:
-        images, rendered_page_count = _render_pdf_images(historical_import.source_file_ref)
+        images, rendered_page_count = _render_pdf_images(
+            historical_import.source_file_ref,
+            expected_sha256=historical_import.source_sha256,
+        )
         if not images:
             raise AIParseError("AI vision cleanup could not render the source PDF. Use text cleanup or review manually.")
         page_count = page_count or rendered_page_count
@@ -1119,7 +1125,10 @@ def _is_image_preview(preview):
 
 def _render_image_from_private_source(preview):
     source_file_ref = str(preview.get("source_file_ref") or "")
-    data = read_private_ref(source_file_ref)
+    data = read_private_ref(
+        source_file_ref,
+        expected_sha256=preview.get("source_sha256") or "",
+    )
     if not data:
         raise AIParseError("Source image is not available in private storage.")
     filename = preview.get("source_filename") or "inquiry-image.png"
@@ -1863,10 +1872,13 @@ def _historical_import_to_preview(historical_import):
     }
 
 
-def _render_pdf_images(source_file_ref):
+def _render_pdf_images(source_file_ref, *, expected_sha256=""):
     if fitz is None:
         raise AIProviderUnavailable("AI vision cleanup is unavailable because PDF rendering is not installed.")
-    data = read_private_ref(source_file_ref)
+    data = read_private_ref(
+        source_file_ref,
+        expected_sha256=expected_sha256,
+    )
     if not data:
         raise AIParseError("Source PDF is not available in private storage.")
     return _render_pdf_bytes_images(data)

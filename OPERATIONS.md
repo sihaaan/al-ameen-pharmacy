@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.1.0 |
+| Document version | 1.2.0 |
 | Status | Initial current-state runbook; unresolved items are marked explicitly |
 | Owner | Assign a primary and backup production operator |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints |
+| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This runbook preserves employee review, blank selling prices, suggestion-only
@@ -21,7 +21,7 @@ send per revision, ambiguous-send lockout, and reconciliation that never sends e
 | Code | production at `70d3da7`; hardening branch at `d88b767` | branch work is not deployed |
 | Database | PostgreSQL 17.10, `READ COMMITTED`; no unapplied migrations at inspection | backup/RPO/RTO and production lock/statement timeouts not verified |
 | Migration gate | no Railway pre-deploy command in inspected manifest | Task 2.8; verify explicitly before any migration release |
-| Private evidence | local default path; no Railway volume; no explicit root | ephemeral and not a reliable backup |
+| Private evidence | dedicated alias and dual reader implemented; local default path; no Railway volume/provider | application-ready but still ephemeral and not a reliable backup |
 | Gmail | consumer mailbox `pharmacydxb@gmail.com`; add-on enabled in observed env | deployment/publication/verification and ownership records not in repo |
 | AI | observed OpenAI provider and moving `gpt-5.4` aliases | exact snapshot/provider policy must be recorded per evaluation |
 | Error monitoring | Sentry integration exists | `SENTRY_DSN` not configured in snapshot |
@@ -181,15 +181,37 @@ An approved plan must cover:
 
 - PostgreSQL and a pre-migration recovery point;
 - exact outbound MIME snapshots and immutable provider-attempt history;
-- durable private quotation evidence after Task 2.3/provider selection;
+- durable private quotation evidence after approved provider/volume activation;
 - Cloudinary business media if it cannot be recreated;
 - configuration inventory and ownership, without plain-text secret exports;
 - restore drills that verify quotation/audit/delivery relationships.
 
-Until durable private storage exists, `QUOTATION_PRIVATE_STORAGE_ROOT` defaults
+Task 2.3 provides a dedicated `quotation_evidence` storage alias, opaque
+content-addressed keys, SHA-256 verification, and dual-read support. It does not
+make the default backend durable: `QUOTATION_PRIVATE_STORAGE_ROOT` still points
 to a local path and the inspected Railway service has no volume. Treat manual
-source files as ephemeral. Gmail remains canonical for Gmail-origin documents,
-but that does not recover unrelated manual uploads.
+source files as ephemeral until an approved backend or volume, backup, restore,
+and legacy-copy procedure are configured and verified. Gmail remains canonical
+for Gmail inquiry and mailbox-PO documents, but that does not recover unrelated
+manual uploads or the contract-intelligence attachment copies retained locally.
+
+For a future storage cutover:
+
+1. pause or closely control new source uploads;
+2. inventory every safe `source_file_ref` and surviving local object, including
+   both `inquiry_sources/v1/...` and unversioned keys, without exporting
+   customer content into logs;
+3. copy every object to the new backend under the same relative key and verify
+   its embedded/recorded SHA-256 where available;
+4. configure the backend/options and verify that new versioned writes/readbacks
+   succeed while old refs remain readable;
+5. exercise a restore and retain the legacy root until the acceptance window
+   closes.
+
+Do not roll application code back below the dual reader after remote-only
+versioned objects are written. Prefer a configuration rollback or forward fix;
+otherwise pause source-dependent operations and first restore exact verified
+objects to the legacy root.
 
 ## 9. Retention and privacy operations
 

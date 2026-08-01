@@ -217,7 +217,11 @@ from .services import (
     transition_quotation_status,
     update_quotation_outcome,
 )
-from .private_storage import read_private_ref
+from .private_storage import (
+    PrivateEvidenceIntegrityError,
+    PrivateEvidenceStorageUnavailable,
+    read_private_ref,
+)
 
 try:
     import fitz
@@ -4895,7 +4899,16 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         historical_import = self.get_object()
         if fitz is None:
             return Response({"detail": "PDF preview rendering is not available in this environment."}, status=status.HTTP_400_BAD_REQUEST)
-        data = read_private_ref(historical_import.source_file_ref)
+        try:
+            data = read_private_ref(
+                historical_import.source_file_ref,
+                expected_sha256=historical_import.source_sha256,
+            )
+        except (PrivateEvidenceStorageUnavailable, PrivateEvidenceIntegrityError):
+            return Response(
+                {"detail": "Source PDF is temporarily unavailable in private storage."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         if not data:
             return Response({"detail": "Source PDF is not available in private storage."}, status=status.HTTP_404_NOT_FOUND)
         try:
@@ -4910,7 +4923,11 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 png_bytes = pixmap.tobytes("png")
         except Exception as exc:
             return Response({"detail": f"Could not render source PDF preview: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
-        return HttpResponse(png_bytes, content_type="image/png")
+        response = HttpResponse(png_bytes, content_type="image/png")
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        response["Pragma"] = "no-cache"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 class HistoricalPriceImportLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):

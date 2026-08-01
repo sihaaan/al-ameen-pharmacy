@@ -578,7 +578,10 @@ def generate_historical_import_learning_suggestions(historical_import, actor=Non
     images = []
     page_count = int((historical_import.parse_meta or {}).get("page_count") or 0)
     if mode == AIParseCache.MODE_VISION:
-        images, rendered_page_count = _render_pdf_images(historical_import.source_file_ref)
+        images, rendered_page_count = _render_pdf_images(
+            historical_import.source_file_ref,
+            expected_sha256=historical_import.source_sha256,
+        )
         page_count = page_count or rendered_page_count
 
     availability = get_ai_parse_availability()

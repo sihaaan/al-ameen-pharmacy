@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.3.0 |
+| Document version | 1.4.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1 and Task 2.2 checkpoints on `codex/technical-hardening` |
+| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints on `codex/technical-hardening` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -452,15 +452,37 @@ small Gmail thread.
 | Gmail messages/documents | Gmail; transient provider request | Canonical re-fetch; bounded request; `store=false` | Gmail policy/provider terms apply |
 | Structured import/evidence | PostgreSQL | Staff-only APIs; bounded excerpts | No application purge policy |
 | AI cache/log | PostgreSQL | source hashes, semantic rows/evidence, content-free metrics | No scheduled purge policy |
-| Manual source files | `QUOTATION_PRIVATE_STORAGE_ROOT` | path confinement and authenticated retrieval | Local filesystem by default; no automatic purge |
+| Manual source files | dedicated `quotation_evidence` storage alias | versioned opaque keys, SHA-256 integrity, fail-closed reads, staff-only retrieval | Local filesystem by default; no automatic purge |
 | Exact outbound MIME/PDF snapshot | PostgreSQL | 35 MiB cap, complete digest, omitted from APIs/admin form, byte-identical retry | No scheduled purge policy; backup/capacity policy required |
 | Audit/delivery ledgers | PostgreSQL | staff-only/read-oriented application access | No scheduled purge policy |
 
+**Task 2.3 implementation.** All application-managed quotation-source writes
+use the dedicated `quotation_evidence` Django storage alias rather than default
+media/Cloudinary. New keys are versioned, content-addressed, omit the customer
+filename, and are verified against SHA-256 on reads. Existing unversioned refs
+remain compatible: the confined legacy local copy wins when present, otherwise
+an operator-copied object can be read from the active backend under the same
+key. A versioned active-backend miss can use the previous confined local copy
+only after validating the full digest embedded in its key; backend failure is
+distinct from definite not-found and never permits fallback. Reads/writes are
+bounded and a successful write is immediately read back and checked. No model,
+public API, frontend, OAuth, AI, or selling-price behavior changed.
+
 **Deployment snapshot.** Railway had no volume and
-`QUOTATION_PRIVATE_STORAGE_ROOT` was not explicitly configured. Therefore the
-default local private-source path is ephemeral across redeploys even though
-database references survive. This is a known durability gap. Task 2.3 adds an
-application abstraction; no storage provider is chosen or configured here.
+`QUOTATION_PRIVATE_STORAGE_ROOT` was not explicitly configured. The repository
+contains no approved private object-store package, provider, bucket, or
+credentials, so the configured default remains an ephemeral local filesystem
+even though the application abstraction is ready. Live provider selection,
+legacy-object copy, access/residency policy, backup, and restore verification
+remain operator-owned configuration work.
+
+The Gmail inquiry and mailbox-PO pipelines continue to keep Gmail as the
+canonical binary store. Contract-intelligence Gmail discovery is a distinct
+workflow that currently retains supported parsed attachments through this
+private storage alias; it must not be described as transient-only. Abandoned
+manual previews and some short-lived price-reference parsing may also leave
+unreferenced objects. No purge was added because retention and legal-hold rules
+are not approved.
 
 Formal retention periods, deletion/legal-hold rules, backup RPO/RTO, restore
 drills, OAuth verification status, and provider contractual settings are

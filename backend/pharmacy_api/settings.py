@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from datetime import timedelta
 from pathlib import Path
+import json
 import os
 import re
 from urllib.parse import urlparse
@@ -231,6 +232,32 @@ QUOTATION_IMPORT_MAX_EXCEL_SHEETS = int(os.environ.get("QUOTATION_IMPORT_MAX_EXC
 QUOTATION_IMPORT_MAX_PDF_PAGES = int(os.environ.get("QUOTATION_IMPORT_MAX_PDF_PAGES", "10"))
 QUOTATION_IMPORT_STORE_SOURCE_FILES = bool(int(os.environ.get("QUOTATION_IMPORT_STORE_SOURCE_FILES", "1")))
 QUOTATION_PRIVATE_STORAGE_ROOT = os.environ.get("QUOTATION_PRIVATE_STORAGE_ROOT", str(BASE_DIR / "private_media" / "quotations"))
+QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES = int(
+    os.environ.get(
+        "QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES",
+        str(QUOTATION_IMPORT_MAX_UPLOAD_BYTES),
+    )
+)
+if QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES < 1:
+    raise ImproperlyConfigured("QUOTATION_PRIVATE_EVIDENCE_MAX_BYTES must be positive.")
+QUOTATION_EVIDENCE_STORAGE_BACKEND = os.environ.get(
+    "QUOTATION_EVIDENCE_STORAGE_BACKEND",
+    "quotations.private_storage.QuotationEvidenceFileSystemStorage",
+).strip()
+if not QUOTATION_EVIDENCE_STORAGE_BACKEND:
+    raise ImproperlyConfigured("QUOTATION_EVIDENCE_STORAGE_BACKEND cannot be empty.")
+try:
+    QUOTATION_EVIDENCE_STORAGE_OPTIONS = json.loads(
+        os.environ.get("QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON", "{}")
+    )
+except json.JSONDecodeError as exc:
+    raise ImproperlyConfigured(
+        "QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON must be a JSON object."
+    ) from exc
+if not isinstance(QUOTATION_EVIDENCE_STORAGE_OPTIONS, dict):
+    raise ImproperlyConfigured(
+        "QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON must be a JSON object."
+    )
 QUOTATION_IMPORT_OCR_PROVIDER = os.environ.get("QUOTATION_IMPORT_OCR_PROVIDER", "")
 QUOTATION_LOGO_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_LOGO_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
 QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES = int(os.environ.get("QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024)))
@@ -365,6 +392,10 @@ if cloudinary_url:
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
         },
+        "quotation_evidence": {
+            "BACKEND": QUOTATION_EVIDENCE_STORAGE_BACKEND,
+            "OPTIONS": QUOTATION_EVIDENCE_STORAGE_OPTIONS,
+        },
     }
 else:
     # Development: Use local filesystem for both
@@ -374,6 +405,10 @@ else:
         },
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+        "quotation_evidence": {
+            "BACKEND": QUOTATION_EVIDENCE_STORAGE_BACKEND,
+            "OPTIONS": QUOTATION_EVIDENCE_STORAGE_OPTIONS,
         },
     }
 

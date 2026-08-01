@@ -3971,17 +3971,24 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(inquiry.lines.count(), 1)
 
     def test_create_imported_rejects_unsafe_source_file_ref(self):
-        payload = {
-            "company": self.company.id,
-            "source_type": Inquiry.SOURCE_TYPE_EXCEL,
-            "source_file_ref": "../secret.xlsx",
-            "lines": [{"raw_name": "Panadol 500mg", "raw_line": "Panadol 500mg - 10 boxes"}],
-        }
+        for source_file_ref in (
+            "../secret.xlsx",
+            "other_prefix/secret.xlsx",
+            "inquiry_sources/v2/2026/08/01/" + "a" * 64 + ".xlsx",
+            "inquiry_sources/line\nbreak.xlsx",
+        ):
+            with self.subTest(source_file_ref=source_file_ref):
+                payload = {
+                    "company": self.company.id,
+                    "source_type": Inquiry.SOURCE_TYPE_EXCEL,
+                    "source_file_ref": source_file_ref,
+                    "lines": [{"raw_name": "Panadol 500mg", "raw_line": "Panadol 500mg - 10 boxes"}],
+                }
 
-        response = self.client.post(reverse("quotation-inquiry-create-imported"), payload, format="json")
+                response = self.client.post(reverse("quotation-inquiry-create-imported"), payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("source_file_ref", response.data)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("source_file_ref", response.data)
 
 
 class HistoricalPriceImportTests(APITestCase):
