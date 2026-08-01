@@ -344,6 +344,83 @@ class GmailAddonEndpointTests(TestCase):
             timeout=10,
         )
 
+    @override_settings(GMAIL_ADDON_MAX_THREAD_MESSAGES=1000)
+    @patch("quotations.gmail_addon._json_request")
+    @patch(
+        "quotations.gmail_addon.get_valid_access_token",
+        return_value="stored-token",
+    )
+    def test_thread_summary_setting_is_hard_capped_at_one_hundred(
+        self,
+        _mock_access_token,
+        mock_json_request,
+    ):
+        mock_json_request.return_value = {
+            "id": "thread-limit",
+            "messages": [
+                {
+                    "id": f"message-{index:03d}",
+                    "threadId": "thread-limit",
+                    "internalDate": str(1_000 + index),
+                    "snippet": f"Message {index}",
+                    "payload": {"headers": []},
+                }
+                for index in range(150)
+            ],
+        }
+
+        summaries = gmail_addon._fetch_thread_message_summaries(
+            self.connection,
+            "thread-limit",
+            required_message_id="message-000",
+            required_thread_id="thread-limit",
+        )
+
+        self.assertEqual(len(summaries), 100)
+        self.assertEqual(summaries[0]["message_id"], "message-000")
+        self.assertEqual(summaries[1]["message_id"], "message-051")
+        self.assertEqual(summaries[-1]["message_id"], "message-149")
+
+    @override_settings(GMAIL_ADDON_MAX_THREAD_MESSAGES=3)
+    @patch("quotations.gmail_addon._json_request")
+    @patch(
+        "quotations.gmail_addon.get_valid_access_token",
+        return_value="stored-token",
+    )
+    def test_thread_summary_shuffled_payload_matches_backend_boundary(
+        self,
+        _mock_access_token,
+        mock_json_request,
+    ):
+        chronological = [0, 1, 2, 3, 4]
+        shuffled = [4, 1, 3, 0, 2]
+        messages = {
+            index: {
+                "id": f"message-{index}",
+                "threadId": "thread-shuffled",
+                "internalDate": str(1_000 + index),
+                "snippet": f"Message {index}",
+                "payload": {"headers": []},
+            }
+            for index in chronological
+        }
+        mock_json_request.return_value = {
+            "id": "thread-shuffled",
+            "messages": [messages[index] for index in shuffled],
+        }
+
+        summaries = gmail_addon._fetch_thread_message_summaries(
+            self.connection,
+            "thread-shuffled",
+            required_message_id="message-0",
+            required_thread_id="thread-shuffled",
+        )
+
+        self.assertEqual(
+            [summary["message_id"] for summary in summaries],
+            ["message-0", "message-3", "message-4"],
+        )
+
     @patch("quotations.gmail_addon._json_request")
     @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
     def test_event_message_alias_resolves_to_canonical_gmail_identity(
@@ -666,6 +743,7 @@ class GmailAddonEndpointTests(TestCase):
         mock_issue_handoff,
         _mock_access_token,
     ):
+        self.mock_fetch_identity.side_effect = self.real_fetch_message_identity
         response = self._post(
             "quotation-gmail-addon-action",
             self._event(mode="ai_thread"),
@@ -734,6 +812,12 @@ class GmailAddonEndpointTests(TestCase):
                 CANONICAL_MESSAGE_ID,
             ],
             ttl_seconds=1800,
+        )
+        mock_fetch_summaries.assert_called_once_with(
+            self.connection,
+            "thread-f:one",
+            required_message_id=CANONICAL_MESSAGE_ID,
+            required_thread_id=CANONICAL_THREAD_ID,
         )
         self.assertEqual(
             self.verified_tokens,
@@ -858,7 +942,7 @@ class GmailAddonEndpointTests(TestCase):
                 "ttl_seconds": 1800,
             },
         )
-        self.assertEqual(mock_fetch_summaries.call_count, 2)
+        mock_fetch_summaries.assert_not_called()
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
     def test_event_aliases_render_as_one_canonical_message(

@@ -71,6 +71,7 @@ from .matching import (
     preload_company_history_match_context,
 )
 from .models import (
+    AIParseCache,
     AIParseLog,
     Company,
     CompanyContact,
@@ -108,6 +109,7 @@ SUPPORTED_GMAIL_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
 NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 GMAIL_AI_PIPELINE_VERSION = "gmail_inquiry_v2"
 GMAIL_AI_SCHEMA_NAME = "gmail_inquiry_native_v2"
+GMAIL_SEMANTIC_CACHE_VERSION = "gmail_semantic_cache_v1"
 ANALYSIS_TIMING_KEYS = (
     "gmail_thread_fetch",
     "source_preparation",
@@ -699,6 +701,46 @@ def _thread_message_metadata(connection, thread_id):
     }
 
 
+def _message_metadata(connection, message_id):
+    """Resolve one Gmail message without retrieving its body or MIME parts."""
+
+    token = get_valid_access_token(connection)
+    query = urllib.parse.urlencode(
+        [
+            ("format", "metadata"),
+            ("metadataHeaders", "Subject"),
+            ("metadataHeaders", "From"),
+            ("metadataHeaders", "To"),
+            ("metadataHeaders", "Cc"),
+            ("metadataHeaders", "Reply-To"),
+        ]
+    )
+    payload = _json_request(
+        f"{GMAIL_API_BASE}/messages/"
+        f"{urllib.parse.quote(str(message_id))}?{query}",
+        token=token,
+    )
+    headers = (payload.get("payload") or {}).get("headers") or []
+    return {
+        "gmail_message_id": _normalize_gmail_id(
+            payload.get("id") or message_id
+        ),
+        "gmail_thread_id": _normalize_gmail_id(payload.get("threadId")),
+        "label_ids": list(payload.get("labelIds") or []),
+        "subject": _header(headers, "Subject"),
+        "sender": _header(headers, "From"),
+        "recipients": _header(headers, "To"),
+        "cc": _header(headers, "Cc"),
+        "reply_to": _header(headers, "Reply-To"),
+        "sent_at": _message_datetime(payload),
+        "snippet": str(payload.get("snippet") or ""),
+        "newest_body_text": "",
+        "newest_body_html": "",
+        "attachment_manifest": [],
+        "_metadata_only": True,
+    }
+
+
 def _email_addresses(value):
     return set(canonical_email_addresses(str(value or "")))
 
@@ -970,10 +1012,25 @@ def _public_attachment_manifest(message):
 
 
 def _fetch_analysis_messages(gmail_import, connection):
-    anchor = fetch_mailbox_message(
-        connection,
-        gmail_import.anchor_message_id,
-        preserve_forwarded=True,
+    selected_ids = _normalize_message_ids(
+        gmail_import.selected_message_ids,
+        fallback=gmail_import.anchor_message_id,
+    )
+    anchor_is_selected = (
+        gmail_import.mode != GmailInquiryImport.MODE_SELECTED_MESSAGES
+        or gmail_import.anchor_message_id in selected_ids
+    )
+    anchor = (
+        fetch_mailbox_message(
+            connection,
+            gmail_import.anchor_message_id,
+            preserve_forwarded=True,
+        )
+        if anchor_is_selected
+        else _message_metadata(
+            connection,
+            gmail_import.anchor_message_id,
+        )
     )
     canonical_anchor_id = _normalize_gmail_id(
         anchor.get("gmail_message_id") or gmail_import.anchor_message_id
@@ -1023,15 +1080,22 @@ def _fetch_analysis_messages(gmail_import, connection):
         for message in timeline_messages
     }
     if canonical_anchor_id not in timeline_ids:
-        timeline_messages.append(anchor)
+        # Match the add-on's visible boundary exactly: an older open message
+        # occupies one slot and the remaining slots contain the newest thread
+        # messages.  Previously the anchor was appended after truncation,
+        # allowing AI-thread mode to fetch/analyze ``limit + 1`` messages even
+        # though the employee could see only ``limit`` in Gmail.
+        limit = max(1, int(timeline_result.get("limit") or 1))
+        timeline_messages = (
+            [anchor]
+            if limit == 1
+            else [anchor, *timeline_messages[-(limit - 1) :]]
+        )
 
     if gmail_import.mode == GmailInquiryImport.MODE_CURRENT_MESSAGE:
         requested_message_ids = [gmail_import.anchor_message_id]
     elif gmail_import.mode == GmailInquiryImport.MODE_SELECTED_MESSAGES:
-        requested_message_ids = _normalize_message_ids(
-            gmail_import.selected_message_ids,
-            fallback=gmail_import.anchor_message_id,
-        )
+        requested_message_ids = selected_ids
     else:
         if not thread_id:
             raise GmailInquiryImportError(
@@ -1050,11 +1114,14 @@ def _fetch_analysis_messages(gmail_import, connection):
     for requested_message_id in requested_message_ids:
         message = (
             anchor
-            if requested_message_id
-            in {
+            if (
+                not anchor.get("_metadata_only")
+                and requested_message_id
+                in {
                 gmail_import.anchor_message_id,
                 canonical_anchor_id,
-            }
+                }
+            )
             else fetch_mailbox_message(
                 connection,
                 requested_message_id,
@@ -2660,6 +2727,159 @@ def _native_thread_context(messages, sources, mode):
     return encoded
 
 
+def _gmail_semantic_source_sha256(
+    *,
+    gmail_import,
+    message_ids,
+    sources,
+    file_inputs,
+    context_hash,
+):
+    """Hash the exact reusable Gmail semantic boundary without raw content."""
+
+    file_descriptors = []
+    for file_input in file_inputs:
+        content = file_input.get("content")
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            raise AIParseError(
+                "A Gmail native attachment is missing its validated source bytes."
+            )
+        file_descriptors.append(
+            {
+                "source_key": str(file_input.get("source_key") or ""),
+                "filename": str(file_input.get("filename") or ""),
+                "mime_type": str(file_input.get("mime_type") or ""),
+                "size": len(content),
+                "detail": str(file_input.get("detail") or "high"),
+                # Recompute from the exact provider input. Never trust a
+                # caller-supplied digest as the semantic cache boundary.
+                "source_sha256": hashlib.sha256(bytes(content)).hexdigest(),
+            }
+        )
+    mailbox_email = (
+        canonicalize_email_address(gmail_import.mailbox_email)
+        or str(gmail_import.mailbox_email or "").strip().casefold()
+    )
+    descriptor = {
+        "cache_version": GMAIL_SEMANTIC_CACHE_VERSION,
+        "mailbox_email": mailbox_email,
+        "mode": str(gmail_import.mode or ""),
+        "context_hash": context_hash,
+        "message_ids": list(message_ids),
+        "sources": [
+            {
+                "source_key": str(source.get("source_key") or ""),
+                "gmail_message_id": str(
+                    source.get("gmail_message_id") or ""
+                ),
+                "kind": str(source.get("kind") or ""),
+                "filename": str(source.get("filename") or ""),
+                "mime_type": str(source.get("mime_type") or ""),
+                "source_sha256": str(source.get("source_sha256") or ""),
+            }
+            for source in sources
+        ],
+        "files": file_descriptors,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            descriptor,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _cacheable_gmail_semantic_result(raw_result):
+    """Sanitize the provider schema without changing validation semantics."""
+
+    identity = raw_result.get("customer_identity") or {}
+    return {
+        "messages": [
+            {
+                "gmail_message_id": str(
+                    message_result.get("gmail_message_id") or ""
+                ),
+                "classification": str(
+                    message_result.get("classification") or ""
+                ),
+                "usage": str(message_result.get("usage") or ""),
+                "reason": str(message_result.get("reason") or "")[:500],
+                "confidence": message_result.get("confidence") or 0,
+            }
+            for message_result in (raw_result.get("messages") or [])
+            if isinstance(message_result, dict)
+        ],
+        "rows": [
+            {
+                "item_name": str(row.get("item_name") or "").strip()[:255],
+                "quantity": str(row.get("quantity") or "").strip(),
+                # Preserve invalid units as invalid on replay. Truncating to
+                # 50 here would incorrectly turn a >50-character unit into a
+                # valid one on a cache hit; the validator retains up to 200.
+                "unit": str(row.get("unit") or "").strip()[:200],
+                "customer_unit_price": str(
+                    row.get("customer_unit_price") or ""
+                ).strip(),
+                "customer_line_total": str(
+                    row.get("customer_line_total") or ""
+                ).strip(),
+                "customer_vat": str(
+                    row.get("customer_vat") or ""
+                ).strip(),
+                "operation": str(row.get("operation") or ""),
+                "citations": [
+                    {
+                        "source_key": str(
+                            citation.get("source_key") or ""
+                        ).strip(),
+                        "page_number": str(
+                            citation.get("page_number") or ""
+                        )[:40],
+                        "sheet_name": str(
+                            citation.get("sheet_name") or ""
+                        )[:120],
+                        "cell_range": str(
+                            citation.get("cell_range") or ""
+                        )[:80],
+                        "raw_source_text": str(
+                            citation.get("raw_source_text") or ""
+                        )[:2000],
+                    }
+                    for citation in (row.get("citations") or [])
+                    if isinstance(citation, dict)
+                ],
+                "confidence": row.get("confidence") or 0,
+                "parse_status": str(row.get("parse_status") or ""),
+                "reason": str(row.get("reason") or "")[:1000],
+            }
+            for row in (raw_result.get("rows") or [])[:250]
+            if isinstance(row, dict)
+        ],
+        "customer_identity": {
+            "company_name": str(identity.get("company_name") or "")[:255],
+            "contact_name": str(identity.get("contact_name") or "")[:255],
+            "contact_email": str(identity.get("contact_email") or "")[:254],
+            "source_keys": [
+                str(value or "").strip()
+                for value in (identity.get("source_keys") or [])
+                if str(value or "").strip()
+            ],
+            "confidence": identity.get("confidence") or 0,
+            "reason": str(identity.get("reason") or "")[:1000],
+        },
+        "warnings": [
+            str(value).strip()
+            for value in (raw_result.get("warnings") or [])
+            if str(value).strip()
+        ],
+        "thread_summary": str(
+            raw_result.get("thread_summary") or ""
+        )[:2000],
+    }
+
+
 def _run_native_thread_analysis(
     messages,
     sources,
@@ -2668,6 +2888,7 @@ def _run_native_thread_analysis(
     actor,
     *,
     analysis_timings=None,
+    allow_semantic_cache_read=True,
 ):
     analysis_timings = (
         analysis_timings if isinstance(analysis_timings, dict) else {}
@@ -2693,7 +2914,6 @@ def _run_native_thread_analysis(
         raise AIParseError(status.get("label") or "AI parsing is unavailable.")
     availability = get_ai_parse_availability()
     provider_name = availability.get("provider") or ""
-    provider = get_ai_parse_provider(provider_name)
     model = (
         availability.get("vision_model")
         if file_inputs
@@ -2712,25 +2932,45 @@ def _run_native_thread_analysis(
         instructions=instructions,
         schema=native_schema,
     )
-    source_hash_material = json.dumps(
-        {
-            "gmail_import_id": gmail_import.pk,
-            "message_ids": message_ids,
-            "source_hashes": [
-                str(source.get("source_sha256") or "")
-                for source in sources
-            ],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    source_sha256 = hashlib.sha256(
-        source_hash_material.encode("utf-8")
-    ).hexdigest()
     context_hash = hashlib.sha256(text_context.encode("utf-8")).hexdigest()
+    source_sha256 = _gmail_semantic_source_sha256(
+        gmail_import=gmail_import,
+        message_ids=message_ids,
+        sources=sources,
+        file_inputs=file_inputs,
+        context_hash=context_hash,
+    )
     log_mode = (
         AIParseLog.MODE_VISION if file_inputs else AIParseLog.MODE_TEXT
     )
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "cache_version": GMAIL_SEMANTIC_CACHE_VERSION,
+                "source_sha256": source_sha256,
+                "provider": provider_name,
+                "model": model,
+                "mode": log_mode,
+                "pipeline_version": contract["pipeline_version"],
+                "schema_name": contract["schema_name"],
+                "prompt_sha256": contract["prompt_sha256"],
+                "schema_sha256": contract["schema_sha256"],
+                "contract_sha256": contract["contract_sha256"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    cache_contract = {
+        key: contract[key]
+        for key in (
+            "pipeline_version",
+            "schema_name",
+            "prompt_sha256",
+            "schema_sha256",
+            "contract_sha256",
+        )
+    }
     audit_usage = {
         "gmail_import_id": gmail_import.pk,
         "message_count": len(message_ids),
@@ -2743,6 +2983,7 @@ def _run_native_thread_analysis(
             int(file_input.get("page_count") or 0)
             for file_input in file_inputs
         ),
+        "semantic_cache_invalid_fallback": False,
     }
     source_shape = {
         "text_chars": len(text_context),
@@ -2762,6 +3003,8 @@ def _run_native_thread_analysis(
     def instrumented_usage(
         provider_usage,
         *,
+        provider_call_attempted=True,
+        application_cache_hit=False,
         outcome="success",
         failure_stage="",
         output_rows=0,
@@ -2788,8 +3031,8 @@ def _run_native_thread_analysis(
             provider_usage=safe_usage,
             timings_ms=common_timings,
             source_shape={**source_shape, "output_rows": output_rows},
-            provider_call_attempted=True,
-            application_cache_hit=False,
+            provider_call_attempted=provider_call_attempted,
+            application_cache_hit=application_cache_hit,
             outcome=outcome,
             failure_stage=failure_stage,
         )
@@ -2800,8 +3043,67 @@ def _run_native_thread_analysis(
             "observability": observation,
         }
 
-    usage = {}
     ai_started = time.perf_counter()
+    if allow_semantic_cache_read:
+        cached = AIParseCache.objects.filter(cache_key=cache_key).first()
+        cached_envelope = cached.result if cached else {}
+        if (
+            isinstance(cached_envelope, dict)
+            and cached_envelope.get("cache_version")
+            == GMAIL_SEMANTIC_CACHE_VERSION
+            and cached_envelope.get("contract") == cache_contract
+            and isinstance(cached_envelope.get("semantic_result"), dict)
+        ):
+            cache_validation_started = time.perf_counter()
+            try:
+                validated_result = _validate_native_thread_result(
+                    cached_envelope["semantic_result"],
+                    messages,
+                    sources,
+                )
+            except Exception:
+                # A stale, malformed, or manually altered cache entry is never
+                # trusted. Fall through to a fresh provider call, whose
+                # successful result will replace this entry.
+                audit_usage["semantic_cache_invalid_fallback"] = True
+            else:
+                analysis_timings["ai_provider"] = 0.0
+                analysis_timings["ai_validation"] = _elapsed_ms(
+                    cache_validation_started
+                )
+                analysis_timings["ai_analysis"] = _elapsed_ms(ai_started)
+                AIParseLog.objects.create(
+                    actor=(
+                        actor
+                        if getattr(actor, "is_authenticated", False)
+                        else None
+                    ),
+                    provider=provider_name,
+                    model=model,
+                    mode=log_mode,
+                    source_type=Inquiry.SOURCE_TYPE_GMAIL,
+                    source_sha256=source_sha256,
+                    context_hash=context_hash,
+                    cache_hit=True,
+                    text_length=len(text_context),
+                    page_count=audit_usage["native_pdf_pages"],
+                    image_count=0,
+                    usage=instrumented_usage(
+                        {},
+                        provider_call_attempted=False,
+                        application_cache_hit=True,
+                        outcome="cache_hit",
+                        output_rows=len(validated_result.get("rows") or []),
+                    ),
+                    success=True,
+                )
+                validated_result["_timings_ms"] = (
+                    _analysis_timing_snapshot(analysis_timings)
+                )
+                return validated_result
+
+    provider = get_ai_parse_provider(provider_name)
+    usage = {}
     provider_started = ai_started
     validation_started = None
     failure_stage = "provider"
@@ -2829,6 +3131,24 @@ def _run_native_thread_analysis(
         )
         analysis_timings["ai_validation"] = _elapsed_ms(
             validation_started
+        )
+        failure_stage = "cache_write"
+        AIParseCache.objects.update_or_create(
+            cache_key=cache_key,
+            defaults={
+                "source_sha256": source_sha256,
+                "context_hash": context_hash,
+                "mode": log_mode,
+                "provider": provider_name,
+                "model": model,
+                "result": {
+                    "cache_version": GMAIL_SEMANTIC_CACHE_VERSION,
+                    "contract": cache_contract,
+                    "semantic_result": _cacheable_gmail_semantic_result(
+                        result
+                    ),
+                },
+            },
         )
         analysis_timings["ai_analysis"] = _elapsed_ms(ai_started)
     except Exception as exc:
@@ -3669,6 +3989,7 @@ def _build_source_analysis(
     timeline_messages=None,
     timeline_meta=None,
     analysis_timings=None,
+    allow_semantic_cache_read=True,
 ):
     """Analyze complete selected bodies and original attachments in one AI pass."""
 
@@ -3718,9 +4039,10 @@ def _build_source_analysis(
     if timeline_meta.get("truncated"):
         warnings.append(
             "This Gmail thread has "
-            f"{timeline_meta.get('total_count')} messages; only the newest "
-            f"{timeline_meta.get('limit')} are shown/analyzed. Select messages "
-            "manually if older context is required."
+            f"{timeline_meta.get('total_count')} messages; only the open message "
+            "and the newest other messages are shown (up to "
+            f"{timeline_meta.get('limit')} total). Analysis remains limited to "
+            "the chosen mode. Select messages manually if older context is required."
         )
     for message in messages:
         if message.get("_forwarded_content_truncated"):
@@ -4426,13 +4748,18 @@ def _build_source_analysis(
             },
         }
     else:
+        native_analysis_options = {
+            "analysis_timings": analysis_timings,
+        }
+        if not allow_semantic_cache_read:
+            native_analysis_options["allow_semantic_cache_read"] = False
         semantic_result = _run_native_thread_analysis(
             semantic_messages,
             evidence,
             file_inputs,
             gmail_import,
             actor,
-            analysis_timings=analysis_timings,
+            **native_analysis_options,
         )
     analysis_timings.update(semantic_result.pop("_timings_ms", {}) or {})
     post_ai_started = time.perf_counter()
@@ -4996,16 +5323,22 @@ def analyze_gmail_inquiry_import(
             return _record(locked)
         if (
             not force
-            and locked.analysis
-            and str((locked.analysis or {}).get("version") or "")
-            == "gmail_inquiry_v2"
             and locked.status
             in {
                 GmailInquiryImport.STATUS_READY,
                 GmailInquiryImport.STATUS_REVIEW_REQUIRED,
             }
+            and (locked.analysis or {}).get("reviewed_at")
         ):
+            # Staff-reviewed rows are user-authored workflow data, not an AI
+            # cache entry. A duplicate/non-force request must never replace
+            # those edits. The explicit Reanalyze action remains the only path
+            # that may intentionally rebuild them from source evidence.
             return _record(locked)
+        # A pipeline version alone cannot prove semantic equivalence. Fetch
+        # the immutable Gmail sources and let the content/contract-bound cache
+        # decide reuse after it has verified provider, model, prompt, schema,
+        # pipeline, selected messages, source ownership, and attachment bytes.
         if (
             locked.status == GmailInquiryImport.STATUS_ANALYZING
             and locked.analysis_started_at
@@ -5070,6 +5403,7 @@ def analyze_gmail_inquiry_import(
             timeline_messages=timeline_messages,
             timeline_meta=timeline_meta,
             analysis_timings=analysis_timings,
+            allow_semantic_cache_read=not force,
         )
         content_fingerprint = _content_fingerprint(
             connection.email,

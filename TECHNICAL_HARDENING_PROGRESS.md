@@ -1196,6 +1196,88 @@
   identity after any rollback rather than trusting results made under a
   different matcher version.
 
+### 2.6 — Bind Gmail semantic reuse to the complete source contract
+
+- Status: completed in code; not deployed.
+- Commit: this task checkpoint (`perf: bind Gmail semantic reuse to source contract`).
+- Finding verified:
+  - Gmail analysis could reuse an unreviewed result based only on the pipeline
+    version, without proving that content, mailbox, selected messages,
+    provider/model, prompt, schema, and attachment bytes were identical.
+  - AI-thread retrieval could analyze one message beyond the add-on's visible
+    cap, and current/selected actions fetched bodies that were not part of the
+    employee's chosen semantic boundary.
+- Files changed:
+  - `backend/quotations/gmail_inquiry_import.py`
+  - `backend/quotations/gmail_addon.py`
+  - `backend/quotations/test_gmail_inquiry_import.py`
+  - `backend/quotations/test_gmail_addon.py`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `gmail_addon/README.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added `gmail_semantic_cache_v1` on the existing `AIParseCache` table. Its
+    key binds normalized mailbox, selection mode, exact text context,
+    chronological Gmail message IDs, source ownership, recomputed attachment
+    byte hashes and presentation detail, provider, configured model, input
+    mode, pipeline/schema names, and prompt/schema/contract hashes.
+  - Cache values retain only sanitized semantic classifications, rows,
+    citations, identity evidence, warnings, and summary. Full bodies,
+    attachment bytes, OAuth data, and provider usage are excluded. Every hit
+    is revalidated against the current message/source allow-list and receives
+    a current actor/import audit log with zero provider usage. Invalid cache
+    data falls back visibly to a fresh provider call.
+  - Explicit reanalysis bypasses cache reads but refreshes the reusable value
+    after a successful provider result. A normal duplicate request cannot
+    overwrite staff-reviewed rows. Deterministic company/product suggestions
+    still run after semantic reuse, and selling prices remain blank.
+  - Current-message mode fully fetches only the open message. Selected mode
+    fetches only selected bodies and resolves an unchecked anchor as metadata.
+    AI-thread mode fetches exactly the visible capped window: the open anchor
+    plus the newest remaining messages. Add-on/backend caps are clamped to
+    1–100 and share the same `(internalDate, message ID)` ordering.
+  - Current and AI add-on actions avoid a redundant full thread-summary call;
+    selected-message actions retain fresh membership verification. Canonical
+    anchor/thread checks remain server-side in every mode.
+- Tests run:
+  - Final Gmail import/add-on regression:
+    `DATABASE_URL=sqlite:///task26-gmail-final.sqlite3 python manage.py test quotations.test_gmail_inquiry_import quotations.test_gmail_addon --noinput --verbosity 1`
+    — 140/140 passed.
+  - Gmail review frontend:
+    `CI=true npm test -- --watchAll=false --runInBand --runTestsByPath src/components/quotations/GmailInquiryReview.test.js`
+    — 27/27 passed; logged request failures are asserted UI recovery cases.
+  - Complete quotation regression from a fresh SQLite database:
+    `DATABASE_URL=sqlite:///task26-all-quotations-rerun.sqlite3 python manage.py test quotations --noinput --verbosity 1`
+    — 1,131/1,131 passed; 16 intentionally skipped. Logged service-unavailable,
+    revoked-OAuth, and stale-summary errors are asserted resilience cases.
+  - `DATABASE_URL=sqlite:///task26-static.sqlite3 python manage.py check`,
+    `python manage.py makemigrations --check --dry-run`, `python -m pip check`,
+    `python -m compileall -q api quotations pharmacy_api`, and
+    `git diff --check` — passed.
+  - Three independent reviews found no remaining Critical, High, or Medium
+    correctness/security issue. Their focused cache/retrieval/add-on suites
+    passed 15/15, 5/5, and 30/30 respectively.
+- Migration: none. The existing `AIParseCache` schema is reused.
+- API/frontend changes: no endpoint, request/response contract, route, or
+  visible review workflow changed. Retrieval is narrower only where the
+  existing selection contract proves excluded bodies are unnecessary.
+- Accuracy/security impact: semantic reuse is content- and contract-addressed,
+  current evidence is revalidated, and reanalysis cannot resurrect an older
+  cached interpretation. Gmail/manual intake, employee review, row evidence,
+  uncertainty, blank selling prices, suggestion-only matching,
+  preview-before-send, verified replies, one-send-per-revision, ambiguous
+  lockout, and reconciliation-never-sends remain unchanged. No OAuth scope,
+  model, prompt, schema, migration, or production configuration changed.
+- Remaining risks: the first unique provider request still bears normal Gmail
+  and AI latency/cost. A configured moving model alias cannot identify its
+  provider-side snapshot more precisely than the configured/logged model name.
+  Gmail API latency/outages remain external dependencies; invalid cache data
+  safely costs a fresh provider call.
+- Rollback: revert this checkpoint; no database rollback is needed. Existing
+  cache rows are harmless and may expire/be removed under normal cache policy.
+  Reverting restores broader retrieval and weaker reuse binding, so prefer a
+  forward fix after deployment.
+
 ## Phase 3
 
 Intentionally not implemented.

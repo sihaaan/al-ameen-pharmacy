@@ -300,6 +300,7 @@ scope, or selling-price behavior changed.
 |---|---|
 | Gmail pipeline | `gmail_inquiry_v2` |
 | Gmail schema | `gmail_inquiry_native_v2` |
+| Gmail semantic cache | `gmail_semantic_cache_v1` |
 | Gmail identity matcher | `gmail_identity_v4` |
 | Manual AI cleanup | `manual_ai_cleanup_v1` |
 | Mailbox PO vision | `mailbox_po_vision_v1` |
@@ -323,6 +324,26 @@ Application validation still rejects fabricated sources, invalid quantities,
 missing citations, contradictory revisions, and customer rows supported only
 by outbound supplier documents. Customer prices remain evidence only and all
 selling prices are blanked.
+
+Task 2.6 replaces the former pipeline-version-only Gmail shortcut with an
+application semantic cache. A Gmail result is reusable only when the normalized
+mailbox, selected message chronology, exact email context, source ownership,
+original attachment bytes, provider, configured model, input mode, prompt hash,
+schema hash, schema name, and pipeline version all match. The cache stores only
+the validated schema-shaped classifications, rows, citations, identity evidence,
+warnings, and summary. It does not store full message bodies, attachment bytes,
+OAuth data, or provider usage. Every hit is validated again against the current
+message/source allow-list, and deterministic company/product matching still runs
+afterward. An explicit employee **Reanalyze** bypasses the cache.
+
+Gmail retrieval remains selection-bounded. Current-message mode fetches only the
+open message body; selected-message mode fetches only the checked messages; and
+AI-thread mode fetches the open message plus the newest remaining messages up to
+the configured limit. An old open message now occupies one of those slots rather
+than creating an invisible `limit + 1` request. The add-on action avoids a second
+thread-summary request for Current/AI actions, while selected-message actions
+retain a fresh canonical membership check. Both add-on and backend limits are
+hard-capped at 100.
 
 ### 5.3 Deterministic matching after extraction
 
@@ -635,8 +656,8 @@ re-identification, and reviewer-agreement risks.
 | Collect paired manual/Gmail baselines with current instrumentation | Proposed; instrumentation implemented | representative approved cases | no loss in strict row/evidence/identity score |
 | Compact output schema | Proposed | golden baseline | reject on any evidence/revision regression |
 | Clean-Excel pre-extraction before Gmail semantic call | Proposed | selection-boundary tests | retain all effective rows and citations |
-| Content/version-bound Gmail semantic reuse | Proposed (Task 2.6) | immutable source identity | never reuse across content/provider/model/prompt/schema/pipeline changes |
-| Reduce Gmail retrieval round trips | Proposed (Task 2.6) | canonical-source tests | preserve current/selected/AI mode boundaries |
+| Content/version-bound Gmail semantic reuse | Implemented (Task 2.6) | immutable source identity | never reuse across content/provider/model/prompt/schema/pipeline changes |
+| Reduce Gmail retrieval round trips | Implemented conservatively (Task 2.6) | canonical-source tests | Current/AI add-on actions skip one redundant summary fetch; selected membership checks remain |
 | Benchmark other models | Optional/Phase 3; not authorized | approved model change and golden set | quality threshold before latency/cost |
 | Background worker | Optional/Phase 3; not authorized | infrastructure decision | no review/state regression |
 
