@@ -26,9 +26,12 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
-from pypdf import PdfReader
 from python_calamine import load_workbook as load_calamine_workbook
 
+from .attachment_inspection import (
+    inspect_pdf_attachment,
+    inspect_spreadsheet_attachment,
+)
 from .ai_parsing import (
     AIParseError,
     ai_parse_contract_descriptor,
@@ -89,6 +92,10 @@ MAX_AI_VISION_ATTACHMENTS = 3
 MAX_ORIGINAL_TEXT_CHARS = 120_000
 DEFAULT_MAX_NATIVE_AI_INPUT_BYTES = 20 * 1024 * 1024
 DEFAULT_MAX_NATIVE_AI_INPUT_FILES = 12
+HARD_MAX_NATIVE_AI_SPREADSHEET_VISIBLE_SHEETS = 10
+HARD_MAX_NATIVE_AI_SPREADSHEET_COLUMNS_PER_SHEET = 100
+HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_ROWS = 5_000
+HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_CELLS = 500_000
 ANALYSIS_STALE_AFTER = timedelta(minutes=10)
 SUPPORTED_GMAIL_EXTENSIONS = ALLOWED_EXTENSIONS | IMAGE_EXTENSIONS
 # Gmail V2 deliberately sends only documents that normally contain item
@@ -120,6 +127,39 @@ NATIVE_MIME_BY_EXTENSION = {
     ".pdf": "application/pdf",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xls": "application/vnd.ms-excel",
+}
+PUBLIC_ATTACHMENT_SAFETY_KEYS = {
+    "active_content_markers",
+    "archive_entry_count",
+    "archive_uncompressed_bytes",
+    "container",
+    "embedded_file_markers",
+    "encrypted",
+    "hard_limits_applied",
+    "suspicious_compression_part_count",
+    "validated_format",
+    "validation_failed",
+}
+PUBLIC_PDF_FIDELITY_KEYS = {
+    "form_field_markers",
+}
+PUBLIC_SPREADSHEET_FIDELITY_KEYS = {
+    "date_cell_count",
+    "embedded_object_count",
+    "error_cell_count",
+    "external_link_count",
+    "formula_cell_count",
+    "formula_without_cached_value_count",
+    "hidden_column_count",
+    "hidden_row_count",
+    "hidden_sheet_count",
+    "inspection_level",
+    "limited_worksheet_xml_count",
+    "macro_part_count",
+    "merged_range_count",
+    "protected_sheet_count",
+    "visible_sheet_count",
+    "workbook_protected",
 }
 INLINE_IMAGE_HINT = re.compile(
     r"(?:^|[_\-. ])(?:logo|signature|footer|banner|icon|spacer|image00|social)(?:[_\-. ]|$)",
@@ -674,6 +714,22 @@ def _is_outbound_message(message, mailbox_email):
     )
 
 
+def _is_verified_mailbox_sent_message(message, mailbox_email):
+    """Use Gmail provenance plus an exact From identity for overflow trust."""
+
+    mailbox_email = str(mailbox_email or "").strip().lower()
+    labels = {
+        str(value or "").strip().upper()
+        for value in message.get("label_ids") or []
+    }
+    sender_addresses = _email_addresses(message.get("sender"))
+    return bool(
+        mailbox_email
+        and "SENT" in labels
+        and sender_addresses == {mailbox_email}
+    )
+
+
 PLAIN_SIGNATURE_MARKER = re.compile(
     r"^\s*(?:--|kind\s+regards|best\s+regards|thanks?\s*(?:&|and)\s*regards|"
     r"regards|sincerely|sent\s+from\s+(?:my|mail\s+for))[\s,!.:-]*$",
@@ -844,6 +900,10 @@ def _public_attachment_manifest(message):
                 "source_sha256": "",
                 "line_count": 0,
                 "result_source": "",
+                "warnings": [],
+                "attachment_safety": {},
+                "pdf_fidelity": {},
+                "spreadsheet_fidelity": {},
             }
         )
     return public
@@ -1810,6 +1870,62 @@ def _attachment_parse_filename(attachment, fallback="gmail-inquiry"):
     return filename or f"{fallback}{extension}"
 
 
+def _public_inspection_values(values, allowed_keys):
+    """Return bounded scalar inspection metadata safe for persisted evidence."""
+
+    if not isinstance(values, dict):
+        return {}
+    return {
+        key: value
+        for key, value in values.items()
+        if key in allowed_keys
+        and (
+            value is None
+            or isinstance(value, (bool, int, float))
+            or isinstance(value, str)
+        )
+    }
+
+
+def _public_attachment_inspection(inspection, extension):
+    inspection = inspection if isinstance(inspection, dict) else {}
+    public = {
+        "inspection_warnings": [
+            str(value).strip()[:1000]
+            for value in (inspection.get("warnings") or [])
+            if str(value).strip()
+        ][:50],
+        "attachment_safety": _public_inspection_values(
+            inspection.get("safety"),
+            PUBLIC_ATTACHMENT_SAFETY_KEYS,
+        ),
+        "pdf_fidelity": {},
+        "spreadsheet_fidelity": {},
+    }
+    fidelity_key = (
+        "pdf_fidelity" if extension == ".pdf" else "spreadsheet_fidelity"
+    )
+    allowed_keys = (
+        PUBLIC_PDF_FIDELITY_KEYS
+        if extension == ".pdf"
+        else PUBLIC_SPREADSHEET_FIDELITY_KEYS
+    )
+    public[fidelity_key] = _public_inspection_values(
+        inspection.get("fidelity"),
+        allowed_keys,
+    )
+    return public
+
+
+def _validation_error_text(exc):
+    messages = getattr(exc, "messages", None) or [str(exc)]
+    return " ".join(
+        str(value).strip()
+        for value in messages
+        if str(value).strip()
+    )[:500]
+
+
 def _fetch_native_ai_attachment(
     connection,
     message_id,
@@ -1862,11 +1978,32 @@ def _fetch_native_ai_attachment(
         raise GmailInquiryImportError(
             f"{attachment.get('filename') or 'Gmail attachment'} is too large."
         )
+    content = bytes(content)
+    source_sha256 = hashlib.sha256(content).hexdigest()
     page_count = 0
     spreadsheet_rows = {}
+    spreadsheet_columns = {}
+    spreadsheet_total_rows = 0
+    spreadsheet_total_cells = 0
+    inspection = {}
+
+    def inspected_rejection(reason, *, hard_validation_failed=False):
+        return {
+            "filename": _attachment_parse_filename(attachment),
+            "mime_type": NATIVE_MIME_BY_EXTENSION[extension],
+            "source_sha256": source_sha256,
+            "size": len(content),
+            "hard_validation_failed": bool(hard_validation_failed),
+            **_public_attachment_inspection(inspection, extension),
+        }, reason
+
     try:
         if extension == ".pdf":
-            page_count = len(PdfReader(BytesIO(content)).pages)
+            reader, inspection = inspect_pdf_attachment(
+                content,
+                declared_mime_type=attachment.get("mime_type") or "",
+            )
+            page_count = len(reader.pages)
             max_pdf_pages = max(
                 1,
                 int(
@@ -1878,11 +2015,16 @@ def _fetch_native_ai_attachment(
                 ),
             )
             if page_count > max_pdf_pages:
-                return None, (
+                return inspected_rejection(
                     f"PDF has {page_count} pages; the safe Gmail AI limit is "
                     f"{max_pdf_pages}. Select a smaller document."
                 )
         elif extension in {".xlsx", ".xls"}:
+            inspection = inspect_spreadsheet_attachment(
+                content,
+                extension=extension,
+                declared_mime_type=attachment.get("mime_type") or "",
+            )
             max_rows = min(
                 1000,
                 max(
@@ -1896,20 +2038,135 @@ def _fetch_native_ai_attachment(
                     ),
                 ),
             )
+            max_visible_sheets = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_VISIBLE_SHEETS,
+                max(
+                    1,
+                    int(
+                        getattr(
+                            settings,
+                            "QUOTATION_IMPORT_MAX_EXCEL_SHEETS",
+                            HARD_MAX_NATIVE_AI_SPREADSHEET_VISIBLE_SHEETS,
+                        )
+                    ),
+                ),
+            )
+            max_columns = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_COLUMNS_PER_SHEET,
+                max(
+                    1,
+                    int(
+                        getattr(
+                            settings,
+                            "QUOTATION_IMPORT_MAX_EXCEL_COLUMNS",
+                            HARD_MAX_NATIVE_AI_SPREADSHEET_COLUMNS_PER_SHEET,
+                        )
+                    ),
+                ),
+            )
+            max_total_rows = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_ROWS,
+                max_rows * max_visible_sheets,
+            )
+            max_total_cells = min(
+                HARD_MAX_NATIVE_AI_SPREADSHEET_TOTAL_CELLS,
+                max_total_rows * max_columns,
+            )
             workbook = load_calamine_workbook(BytesIO(content))
             try:
-                for sheet_name in workbook.sheet_names:
+                metadata_by_name = {
+                    str(metadata.name): metadata
+                    for metadata in (
+                        getattr(workbook, "sheets_metadata", None) or []
+                    )
+                }
+                visible_sheet_names = [
+                    sheet_name
+                    for sheet_name in workbook.sheet_names
+                    if str(
+                        getattr(
+                            metadata_by_name.get(sheet_name),
+                            "visible",
+                            "visible",
+                        )
+                    )
+                    .rsplit(".", 1)[-1]
+                    .lower()
+                    == "visible"
+                ]
+                fidelity = dict(inspection.get("fidelity") or {})
+                fidelity["visible_sheet_count"] = len(visible_sheet_names)
+                fidelity["hidden_sheet_count"] = max(
+                    0,
+                    len(workbook.sheet_names) - len(visible_sheet_names),
+                )
+                inspection = {**inspection, "fidelity": fidelity}
+                if len(visible_sheet_names) > max_visible_sheets:
+                    return inspected_rejection(
+                        "Spreadsheet has "
+                        f"{len(visible_sheet_names)} visible sheets; the safe "
+                        f"Gmail AI limit is {max_visible_sheets}. Split the "
+                        "workbook and retry.",
+                        hard_validation_failed=True,
+                    )
+                for sheet_name in visible_sheet_names:
                     sheet = workbook.get_sheet_by_name(sheet_name)
                     row_count = int(getattr(sheet, "height", 0) or 0)
+                    column_count = int(getattr(sheet, "width", 0) or 0)
                     spreadsheet_rows[str(sheet_name)[:120]] = row_count
+                    spreadsheet_columns[str(sheet_name)[:120]] = column_count
                     if row_count > max_rows:
-                        return None, (
+                        return inspected_rejection(
                             f"Spreadsheet sheet '{sheet_name}' has {row_count} "
                             f"rows; native AI reads at most {max_rows} rows per "
-                            "sheet. Split the workbook and retry."
+                            "sheet. Split the workbook and retry.",
+                            hard_validation_failed=True,
+                        )
+                    if column_count > max_columns:
+                        return inspected_rejection(
+                            f"Spreadsheet sheet '{sheet_name}' has "
+                            f"{column_count} columns; the safe Gmail AI limit "
+                            f"is {max_columns} columns per sheet. Split the "
+                            "workbook and retry.",
+                            hard_validation_failed=True,
+                        )
+                    spreadsheet_total_rows += row_count
+                    spreadsheet_total_cells += row_count * column_count
+                    if spreadsheet_total_rows > max_total_rows:
+                        return inspected_rejection(
+                            "Spreadsheet has "
+                            f"{spreadsheet_total_rows} aggregate visible rows; "
+                            f"the safe Gmail AI limit is {max_total_rows}. "
+                            "Split the workbook and retry.",
+                            hard_validation_failed=True,
+                        )
+                    if spreadsheet_total_cells > max_total_cells:
+                        return inspected_rejection(
+                            "Spreadsheet has "
+                            f"{spreadsheet_total_cells} aggregate visible cells; "
+                            f"the safe Gmail AI limit is {max_total_cells}. "
+                            "Split the workbook and retry.",
+                            hard_validation_failed=True,
                         )
             finally:
                 workbook.close()
+    except ValidationError as exc:
+        public_inspection = _public_attachment_inspection({}, extension)
+        public_inspection["attachment_safety"] = {
+            "hard_limits_applied": True,
+            "validation_failed": True,
+        }
+        return {
+            "filename": _attachment_parse_filename(attachment),
+            "mime_type": NATIVE_MIME_BY_EXTENSION[extension],
+            "source_sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "hard_validation_failed": True,
+            **public_inspection,
+        }, (
+            "Attachment failed the required safety inspection: "
+            f"{_validation_error_text(exc)}"
+        )
     except Exception as exc:
         return None, (
             "The attachment could not pass the native AI safety check: "
@@ -1930,15 +2187,23 @@ def _fetch_native_ai_attachment(
     # has passed its format-specific preflight, so submit the canonical MIME
     # type expected by the native document API.
     mime_type = NATIVE_MIME_BY_EXTENSION[extension]
+    public_inspection = _public_attachment_inspection(
+        inspection,
+        extension,
+    )
     return {
         "filename": filename,
         "mime_type": mime_type,
-        "content": bytes(content),
-        "source_sha256": hashlib.sha256(bytes(content)).hexdigest(),
+        "content": content,
+        "source_sha256": source_sha256,
         "size": len(content),
         "detail": "high",
         "page_count": page_count,
         "spreadsheet_rows": spreadsheet_rows,
+        "spreadsheet_columns": spreadsheet_columns,
+        "spreadsheet_total_rows": spreadsheet_total_rows,
+        "spreadsheet_total_cells": spreadsheet_total_cells,
+        **public_inspection,
     }, ""
 
 
@@ -3338,7 +3603,188 @@ def _build_source_analysis(
     file_inputs = []
     fetched_attachment_count = 0
     total_input_bytes = 0
+    required_attachment_failed = False
+    hard_validation_failed = False
     semantic_messages = []
+
+    def append_attachment_evidence(
+        *,
+        attachment_key,
+        message_id,
+        message_sequence,
+        message,
+        attachment,
+        filename,
+        status,
+        reason,
+        inspection_data=None,
+        result_source="attachment_preparation",
+    ):
+        inspection_data = (
+            inspection_data if isinstance(inspection_data, dict) else {}
+        )
+        inspection_warnings = list(
+            inspection_data.get("inspection_warnings") or []
+        )[:50]
+        source = {
+            "source_key": attachment_key,
+            "gmail_message_id": message_id,
+            "kind": "attachment",
+            "filename": str(
+                inspection_data.get("filename") or filename
+            )[:255],
+            "mime_type": str(
+                inspection_data.get("mime_type")
+                or attachment.get("mime_type")
+                or ""
+            )[:255],
+            "attachment_id": str(
+                attachment.get("attachment_id") or ""
+            )[:500],
+            "part_id": str(attachment.get("part_id") or "")[:120],
+            "source_sha256": str(
+                inspection_data.get("source_sha256") or ""
+            )[:64],
+            "parse_method": (
+                "attachment_inspection_v1"
+                if result_source == "attachment_inspection"
+                else "attachment_preparation_v1"
+            ),
+            "parse_status": status,
+            "parse_reason": str(reason or "")[:1000],
+            "line_count": 0,
+            "warnings": inspection_warnings,
+            "attachment_safety": dict(
+                inspection_data.get("attachment_safety") or {}
+            ),
+            "pdf_fidelity": dict(
+                inspection_data.get("pdf_fidelity") or {}
+            ),
+            "spreadsheet_fidelity": dict(
+                inspection_data.get("spreadsheet_fidelity") or {}
+            ),
+            "result_source": result_source,
+            "rows": [],
+            "message_sequence": message_sequence,
+            "source_subject": str(message.get("subject") or "")[:500],
+            "source_sender": str(message.get("sender") or "")[:500],
+            "source_sent_at": _json_safe(message.get("sent_at")),
+        }
+        evidence.append(source)
+        return source
+
+    def record_required_attachment_failure(
+        *,
+        manifest,
+        attachment_key,
+        message_id,
+        message_sequence,
+        message,
+        attachment,
+        filename,
+        reason,
+        inspection_data=None,
+    ):
+        nonlocal required_attachment_failed, hard_validation_failed
+        inspection_data = (
+            inspection_data if isinstance(inspection_data, dict) else {}
+        )
+        is_hard_failure = bool(
+            inspection_data.get("hard_validation_failed")
+        )
+        result_source = (
+            "attachment_inspection"
+            if is_hard_failure
+            else "attachment_preparation"
+        )
+        inspection_warnings = list(
+            inspection_data.get("inspection_warnings") or []
+        )[:50]
+        manifest.update(
+            {
+                "parse_status": "failed",
+                "parse_reason": str(reason or "")[:1000],
+                "source_sha256": str(
+                    inspection_data.get("source_sha256") or ""
+                )[:64],
+                "warnings": inspection_warnings,
+                "attachment_safety": dict(
+                    inspection_data.get("attachment_safety") or {}
+                ),
+                "pdf_fidelity": dict(
+                    inspection_data.get("pdf_fidelity") or {}
+                ),
+                "spreadsheet_fidelity": dict(
+                    inspection_data.get("spreadsheet_fidelity") or {}
+                ),
+                "result_source": result_source,
+            }
+        )
+        append_attachment_evidence(
+            attachment_key=attachment_key,
+            message_id=message_id,
+            message_sequence=message_sequence,
+            message=message,
+            attachment=attachment,
+            filename=filename,
+            status="failed",
+            reason=reason,
+            inspection_data=inspection_data,
+            result_source=result_source,
+        )
+        required_attachment_failed = True
+        hard_validation_failed = hard_validation_failed or is_hard_failure
+        warnings.append(f"{filename or 'Gmail attachment'}: {reason}")
+        warnings.extend(
+            f"{filename}: {warning}"
+            for warning in inspection_warnings
+        )
+
+    def record_blocked_attachment(
+        *,
+        manifest,
+        attachment_key,
+        message_id,
+        message_sequence,
+        message,
+        attachment,
+        filename,
+        reason,
+    ):
+        result_source = (
+            "attachment_inspection"
+            if hard_validation_failed
+            else "attachment_preparation"
+        )
+        manifest.update(
+            {
+                "parse_status": "skipped",
+                "parse_reason": reason,
+                "result_source": result_source,
+            }
+        )
+        append_attachment_evidence(
+            attachment_key=attachment_key,
+            message_id=message_id,
+            message_sequence=message_sequence,
+            message=message,
+            attachment=attachment,
+            filename=filename,
+            status="skipped",
+            reason=reason,
+            result_source=result_source,
+        )
+
+    def blocked_attachment_reason():
+        if hard_validation_failed:
+            return (
+                "AI analysis was not started because another selected "
+                "attachment failed required safety inspection."
+            )
+        return (
+            "AI analysis was not started because another selected supported "
+            "attachment could not be included completely."
+        )
 
     for message_sequence, original_message in enumerate(messages, start=1):
         message = {**original_message}
@@ -3381,9 +3827,67 @@ def _build_source_analysis(
                 }
             )
 
-        message_attachments = (
-            message.get("attachment_manifest") or []
-        )[:MAX_ATTACHMENT_METADATA_PER_MESSAGE]
+        all_message_attachments = message.get("attachment_manifest") or []
+        message_attachments = all_message_attachments[
+            :MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ]
+        if (
+            not _is_verified_mailbox_sent_message(message, mailbox_email)
+            and len(all_message_attachments)
+            > MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ):
+            overflow_reason = (
+                f"Selected inbound Gmail message has "
+                f"{len(all_message_attachments)} attachments; only "
+                f"{MAX_ATTACHMENT_METADATA_PER_MESSAGE} attachment metadata "
+                "records can be inspected safely. Analysis was blocked because "
+                "a supported inquiry document may be outside that bounded window."
+            )
+            overflow_source_key = _source_key(
+                message_id,
+                "attachment",
+                "metadata-overflow",
+            )
+            overflow_manifest = {}
+            record_required_attachment_failure(
+                manifest=overflow_manifest,
+                attachment_key=overflow_source_key,
+                message_id=message_id,
+                message_sequence=message_sequence,
+                message=message,
+                attachment={
+                    "mime_type": "application/octet-stream",
+                    "attachment_id": "",
+                    "part_id": "",
+                },
+                filename="Additional Gmail attachments",
+                reason=overflow_reason,
+            )
+            public_message = manifest_by_id.get(message_id)
+            if public_message is not None:
+                public_message.update(
+                    {
+                        "attachment_analysis_status": "failed",
+                        "attachment_analysis_reason": overflow_reason,
+                    }
+                )
+            for public_attachment in attachment_manifest:
+                if (
+                    str(public_attachment.get("gmail_message_id") or "")
+                    != message_id
+                ):
+                    continue
+                public_attachment.update(
+                    {
+                        "parse_status": "skipped",
+                        "parse_reason": overflow_reason,
+                        "result_source": "attachment_preparation",
+                    }
+                )
+            # Do not inspect or fetch any attachment from an inbound message
+            # whose metadata set is incomplete. The bounded marker above is
+            # enough for staff review without widening the metadata cap.
+            continue
         for attachment in message_attachments:
             if not isinstance(attachment, dict):
                 continue
@@ -3463,33 +3967,46 @@ def _build_source_analysis(
                     "Original Gmail attachment AI processing is disabled. "
                     "Enable mailbox AI vision/file processing and retry."
                 )
-            if declared_size and declared_size > max_bytes:
-                manifest.update(
-                    {
-                        "parse_status": "over_limit",
-                        "parse_reason": (
-                            f"Attachment exceeds the {max_bytes}-byte "
-                            "inquiry analysis limit."
-                        ),
-                    }
+            if required_attachment_failed:
+                record_blocked_attachment(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=blocked_attachment_reason(),
                 )
-                warnings.append(
-                    f"{filename or 'Gmail attachment'} is over the file-size limit."
+                continue
+            if declared_size and declared_size > max_bytes:
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        f"Attachment exceeds the {max_bytes}-byte inquiry "
+                        "analysis limit."
+                    ),
                 )
                 continue
             if fetched_attachment_count >= max_native_files:
-                manifest.update(
-                    {
-                        "parse_status": "skipped",
-                        "parse_reason": (
-                            "Per-import attachment limit reached; select fewer "
-                            "messages and reanalyze."
-                        ),
-                    }
-                )
-                warnings.append(
-                    "Some Gmail attachments were not sent because the "
-                    "per-import attachment limit was reached."
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        "Per-import attachment limit reached; select fewer "
+                        "messages and reanalyze."
+                    ),
                 )
                 continue
             private_attachment = next(
@@ -3509,40 +4026,80 @@ def _build_source_analysis(
                 ),
                 attachment,
             )
-            native_input, skipped_reason = _fetch_native_ai_attachment(
-                connection,
-                message_id,
-                private_attachment,
-                max_bytes=max_bytes,
-            )
-            if skipped_reason:
-                manifest.update(
-                    {
-                        "parse_status": "unsupported",
-                        "parse_reason": skipped_reason,
-                    }
+            try:
+                native_input, skipped_reason = _fetch_native_ai_attachment(
+                    connection,
+                    message_id,
+                    private_attachment,
+                    max_bytes=max_bytes,
                 )
-                warnings.append(f"{filename}: {skipped_reason}")
+            except Exception as exc:
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        "Attachment could not be fetched or prepared for "
+                        f"analysis: {str(exc)[:300]}"
+                    ),
+                )
+                continue
+            if skipped_reason:
+                inspection_data = (
+                    native_input if isinstance(native_input, dict) else {}
+                )
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=skipped_reason,
+                    inspection_data=inspection_data,
+                )
                 continue
             if total_input_bytes + native_input["size"] > max_total_bytes:
-                manifest.update(
-                    {
-                        "parse_status": "over_limit",
-                        "parse_reason": (
-                            "Combined original attachments exceed the safe "
-                            "single-analysis limit; select fewer messages."
-                        ),
-                    }
-                )
-                warnings.append(
-                    "Some Gmail attachments were not sent because their "
-                    "combined size exceeds the safe AI request limit."
+                record_required_attachment_failure(
+                    manifest=manifest,
+                    attachment_key=attachment_key,
+                    message_id=message_id,
+                    message_sequence=message_sequence,
+                    message=message,
+                    attachment=attachment,
+                    filename=filename,
+                    reason=(
+                        "Combined original attachments exceed the safe "
+                        "single-analysis limit; select fewer messages."
+                    ),
+                    inspection_data=native_input,
                 )
                 continue
             fetched_attachment_count += 1
             total_input_bytes += native_input["size"]
             native_input["source_key"] = attachment_key
             file_inputs.append(native_input)
+            inspection_warnings = list(
+                native_input.get("inspection_warnings") or []
+            )
+            attachment_safety = dict(
+                native_input.get("attachment_safety") or {}
+            )
+            pdf_fidelity = dict(
+                native_input.get("pdf_fidelity") or {}
+            )
+            spreadsheet_fidelity = dict(
+                native_input.get("spreadsheet_fidelity") or {}
+            )
+            warnings.extend(
+                f"{filename}: {warning}"
+                for warning in inspection_warnings
+            )
             source = {
                 "source_key": attachment_key,
                 "gmail_message_id": message_id,
@@ -3553,8 +4110,13 @@ def _build_source_analysis(
                 "part_id": attachment.get("part_id") or "",
                 "source_sha256": native_input["source_sha256"],
                 "parse_method": "openai_native_input_v2",
+                "parse_status": "submitted",
+                "parse_reason": "Original attachment sent for AI analysis.",
                 "line_count": 0,
-                "warnings": [],
+                "warnings": inspection_warnings,
+                "attachment_safety": attachment_safety,
+                "pdf_fidelity": pdf_fidelity,
+                "spreadsheet_fidelity": spreadsheet_fidelity,
                 "result_source": "ai_native_file",
                 "rows": [],
                 "message_sequence": message_sequence,
@@ -3570,20 +4132,93 @@ def _build_source_analysis(
                     "source_sha256": native_input["source_sha256"],
                     "line_count": 0,
                     "result_source": "ai_native_file",
+                    "warnings": inspection_warnings,
+                    "attachment_safety": attachment_safety,
+                    "pdf_fidelity": pdf_fidelity,
+                    "spreadsheet_fidelity": spreadsheet_fidelity,
                 }
             )
 
     analysis_timings["source_preparation"] = _elapsed_ms(
         preparation_started
     )
-    semantic_result = _run_native_thread_analysis(
-        semantic_messages,
-        evidence,
-        file_inputs,
-        gmail_import,
-        actor,
-        analysis_timings=analysis_timings,
-    )
+    provider_invoked = not required_attachment_failed
+    if required_attachment_failed:
+        if hard_validation_failed:
+            blocked_reason = (
+                "AI analysis was not started because a selected attachment "
+                "failed required safety inspection. Remove or replace that "
+                "attachment and retry."
+            )
+            blocked_result_source = "attachment_inspection"
+        else:
+            blocked_reason = (
+                "AI analysis was not started because every selected supported "
+                "attachment must be included completely. Select fewer files, "
+                "or remove or replace the failed attachment, and retry."
+            )
+            blocked_result_source = "attachment_preparation"
+        warnings.append(blocked_reason)
+        for manifest in attachment_manifest:
+            if manifest.get("parse_status") == "submitted":
+                manifest.update(
+                    {
+                        "parse_status": "skipped",
+                        "parse_reason": blocked_reason,
+                        "result_source": blocked_result_source,
+                    }
+                )
+        for source in evidence:
+            if (
+                source.get("kind") == "attachment"
+                and source.get("parse_status") == "submitted"
+            ):
+                source.update(
+                    {
+                        "parse_status": "skipped",
+                        "parse_reason": blocked_reason,
+                        "result_source": blocked_result_source,
+                    }
+                )
+        file_inputs = []
+        total_input_bytes = 0
+        semantic_result = {
+            "messages": {
+                str(message.get("gmail_message_id") or ""): {
+                    "classification": (
+                        "our_reply"
+                        if message.get("is_outbound")
+                        else "context"
+                    ),
+                    "usage": "context",
+                    "reason": blocked_reason,
+                    "confidence": 1.0,
+                }
+                for message in semantic_messages
+                if message.get("gmail_message_id")
+            },
+            "rows": [],
+            "warnings": [],
+            "thread_summary": blocked_reason,
+            "usage": {},
+            "customer_identity": {
+                "company_name": "",
+                "contact_name": "",
+                "contact_email": "",
+                "source_keys": [],
+                "confidence": 0.0,
+                "reason": blocked_reason,
+            },
+        }
+    else:
+        semantic_result = _run_native_thread_analysis(
+            semantic_messages,
+            evidence,
+            file_inputs,
+            gmail_import,
+            actor,
+            analysis_timings=analysis_timings,
+        )
     analysis_timings.update(semantic_result.pop("_timings_ms", {}) or {})
     post_ai_started = time.perf_counter()
     warnings.extend(semantic_result["warnings"])
@@ -3756,9 +4391,9 @@ def _build_source_analysis(
             "selected_message_ids": sorted(selected_ids),
             "multiple_distinct_sources": False,
             "low_confidence": low_confidence,
-            "ai_used": True,
-            "semantic_ai_used": True,
-            "native_file_ai_used": bool(file_inputs),
+            "ai_used": provider_invoked,
+            "semantic_ai_used": provider_invoked,
+            "native_file_ai_used": bool(file_inputs) and provider_invoked,
             "native_file_count": len(file_inputs),
             "native_file_bytes": total_input_bytes,
             "obvious_order": obvious_order,

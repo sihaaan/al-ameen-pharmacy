@@ -12,6 +12,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from .attachment_inspection import inspect_pdf_attachment
 from .import_rules import (
     is_obvious_po_metadata_item,
     preserve_specific_item_details,
@@ -41,6 +42,10 @@ VALID_PARSE_STATUSES = {"parsed", "needs_review", "ignored"}
 AI_DETERMINISTIC_GUARD_WARNING = (
     "AI cleanup was rejected because it removed or changed high-confidence deterministic item data; "
     "the deterministic extraction was kept for staff review."
+)
+AI_CUSTOMER_EVIDENCE_GUARD_WARNING = (
+    "AI cleanup was rejected because customer price evidence could not be mapped "
+    "back to a unique source row; the deterministic extraction was kept for staff review."
 )
 
 # In-memory vision is used for Gmail attachments that deliberately must not be
@@ -1216,6 +1221,95 @@ def _current_source_meta(preview):
     return source_meta
 
 
+CUSTOMER_EVIDENCE_FIELDS = (
+    "customer_unit_price",
+    "customer_amount",
+    "customer_vat_rate",
+    "customer_vat_amount",
+    "customer_vat",
+    "customer_line_total",
+)
+
+
+def _evidence_identity(value):
+    return " ".join(re.findall(r"[a-z0-9]+", _clean_text(value).lower()))
+
+
+def _has_customer_evidence(row):
+    return any(_clean_text((row or {}).get(field)) for field in CUSTOMER_EVIDENCE_FIELDS)
+
+
+def _row_evidence_match(source_row, candidate_row):
+    source_raw = _evidence_identity(
+        source_row.get("raw_line") or source_row.get("raw_source_text")
+    )
+    candidate_raw = _evidence_identity(
+        candidate_row.get("raw_line") or candidate_row.get("raw_source_text")
+    )
+    if source_raw and candidate_raw and source_raw == candidate_raw:
+        return True
+
+    source_name = _evidence_identity(_guard_item_name(source_row))
+    candidate_name = _evidence_identity(_guard_item_name(candidate_row))
+    if not source_name or source_name != candidate_name:
+        return False
+    source_quantity = _guard_decimal(source_row.get("quantity"))
+    candidate_quantity = _guard_decimal(candidate_row.get("quantity"))
+    if (
+        source_quantity is not None
+        and candidate_quantity is not None
+        and source_quantity != candidate_quantity
+    ):
+        return False
+    source_unit = _evidence_identity(source_row.get("unit"))
+    candidate_unit = _evidence_identity(candidate_row.get("unit"))
+    return not (source_unit and candidate_unit and source_unit != candidate_unit)
+
+
+def _restore_customer_evidence(preview, result):
+    """Copy current-source evidence only after a unique deterministic row match.
+
+    Reusable AI cache payloads intentionally contain no upload-specific source
+    evidence. This merge therefore runs only while binding a result to the
+    current preview. If evidence cannot be mapped uniquely, callers must keep
+    the deterministic rows rather than silently discard it.
+    """
+
+    source_rows = [
+        row
+        for row in ((preview or {}).get("lines") or [])
+        if isinstance(row, dict) and _has_customer_evidence(row)
+    ]
+    if not source_rows:
+        return True
+    candidate_rows = [
+        row for row in ((result or {}).get("lines") or []) if isinstance(row, dict)
+    ]
+    used = set()
+    for source_row in source_rows:
+        matches = [
+            index
+            for index, candidate_row in enumerate(candidate_rows)
+            if index not in used and _row_evidence_match(source_row, candidate_row)
+        ]
+        if len(matches) != 1:
+            return False
+        match_index = matches[0]
+        used.add(match_index)
+        candidate_row = candidate_rows[match_index]
+        for field in CUSTOMER_EVIDENCE_FIELDS:
+            source_value = source_row.get(field)
+            if _clean_text(source_value) and not _clean_text(candidate_row.get(field)):
+                candidate_row[field] = source_value
+        source_notes = _clean_text(source_row.get("notes"))
+        candidate_notes = _clean_text(candidate_row.get("notes"))
+        if source_notes and source_notes.lower() not in candidate_notes.lower():
+            candidate_row["notes"] = " | ".join(
+                value for value in (candidate_notes, source_notes) if value
+            )
+    return True
+
+
 def _bind_result_source(result, preview):
     """Bind reusable AI output to the current upload's provenance."""
 
@@ -1238,6 +1332,40 @@ def _bind_result_source(result, preview):
         else preview.get("parse_method", "")
     )
     result_meta = result.get("meta") or {}
+    # Parser/inspection warnings describe the current source and must never be
+    # replaced by provider output or inherited solely from a reusable cache.
+    # Keep them alongside any warnings produced by AI validation.
+    rebound["warnings"] = list(
+        dict.fromkeys(
+            _clean_text(warning)
+            for warning in [
+                *((preview or {}).get("warnings") or []),
+                *((result or {}).get("warnings") or []),
+            ]
+            if _clean_text(warning)
+        )
+    )
+    if not _restore_customer_evidence(preview, rebound):
+        fallback = {**(preview or {})}
+        fallback["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *rebound["warnings"],
+                    AI_CUSTOMER_EVIDENCE_GUARD_WARNING,
+                ]
+            )
+        )
+        fallback["meta"] = {
+            **_current_source_meta(preview),
+            "ai_cleanup_rejected": True,
+            "ai_cleanup_rejection_reason": "customer_price_evidence_unmapped",
+        }
+        fallback["result_source"] = AI_SOURCE_DETERMINISTIC
+        fallback["ai_status"] = AI_STATUS_FAILED
+        fallback["ai_status_label"] = (
+            "AI cleanup rejected; deterministic customer evidence kept."
+        )
+        return fallback
     # Preview metadata belongs to this upload. AI identity and usage fields are
     # reserved for the server-generated result so a browser-echoed preview
     # cannot replace them.
@@ -1445,7 +1573,7 @@ def _run_ai_cleanup(
             ),
             success=True,
         )
-        return result
+        return _bind_result_source(result, preview)
     except Exception as exc:
         if "provider" not in timings_ms:
             timings_ms["provider"] = ai_parse_elapsed_ms(provider_started_at)
@@ -1934,6 +2062,27 @@ def _render_pdf_bytes_images(data, *, max_pages=None):
     )
     images = []
     rendered_bytes = 0
+    try:
+        _, inspection = inspect_pdf_attachment(
+            data,
+            # The renderer keeps the lower workflow-specific cap below so its
+            # established error behavior is preserved. Preflight uses the
+            # immutable hard ceiling to reject report-sized PDFs before fitz.
+            max_pages=hard_max_pages,
+        )
+    except ValidationError as exc:
+        messages = getattr(exc, "messages", None) or [str(exc)]
+        raise AIParseError(
+            "PDF rendering was blocked by the attachment safety preflight: "
+            + "; ".join(str(message) for message in messages)
+        ) from exc
+    if not bool(
+        (inspection.get("safety") or {}).get("local_traversal_safe", False)
+    ):
+        raise AIParseError(
+            "PDF rendering was skipped because its streams cannot be decoded "
+            "with a bounded in-process preflight."
+        )
     with fitz.open(stream=data, filetype="pdf") as document:
         if len(document) > effective_max_pages:
             raise AIParseError(

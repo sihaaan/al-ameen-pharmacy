@@ -1180,6 +1180,54 @@ describe('QuotationEditor Product price context', () => {
     }));
   });
 
+  test('keeps every attachment warning reviewable when an LPO has more than three', async () => {
+    const sentQuote = {
+      ...readyQuote,
+      status: 'sent',
+      status_display: 'Sent',
+    };
+    const warnings = [
+      'Workbook contains formula cells; verify quantities and prices.',
+      'Workbook contains hidden sheets, rows, or columns.',
+      'Workbook contains merged cells; verify extracted row alignment.',
+      "Stopped reading sheet 'Items' after 500 rows.",
+      "Stopped reading columns in sheet 'Items' after 100 columns.",
+      'Workbook has more than 10 visible sheets; later visible sheets were not parsed.',
+      'Workbook contains explicit date cells; verify item codes.',
+    ];
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: sentQuote });
+    quotationAPI.quotes.lpos.mockResolvedValueOnce({
+      data: [{
+        id: 92,
+        lpo_number: 'LPO-WARN-92',
+        lpo_date: '2026-07-31',
+        notes: '',
+        status: 'needs_review',
+        status_display: 'Needs review',
+        source_filename: 'warning-source.xlsx',
+        source_type_display: 'File',
+        parsed_row_count: 1,
+        received_at: '2026-07-31T08:00:00Z',
+        warnings,
+        parsed_meta: {},
+      }],
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const warningPanel = await screen.findByRole('alert', { name: 'LPO attachment warnings' });
+    expect(within(warningPanel).getByText(warnings[0])).toBeVisible();
+    expect(within(warningPanel).getByText(warnings[2])).toBeVisible();
+    // Material completeness warnings stay visible even when they occur after
+    // the original three-warning display limit.
+    expect(within(warningPanel).getByText(warnings[3])).toBeVisible();
+    expect(within(warningPanel).getByText(warnings[4])).toBeVisible();
+    expect(within(warningPanel).getByText(warnings[5])).toBeVisible();
+    const expansion = within(warningPanel).getByText('Show 1 more warning');
+    fireEvent.click(expansion);
+    expect(within(warningPanel).getByText(warnings[6])).toBeVisible();
+  });
+
   test('never overwrites a price typed while history is loading', async () => {
     const request = deferred();
     quotationAPI.quotes.productPrice.mockImplementationOnce(() => request.promise);

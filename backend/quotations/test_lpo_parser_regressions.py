@@ -275,6 +275,8 @@ class LPOTextParserRegressionTests(SimpleTestCase):
 
     def test_headerless_pdf_grid_infers_description_quantity_and_unit_columns(self):
         page_one = SimpleNamespace(
+            width=612,
+            height=792,
             extract_tables=lambda: [
                 [
                     [
@@ -318,6 +320,8 @@ class LPOTextParserRegressionTests(SimpleTestCase):
             extract_text=lambda: "headerless page one",
         )
         page_two = SimpleNamespace(
+            width=612,
+            height=792,
             extract_tables=lambda: [
                 [
                     [

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.2.0 |
+| Document version | 1.3.0 |
 | Status | Initial current-state runbook; unresolved items are marked explicitly |
 | Owner | Assign a primary and backup production operator |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This runbook preserves employee review, blank selling prices, suggestion-only
@@ -58,10 +58,16 @@ not in the repository.
 - Review any quotation email in `sending` or `unknown`; never resend it blindly.
 - Check recent AI failures/latency and whether provider/model unexpectedly changed.
 - Spot-check that new parsed quotation rows have evidence and blank selling prices.
+- Review attachment hard failures and fidelity warnings; compare warning-only
+  rows with the visible customer source rather than clearing warnings blindly.
 
 ### Weekly
 
 - Review failed imports, repeated reanalysis, cache behavior, and validation failures.
+- Look for repeated archive-limit, malformed/encrypted file, parser-fallback,
+  PDF xref/object/stream/geometry/output-limit, hidden/formula/merged-cell,
+  inline-image/local-render skip, Gmail attachment-metadata overflow,
+  truncation, or invalid-image failures by route.
 - Review AI timing/token aggregates by route, provider, model, pipeline, schema,
   prompt/contract hash, and success. Do not group unlike contracts together.
 - Check database capacity/connections, Railway memory/CPU/restarts, Gmail API
@@ -73,6 +79,9 @@ not in the repository.
 
 Use [DEPLOYMENT.md](DEPLOYMENT.md). Record exact commit, deployment IDs,
 migration plan, backup/recovery point, operator, UTC time, and smoke-test result.
+Task 2.4 code requires additive migration
+`quotations.0036_quotationoutcomepoimport_parsed_meta` before promotion; verify
+that outcome-PO inspection metadata survives a parse/reload smoke test.
 
 ## 4. AI intake monitoring
 
@@ -109,6 +118,9 @@ When analysis appears stuck:
 |---|---|---|---|
 | AI timeout/provider failure | import fails or remains reviewable with errors | inspect sanitized log; explicit reanalyze after service recovers | not applicable |
 | Malformed/unsupported AI output | validation rejects/flags rows | do not bypass; correct source/selection or review manually | not applicable |
+| Attachment hard inspection failure | manual/historical upload is rejected before new source storage; Gmail records the rejection and blocks the selected provider call | retain the canonical customer source, inspect the sanitized reason, and request a valid/smaller/exported copy; never rename or bypass it | not applicable |
+| Attachment fidelity warning | parsing may continue with bounded warning/safety/fidelity metadata | compare formulas/cached values, hidden or merged content, visible-sheet limits, duplicate rows, PDF forms, and source evidence before saving review | not applicable |
+| Invalid product/branding image | upload is rejected before persistence | verify PNG/JPEG/WebP bytes, size, dimensions, and single-frame format; obtain a valid export | not applicable |
 | Selection changed during analysis | stale response rejected | reopen and analyze current selection | not applicable |
 | Handoff expired | claim rejected | return to Gmail and create a new handoff | not applicable |
 | Database lock wait/failure | request fails or waits within DB behavior | inspect logs; retry only the non-send operation after state refresh | never infer email status |
@@ -121,6 +133,31 @@ When analysis appears stuck:
 | Multiple/malformed reconciliation candidates | conflict/provenance error | escalate; compare exact RFC ID/From/thread/SENT evidence | **No** |
 | Frozen snapshot mismatch/corruption | retry blocked before Gmail | preserve hashes/attempt history; create a reviewed revision or escalate corruption | **No** |
 | Private evidence missing | authenticated open fails/reference is stale | recover exact hash-matched canonical source; audit action | not applicable |
+
+### Attachment rejection and fidelity-warning procedure
+
+1. Identify the route: manual inquiry/LPO/proforma, Gmail native, price
+   reference, historical PDF, or product/branding image.
+2. For a hard failure, preserve only the sanitized reason, source digest or
+   evidence reference already recorded by the application. Do not copy the
+   customer file into logs, tickets, or chat, and do not bypass inspection.
+3. In Gmail, a shared hard inspection failure intentionally prevents the AI
+   provider call for the entire selected source set. Remove or replace a source
+   only through the normal employee selection/review flow, then reanalyze.
+4. For warning-only results, open the canonical source and compare every
+   affected value. Formula caches, hidden/merged cells, external links,
+   truncated rows/columns/sheets, PDF forms, and cross-sheet duplicates require
+   particular attention.
+5. Confirm that inquiry selling prices remain blank and that source/customer
+   prices are evidence only. Price-reference application is a separate,
+   explicit employee action.
+6. Record route, UTC time, sanitized validation class, configured limit names,
+   employee decision, and retry outcome. Do not describe a passed inspection as
+   malware-free.
+
+There is no malware/AV scanner and no parser sandbox. Legacy `.xls` and binary
+`.xlsb` inspection is limited. Configuration and rollback details are in
+[ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md).
 
 ## 6. Ambiguous Gmail delivery procedure
 
@@ -267,5 +304,6 @@ Known deviations and rollback owner:
 - [Deployment guide](DEPLOYMENT.md)
 - [Security guide](SECURITY.md)
 - [Technical hardening progress](TECHNICAL_HARDENING_PROGRESS.md)
+- [Attachment security and spreadsheet fidelity](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)
 - [Railway pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command)
 - [Railway volumes](https://docs.railway.com/volumes/reference)

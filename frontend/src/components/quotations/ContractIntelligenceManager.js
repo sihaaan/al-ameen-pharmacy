@@ -66,6 +66,32 @@ const formatDateTime = (value) => {
 
 const percent = (value) => `${Math.round(Number(value || 0) * 100)}%`;
 
+export const ContractWarningReview = ({ warnings = [] }) => {
+  const reviewWarnings = Array.isArray(warnings)
+    ? warnings.filter((warning) => String(warning || '').trim())
+    : [];
+  if (!reviewWarnings.length) return null;
+  const visibleWarnings = reviewWarnings.slice(0, 3);
+  const additionalWarnings = reviewWarnings.slice(3);
+  return (
+    <section className="qm-helper warning" role="alert" aria-label="Contract analysis warnings">
+      {visibleWarnings.map((warning, index) => (
+        <div key={`${warning}-${index}`}>{warning}</div>
+      ))}
+      {!!additionalWarnings.length && (
+        <details>
+          <summary>
+            Show {additionalWarnings.length} more {additionalWarnings.length === 1 ? 'warning' : 'warnings'}
+          </summary>
+          {additionalWarnings.map((warning, index) => (
+            <div key={`${warning}-${index + visibleWarnings.length}`}>{warning}</div>
+          ))}
+        </details>
+      )}
+    </section>
+  );
+};
+
 const ContractIntelligenceManager = () => {
   const [gmail, setGmail] = useState(null);
   const [companies, setCompanies] = useState([]);
@@ -871,13 +897,7 @@ const ContractIntelligenceManager = () => {
                 </div>
               </section>
 
-              {!!(selectedRun.warnings || []).length && (
-                <section className="qm-helper warning">
-                  {(selectedRun.warnings || []).slice(0, 3).map((warning, index) => (
-                    <div key={`${warning}-${index}`}>{warning}</div>
-                  ))}
-                </section>
-              )}
+              <ContractWarningReview warnings={selectedRun.warnings} />
 
               <section className="qm-grid-two qm-contract-panels">
                 <div className="qm-panel">

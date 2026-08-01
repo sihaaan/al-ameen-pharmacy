@@ -873,6 +873,189 @@
   the dual reader until exact hash-verified objects are restored to the legacy
   root; prefer a configuration rollback or forward fix with uploads paused.
 
+### 2.4 — Harden attachment checks and spreadsheet fidelity
+
+- Status: completed in code; not deployed.
+- Commit: this task checkpoint (`fix: harden quotation attachment parsing`).
+- Finding verified:
+  - Supported Office uploads were checked mainly by filename/signature before
+    openpyxl/calamine, so archive expansion, unsafe/duplicate package members,
+    package-kind mismatches, formulas, hidden content, merges, and fallback
+    truncation could be invisible.
+  - Direct price-reference XLSX and historical-PDF parsing did not share one
+    safety/fidelity boundary. Gmail native AI preserved original bytes but did
+    not expose the same bounded inspection evidence before provider submission.
+  - Quotation-line product-image upload persisted a file without the complete
+    shared decode validation used by other image paths.
+  - Contract-intelligence returned only the first ten attachment records, so
+    later customer attachments could disappear rather than remain explicit
+    skipped evidence.
+- Files changed:
+  - `backend/quotations/attachment_inspection.py`
+  - `backend/quotations/import_parsers.py`
+  - `backend/quotations/import_rules.py`
+  - `backend/quotations/ai_parsing.py`
+  - `backend/quotations/gmail_inquiry_import.py`
+  - `backend/quotations/contract_intelligence.py`
+  - `backend/quotations/price_reference.py`
+  - `backend/quotations/historical_import_parsers.py`
+  - `backend/quotations/quote_po_intelligence.py`
+  - `backend/quotations/models.py`
+  - `backend/quotations/migrations/0036_quotationoutcomepoimport_parsed_meta.py`
+  - `backend/api/upload_validation.py`
+  - `backend/api/serializers.py`
+  - `backend/quotations/serializers.py`
+  - `backend/quotations/views.py`
+  - `backend/pharmacy_api/settings.py`
+  - `backend/.env.example`
+  - `backend/api/tests.py`
+  - `backend/quotations/tests.py`
+  - `backend/quotations/test_attachment_fidelity.py`
+  - `backend/quotations/test_attachment_meta_retention.py`
+  - `backend/quotations/test_gmail_attachment_fidelity.py`
+  - `backend/quotations/test_import_rule_fidelity.py`
+  - `backend/quotations/test_lpo_parser_regressions.py`
+  - `backend/quotations/test_pdf_resource_bounds.py`
+  - `backend/quotations/test_reference_attachment_fidelity.py`
+  - `backend/quotations/test_email_lpo.py`
+  - `backend/quotations/test_documentation_contract.py`
+  - `frontend/src/components/quotations/QuotationOutcomeReview.js`
+  - `frontend/src/components/quotations/QuotationOutcomeReview.test.js`
+  - `frontend/src/components/quotations/ProformaInvoiceManager.js`
+  - `frontend/src/components/quotations/ProformaInvoiceManager.test.js`
+  - `frontend/src/components/quotations/InquiryManager.js`
+  - `frontend/src/components/quotations/InquiryManager.test.js`
+  - `frontend/src/components/quotations/InquiryManagerCompanySafety.test.js`
+  - `frontend/src/components/quotations/ContractIntelligenceManager.js`
+  - `frontend/src/components/quotations/ContractIntelligenceManager.test.js`
+  - `frontend/src/components/quotations/QuotationEditor.js`
+  - `frontend/src/components/quotations/QuotationEditor.test.js`
+  - `ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `SECURITY.md`
+  - `OPERATIONS.md`
+  - `DEPLOYMENT.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Added provider-neutral PDF/Office inspection before parsing. OOXML entry,
+    member, total-expansion, traversal, duplicate, symlink, encryption,
+    required-part, package-kind, macro-masquerade, and unsafe XML violations
+    fail closed within code-level ceilings. PDF preflight follows bounded
+    revision/xref chains, validates exact direct/compressed-object mappings and
+    stream boundaries, and constrains `PdfReader` to the validated graph before
+    complete object/page inspection. MIME mismatch after validated bytes
+    remains a warning.
+  - XLSX formulas and missing caches, explicit error/date cells, hidden
+    sheets/rows/columns, merged cells, protection, external links, embedded
+    objects, suspicious compression, and bounded/limited inspection are
+    warning-only. Legacy XLS and binary XLSB explicitly retain limited-
+    inspection warnings. Form/embedded/active PDF markers are warning-only and
+    are never executed.
+  - Visible sheets are selected before caps; row/column/sheet limits warn only
+    when exceeded. A late primary-reader failure cannot leak partial rows into
+    fallback output. Cross-sheet duplicates remain present and are flagged for
+    staff rather than silently removed.
+  - Missing quantity/unit and ambiguous signed/grouped numeric source text now
+    deterministically require review while preserving the previous parsed
+    compatibility value. No locale reinterpretation or price invention was
+    added.
+  - Gmail PDF/XLS/XLSX inspection retains exact original provider bytes and
+    hashes. Bounded warning/safety/fidelity metadata enters the manifest and
+    evidence without hidden sheet names or binary content. Any selected hard
+    failure records explicit failed evidence and blocks the whole AI provider
+    call so a partial selected source set cannot be analyzed silently.
+    Selected supported documents that cannot be fetched/prepared or exceed the
+    per-file, selected-file-count, or combined-byte limit use the same
+    fail-closed behavior. A selected inbound message with more than 100
+    attachment metadata entries also blocks before fetch/provider use; only a
+    Gmail `SENT` message with the exact singleton mailbox `From` is exempt as
+    outbound context. Native workbooks also receive visible-sheet,
+    per-sheet row/column, aggregate-row, and aggregate-cell bounds before the
+    provider call.
+  - Every local PDF vision render repeats inspection immediately before the
+    native renderer and requires a bounded local-traversal result. Reachable
+    inline images in Page, recursive Form, Pattern, Type3, soft-mask, and
+    annotation-appearance streams block local rendering conservatively;
+    unsupported filters and per-page image aggregates use the same boundary.
+  - Direct price-reference XLSX and historical PDF now share inspection and
+    expose additive bounded metadata. Existing explicit reference-price
+    application and historical review/commit semantics are unchanged.
+  - Product, quotation-line, logo, signature, and stamp images now require a
+    bounded full Pillow verification and pixel decode, decoded-format/extension
+    and supplied-MIME agreement, positive dimensions, at most 12,000 pixels per
+    edge, at most 25 million pixels, and one frame before persistence. Uploads
+    are rewound on every result. Company `Brand.logo` uses the same boundary.
+  - Parser/inspection warnings are rebound to the current source after AI
+    cleanup without entering reusable cache payloads. Deterministic customer
+    price evidence and notes are restored only to a unique matching AI row; if
+    that mapping is not unique, the AI replacement is rejected and the
+    deterministic rows remain. Selling-price fields stay blank.
+  - The first-ten contract-intelligence processing ceiling is unchanged, but
+    every later attachment remains JSON-safe skipped metadata and is never
+    fetched or parsed. PO/outcome and proforma file pickers now advertise only
+    the PDF/Excel types their backend routes accept.
+- Tests run:
+  - Final complete quotation regression from a fresh SQLite test database:
+    `DATABASE_URL=sqlite:///task24-all-quotations-final.sqlite3 python manage.py test quotations --noinput --verbosity 1`
+    — 1,068/1,068 passed; 16 intentional environment-specific skips. Logged
+    service-unavailable, revoked-OAuth, and stale-summary errors are asserted
+    resilience cases.
+  - Final API regression:
+    `DATABASE_URL=sqlite:///task24-api-final.sqlite3 python manage.py test api --noinput --verbosity 1`
+    — 32/32 passed.
+  - Final combined attachment/Gmail regression:
+    `DATABASE_URL=sqlite:///task24-root-final.sqlite3 python manage.py test quotations.test_pdf_resource_bounds quotations.test_attachment_fidelity quotations.test_import_rule_fidelity quotations.test_reference_attachment_fidelity quotations.test_gmail_attachment_fidelity quotations.test_gmail_inquiry_import --noinput --verbosity 1`
+    — 169/169 passed.
+  - Independent defensive regression: 38/38 focused PDF/Gmail boundary tests
+    passed; a read-only compatibility sample of 500/500 existing private PDFs
+    passed, including compressed-object PDFs.
+  - Final frontend regression:
+    `npm test -- --watchAll=false --runInBand QuotationOutcomeReview.test.js ProformaInvoiceManager.test.js ContractIntelligenceManager.test.js InquiryManager.test.js InquiryManagerCompanySafety.test.js QuotationEditor.test.js`
+    — 97/97 passed across six suites; the logged replacement-parse error is an
+    asserted UI failure-state test.
+  - `npm run build` — optimized production build compiled successfully.
+  - `python manage.py check`, `python manage.py makemigrations --check --dry-run`,
+    `python -m compileall -q api quotations pharmacy_api`, and
+    `git diff --check` — passed (line-ending notices only where noted by Git).
+- Migration: `0036_quotationoutcomepoimport_parsed_meta` adds one
+  empty-default JSON field to `QuotationOutcomePOImport`; it deletes no record
+  and has no customer-content backfill. It must run before Task 2.4 code. Once
+  structured evidence exists, reversing it would delete that evidence, so keep
+  the column and prefer a forward fix.
+- API/frontend changes: no endpoint or request shape changed. The outcome-PO
+  serializer adds the read-only `parsed_meta` response field. Preview, Gmail
+  manifest/evidence, price-reference, and historical responses gain additive
+  warning/safety/fidelity metadata. Hard invalid Gmail attachments become
+  explicit failed evidence with no provider call. File-picker accept filters
+  now match existing server behavior.
+- Accuracy/security impact: definite malformed/container/resource violations
+  fail before parser/provider/persistence where applicable; possible business-
+  fidelity problems remain visible warnings and never cause automatic formula
+  recalculation, hidden-data recovery, merge filling, deduplication, product/
+  alias creation, company assignment, or selling-price invention. Employee
+  review, row evidence, Gmail/manual routes, preview-before-send, verified
+  replies, one-send-per-revision, ambiguous lockout, and no-send reconciliation
+  remain unchanged.
+- Remaining risks: this is not malware/AV scanning and parsers still run in the
+  web process without a sandbox. XLS/XLSB, large XLSX worksheet XML, style-based
+  dates, formulas/rendering, PDF markers/forms, OCR, and semantic extraction
+  remain incomplete or fallible. A legitimate file can exceed a hard resource
+  ceiling. No practical generated XLS/XLSB fixture proves every binary feature;
+  those formats deliberately retain limited-inspection warnings. Native PDF
+  image codecs retain in-process complexity after geometry/output bounds;
+  inline/unsupported-filter PDFs deliberately skip local rendering. Gmail's
+  response JSON/MIME tree is materialized before the 100-entry attachment cap,
+  and trusted direct Django-admin/model image assignment is outside the custom
+  serializer boundary.
+- Rollback: revert this checkpoint as one unit before deployment; an unused
+  `0036` may be reversed. After structured outcome metadata exists, retain the
+  column and use a forward or schema-compatible application rollback. After
+  deployment, first restore an accidentally tightened environment limit or
+  prefer a forward fix; reverting the inspection call sites weakens defenses.
+  No provider/OAuth/AI/production rollback is needed. Re-run a fresh preview
+  after rollback rather than trusting output produced under a different
+  inspection contract.
+
 ## Phase 3
 
 Intentionally not implemented.

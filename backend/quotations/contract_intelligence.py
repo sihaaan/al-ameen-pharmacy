@@ -58,6 +58,7 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 MAX_ANALYSIS_CHARS = 18000
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_SYNCHRONOUS_ATTACHMENTS_PER_MESSAGE = 10
 SUPPORTED_ATTACHMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".xlsb"}
 MAX_NESTED_EMAIL_PARTS = 100
 MAX_NESTED_EMAIL_DEPTH = 4
@@ -722,7 +723,8 @@ def gmail_fetch_message(connection, message_id, *, include_attachments=True):
 
     parsed_attachments = []
     if include_attachments:
-        for attachment in attachment_refs[:10]:
+        processing_attempts = 0
+        for attachment in attachment_refs:
             public_attachment = {key: value for key, value in attachment.items() if key != "_inline_data"}
             extension = os.path.splitext(attachment["filename"])[1].lower()
             if extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
@@ -731,6 +733,20 @@ def gmail_fetch_message(connection, message_id, *, include_attachments=True):
             if int(attachment.get("size") or 0) > MAX_ATTACHMENT_BYTES:
                 parsed_attachments.append({**public_attachment, "status": "skipped", "reason": "Attachment too large for synchronous V1 parsing."})
                 continue
+            if processing_attempts >= MAX_SYNCHRONOUS_ATTACHMENTS_PER_MESSAGE:
+                parsed_attachments.append(
+                    {
+                        **public_attachment,
+                        "status": "skipped",
+                        "reason": "Per-message synchronous attachment processing limit reached; this attachment was not fetched or parsed.",
+                    }
+                )
+                continue
+            # Only supported, size-eligible documents consume the synchronous
+            # parsing budget. Gmail signature graphics, unsupported files, and
+            # oversized metadata-only entries must not hide a later PDF/Excel
+            # request from the parser.
+            processing_attempts += 1
             try:
                 if attachment.get("_inline_data"):
                     content = _decode_gmail_data(attachment["_inline_data"])

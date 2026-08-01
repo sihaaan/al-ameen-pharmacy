@@ -4,6 +4,8 @@ import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
+export const PROFORMA_LPO_UPLOAD_ACCEPT = '.pdf,.xlsx,.xls,.xlsb';
+
 const emptyForm = {
   company: '',
   contact: '',
@@ -507,7 +509,7 @@ const ProformaInvoiceManager = () => {
                 </div>
                 <div className="qm-proforma-upload-grid">
                   <label>Upload LPO file
-                    <input type="file" accept=".pdf,.xlsx,.xls,.csv,.txt" onChange={(event) => setLpoForm({ ...lpoForm, file: event.target.files?.[0] || null })} />
+                    <input type="file" accept={PROFORMA_LPO_UPLOAD_ACCEPT} onChange={(event) => setLpoForm({ ...lpoForm, file: event.target.files?.[0] || null })} />
                   </label>
                   <label>Paste LPO text
                     <textarea rows="5" value={lpoForm.text} onChange={(event) => setLpoForm({ ...lpoForm, text: event.target.value })} placeholder="Paste LPO lines here if no file is available" />

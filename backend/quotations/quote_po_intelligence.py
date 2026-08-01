@@ -1570,6 +1570,17 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
             deterministic_preview,
             preview,
         )
+        preview_meta = dict(preview.get("meta") or {})
+        deterministic_meta = deterministic_preview.get("meta") or {}
+        for key in (
+            "attachment_safety",
+            "spreadsheet_fidelity",
+            "pdf_fidelity",
+        ):
+            value = deterministic_meta.get(key)
+            if isinstance(value, dict):
+                preview_meta[key] = value
+        preview["meta"] = preview_meta
         warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
         preview["warnings"] = warnings
         details = _extract_gmail_lpo_details(preview)
@@ -1596,6 +1607,16 @@ def parse_quote_po_evidence(evidence, actor, *, use_ai=True, link_approved=False
                 ),
                 "parse_method": preview.get("parse_method", "gmail_evidence"),
                 "parsed_rows": preview.get("lines") or [],
+                "parsed_meta": {
+                    key: value
+                    for key, value in (preview.get("meta") or {}).items()
+                    if key in {
+                        "attachment_safety",
+                        "spreadsheet_fidelity",
+                        "pdf_fidelity",
+                    }
+                    and isinstance(value, dict)
+                },
                 "suggestions": _merge_applied_suggestion_provenance(
                     po_import.suggestions if po_import else [],
                     suggestions,

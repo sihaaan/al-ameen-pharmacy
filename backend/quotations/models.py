@@ -2433,6 +2433,7 @@ class QuotationOutcomePOImport(models.Model):
     parse_method = models.CharField(max_length=100, blank=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PARSED)
     parsed_rows = models.JSONField(default=list, blank=True)
+    parsed_meta = models.JSONField(default=dict, blank=True)
     suggestions = models.JSONField(default=list, blank=True)
     unmatched_po_rows = models.JSONField(default=list, blank=True)
     missing_quote_line_ids = models.JSONField(default=list, blank=True)

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from decimal import Decimal
 from datetime import date, timedelta
 from io import BytesIO
@@ -1608,6 +1609,66 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(response.data["lines"][1]["unit"], "PCS")
         self.assertEqual(response.data["lines"][1]["price_reference_status"], "unmatched")
 
+    def test_reviewed_price_reference_survives_inquiry_and_quote_creation(self):
+        reference = self.client.post(
+            reverse("quotation-inquiry-apply-price-reference"),
+            {
+                "raw_text": "S. No.\tItem Description\tQty\tUOM\tPrice\n1\tPulse Oximeter\t1\tNUM\t55",
+                "preview": json.dumps(
+                    {
+                        "source_type": "pasted_text",
+                        "lines": [
+                            {
+                                "raw_name": "Pulse Oximeter",
+                                "raw_line": "Pulse Oximeter | 2 | NUM",
+                                "quantity": "2",
+                                "unit": "NUM",
+                                "parse_status": "parsed",
+                                "parse_confidence": 0.95,
+                            }
+                        ],
+                    }
+                ),
+                "use_ai": "false",
+            },
+            format="multipart",
+        )
+        self.assertEqual(reference.status_code, status.HTTP_200_OK)
+        reviewed_line = reference.data["lines"][0]
+        self.assertEqual(reviewed_line["price_reference_status"], "matched")
+        self.assertEqual(reviewed_line["unit_price"], "55.00")
+
+        inquiry = self.client.post(
+            reverse("quotation-inquiry-create-imported"),
+            {
+                "company": self.company.id,
+                "subject": "Reviewed reference price",
+                "source_type": Inquiry.SOURCE_TYPE_PASTED_TEXT,
+                "lines": [
+                    {
+                        "raw_name": reviewed_line["raw_name"],
+                        "raw_line": reviewed_line["raw_line"],
+                        "quantity": reviewed_line["quantity"],
+                        "unit": reviewed_line["unit"],
+                        "unit_price": reviewed_line["unit_price"],
+                        "vat_rate": reviewed_line["vat_rate"],
+                        "parse_status": reviewed_line["parse_status"],
+                        "parse_confidence": reviewed_line["parse_confidence"],
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(inquiry.status_code, status.HTTP_201_CREATED)
+        quote = self.client.post(
+            reverse("quotation-inquiry-create-quote", args=[inquiry.data["id"]])
+        )
+
+        self.assertEqual(quote.status_code, status.HTTP_201_CREATED)
+        quotation_line = QuotationLine.objects.get(quotation_id=quote.data["id"])
+        self.assertEqual(quotation_line.unit_price, Decimal("55.00"))
+        self.assertEqual(quotation_line.line_total, Decimal("110.00"))
+
     def test_imported_inquiry_prices_carry_into_created_quote_lines(self):
         response = self.client.post(
             reverse("quotation-inquiry-create-imported"),
@@ -1800,6 +1861,81 @@ class QuotationWorkflowTests(APITestCase):
 
                 pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
                 self.assertEqual(pdf_response.status_code, status.HTTP_200_OK)
+
+    def test_quotation_line_rejects_unsafe_product_images_without_persisting(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        png_bytes = make_png_bytes()
+        animated_webp = BytesIO()
+        first_frame = PILImage.new("RGB", (12, 12), "white")
+        second_frame = PILImage.new("RGB", (12, 12), "black")
+        try:
+            first_frame.save(
+                animated_webp,
+                format="WEBP",
+                save_all=True,
+                append_images=[second_frame],
+            )
+        except OSError as exc:  # pragma: no cover - depends on Pillow build features
+            self.skipTest(f"Animated WebP encoder unavailable: {exc}")
+
+        samples = [
+            (
+                "truncated",
+                SimpleUploadedFile(
+                    "truncated.png",
+                    png_bytes[:24],
+                    content_type="image/png",
+                ),
+                None,
+            ),
+            (
+                "spoofed",
+                SimpleUploadedFile(
+                    "spoofed.jpg",
+                    png_bytes,
+                    content_type="image/jpeg",
+                ),
+                None,
+            ),
+            (
+                "pixel_limit",
+                make_png_upload("too-many-pixels.png"),
+                100,
+            ),
+            (
+                "animated",
+                SimpleUploadedFile(
+                    "animated.webp",
+                    animated_webp.getvalue(),
+                    content_type="image/webp",
+                ),
+                None,
+            ),
+        ]
+
+        for case, upload, max_pixels in samples:
+            with self.subTest(case=case):
+                patcher = (
+                    patch("api.upload_validation.DEFAULT_MAX_IMAGE_PIXELS", max_pixels)
+                    if max_pixels is not None
+                    else nullcontext()
+                )
+                with patcher:
+                    response = self.client.post(
+                        reverse("quotation-line-upload-product-image", args=[line.id]),
+                        {"image": upload},
+                        format="multipart",
+                    )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(
+                    ProductImage.objects.filter(product=self.product).count(),
+                    0,
+                )
+                line.refresh_from_db()
+                self.assertIsNone(line.product_image_id)
+                self.assertFalse(line.include_product_image)
 
     def test_bulk_create_products_dedupes_same_normalized_names(self):
         quotation = self.create_quote()
@@ -3682,9 +3818,15 @@ class InquiryImportTests(APITestCase):
 
         first = response.data["lines"][0]
         self.assertEqual(first["raw_name"], "Wheel Chair - Supreme")
-        self.assertEqual(first["vat_rate"], "5")
-        self.assertEqual(first["vat_amount"], "16")
-        self.assertEqual(first["line_total"], "336")
+        self.assertIsNone(first["unit_price"])
+        self.assertIsNone(first["vat_rate"])
+        self.assertIsNone(first["vat_amount"])
+        self.assertIsNone(first["line_total"])
+        self.assertEqual(first["customer_unit_price"], "320")
+        self.assertEqual(first["customer_vat"], "VAT rate 5%; VAT amount 16")
+        self.assertEqual(first["customer_line_total"], "336")
+        self.assertIn("Customer/source unit price: 320", first["notes"])
+        self.assertIn("Customer/source VAT: VAT rate 5%; VAT amount 16", first["notes"])
         self.assertIn("VAT %: 5", first["notes"])
         self.assertIn("VAT Amount: 16", first["notes"])
 
@@ -3866,20 +4008,25 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(first_line["raw_name"], "Deep Heat Spray 150ml")
         self.assertEqual(first_line["quantity"], "5")
         self.assertEqual(first_line["unit"], "No")
-        self.assertEqual(first_line["unit_price"], "12")
-        self.assertEqual(first_line["line_total"], "60")
+        self.assertIsNone(first_line["unit_price"])
+        self.assertIsNone(first_line["line_total"])
+        self.assertEqual(first_line["customer_unit_price"], "12")
+        self.assertEqual(first_line["customer_line_total"], "60")
         self.assertEqual(first_line["parse_status"], InquiryLine.PARSE_PARSED)
 
         band_aid = response.data["lines"][1]
         self.assertEqual(band_aid["raw_name"], "Band Aid Waterproof - Brand : Broplast (1 x 100)")
         self.assertEqual(band_aid["quantity"], "5")
         self.assertEqual(band_aid["unit"], "Boxes")
-        self.assertEqual(band_aid["unit_price"], "8")
-        self.assertEqual(band_aid["line_total"], "40")
+        self.assertIsNone(band_aid["unit_price"])
+        self.assertIsNone(band_aid["line_total"])
+        self.assertEqual(band_aid["customer_unit_price"], "8")
+        self.assertEqual(band_aid["customer_line_total"], "40")
 
         continuation = next(line for line in response.data["lines"] if line["raw_name"].startswith("Face Mask Earloop"))
         self.assertEqual(continuation["quantity"], "5")
-        self.assertEqual(continuation["unit_price"], "6")
+        self.assertIsNone(continuation["unit_price"])
+        self.assertEqual(continuation["customer_unit_price"], "6")
 
     def test_pasted_email_price_text_extracts_item_price_and_ambiguous_quantity(self):
         response = self.client.post(
@@ -3903,15 +4050,63 @@ class InquiryImportTests(APITestCase):
         self.assertEqual(electrorush["raw_name"], "Electrorush 21gm Sache for 1 Ltr Solution")
         self.assertEqual(electrorush["quantity"], "50")
         self.assertEqual(electrorush["unit"], "carton")
-        self.assertEqual(electrorush["unit_price"], "375")
+        self.assertIsNone(electrorush["unit_price"])
+        self.assertEqual(electrorush["customer_unit_price"], "375")
         self.assertIn("1 box 10 sachets", electrorush["notes"])
 
         zest = response.data["lines"][1]
         self.assertEqual(zest["raw_name"], "Zest ORS 21 gm sachet per for 1 Ltr Solution")
         self.assertIsNone(zest["quantity"])
         self.assertEqual(zest["unit"], "box")
-        self.assertEqual(zest["unit_price"], "18")
+        self.assertIsNone(zest["unit_price"])
+        self.assertEqual(zest["customer_unit_price"], "18")
         self.assertEqual(zest["parse_status"], InquiryLine.PARSE_NEEDS_REVIEW)
+
+    def test_extracted_customer_price_does_not_prefill_created_quotation(self):
+        parsed = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {"file": self.make_vat_total_excel_upload()},
+            format="multipart",
+        )
+        self.assertEqual(parsed.status_code, status.HTTP_200_OK)
+        parsed_line = parsed.data["lines"][0]
+        self.assertEqual(parsed_line["customer_unit_price"], "320")
+        self.assertIsNone(parsed_line["unit_price"])
+
+        created = self.client.post(
+            reverse("quotation-inquiry-create-imported"),
+            {
+                "company": self.company.id,
+                "subject": "Customer workbook prices are evidence",
+                "source_type": Inquiry.SOURCE_TYPE_EXCEL,
+                "lines": [
+                    {
+                        "raw_name": parsed_line["raw_name"],
+                        "raw_line": parsed_line["raw_line"],
+                        "quantity": parsed_line["quantity"],
+                        "unit": parsed_line["unit"],
+                        "unit_price": parsed_line["unit_price"],
+                        "vat_rate": parsed_line["vat_rate"] or "0",
+                        "notes": parsed_line["notes"],
+                        "parse_status": parsed_line["parse_status"],
+                        "parse_confidence": parsed_line["parse_confidence"],
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        inquiry_line = InquiryLine.objects.get(inquiry_id=created.data["id"])
+        self.assertIn("Customer/source unit price: 320", inquiry_line.notes)
+        self.assertIn("Customer/source total: 336", inquiry_line.notes)
+        quote = self.client.post(
+            reverse("quotation-inquiry-create-quote", args=[created.data["id"]])
+        )
+        self.assertEqual(quote.status_code, status.HTTP_201_CREATED)
+        quotation_line = QuotationLine.objects.get(quotation_id=quote.data["id"])
+        self.assertIsNone(quotation_line.unit_price)
+        self.assertEqual(quotation_line.vat_rate, Decimal("0.00"))
+        self.assertIn("Customer/source unit price: 320", quotation_line.notes)
 
     def test_pdf_no_selectable_text_returns_warning(self):
         response = self.client.post(
@@ -5833,6 +6028,30 @@ class AIImportParsingTests(APITestCase):
         non_staff = self.client.post(url, payload, format="json")
         self.assertEqual(non_staff.status_code, status.HTTP_403_FORBIDDEN)
 
+    @patch("quotations.views.clean_preview_with_ai")
+    def test_ai_clean_parse_rejects_reviewed_pricing_before_provider_call(self, clean_preview):
+        url = reverse("quotation-inquiry-ai-clean-parse")
+        priced_fields = [
+            {"unit_price": "12.50"},
+            {"vat_rate": "5.00"},
+            {"price_reference_status": "matched"},
+        ]
+
+        for fields in priced_fields:
+            with self.subTest(fields=fields):
+                preview = self.preview_payload()
+                preview["lines"][0].update(fields)
+                response = self.client.post(
+                    url,
+                    {"preview": preview},
+                    format="json",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("only before pricing", response.data["detail"])
+
+        clean_preview.assert_not_called()
+
     @override_settings(QUOTATION_AI_PARSE_GLOBAL_ENABLED=True)
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_ai_disabled_returns_clear_response_without_provider_call(self):
@@ -5858,11 +6077,16 @@ class AIImportParsingTests(APITestCase):
     def test_text_ai_valid_json_returns_candidate_rows_without_side_effects(self):
         self.enable_ai()
         provider = MockAIProvider()
+        provider.result["warnings"] = ["AI marked one row for staff review."]
+        preview = self.preview_payload()
+        preview["warnings"] = [
+            "Workbook contains formula cells; cached values may be stale."
+        ]
 
         with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
             response = self.client.post(
                 reverse("quotation-inquiry-ai-clean-parse"),
-                {"preview": self.preview_payload(), "company": self.company.id},
+                {"preview": preview, "company": self.company.id},
                 format="json",
             )
 
@@ -5870,10 +6094,25 @@ class AIImportParsingTests(APITestCase):
         self.assertEqual(response.data["result_source"], "ai_text_cleanup")
         self.assertEqual(response.data["lines"][0]["raw_name"], "Electrorush 21gm Sache for 1 Ltr Solution")
         self.assertEqual(response.data["lines"][0]["quantity"], "50")
-        self.assertEqual(response.data["lines"][0]["unit_price"], "375")
+        self.assertIsNone(response.data["lines"][0]["unit_price"])
+        self.assertEqual(response.data["lines"][0]["customer_unit_price"], "375")
+        self.assertIn(
+            "Customer/source unit price: 375",
+            response.data["lines"][0]["notes"],
+        )
         self.assertEqual(response.data["lines"][1]["parse_status"], InquiryLine.PARSE_NEEDS_REVIEW)
         self.assertFalse(response.data["lines"][0]["matched_product"])
         self.assertGreaterEqual(response.data["lines"][0]["parse_confidence"], 0.85)
+        self.assertIn(
+            "Workbook contains formula cells; cached values may be stale.",
+            response.data["warnings"],
+        )
+        self.assertIn("AI marked one row for staff review.", response.data["warnings"])
+        cached = AIParseCache.objects.get()
+        self.assertNotIn(
+            "Workbook contains formula cells; cached values may be stale.",
+            cached.result.get("warnings") or [],
+        )
         self.assertEqual(Product.objects.count(), 0)
         self.assertEqual(ProductAlias.objects.count(), 0)
         self.assertEqual(CompanyPriceHistory.objects.count(), 0)
@@ -5887,6 +6126,116 @@ class AIImportParsingTests(APITestCase):
         self.assertEqual(observation["cost_basis"]["output_tokens"], 20)
         self.assertTrue(observation["provider_call_attempted"])
         self.assertGreaterEqual(observation["timings_ms"]["total"], 0)
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_ai_cleanup_preserves_deterministic_customer_price_evidence(self):
+        self.enable_ai()
+        preview = self.preview_payload()
+        preview["lines"] = [
+            {
+                "raw_name": "Sterile Bandages",
+                "raw_line": "Sterile Bandages | 2 | PCS | AED 12.50",
+                "quantity": "2",
+                "unit": "PCS",
+                "unit_price": None,
+                "line_total": None,
+                "customer_unit_price": "12.50",
+                "customer_line_total": "25.00",
+                "notes": (
+                    "Customer/source unit price: 12.50; "
+                    "Customer/source total: 25.00"
+                ),
+                "parse_status": InquiryLine.PARSE_NEEDS_REVIEW,
+                "parse_confidence": 0.7,
+            }
+        ]
+        provider = MockAIProvider(
+            result={
+                "rows": [
+                    {
+                        "item_name": "Sterile Bandages",
+                        "quantity": "2",
+                        "unit": "PCS",
+                        "unit_price": "",
+                        "vat_rate": "",
+                        "vat_amount": "",
+                        "line_total": "",
+                        "pack_info": "",
+                        "notes": "AI-cleaned wording.",
+                        "raw_source_text": (
+                            "Sterile Bandages | 2 | PCS | AED 12.50"
+                        ),
+                        "page_number": "",
+                        "confidence": 0.95,
+                        "parse_status": "parsed",
+                        "reason": "",
+                    }
+                ],
+                "warnings": [],
+                "document_notes": "",
+            }
+        )
+
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-inquiry-ai-clean-parse"),
+                {"preview": preview},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line = response.data["lines"][0]
+        self.assertEqual(line["customer_unit_price"], "12.50")
+        self.assertEqual(line["customer_line_total"], "25.00")
+        self.assertIsNone(line["unit_price"])
+        self.assertIsNone(line["line_total"])
+        self.assertIn("AI-cleaned wording", line["notes"])
+        self.assertIn("Customer/source unit price: 12.50", line["notes"])
+
+    @override_settings(
+        QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
+        QUOTATION_AI_PARSE_PROVIDER="openai",
+        QUOTATION_AI_PARSE_TEXT_MODEL="test-text-model",
+    )
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
+    def test_ai_cleanup_keeps_deterministic_rows_if_customer_evidence_is_unmapped(self):
+        self.enable_ai()
+        preview = self.preview_payload()
+        preview["lines"][0].update(
+            {
+                "customer_unit_price": "375",
+                "notes": "Customer/source unit price: 375",
+            }
+        )
+        provider = MockAIProvider()
+        provider.result["rows"] = [
+            {
+                **provider.result["rows"][0],
+                "item_name": "Different Product",
+                "raw_source_text": "Different Product 1 PCS",
+            }
+        ]
+
+        with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
+            response = self.client.post(
+                reverse("quotation-inquiry-ai-clean-parse"),
+                {"preview": preview},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["result_source"], "deterministic_parse")
+        self.assertEqual(
+            response.data["meta"]["ai_cleanup_rejection_reason"],
+            "customer_price_evidence_unmapped",
+        )
+        self.assertEqual(response.data["lines"][0]["customer_unit_price"], "375")
+        self.assertIsNone(response.data["lines"][0].get("unit_price"))
 
     @override_settings(
         QUOTATION_AI_PARSE_GLOBAL_ENABLED=True,
@@ -5929,6 +6278,33 @@ class AIImportParsingTests(APITestCase):
                     format="multipart",
                 )
                 self.assertEqual(parsed.status_code, status.HTTP_200_OK)
+                parsed_line = next(
+                    line
+                    for line in parsed.data["lines"]
+                    if "Deep Heat Spray" in str(line.get("raw_name") or "")
+                )
+                provider.result = {
+                    "rows": [
+                        {
+                            "item_name": parsed_line["raw_name"],
+                            "quantity": parsed_line.get("quantity") or "",
+                            "unit": parsed_line.get("unit") or "",
+                            "unit_price": "",
+                            "vat_rate": "",
+                            "vat_amount": "",
+                            "line_total": "",
+                            "pack_info": "",
+                            "notes": "",
+                            "raw_source_text": parsed_line.get("raw_line") or "",
+                            "page_number": str(parsed_line.get("page_number") or "1"),
+                            "confidence": 0.95,
+                            "parse_status": "parsed",
+                            "reason": "",
+                        }
+                    ],
+                    "warnings": [],
+                    "document_notes": "",
+                }
                 with patch("quotations.ai_parsing.get_ai_parse_provider", return_value=provider):
                     response = self.client.post(
                         reverse("quotation-inquiry-ai-clean-parse"),
@@ -5976,6 +6352,11 @@ class AIImportParsingTests(APITestCase):
             )
         self.assertEqual(poor.status_code, status.HTTP_200_OK)
         self.assertIn("ai_candidate", poor.data)
+        self.assertIsNone(poor.data["ai_candidate"]["lines"][0]["unit_price"])
+        self.assertEqual(
+            poor.data["ai_candidate"]["lines"][0]["customer_unit_price"],
+            "375",
+        )
         self.assertEqual(len(provider.calls), 1)
 
         provider.calls.clear()
@@ -6245,6 +6626,41 @@ class QuotationSettingsTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("valid image", str(response.data))
+
+    def test_branding_uploads_reject_invalid_decoded_content_without_persisting(self):
+        self.client.force_authenticate(self.staff)
+        png_bytes = make_png_bytes()
+        samples = [
+            (
+                "signature_image",
+                SimpleUploadedFile(
+                    "truncated.png",
+                    png_bytes[:24],
+                    content_type="image/png",
+                ),
+            ),
+            (
+                "stamp_image",
+                SimpleUploadedFile(
+                    "spoofed.jpg",
+                    png_bytes,
+                    content_type="image/jpeg",
+                ),
+            ),
+        ]
+
+        for field_name, upload in samples:
+            with self.subTest(field=field_name):
+                response = self.client.patch(
+                    reverse("quotation-settings"),
+                    {field_name: upload},
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                settings_obj = QuotationSettings.get_solo()
+                settings_obj.refresh_from_db()
+                self.assertFalse(getattr(settings_obj, field_name))
 
     def test_signature_and_stamp_uploads_work(self):
         self.client.force_authenticate(self.staff)

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.2.0 |
+| Document version | 2.3.0 |
 | Status | Operator guide; live values require independent verification |
 | Owner | Al Ameen platform maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This guide separates repository behavior from live provider configuration. A
@@ -15,7 +15,9 @@ or OpenAI console setting. Record the operator, UTC time, and provider evidence
 when completing any production checklist.
 
 See [OPERATIONS.md](OPERATIONS.md) for monitoring, backup, incident, and
-recovery procedures; [SECURITY.md](SECURITY.md) for security controls; and
+recovery procedures; [SECURITY.md](SECURITY.md) for security controls;
+[ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)
+for Task 2.4 attachment limits; and
 [gmail_addon/README.md](gmail_addon/README.md) for the Gmail add-on.
 
 ## 1. Repository deployment shape
@@ -140,6 +142,9 @@ inventory. Never commit filled values. At minimum verify these groups:
 - Gmail add-on: only the variables documented in
   [gmail_addon/README.md](gmail_addon/README.md);
 - AI: approved provider/key/model/timeouts and explicit privacy feature flags;
+- attachment parsing: upload, PDF page, Excel visible-sheet/row/column,
+  OOXML archive entry/expanded-size/member, and price-reference row bounds
+  listed below;
 - workers: `GUNICORN_TIMEOUT`, `WEB_CONCURRENCY`, `GUNICORN_THREADS`;
 - observability: log levels and optional Sentry variables.
 
@@ -148,6 +153,56 @@ The current defaults include an 8-second PostgreSQL connect timeout, a
 AI timeout, a 180-second native Gmail AI timeout, and a 300-second Gunicorn
 timeout. Long Gmail analysis is synchronous; browser polling makes its state
 resumable but does not create a background worker.
+
+### Task 2.4 attachment limits
+
+The reviewed repository exposes these document-parser controls in
+[backend/.env.example](backend/.env.example):
+
+- `QUOTATION_IMPORT_MAX_UPLOAD_BYTES`;
+- `QUOTATION_IMPORT_MAX_EXCEL_ROWS`,
+  `QUOTATION_IMPORT_MAX_EXCEL_SHEETS`, and
+  `QUOTATION_IMPORT_MAX_EXCEL_COLUMNS`;
+- `QUOTATION_IMPORT_MAX_PDF_PAGES`;
+- `QUOTATION_IMPORT_MAX_PDF_OBJECTS` and
+  `QUOTATION_IMPORT_MAX_PDF_STREAMS`;
+- `QUOTATION_IMPORT_MAX_PDF_DECODED_STREAM_BYTES` and
+  `QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES`;
+- `QUOTATION_IMPORT_MAX_PDF_PAGE_DIMENSION_POINTS`,
+  `QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS`,
+  `QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS`, and
+  `QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS`;
+- `QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE`,
+  `QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS`,
+  `QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE`, and
+  `QUOTATION_IMPORT_MAX_PDF_TOTAL_WORDS`;
+- `QUOTATION_IMPORT_MAX_PDF_TABLE_ROWS` and
+  `QUOTATION_IMPORT_MAX_PDF_TABLE_CELLS`;
+- `QUOTATION_IMPORT_MAX_ARCHIVE_ENTRIES`,
+  `QUOTATION_IMPORT_MAX_ARCHIVE_UNCOMPRESSED_BYTES`, and
+  `QUOTATION_IMPORT_MAX_ARCHIVE_MEMBER_BYTES`; and
+- `QUOTATION_PRICE_REFERENCE_MAX_EXCEL_ROWS`.
+
+Gmail native AI retains its separate existing file/count/byte/page/row limits.
+Product and branding image byte limits are controlled by
+`PRODUCT_IMAGE_MAX_UPLOAD_BYTES` and
+`QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES`; fixed decoded-image ceilings are
+12,000 pixels on either edge, 25 million total pixels, and one frame.
+
+Task 2.4 requires additive migration
+`quotations.0036_quotationoutcomepoimport_parsed_meta` before application-code
+promotion. It adds an empty-default JSON field to outcome-PO imports so
+structured inspection evidence survives review; it deletes no records and has
+no customer-content backfill. The task changes no public endpoint or request
+shape. Outcome-PO responses add the read-only `parsed_meta` field, and preview
+responses may contain additive validation warnings and bounded attachment
+safety/fidelity metadata. Invalid files now fail through the existing
+validation-error path. It does not change production/provider configuration,
+OAuth scopes, AI models, prompts, or extraction schemas. Before promotion,
+review the defaults and any environment overrides against memory/CPU capacity,
+then test a normal file, a warning-only fidelity file, and a hard failure on
+every enabled route. Passing these checks is not malware/AV proof, and parsers
+are not sandboxed.
 
 ### Gmail/AI disclosure
 
@@ -240,7 +295,11 @@ After the approved commit and explicit migration gate are configured:
    - login and permissions;
    - company/product lookup;
    - manual inquiry review with blank selling prices;
+   - representative attachment acceptance, warning visibility, and hard
+     rejection without a persisted invalid source;
    - Gmail import review if enabled, without creating duplicates;
+   - Gmail native hard-failure behavior in staging/mocks: no provider call and
+     a bounded rejection record for the selected source;
    - quotation preview and **Finalize Only**;
    - a controlled email send only to an approved test recipient;
    - ambiguous-send reconciliation in a mocked/staging environment.
@@ -302,6 +361,20 @@ Application rollback and data rollback are separate decisions.
 Destructive migration reversal, data deletion, or production restore requires
 explicit authority and is outside an ordinary code rollback.
 
+### Task 2.4 rollback note
+
+Before deployment, revert the Task 2.4 checkpoint as one unit; an unused `0036`
+may also be reversed. After any outcome import stores `parsed_meta`, do not
+reverse `0036` as an ordinary rollback because doing so deletes retained
+inspection evidence. Keep the additive column and use a forward fix or
+schema-compatible application rollback. First restore an accidentally tightened
+limit to its previous reviewed environment value when that is the cause.
+Reverting inspection code and call sites weakens file defenses, so it requires
+an explicit security decision and must include their tests and documentation.
+Re-run fresh previews after rollback; do not reuse a result produced under a
+different inspection contract. No provider, OAuth, AI, or infrastructure
+rollback is required because Task 2.4 changes none of them.
+
 ### Task 2.2 migration note
 
 Migration `quotations.0035_quotationemailoutboundsnapshot_and_more` creates
@@ -351,6 +424,7 @@ specific release.
 - [ ] Database and file backup/restore procedures verified.
 - [ ] Gmail mailbox, scopes, owner, and reconnect behavior verified if enabled.
 - [ ] AI processor/privacy settings and exact model recorded if enabled.
+- [ ] Attachment limits and warning/hard-failure behavior verified on each enabled route; no AV/sandbox claim recorded.
 - [ ] Smoke test completed without sending to an unintended recipient.
 - [ ] Monitoring/log access and rollback decision owner confirmed.
 
@@ -360,3 +434,4 @@ specific release.
 - [Railway deployment reference](https://docs.railway.com/deployments/reference)
 - [Railway volumes](https://docs.railway.com/volumes/reference)
 - [Django deployment checklist](https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/)
+- [Attachment security and spreadsheet fidelity](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)

@@ -2950,7 +2950,7 @@ class GmailInquiryImportTests(TestCase):
     )
     @patch("quotations.import_parsers.parse_file_preview")
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
-    def test_native_safety_preflight_skips_oversized_pdf_and_workbook_before_ai(
+    def test_native_safety_preflight_blocks_ai_on_oversized_workbook(
         self,
         mock_native_analysis,
         mock_parse_file,
@@ -2976,16 +2976,6 @@ class GmailInquiryImportTests(TestCase):
 
         attachments = [
             {
-                "filename": "too-many-pages.pdf",
-                "mime_type": "application/pdf",
-                "size": len(pdf_content),
-                "attachment_id": "large-pdf",
-                "part_id": "1",
-                "_inline_data": base64.urlsafe_b64encode(
-                    pdf_content
-                ).decode("ascii"),
-            },
-            {
                 "filename": "too-many-rows.xlsx",
                 "mime_type": (
                     "application/vnd.openxmlformats-officedocument."
@@ -2998,6 +2988,16 @@ class GmailInquiryImportTests(TestCase):
                     xlsx_content
                 ).decode("ascii"),
             },
+            {
+                "filename": "too-many-pages.pdf",
+                "mime_type": "application/pdf",
+                "size": len(pdf_content),
+                "attachment_id": "large-pdf",
+                "part_id": "1",
+                "_inline_data": base64.urlsafe_b64encode(
+                    pdf_content
+                ).decode("ascii"),
+            },
         ]
         message = gmail_message(
             "preflight-message",
@@ -3006,28 +3006,6 @@ class GmailInquiryImportTests(TestCase):
         )
         gmail_import = self.issue_and_claim(anchor="preflight-message")
 
-        def native_result(
-            messages,
-            sources,
-            file_inputs,
-            _gmail_import,
-            _actor,
-            *,
-            analysis_timings=None,
-        ):
-            self.assertEqual(file_inputs, [])
-            self.assertEqual(
-                [source["kind"] for source in sources],
-                ["email_body"],
-            )
-            return validated_native_analysis_result(
-                messages,
-                sources,
-                [native_message_result("preflight-message")],
-                [],
-            )
-
-        mock_native_analysis.side_effect = native_result
         result = _build_source_analysis(
             [message],
             self.connection,
@@ -3037,20 +3015,29 @@ class GmailInquiryImportTests(TestCase):
         )
 
         mock_parse_file.assert_not_called()
+        mock_native_analysis.assert_not_called()
         self.assertEqual(
             [
                 attachment["parse_status"]
                 for attachment in result["attachment_manifest"]
             ],
-            ["unsupported", "unsupported"],
+            ["failed", "skipped"],
         )
         reasons = [
             attachment["parse_reason"]
             for attachment in result["attachment_manifest"]
         ]
-        self.assertIn("PDF has 3 pages", reasons[0])
-        self.assertIn("has 1001 rows", reasons[1])
+        self.assertIn("has 1001 rows", reasons[0])
+        self.assertIn("failed required safety inspection", reasons[1])
         self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertTrue(
+            any(
+                source.get("parse_status") == "failed"
+                and source.get("filename") == "too-many-rows.xlsx"
+                for source in result["evidence"]
+            )
+        )
 
     def test_generic_signature_image_bundle_is_skipped_beside_rfq_document(
         self,
@@ -3912,7 +3899,7 @@ class GmailInquiryImportTests(TestCase):
     @patch("quotations.import_parsers.parse_file_preview")
     @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
-    def test_attachment_manifest_is_complete_and_global_parse_cap_is_enforced(
+    def test_native_file_count_cap_fails_closed_for_the_selection(
         self,
         mock_native_analysis,
         mock_native_fetch,
@@ -3963,29 +3950,6 @@ class GmailInquiryImportTests(TestCase):
 
         mock_native_fetch.side_effect = native_fetch
 
-        def native_result(
-            semantic_messages,
-            _sources,
-            file_inputs,
-            _gmail_import,
-            _actor,
-            *,
-            analysis_timings=None,
-        ):
-            self.assertEqual(len(file_inputs), 12)
-            return validated_native_analysis_result(
-                semantic_messages,
-                _sources,
-                [
-                    native_message_result(
-                        message["gmail_message_id"],
-                    )
-                    for message in semantic_messages
-                ],
-                [],
-            )
-
-        mock_native_analysis.side_effect = native_result
         result = _build_source_analysis(
             messages,
             self.connection,
@@ -3996,13 +3960,570 @@ class GmailInquiryImportTests(TestCase):
 
         self.assertEqual(len(result["attachment_manifest"]), 35)
         self.assertEqual(mock_native_fetch.call_count, 12)
+        mock_native_analysis.assert_not_called()
         mock_parse_file.assert_not_called()
         self.assertEqual(
             sum(
                 row["parse_status"] == "skipped"
                 for row in result["attachment_manifest"]
             ),
-            23,
+            34,
+        )
+        self.assertEqual(
+            sum(
+                row["parse_status"] == "failed"
+                for row in result["attachment_manifest"]
+            ),
+            1,
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        failed = next(
+            row
+            for row in result["attachment_manifest"]
+            if row["parse_status"] == "failed"
+        )
+        self.assertIn("Per-import attachment limit reached", failed["parse_reason"])
+        self.assertTrue(
+            any(
+                source.get("source_key") == failed["source_key"]
+                and source.get("parse_status") == "failed"
+                for source in result["evidence"]
+            )
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_IMPORT_MAX_UPLOAD_BYTES=10,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+        QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES=20,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_native_per_file_byte_limit_fails_closed_with_valid_sibling(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": "valid.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": "valid",
+                "part_id": "1",
+            },
+            {
+                "filename": "too-large.xlsx",
+                "mime_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "size": 11,
+                "attachment_id": "too-large",
+                "part_id": "2",
+            },
+        ]
+        valid_content = b"12345678"
+        mock_native_fetch.return_value = (
+            {
+                "filename": "valid.pdf",
+                "mime_type": "application/pdf",
+                "content": valid_content,
+                "source_sha256": hashlib.sha256(valid_content).hexdigest(),
+                "size": len(valid_content),
+                "detail": "high",
+            },
+            "",
+        )
+        gmail_import = self.issue_and_claim(anchor="per-file-limit")
+        message = gmail_message(
+            "per-file-limit",
+            body="Please quote both attached documents.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        mock_native_fetch.assert_called_once()
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(
+            [row["parse_status"] for row in result["attachment_manifest"]],
+            ["skipped", "failed"],
+        )
+        self.assertIn(
+            "exceeds the 10-byte",
+            result["attachment_manifest"][1]["parse_reason"],
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(
+            [
+                source["parse_status"]
+                for source in result["evidence"]
+                if source.get("kind") == "attachment"
+            ],
+            ["skipped", "failed"],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_IMPORT_MAX_UPLOAD_BYTES=10,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+        QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES=15,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_native_combined_byte_limit_fails_closed_with_valid_sibling(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"request-{index}.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": f"request-{index}",
+                "part_id": str(index),
+            }
+            for index in range(1, 3)
+        ]
+
+        def native_fetch(_connection, _message_id, attachment, *, max_bytes):
+            content = attachment["attachment_id"].encode("ascii")[:8]
+            content = content.ljust(8, b"x")
+            self.assertLessEqual(len(content), max_bytes)
+            return (
+                {
+                    "filename": attachment["filename"],
+                    "mime_type": attachment["mime_type"],
+                    "content": content,
+                    "source_sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                    "detail": "high",
+                },
+                "",
+            )
+
+        mock_native_fetch.side_effect = native_fetch
+        gmail_import = self.issue_and_claim(anchor="combined-limit")
+        message = gmail_message(
+            "combined-limit",
+            body="Please quote both attached documents.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertEqual(mock_native_fetch.call_count, 2)
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(
+            [row["parse_status"] for row in result["attachment_manifest"]],
+            ["skipped", "failed"],
+        )
+        self.assertIn(
+            "Combined original attachments exceed",
+            result["attachment_manifest"][1]["parse_reason"],
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(
+            [
+                source["parse_status"]
+                for source in result["evidence"]
+                if source.get("kind") == "attachment"
+            ],
+            ["skipped", "failed"],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_IMPORT_MAX_UPLOAD_BYTES=1024,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+        QUOTATION_AI_NATIVE_MAX_TOTAL_BYTES=2048,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_native_fetch_failure_fails_closed_with_valid_sibling(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": "valid.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": "valid",
+                "part_id": "1",
+            },
+            {
+                "filename": "unavailable.xlsx",
+                "mime_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "size": 8,
+                "attachment_id": "unavailable",
+                "part_id": "2",
+            },
+        ]
+        valid_content = b"validpdf"
+        mock_native_fetch.side_effect = [
+            (
+                {
+                    "filename": "valid.pdf",
+                    "mime_type": "application/pdf",
+                    "content": valid_content,
+                    "source_sha256": hashlib.sha256(valid_content).hexdigest(),
+                    "size": len(valid_content),
+                    "detail": "high",
+                },
+                "",
+            ),
+            GmailInquiryImportError("Gmail attachment download failed."),
+        ]
+        gmail_import = self.issue_and_claim(anchor="fetch-failure")
+        message = gmail_message(
+            "fetch-failure",
+            body="Please quote both attached documents.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        self.assertEqual(mock_native_fetch.call_count, 2)
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(
+            [row["parse_status"] for row in result["attachment_manifest"]],
+            ["skipped", "failed"],
+        )
+        self.assertIn(
+            "could not be fetched or prepared",
+            result["attachment_manifest"][1]["parse_reason"],
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(
+            [
+                source["parse_status"]
+                for source in result["evidence"]
+                if source.get("kind") == "attachment"
+            ],
+            ["skipped", "failed"],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_inbound_attachment_metadata_overflow_blocks_analysis_and_confirmation(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"signature-{index}.png",
+                "mime_type": "image/png",
+                "size": 800,
+                "attachment_id": f"signature-{index}",
+                "part_id": str(index),
+            }
+            for index in range(100)
+        ]
+        attachments.append(
+            {
+                "filename": "customer-rfq.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": "customer-rfq",
+                "part_id": "101",
+            }
+        )
+        gmail_import = self.issue_and_claim(anchor="metadata-overflow")
+        message = gmail_message(
+            "metadata-overflow",
+            body="Please quote the attached RFQ.",
+            attachments=attachments,
+        )
+
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_not_called()
+        self.assertEqual(len(result["attachment_manifest"]), 100)
+        self.assertTrue(
+            all(
+                attachment["parse_status"] == "skipped"
+                for attachment in result["attachment_manifest"]
+            )
+        )
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(result["preview"]["meta"]["native_file_count"], 0)
+        self.assertEqual(
+            result["message_manifest"][0]["attachment_analysis_status"],
+            "failed",
+        )
+        self.assertIn(
+            "101 attachments",
+            result["message_manifest"][0]["attachment_analysis_reason"],
+        )
+        overflow_evidence = [
+            source
+            for source in result["evidence"]
+            if source.get("parse_status") == "failed"
+        ]
+        self.assertEqual(len(overflow_evidence), 1)
+        self.assertEqual(
+            overflow_evidence[0]["filename"],
+            "Additional Gmail attachments",
+        )
+        self.assertIn(
+            "bounded window",
+            overflow_evidence[0]["parse_reason"],
+        )
+
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.analysis = {
+            "preview": result["preview"],
+            "thread_analysis": result["thread_analysis"],
+        }
+        gmail_import.message_manifest = result["message_manifest"]
+        gmail_import.attachment_manifest = result["attachment_manifest"]
+        gmail_import.evidence = result["evidence"]
+        gmail_import.save(
+            update_fields=[
+                "status",
+                "analysis",
+                "message_manifest",
+                "attachment_manifest",
+                "evidence",
+                "updated_at",
+            ]
+        )
+        with self.assertRaisesRegex(
+            GmailInquiryImportError,
+            "No reviewed item rows",
+        ):
+            confirm_gmail_inquiry_import(
+                gmail_import,
+                self.staff,
+                company=self.company,
+            )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_outbound_attachment_metadata_overflow_remains_context_only(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        outbound_attachments = [
+            {
+                "filename": f"our-document-{index}.pdf",
+                "mime_type": "application/pdf",
+                "size": 8,
+                "attachment_id": f"our-document-{index}",
+                "part_id": str(index),
+            }
+            for index in range(101)
+        ]
+        outbound = gmail_message(
+            "outbound-overflow",
+            sender=f"AI Ameen <{MAILBOX_EMAIL}>",
+            body="Please find our documents.",
+            attachments=outbound_attachments,
+        )
+        outbound["label_ids"] = ["SENT"]
+        inbound = gmail_message(
+            "inbound-body",
+            body="Please quote ten boxes of sterile gauze.",
+        )
+        gmail_import = self.issue_and_claim(anchor="inbound-body")
+
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
+            self.assertEqual(file_inputs, [])
+            return validated_native_analysis_result(
+                messages,
+                sources,
+                [
+                    native_message_result(
+                        "outbound-overflow",
+                        classification="our_reply",
+                        usage="context",
+                    ),
+                    native_message_result("inbound-body"),
+                ],
+                [],
+            )
+
+        mock_native_analysis.side_effect = native_result
+        result = _build_source_analysis(
+            [outbound, inbound],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[outbound, inbound],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_called_once()
+        self.assertTrue(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(len(result["attachment_manifest"]), 100)
+        self.assertTrue(
+            all(
+                attachment["parse_status"] == "excluded"
+                for attachment in result["attachment_manifest"]
+            )
+        )
+        self.assertNotIn(
+            "attachment_analysis_status",
+            result["message_manifest"][0],
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_mailbox_from_without_sent_label_does_not_bypass_overflow_block(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"attachment-{index}.png",
+                "mime_type": "image/png",
+                "size": 800,
+                "attachment_id": f"attachment-{index}",
+                "part_id": str(index),
+            }
+            for index in range(101)
+        ]
+        spoofed = gmail_message(
+            "spoofed-mailbox-from",
+            sender=f"Spoofed Sender <{MAILBOX_EMAIL}>",
+            body="Please quote the hidden attachment.",
+            attachments=attachments,
+        )
+        spoofed["label_ids"] = ["INBOX"]
+        gmail_import = self.issue_and_claim(anchor="spoofed-mailbox-from")
+
+        result = _build_source_analysis(
+            [spoofed],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[spoofed],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_not_called()
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(
+            result["message_manifest"][0]["attachment_analysis_status"],
+            "failed",
+        )
+
+    @override_settings(
+        QUOTATION_MAILBOX_AI_VISION_ENABLED=True,
+        QUOTATION_AI_NATIVE_MAX_FILES=12,
+    )
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_sent_label_with_mismatched_from_does_not_bypass_overflow_block(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        attachments = [
+            {
+                "filename": f"attachment-{index}.png",
+                "mime_type": "image/png",
+                "size": 800,
+                "attachment_id": f"attachment-{index}",
+                "part_id": str(index),
+            }
+            for index in range(101)
+        ]
+        mismatched = gmail_message(
+            "mismatched-sent-from",
+            sender="Different Sender <different@example.com>",
+            body="Please quote the hidden attachment.",
+            attachments=attachments,
+        )
+        mismatched["label_ids"] = ["SENT"]
+        gmail_import = self.issue_and_claim(anchor="mismatched-sent-from")
+
+        result = _build_source_analysis(
+            [mismatched],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[mismatched],
+        )
+
+        mock_native_fetch.assert_not_called()
+        mock_native_analysis.assert_not_called()
+        self.assertFalse(result["preview"]["meta"]["ai_used"])
+        self.assertEqual(result["preview"]["lines"], [])
+        self.assertEqual(
+            result["message_manifest"][0]["attachment_analysis_status"],
+            "failed",
         )
 
     def test_extensionless_supported_mime_types_receive_safe_parse_names(self):

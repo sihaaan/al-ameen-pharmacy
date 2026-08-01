@@ -1,13 +1,13 @@
 import re
 from decimal import Decimal
 
-from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from rest_framework import serializers
 
 from api.models import Product, ProductImage
 from api.serializers import ProductListSerializer
+from api.upload_validation import validate_image_upload
 
 from .company_matching import find_similar_companies
 from .matching import normalize_item_text
@@ -49,37 +49,12 @@ from .models import (
 )
 
 
-SAFE_BRANDING_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
-SAFE_BRANDING_IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp"}
-
-
 def validate_branding_image_upload(image, label):
-    if not image:
-        return image
-    max_bytes = int(
-        getattr(
-            settings,
-            "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
-            getattr(settings, "QUOTATION_LOGO_MAX_UPLOAD_BYTES", 2 * 1024 * 1024),
-        )
+    return validate_image_upload(
+        image,
+        label=label,
+        max_bytes_setting="QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
     )
-    if image.size > max_bytes:
-        raise serializers.ValidationError(f"{label} file is too large. Maximum size is {max_bytes // (1024 * 1024)} MB.")
-    extension = image.name.rsplit(".", 1)[-1].lower() if "." in image.name else ""
-    if extension not in SAFE_BRANDING_IMAGE_EXTENSIONS:
-        raise serializers.ValidationError(f"Unsupported {label.lower()} type. Upload png, jpg, jpeg, or webp only.")
-    if getattr(image, "content_type", "") and image.content_type not in SAFE_BRANDING_IMAGE_CONTENT_TYPES:
-        raise serializers.ValidationError(f"Unsupported {label.lower()} content type.")
-    header = image.read(512)
-    image.seek(0)
-    if extension == "webp":
-        if not (header.startswith(b"RIFF") and b"WEBP" in header[:16]):
-            raise serializers.ValidationError("Uploaded file does not look like a valid WebP image.")
-    elif extension == "png" and not header.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise serializers.ValidationError("Uploaded file does not look like a valid PNG image.")
-    elif extension in {"jpg", "jpeg"} and not header.startswith(b"\xff\xd8\xff"):
-        raise serializers.ValidationError("Uploaded file does not look like a valid image.")
-    return image
 
 
 def format_unit_price_value(value):
@@ -2726,6 +2701,7 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
             "parse_method",
             "status",
             "parsed_rows",
+            "parsed_meta",
             "suggestions",
             "unmatched_po_rows",
             "missing_quote_line_ids",

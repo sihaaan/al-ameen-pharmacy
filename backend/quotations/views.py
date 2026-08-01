@@ -23,6 +23,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from api.models import Product, ProductImage
+from api.upload_validation import validate_image_upload
 
 from .ai_parsing import (
     AIParseError,
@@ -63,6 +64,7 @@ from .contract_intelligence import (
     analyze_contract_run,
 )
 from .historical_import_parsers import parse_historical_pdf_upload
+from .attachment_inspection import inspect_pdf_attachment, validate_pdf_page_geometry
 from .gmail_inquiry_import import (
     GmailInquiryImportBusy,
     GmailInquiryImportError,
@@ -313,6 +315,27 @@ def _clean_lpo_number_candidate(value):
     if len(candidate) < 3 or len(candidate) > 120:
         return ""
     return candidate
+
+
+ATTACHMENT_INSPECTION_META_KEYS = (
+    "attachment_safety",
+    "spreadsheet_fidelity",
+    "pdf_fidelity",
+)
+
+
+def _preserve_attachment_inspection_meta(preview, source_preview):
+    """Keep bounded parser inspection data when a cleanup result replaces rows."""
+
+    retained = dict(preview or {})
+    retained_meta = dict(retained.get("meta") or {})
+    source_meta = (source_preview or {}).get("meta") or {}
+    for key in ATTACHMENT_INSPECTION_META_KEYS:
+        value = source_meta.get(key)
+        if isinstance(value, dict):
+            retained_meta[key] = value
+    retained["meta"] = retained_meta
+    return retained
 
 
 def _extract_lpo_details(preview):
@@ -2031,6 +2054,140 @@ class GmailInquiryImportViewSet(
         return response
 
 
+def _has_preview_value(value):
+    return value is not None and str(value).strip() != ""
+
+
+def _preview_has_reviewed_pricing(preview):
+    """Return whether staff pricing must be preserved before AI row cleanup."""
+
+    if not isinstance(preview, dict):
+        return False
+    for line in preview.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        if _has_preview_value(line.get("unit_price")):
+            return True
+        if line.get("price_reference_status") == "matched":
+            return True
+        vat_rate = line.get("vat_rate")
+        if _has_preview_value(vat_rate):
+            try:
+                normalized_vat = Decimal(str(vat_rate).strip().rstrip("%"))
+            except (ArithmeticError, ValueError):
+                normalized_vat = None
+            if normalized_vat == Decimal("5"):
+                return True
+    return False
+
+
+def _move_extracted_customer_prices_to_evidence(preview):
+    """Keep source prices visible without treating them as our selling prices.
+
+    Manual text/file extraction may identify prices contained in a customer's
+    request.  Those values are useful evidence, but they must not prefill the
+    quotation price fields.  Explicit staff-entered prices and the separate
+    price-reference action remain unchanged because they do not pass through
+    this extraction-response boundary.
+    """
+
+    if not isinstance(preview, dict):
+        return preview
+
+    moved_price_evidence = False
+    for line in preview.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+
+        # A staff-reviewed price reference is an explicit pricing action, not
+        # an automatically extracted customer selling price.
+        is_explicit_price_reference = (
+            line.get("price_reference_status") == "matched"
+            and isinstance(line.get("price_reference_match"), dict)
+        )
+        if is_explicit_price_reference:
+            continue
+
+        unit_price = line.get("unit_price")
+        amount = line.get("amount")
+        line_total = line.get("line_total")
+        vat_rate = line.get("vat_rate")
+        vat_amount = line.get("vat_amount")
+        source_values = (unit_price, amount, line_total, vat_rate, vat_amount)
+        has_source_price = any(_has_preview_value(value) for value in source_values)
+
+        if _has_preview_value(unit_price) and not _has_preview_value(
+            line.get("customer_unit_price")
+        ):
+            line["customer_unit_price"] = str(unit_price)
+        if _has_preview_value(amount) and not _has_preview_value(
+            line.get("customer_amount")
+        ):
+            line["customer_amount"] = str(amount)
+        if not _has_preview_value(line.get("customer_line_total")):
+            customer_total = line_total if _has_preview_value(line_total) else amount
+            if _has_preview_value(customer_total):
+                line["customer_line_total"] = str(customer_total)
+        if _has_preview_value(vat_rate) and not _has_preview_value(
+            line.get("customer_vat_rate")
+        ):
+            line["customer_vat_rate"] = str(vat_rate)
+        if _has_preview_value(vat_amount) and not _has_preview_value(
+            line.get("customer_vat_amount")
+        ):
+            line["customer_vat_amount"] = str(vat_amount)
+        if not _has_preview_value(line.get("customer_vat")):
+            vat_evidence = []
+            if _has_preview_value(vat_rate):
+                rate_text = str(vat_rate).strip()
+                vat_evidence.append(
+                    f"VAT rate {rate_text if rate_text.endswith('%') else rate_text + '%'}"
+                )
+            if _has_preview_value(vat_amount):
+                vat_evidence.append(f"VAT amount {str(vat_amount).strip()}")
+            if vat_evidence:
+                line["customer_vat"] = "; ".join(vat_evidence)
+
+        evidence_notes = []
+        for label, field in (
+            ("unit price", "customer_unit_price"),
+            ("amount", "customer_amount"),
+            ("VAT", "customer_vat"),
+            ("total", "customer_line_total"),
+        ):
+            value = line.get(field)
+            if _has_preview_value(value):
+                evidence_notes.append(
+                    f"Customer/source {label}: {str(value).strip()}"
+                )
+        existing_notes = str(line.get("notes") or "").strip()
+        existing_notes_lower = existing_notes.lower()
+        new_evidence_notes = [
+            note for note in evidence_notes if note.lower() not in existing_notes_lower
+        ]
+        if new_evidence_notes:
+            line["notes"] = "; ".join(
+                value for value in (existing_notes, *new_evidence_notes) if value
+            )
+
+        # Always normalize these extraction outputs to blank values. This also
+        # covers AI schemas that return empty strings for unused money fields.
+        for field in ("unit_price", "amount", "vat_rate", "vat_amount", "line_total"):
+            line[field] = None
+        moved_price_evidence = moved_price_evidence or has_source_price
+
+    candidate = preview.get("ai_candidate")
+    if isinstance(candidate, dict):
+        _move_extracted_customer_prices_to_evidence(candidate)
+
+    meta = preview.setdefault("meta", {})
+    if isinstance(meta, dict):
+        meta["selling_prices_blank_after_extraction"] = True
+        if moved_price_evidence:
+            meta["customer_price_evidence_separated"] = True
+    return preview
+
+
 class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     serializer_class = InquirySerializer
     queryset = Inquiry.objects.select_related("company", "contact", "created_by").prefetch_related(
@@ -2093,7 +2250,7 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=False)
         if preview.get("ai_candidate"):
             self._apply_product_matches(preview["ai_candidate"], request.data.get("company"))
-        return Response(preview)
+        return Response(_move_extracted_customer_prices_to_evidence(preview))
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def parse_file(self, request):
@@ -2120,12 +2277,12 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             self._apply_product_matches(preview, request.data.get("company"))
-            return Response(preview)
+            return Response(_move_extracted_customer_prices_to_evidence(preview))
         self._apply_product_matches(preview, request.data.get("company"))
         maybe_attach_auto_ai_candidate(preview, actor=request.user, allow_vision=True)
         if preview.get("ai_candidate"):
             self._apply_product_matches(preview["ai_candidate"], request.data.get("company"))
-        return Response(preview)
+        return Response(_move_extracted_customer_prices_to_evidence(preview))
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def apply_price_reference(self, request):
@@ -2178,6 +2335,17 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         preview = request.data.get("preview") or {}
         if not isinstance(preview, dict):
             return Response({"detail": "A deterministic preview object is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if _preview_has_reviewed_pricing(preview):
+            return Response(
+                {
+                    "detail": (
+                        "AI cleanup is available only before pricing. Keep the current "
+                        "rows, or clear the reviewed price, VAT, and price-reference "
+                        "selection before running AI cleanup."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         requested_mode = request.data.get("mode") or "auto"
         try:
             candidate = clean_preview_with_ai(
@@ -2196,7 +2364,7 @@ class InquiryViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         self._apply_product_matches(candidate, request.data.get("company"))
-        return Response(candidate)
+        return Response(_move_extracted_customer_prices_to_evidence(candidate))
 
     @action(detail=True, methods=["post"])
     def create_quote(self, request, pk=None):
@@ -3321,6 +3489,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 deterministic_preview,
                 preview,
             )
+            preview = _preserve_attachment_inspection_meta(
+                preview,
+                deterministic_preview,
+            )
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
             preview["warnings"] = warnings
             po_import = QuotationOutcomePOImport.objects.create(
@@ -3331,6 +3503,12 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 source_file_ref=preview.get("source_file_ref", ""),
                 parse_method=preview.get("parse_method", ""),
                 parsed_rows=preview.get("lines") or [],
+                parsed_meta={
+                    key: value
+                    for key, value in (preview.get("meta") or {}).items()
+                    if key in ATTACHMENT_INSPECTION_META_KEYS
+                    and isinstance(value, dict)
+                },
                 suggestions=suggestions,
                 unmatched_po_rows=unmatched,
                 missing_quote_line_ids=missing_line_ids,
@@ -3584,6 +3762,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 quotation,
                 deterministic_preview,
                 preview,
+            )
+            preview = _preserve_attachment_inspection_meta(
+                preview,
+                deterministic_preview,
             )
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
             preview["warnings"] = warnings
@@ -3925,6 +4107,11 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             for key, value in source_context.items():
                 if value and not preview.get(key):
                     preview[key] = value
+
+            preview = _preserve_attachment_inspection_meta(
+                preview,
+                deterministic_preview if use_ai else preview,
+            )
 
             details = _extract_lpo_details(preview)
             if not details["lpo_number"]:
@@ -4288,6 +4475,7 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         {"detail": "Choose an image file."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                validate_image_upload(image_file, label="Product image")
                 has_primary = ProductImage.objects.filter(
                     product=line.product,
                     is_primary=True,
@@ -4912,6 +5100,26 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         if not data:
             return Response({"detail": "Source PDF is not available in private storage."}, status=status.HTTP_404_NOT_FOUND)
         try:
+            # Historical records may predate upload-time inspection. Re-run
+            # the bounded object/stream/page checks before opening the native
+            # rasterizer so an old unsafe source cannot bypass current limits.
+            _, inspection = inspect_pdf_attachment(
+                data,
+                max_pages=max(
+                    1,
+                    int(getattr(settings, "QUOTATION_IMPORT_MAX_PDF_PAGES", 10)),
+                ),
+            )
+            if not bool(
+                (inspection.get("safety") or {}).get(
+                    "local_traversal_safe",
+                    True,
+                )
+            ):
+                raise DjangoValidationError(
+                    "PDF preview rendering was skipped because its stream filters "
+                    "cannot be decoded with a bounded in-process preflight."
+                )
             with fitz.open(stream=data, filetype="pdf") as document:
                 try:
                     requested_page = int(request.query_params.get("page") or 1)
@@ -4919,7 +5127,17 @@ class HistoricalPriceImportViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     requested_page = 1
                 page_index = max(0, min(requested_page - 1, len(document) - 1))
                 page = document[page_index]
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+                render_scale = 1.2
+                validate_pdf_page_geometry(
+                    page.rect.width,
+                    page.rect.height,
+                    page_number=page_index + 1,
+                    render_scale=render_scale,
+                )
+                pixmap = page.get_pixmap(
+                    matrix=fitz.Matrix(render_scale, render_scale),
+                    alpha=False,
+                )
                 png_bytes = pixmap.tobytes("png")
         except Exception as exc:
             return Response({"detail": f"Could not render source PDF preview: {exc}"}, status=status.HTTP_400_BAD_REQUEST)

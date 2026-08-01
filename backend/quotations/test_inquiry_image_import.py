@@ -28,7 +28,16 @@ from .import_parsers import (
     normalize_image_bytes_for_ai,
     parse_file_preview,
 )
-from .models import AIParseCache, AIParseLog, Company, Inquiry, ProductAlias, Quotation, QuotationSettings
+from .models import (
+    AIParseCache,
+    AIParseLog,
+    Company,
+    Inquiry,
+    ProductAlias,
+    Quotation,
+    QuotationLine,
+    QuotationSettings,
+)
 from .serializers import ImportedInquiryCreateSerializer
 
 
@@ -625,9 +634,58 @@ class InquiryImageParseFileAPITests(APITestCase):
         self.assertEqual(response.data["lines"][0]["raw_name"], "Gloves Medium")
         self.assertEqual(response.data["lines"][0]["matched_product"], self.product.id)
         self.assertEqual(response.data["lines"][0]["match_status"], "confirmed")
+        self.assertIsNone(response.data["lines"][0]["unit_price"])
+        self.assertIsNone(response.data["lines"][0]["vat_rate"])
+        self.assertIsNone(response.data["lines"][0]["vat_amount"])
+        self.assertIsNone(response.data["lines"][0]["line_total"])
+        self.assertEqual(response.data["lines"][0]["customer_unit_price"], "12.00")
+        self.assertEqual(response.data["lines"][0]["customer_line_total"], "63.00")
+        self.assertEqual(
+            response.data["lines"][0]["customer_vat"],
+            "VAT rate 5%; VAT amount 3.00",
+        )
+        self.assertIn(
+            "Customer/source unit price: 12.00",
+            response.data["lines"][0]["notes"],
+        )
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(provider.calls[0]["mode"], "vision")
         self.assertEqual(len(provider.calls[0]["image_data_urls"]), 1)
+
+        extracted = response.data["lines"][0]
+        inquiry = self.client.post(
+            reverse("quotation-inquiry-create-imported"),
+            {
+                "company": self.company.id,
+                "subject": "Screenshot prices are evidence",
+                "source_type": Inquiry.SOURCE_TYPE_IMAGE,
+                "source_filename": response.data["source_filename"],
+                "source_mime_type": response.data["source_mime_type"],
+                "source_sha256": response.data["source_sha256"],
+                "lines": [
+                    {
+                        "raw_name": extracted["raw_name"],
+                        "raw_line": extracted["raw_line"],
+                        "quantity": extracted["quantity"],
+                        "unit": extracted["unit"],
+                        "unit_price": extracted["unit_price"],
+                        "vat_rate": extracted["vat_rate"] or "0",
+                        "notes": extracted["notes"],
+                        "parse_status": extracted["parse_status"],
+                        "parse_confidence": extracted["parse_confidence"],
+                    }
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(inquiry.status_code, status.HTTP_201_CREATED)
+        quote = self.client.post(
+            reverse("quotation-inquiry-create-quote", args=[inquiry.data["id"]])
+        )
+        self.assertEqual(quote.status_code, status.HTTP_201_CREATED)
+        quotation_line = QuotationLine.objects.get(quotation_id=quote.data["id"])
+        self.assertIsNone(quotation_line.unit_price)
+        self.assertIn("Customer/source unit price: 12.00", quotation_line.notes)
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False)
     def test_image_ai_failure_returns_clear_400_without_saving_an_inquiry(self):

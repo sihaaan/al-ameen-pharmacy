@@ -21,6 +21,7 @@ from quotations.models import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PRIMARY_DOCUMENTS = (
+    "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md",
     "GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md",
     "DEPLOYMENT.md",
     "SECURITY.md",
@@ -141,6 +142,107 @@ class DocumentationContractTests(SimpleTestCase):
             with self.subTest(name=name):
                 self.assertIn(name, content)
         self.assertRegex(content, r"(?m)^# CLOUDINARY_URL=cloudinary://")
+
+        attachment_defaults = {
+            "QUOTATION_IMPORT_MAX_UPLOAD_BYTES": "5242880",
+            "QUOTATION_IMPORT_MAX_EXCEL_ROWS": "500",
+            "QUOTATION_IMPORT_MAX_EXCEL_SHEETS": "10",
+            "QUOTATION_IMPORT_MAX_EXCEL_COLUMNS": "100",
+            "QUOTATION_IMPORT_MAX_PDF_PAGES": "10",
+            "QUOTATION_IMPORT_MAX_PDF_OBJECTS": "20000",
+            "QUOTATION_IMPORT_MAX_PDF_STREAMS": "5000",
+            "QUOTATION_IMPORT_MAX_PDF_DECODED_STREAM_BYTES": "33554432",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES": "67108864",
+            "QUOTATION_IMPORT_MAX_PDF_PAGE_DIMENSION_POINTS": "10000",
+            "QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS": "16000000",
+            "QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS": "25000000",
+            "QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS": "25000000",
+            "QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE": "250000",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS": "1000000",
+            "QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE": "50000",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_WORDS": "250000",
+            "QUOTATION_IMPORT_MAX_PDF_TABLE_ROWS": "20000",
+            "QUOTATION_IMPORT_MAX_PDF_TABLE_CELLS": "100000",
+            "QUOTATION_IMPORT_MAX_ARCHIVE_ENTRIES": "2048",
+            "QUOTATION_IMPORT_MAX_ARCHIVE_UNCOMPRESSED_BYTES": "134217728",
+            "QUOTATION_IMPORT_MAX_ARCHIVE_MEMBER_BYTES": "33554432",
+            "QUOTATION_PRICE_REFERENCE_MAX_EXCEL_ROWS": "5000",
+        }
+        for name, value in attachment_defaults.items():
+            with self.subTest(attachment_setting=name):
+                self.assertRegex(
+                    content,
+                    rf"(?m)^# {re.escape(name)}={re.escape(value)}$",
+                )
+
+    def test_attachment_security_and_fidelity_contract_is_documented(self):
+        relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"
+        content = read_repository_file(relative_path)
+        lowered = content.lower()
+
+        required_route_phrases = (
+            "manual inquiry",
+            "quotation lpo/outcome",
+            "proforma lpo",
+            "gmail native inquiry analysis",
+            "price-reference upload",
+            "historical quotation pdf",
+            "product and quotation-branding images",
+        )
+        for phrase in required_route_phrases:
+            with self.subTest(route=phrase):
+                self.assertIn(phrase, lowered)
+
+        required_safety_phrases = (
+            "hard failure",
+            "warning-only",
+            "no malware scanner or antivirus",
+            "no parser sandbox",
+            "legacy `.xls`",
+            "`.xlsb`",
+            "blank selling prices",
+            "0036_quotationoutcomepoimport_parsed_meta",
+            "additive database migration",
+            "no production deployment",
+            "not item evidence",
+        )
+        for phrase in required_safety_phrases:
+            with self.subTest(safety_claim=phrase):
+                self.assertIn(phrase, lowered)
+
+        for setting_name in (
+            "QUOTATION_IMPORT_MAX_ARCHIVE_ENTRIES",
+            "QUOTATION_IMPORT_MAX_ARCHIVE_UNCOMPRESSED_BYTES",
+            "QUOTATION_IMPORT_MAX_ARCHIVE_MEMBER_BYTES",
+            "QUOTATION_IMPORT_MAX_PDF_OBJECTS",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES",
+            "QUOTATION_IMPORT_MAX_PDF_PAGE_DIMENSION_POINTS",
+            "QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_WORDS",
+            "QUOTATION_IMPORT_MAX_PDF_TABLE_CELLS",
+            "QUOTATION_PRICE_REFERENCE_MAX_EXCEL_ROWS",
+            "PRODUCT_IMAGE_MAX_UPLOAD_BYTES",
+            "QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES",
+        ):
+            with self.subTest(documented_setting=setting_name):
+                self.assertIn(f"`{setting_name}`", content)
+
+        self.assertRegex(lowered, r"no\s+oauth scope")
+        self.assertIn("ai model/prompt/schema change", lowered)
+        self.assertIn("do not reverse `0036`", lowered)
+        self.assertIn("local page traversal", lowered)
+        self.assertIn("inline-image", lowered)
+        self.assertIn("rollback", lowered)
+
+        for document in (
+            "SECURITY.md",
+            "OPERATIONS.md",
+            "DEPLOYMENT.md",
+            "GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md",
+        ):
+            with self.subTest(linked_from=document):
+                self.assertIn(relative_path, read_repository_file(document))
 
     def test_legacy_status_documents_are_clearly_marked_historical(self):
         for relative_path in (

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.4.0 |
+| Document version | 1.5.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints on `codex/technical-hardening` |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint on `codex/technical-hardening` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -15,7 +15,9 @@ measured or observed in one deployment. It is not a production-compliance
 attestation. See [DEPLOYMENT.md](DEPLOYMENT.md), [SECURITY.md](SECURITY.md),
 [OPERATIONS.md](OPERATIONS.md), and
 [TECHNICAL_HARDENING_PROGRESS.md](TECHNICAL_HARDENING_PROGRESS.md) for the
-corresponding runbooks and branch checkpoints.
+corresponding runbooks and branch checkpoints. Task 2.4 attachment behavior is
+specified in
+[ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md).
 
 ## 1. Claim labels
 
@@ -188,6 +190,54 @@ both `QUOTATION_MAILBOX_AI_VISION_ENABLED` and the staff-facing quotation
 setting `ai_pdf_vision_enabled`. This dual gate is not a claim that only page
 images are sent.
 
+#### Task 2.4 attachment inspection boundary
+
+**Implemented in reviewed branch.** Supported inbound PDF, XLS, and XLSX files
+receive bounded, provider-neutral inspection before native AI submission.
+Warning-only fidelity signals (for example MIME mismatch after byte validation,
+formulas/cached results, hidden/merged content, external links, or PDF active
+content/forms) remain in the attachment manifest, evidence, and import warnings,
+and the existing provider analysis may continue.
+
+A selected attachment that fails the shared hard inspection blocks the entire
+provider call for that selection. Its digest and bounded validation record use
+`attachment_inspection_v1`; other prepared files are marked skipped and the
+analysis produces no request rows. This avoids silently analyzing a partial
+selected source set. The same fail-closed rule applies when a selected,
+otherwise-supported PDF/XLS/XLSX cannot be fetched or exceeds the per-file,
+selected-file-count, or combined-byte limit. The rejection record explains why
+a source was excluded; it is not item-level evidence. Deliberately unsupported
+signature graphics, ordinary images, and native XLSB remain warning-only route
+exclusions.
+
+If a selected inbound message exposes more than 100 attachment metadata
+records, the bounded first 100 remain visible as skipped evidence and one
+synthetic failed evidence record explains the incomplete source set. No
+attachment is fetched, no provider request is made, and no row is produced.
+The overflow exemption is intentionally narrower than ordinary thread
+classification: it requires both Gmail's `SENT` label and an exact singleton
+`From` address equal to the connected canonical mailbox. Gmail's JSON/MIME tree
+is already materialized before this policy runs; a bounded response reader and
+explicit incomplete-message state remain future defense-in-depth work.
+
+Before provider submission, native workbooks are also bounded by visible
+sheets, rows and columns per sheet, aggregate visible rows, and aggregate
+visible cells. The current hard ceilings are 10 visible sheets, 1,000 rows per
+sheet, 100 columns per sheet, 5,000 aggregate rows, and 500,000 aggregate cells;
+lower configured manual sheet/column bounds still apply. These are explicit
+failures, not silent truncation. Warning and structured inspection metadata are
+retained in the Gmail evidence chain. Quotation LPO/proforma records retain the
+same structured subset in their existing `parsed_meta`; Task 2.4 migration
+`0036_quotationoutcomepoimport_parsed_meta` adds the equivalent field to
+outcome-PO imports.
+
+This is not malware/AV detection and no parser sandbox was added. Legacy `.xls`
+and binary `.xlsb` inspection is limited. PDF local rendering is allowed only
+after a fresh preflight proves bounded stream traversal and finds no reachable
+inline-image content; Gmail provider submission can still use a byte-identical
+warning-only PDF after every hard check passes. No OAuth scope, provider, AI
+model, prompt, schema, or production configuration changed.
+
 ### 5.2 Versioned contract
 
 **Implemented in reviewed branch.** Current code constants are:
@@ -255,6 +305,17 @@ Primary endpoints:
 - `POST /quotations/inquiries/create_imported/`
 - `POST /quotations/inquiries/{id}/create_quote/`
 
+Task 2.4 inspects supported document containers before parsing and before a new
+manual source is stored. The same preview boundary is reused by quotation
+outcome/LPO, proforma LPO, mailbox-PO, contract-intelligence, and preview-based
+price-reference paths. Spreadsheet parsing chooses visible sheets before the
+sheet cap, exposes row/column/sheet truncation and fallback warnings, and keeps
+possible cross-sheet duplicates for employee review. Safety and fidelity fields
+are additive preview metadata; hard failures create no rows. Direct XLSX price
+reference has its own larger row limit and remains a distinct explicit employee
+action that may populate a reference price. Customer prices/budgets from inquiry
+extraction remain evidence only.
+
 The manual route can be faster for a clean workbook because the employee has
 already selected one source and local code reduces it to compact rows. The
 Gmail route performs broader selection, identity, revision, and evidence work.
@@ -273,6 +334,10 @@ the Inquiry and draft Quotation. These invariants apply to both routes:
 - uncertain/conflicting sources remain visible;
 - AI cannot create products or aliases;
 - repeated confirmation cannot silently duplicate a Gmail thread quotation.
+
+Attachment warnings never satisfy these gates. Passing a container inspection
+does not establish company identity, product equivalence, requested quantity,
+or business accuracy.
 
 ## 8. Preview-before-send delivery
 
@@ -542,6 +607,11 @@ module against default SQLite intentionally skips PostgreSQL-only cases.
 - `backend/quotations/gmail_addon.py`
 - `backend/quotations/gmail_inquiry_import.py`
 - `backend/quotations/ai_parsing.py`
+- `backend/quotations/attachment_inspection.py`
+- `backend/quotations/import_parsers.py`
+- `backend/quotations/price_reference.py`
+- `backend/quotations/historical_import_parsers.py`
+- `backend/api/upload_validation.py`
 - `backend/quotations/quotation_email_delivery.py`
 - `backend/quotations/private_storage.py`
 - `backend/quotations/models.py`
@@ -549,3 +619,4 @@ module against default SQLite intentionally skips PostgreSQL-only cases.
 - `frontend/src/components/quotations/QuotationEmailPreviewDialog.js`
 - `gmail_addon/deployment.template.json`
 - `backend/quotations/evaluation_corpus/quotation_intake_v1.json`
+- [Attachment security and spreadsheet fidelity](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.3.0 |
+| Document version | 2.4.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline plus the Task 2.1, Task 2.2, and Task 2.3 checkpoints |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
@@ -72,6 +72,40 @@ configuration. Complete the unchecked verification items for each release.
   visible.
 - Reviewed-branch instrumentation stores numeric usage/timing and contract
   hashes without copying full customer content into its observability envelope.
+
+### Attachment and image validation
+
+- Task 2.4 inspects supported PDF and Excel containers before normal parser
+  use. Definite malformed/encrypted/unsafe containers and hard archive limits
+  fail closed; MIME mismatches and business-fidelity features such as formulas,
+  hidden/merged cells, external links, and PDF active-content markers remain
+  warning-only after byte validation.
+- PDF cross-reference/object-stream structure is bounded before `PdfReader`;
+  object, stream, geometry, embedded-image, render, text, word, and table output
+  limits then apply. Unsupported non-image content filters skip local page
+  traversal, while an xref/object stream that cannot be decoded under the
+  preflight limits fails closed. Local AI rendering repeats the inspection
+  immediately before opening the renderer. Reachable inline images in page,
+  Form, Pattern, Type3, soft-mask, or annotation-appearance content also block
+  local rendering because their geometry is not interpreted speculatively.
+- Gmail native analysis blocks the complete provider call for the selected
+  source set if any selected supported document fails inspection, cannot be
+  fetched/prepared, or exceeds a file-count/byte boundary. The rejection reason
+  and digest remain bounded evidence, prepared siblings are marked skipped, and
+  no failed attachment becomes item evidence or produces rows. More than 100
+  attachment metadata entries on a selected inbound message use the same
+  fail-closed path; only a Gmail `SENT` message whose sole parsed `From` address
+  is the exact connected mailbox is exempt as outbound context.
+- Product and quotation-branding images must agree across extension, declared
+  MIME when supplied, and decoded PNG/JPEG/WebP format, and pass byte,
+  dimension, pixel, complete-decode, and single-frame limits before persistence.
+  This includes company brand logos as well as product, line, quotation logo,
+  signature, and stamp uploads.
+- These are bounded validation controls, not malware/antivirus scanning or a
+  parser sandbox. Legacy `.xls` and binary `.xlsb` content receive limited
+  fidelity inspection. Native PDF image-codec complexity and upstream Gmail
+  JSON/MIME-tree materialization remain in-process availability risks. See
+  [ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md).
 
 ### Database and file access
 
@@ -170,6 +204,7 @@ Record operator, evidence link, and UTC time for every checked item.
 - [ ] Private quotation evidence has an accepted durability/recovery posture.
 - [ ] Google scopes, mailbox, owners, publication/verification, and reconnect tested.
 - [ ] OpenAI project/model, processor terms, retention, and privacy gates approved.
+- [ ] Representative valid, warning-only, and hard-failure attachments were smoke-tested without bypassing employee review or blank inquiry selling prices.
 - [ ] Sentry/logging excludes unnecessary PII and access is restricted.
 - [ ] The deployed commit includes and verifies Task 1.8 read-only audit/history administration.
 - [ ] Ambiguous-email reconciliation and no-blind-retry runbook tested.
@@ -247,6 +282,11 @@ Record operator, evidence link, and UTC time for every checked item.
   PostgreSQL safely aborts a deadlock participant, but explicit timeout/deadlock
   normalization remains Task 2.8 availability work.
 - Formal credential ownership transfer remains Task 2.7.
+- Attachment checks do not provide malware/AV detection or parser isolation.
+  PDF marker inspection is not exhaustive, and legacy `.xls`/`.xlsb` formula,
+  hidden-content, external-link, macro, encryption, and embedded-object coverage
+  is limited. Passing validation is not proof that business data is trustworthy
+  or that extraction is accurate.
 
 These are explicit risks, not permission to bypass the existing review,
 evidence, blank-price, recipient-verification, or send-reconciliation controls.
@@ -260,3 +300,4 @@ evidence, blank-price, recipient-verification, or send-reconciliation controls.
 - [Google OAuth app audience](https://support.google.com/cloud/answer/15549945)
 - [Architecture reference](GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md)
 - [Operations runbook](OPERATIONS.md)
+- [Attachment security and spreadsheet fidelity](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)

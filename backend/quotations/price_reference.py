@@ -4,11 +4,13 @@ from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from openpyxl import load_workbook
 
 from .ai_parsing import AIParseError, clean_preview_with_ai
-from .import_parsers import read_upload_bytes
+from .attachment_inspection import inspect_spreadsheet_attachment
+from .import_parsers import max_excel_columns, max_excel_sheets, read_upload_bytes
 from .import_parsers import parse_file_preview, parse_text_preview
 from .models import normalize_label
 
@@ -16,6 +18,7 @@ from .models import normalize_label
 PRICE_REFERENCE_WORKBOOK_EXTENSIONS = {".xlsx"}
 PRICE_REFERENCE_PREVIEW_EXTENSIONS = {".pdf", ".xls", ".xlsb"}
 PRICE_REFERENCE_FILE_EXTENSIONS = PRICE_REFERENCE_WORKBOOK_EXTENSIONS | PRICE_REFERENCE_PREVIEW_EXTENSIONS
+DEFAULT_PRICE_REFERENCE_MAX_EXCEL_ROWS = 5000
 PRICE_HEADER_ALIASES = {
     "serial": {"sno", "s no", "sl no", "sr no", "serial", "#"},
     "item": {"item", "items", "item description", "item desc", "description", "material description"},
@@ -40,6 +43,20 @@ class PriceReferenceRow:
     row_number: int
     sequence: int
     raw_values: list[str]
+
+
+def max_price_reference_excel_rows():
+    try:
+        configured = int(
+            getattr(
+                settings,
+                "QUOTATION_PRICE_REFERENCE_MAX_EXCEL_ROWS",
+                DEFAULT_PRICE_REFERENCE_MAX_EXCEL_ROWS,
+            )
+        )
+    except (TypeError, ValueError):
+        configured = DEFAULT_PRICE_REFERENCE_MAX_EXCEL_ROWS
+    return max(1, configured)
 
 
 def _clean_cell(value):
@@ -188,20 +205,52 @@ def parse_price_reference_workbook(uploaded_file):
     extension = Path(filename).suffix.lower()
     if extension not in PRICE_REFERENCE_WORKBOOK_EXTENSIONS:
         raise ValidationError("Upload an .xlsx price reference workbook.")
+    inspection = inspect_spreadsheet_attachment(
+        data,
+        extension=extension,
+        declared_mime_type=str(getattr(uploaded_file, "content_type", "") or ""),
+    )
     try:
         workbook = load_workbook(BytesIO(data), data_only=True, read_only=True)
     except Exception as exc:
         raise ValidationError(f"Could not read price reference workbook: {exc}") from exc
 
     rows = []
-    warnings = []
+    warnings = list(inspection.get("warnings") or [])
+    sheet_metadata = []
     sequence = 0
+    row_limit = max_price_reference_excel_rows()
+    column_limit = max_excel_columns()
+    sheet_limit = max_excel_sheets()
     try:
-        for sheet in workbook.worksheets[:10]:
-            if getattr(sheet, "sheet_state", "visible") != "visible":
-                continue
+        visible_sheets = [
+            sheet
+            for sheet in workbook.worksheets
+            if getattr(sheet, "sheet_state", "visible") == "visible"
+        ]
+        sheet_limit_reached = len(visible_sheets) > sheet_limit
+        for sheet in visible_sheets[:sheet_limit]:
             current_columns = {}
-            for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            rows_read = 0
+            parsed_before = len(rows)
+            row_limit_reached = False
+            sheet_max_column = int(getattr(sheet, "max_column", 0) or 0)
+            column_limit_reached = sheet_max_column > column_limit
+            effective_max_column = max(
+                1,
+                min(column_limit, sheet_max_column or column_limit),
+            )
+            for row_number, row in enumerate(
+                sheet.iter_rows(
+                    values_only=True,
+                    max_col=effective_max_column,
+                ),
+                start=1,
+            ):
+                if row_number > row_limit:
+                    row_limit_reached = True
+                    break
+                rows_read += 1
                 values = tuple(row or [])
                 header_columns = _map_header(values)
                 if header_columns:
@@ -220,11 +269,49 @@ def parse_price_reference_workbook(uploaded_file):
                 sequence += 1
                 if parsed:
                     rows.append(parsed)
+            sheet_metadata.append(
+                {
+                    "sheet_name": sheet.title,
+                    "rows_read": rows_read,
+                    "parsed_rows": len(rows) - parsed_before,
+                    "row_limit_reached": row_limit_reached,
+                    "column_limit_reached": column_limit_reached,
+                }
+            )
+            if row_limit_reached:
+                warnings.append(
+                    f"Stopped reading price reference sheet '{sheet.title}' after "
+                    f"{row_limit} rows because the sheet contains additional rows."
+                )
+            if column_limit_reached:
+                warnings.append(
+                    f"Stopped reading columns in price reference sheet '{sheet.title}' "
+                    f"after {column_limit} columns."
+                )
     finally:
         workbook.close()
+    if sheet_limit_reached:
+        warnings.append(
+            f"Price reference workbook has more than {sheet_limit} visible sheets; "
+            "later visible sheets were not parsed."
+        )
     if not rows:
         warnings.append("No item price rows were detected in the reference workbook.")
-    return rows, {"filename": filename, "row_count": len(rows), "warnings": warnings}
+    return rows, {
+        "filename": filename,
+        "row_count": len(rows),
+        "warnings": list(dict.fromkeys(warnings)),
+        "attachment_safety": inspection.get("safety") or {},
+        "spreadsheet_fidelity": inspection.get("fidelity") or {},
+        "sheet_metadata": sheet_metadata,
+        "spreadsheet_limits": {
+            "max_visible_sheets": sheet_limit,
+            "max_rows_per_sheet": row_limit,
+            "max_columns_per_sheet": column_limit,
+            "visible_sheet_count": len(visible_sheets),
+            "sheet_limit_reached": sheet_limit_reached,
+        },
+    }
 
 
 def _reference_rows_from_preview(preview):
@@ -262,7 +349,7 @@ def _reference_rows_from_preview(preview):
         sequence += 1
     if not rows:
         warnings.append("No item price rows were detected in the price reference source.")
-    return rows, {
+    meta = {
         "filename": preview.get("source_filename") or preview.get("source_type") or "Pasted price reference",
         "row_count": len(rows),
         "warnings": warnings,
@@ -271,6 +358,11 @@ def _reference_rows_from_preview(preview):
         "ai_status": preview.get("ai_status", ""),
         "ai_status_label": preview.get("ai_status_label", ""),
     }
+    preview_meta = preview.get("meta") if isinstance(preview.get("meta"), dict) else {}
+    for key in ("attachment_safety", "spreadsheet_fidelity", "pdf_fidelity"):
+        if key in preview_meta:
+            meta[key] = preview_meta[key]
+    return rows, meta
 
 
 def parse_price_reference_source(uploaded_file=None, *, raw_text="", raw_html="", use_ai=False, actor=None):
