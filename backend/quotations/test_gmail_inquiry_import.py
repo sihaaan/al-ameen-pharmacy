@@ -35,6 +35,7 @@ from .gmail_inquiry_import import (
     _confirmation_subject,
     _fetch_native_ai_attachment,
     _fetch_analysis_messages,
+    _is_outbound_message,
     _looks_like_inline_image,
     _looks_like_signature_image_bundle_member,
     _thread_message_metadata,
@@ -394,6 +395,288 @@ class GmailInquiryImportTests(TestCase):
         self.assertNotEqual(
             candidates["recommended_company_id"],
             inferred.id,
+        )
+
+    def test_company_candidates_canonicalize_idn_and_root_dot(self):
+        company = Company.objects.create(
+            name="IDN Customer",
+            email="buyer@bücher.example",
+        )
+        message = gmail_message(
+            "identity-idn",
+            sender="Buyer <BUYER@xn--bcher-kva.example.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], company.id)
+        self.assertTrue(candidates["exact_company_match"])
+        self.assertEqual(
+            candidates["verified_identity_sender_emails"],
+            ["buyer@xn--bcher-kva.example"],
+        )
+
+    def test_canonical_idn_collision_remains_ambiguous(self):
+        first = Company.objects.create(
+            name="First IDN Customer",
+            email="shared@bücher.example",
+        )
+        second = Company.objects.create(
+            name="Second IDN Customer",
+            email="shared@xn--bcher-kva.example",
+        )
+        message = gmail_message(
+            "identity-idn-collision",
+            sender="Buyer <SHARED@BÜCHER.EXAMPLE.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertEqual(
+            {row["company_id"] for row in candidates["companies"]},
+            {first.id, second.id},
+        )
+
+    def test_public_domain_root_dot_does_not_enable_domain_inference(self):
+        Company.objects.create(name="Regional Gmail Healthcare")
+        message = gmail_message(
+            "identity-public-root-dot",
+            sender="Health Center <regionalgmailhealthcare@gmail.com.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["companies"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+
+    def test_exact_saved_public_email_still_matches_after_canonicalization(self):
+        company = Company.objects.create(
+            name="Saved Public Mail Customer",
+            email="public.customer@yahoo.fr",
+        )
+        message = gmail_message(
+            "identity-public-exact",
+            sender="Buyer <PUBLIC.CUSTOMER@YAHOO.FR.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], company.id)
+        self.assertTrue(candidates["exact_company_match"])
+
+    def test_plus_address_is_not_an_exact_saved_sender(self):
+        message = gmail_message(
+            "identity-plus",
+            sender="Buyer <buyer+rfq@example.com>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], self.company.id)
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertIsNone(candidates["recommended_contact_id"])
+        self.assertNotIn(
+            "exact_contact_email",
+            {row["match_method"] for row in candidates["companies"]},
+        )
+
+    def test_plus_address_matches_only_when_the_exact_tag_is_saved(self):
+        company = Company.objects.create(
+            name="Tagged Address Customer",
+            email="buyer+rfq@example.com",
+        )
+        message = gmail_message(
+            "identity-plus-exact",
+            sender="Buyer <BUYER+RFQ@EXAMPLE.COM.>",
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["recommended_company_id"], company.id)
+        self.assertTrue(candidates["exact_company_match"])
+
+    def test_multiple_or_duplicate_from_addresses_never_match_exactly(self):
+        cases = [
+            gmail_message(
+                "identity-multiple-from",
+                sender=(
+                    "Buyer <buyer@example.com>, "
+                    "Other <other@unrelated.example>"
+                ),
+            ),
+            {
+                **gmail_message(
+                    "identity-duplicate-from",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {"name": "From", "value": "Buyer <buyer@example.com>"},
+                    {"name": "From", "value": "Buyer <buyer@example.com>"},
+                ],
+            },
+            {
+                **gmail_message(
+                    "identity-empty-malformed-from-token",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {
+                        "name": "From",
+                        "value": "Bad <> , Buyer <buyer@example.com>",
+                    }
+                ],
+            },
+            {
+                **gmail_message(
+                    "identity-duplicate-address-one-field",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {
+                        "name": "From",
+                        "value": "buyer@example.com, buyer@example.com",
+                    }
+                ],
+            },
+            {
+                **gmail_message(
+                    "identity-full-headers-without-from",
+                    sender="Buyer <buyer@example.com>",
+                ),
+                "full_headers": [
+                    {"name": "To", "value": MAILBOX_EMAIL},
+                ],
+            },
+        ]
+
+        for message in cases:
+            with self.subTest(message_id=message["gmail_message_id"]):
+                candidates = _company_contact_candidates(
+                    [message],
+                    MAILBOX_EMAIL,
+                )
+                self.assertIsNone(candidates["recommended_company_id"])
+                self.assertIsNone(candidates["recommended_contact_id"])
+                self.assertFalse(candidates["exact_company_match"])
+                self.assertTrue(candidates["identity_warnings"])
+
+    def test_ambiguous_from_cannot_impersonate_shared_mailbox_direction(self):
+        message = gmail_message(
+            "identity-ambiguous-outbound",
+            sender=(
+                f"Shared Mailbox <{MAILBOX_EMAIL}>, "
+                "Other <other@unrelated.example>"
+            ),
+        )
+        message["full_headers"] = [
+            {"name": "From", "value": message["sender"]},
+        ]
+        message["label_ids"] = []
+
+        self.assertFalse(_is_outbound_message(message, MAILBOX_EMAIL))
+
+        message["label_ids"] = ["SENT"]
+        self.assertTrue(_is_outbound_message(message, MAILBOX_EMAIL))
+
+    def test_forwarder_identity_is_suppressed_but_ai_customer_is_review_only(self):
+        forwarded_company = Company.objects.create(
+            name="Original Customer Medical Services LLC",
+        )
+        CompanyContact.objects.create(
+            company=forwarded_company,
+            name="Original Buyer",
+            email="original@customer.example",
+        )
+        message = gmail_message(
+            "identity-forwarded",
+            sender="Buyer <buyer@example.com>",
+            body="Please prepare the forwarded quotation request.",
+        )
+        message.update(
+            {
+                "contains_unverified_forwarded_content": True,
+                "_forwarded_body_text": (
+                    "---------- Forwarded message ---------\n"
+                    "From: Original Buyer <original@customer.example>\n"
+                    "Date: Fri, 31 Jul 2026 at 10:00\n"
+                    "Subject: RFQ\nTo: quotes@example.com\n\n"
+                    "Original Customer Medical Services LLC\n"
+                    "Sterile Gauze | 20 | BOX"
+                ),
+            }
+        )
+
+        candidates = _company_contact_candidates([message], MAILBOX_EMAIL)
+
+        self.assertEqual(candidates["sender_emails"], ["buyer@example.com"])
+        self.assertEqual(candidates["verified_identity_sender_emails"], [])
+        self.assertIsNone(candidates["recommended_company_id"])
+        self.assertFalse(candidates["exact_company_match"])
+        self.assertNotIn(
+            self.company.id,
+            {row["company_id"] for row in candidates["companies"]},
+        )
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "Original Customer Medical Services LLC",
+                "contact_name": "Original Buyer",
+                "contact_email": "original@customer.example",
+                "source_keys": [
+                    candidates[
+                        "unverified_forwarded_identity_source_keys"
+                    ][0]
+                ],
+                "confidence": 0.99,
+                "reason": "Read from unverified forwarded content.",
+            },
+        )
+
+        self.assertEqual(
+            ranked["recommended_company_id"],
+            forwarded_company.id,
+        )
+        self.assertFalse(ranked["exact_company_match"])
+        self.assertIsNone(ranked["recommended_contact_id"])
+        self.assertEqual(ranked["contacts"], [])
+        self.assertTrue(ranked["ai_identity_unverified_forwarded"])
+
+    def test_reply_to_domain_mismatch_is_visible_but_never_identity_evidence(self):
+        cross_domain = gmail_message(
+            "identity-cross-reply-to",
+            sender="Unknown <unknown@customer.example>",
+        )
+        cross_domain["reply_to"] = "Accounts <accounts@other.example>"
+        same_domain = gmail_message(
+            "identity-same-reply-to",
+            sender="Unknown <unknown@customer.example>",
+        )
+        same_domain["reply_to"] = "Accounts <accounts@customer.example>"
+
+        cross_candidates = _company_contact_candidates(
+            [cross_domain],
+            MAILBOX_EMAIL,
+        )
+        same_candidates = _company_contact_candidates(
+            [same_domain],
+            MAILBOX_EMAIL,
+        )
+
+        self.assertTrue(
+            any(
+                "Reply-To domain differs" in warning
+                for warning in cross_candidates["identity_warnings"]
+            )
+        )
+        self.assertFalse(
+            any(
+                "Reply-To domain differs" in warning
+                for warning in same_candidates["identity_warnings"]
+            )
         )
 
     @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
@@ -894,6 +1177,38 @@ class GmailInquiryImportTests(TestCase):
         self.assertEqual(match["evidence"][0]["score"], 96)
         self.assertFalse(ranked["exact_company_match"])
 
+    def test_ai_contact_email_uses_same_idn_canonical_form_as_saved_contact(self):
+        company = Company.objects.create(name="Bucher Medical Services LLC")
+        contact = CompanyContact.objects.create(
+            company=company,
+            name="Original Buyer",
+            email="buyer@xn--bcher-kva.example",
+        )
+        candidates = {
+            "sender_emails": [],
+            "companies": [],
+            "contacts": [],
+            "recommended_company_id": None,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+
+        ranked = _apply_ai_identity_candidates(
+            candidates,
+            {
+                "company_name": "Bucher Medical Services LLC",
+                "contact_name": "Original Buyer",
+                "contact_email": "BUYER@bücher.example.",
+                "source_keys": ["forwarded-body"],
+                "confidence": 0.99,
+                "reason": "Read from unverified forwarded evidence.",
+            },
+        )
+
+        self.assertEqual(ranked["recommended_company_id"], company.id)
+        self.assertEqual(ranked["recommended_contact_id"], contact.id)
+        self.assertFalse(ranked["exact_company_match"])
+
     def test_ai_identity_suppresses_wrong_unique_domain_property_match(self):
         company = Company.objects.create(
             name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
@@ -1321,7 +1636,7 @@ class GmailInquiryImportTests(TestCase):
                     match["evidence"][0]["specificity_conflict"]
                 )
 
-    def test_stored_gmail_identity_is_reranked_once_without_another_ai_call(self):
+    def test_unversioned_stored_identity_requires_reanalysis(self):
         company = Company.objects.create(
             name="RAQ Contracting Company LLC",
         )
@@ -1357,30 +1672,153 @@ class GmailInquiryImportTests(TestCase):
             gmail_import
         )
 
-        self.assertEqual(
-            refreshed.candidates["recommended_company_id"],
-            company.id,
+        self.assertIsNone(refreshed.candidates["recommended_company_id"])
+        self.assertIsNone(refreshed.candidates["recommended_contact_id"])
+        self.assertFalse(refreshed.candidates["exact_company_match"])
+        self.assertEqual(refreshed.candidates["companies"], [])
+        self.assertEqual(refreshed.candidates["contacts"], [])
+        self.assertTrue(
+            refreshed.candidates["identity_reanalysis_required"]
         )
-        self.assertEqual(
-            refreshed.candidates["identity_match_version"],
-            "gmail_identity_v3",
+        self.assertNotIn(
+            "identity_match_version",
+            refreshed.candidates,
         )
         gmail_import.refresh_from_db()
-        self.assertEqual(
-            gmail_import.candidates["recommended_company_id"],
-            company.id,
+        self.assertTrue(
+            gmail_import.candidates["identity_reanalysis_required"]
         )
         with CaptureQueriesContext(django_connection) as captured:
             same = refresh_gmail_inquiry_identity_candidates(
                 gmail_import
             )
         self.assertEqual(len(captured), 0)
-        self.assertEqual(
-            same.candidates["recommended_company_id"],
-            company.id,
+        self.assertTrue(same.candidates["identity_reanalysis_required"])
+
+    def test_direct_confirmation_rejects_stale_identity_without_refresh(self):
+        gmail_import = self.analyzed_record(
+            thread="direct-confirm-stale-identity",
+            rows=[
+                {
+                    "row_key": "d" * 32,
+                    "raw_name": "Sterile Gauze",
+                    "raw_line": "Sterile Gauze | 2 | BOX",
+                    "quantity": "2",
+                    "unit": "BOX",
+                    "unit_price": None,
+                    "vat_rate": "0.00",
+                    "operation": "added",
+                    "parse_status": "parsed",
+                    "parse_confidence": 0.99,
+                    "included": True,
+                    "reviewed_by_user": True,
+                    "_source_keys": ["stored-email-body"],
+                }
+            ],
+        )
+        gmail_import.analysis["thread_analysis"] = {
+            "customer_identity": {
+                "company_name": self.company.name,
+                "contact_name": self.contact.name,
+                "contact_email": self.contact.email,
+                "source_keys": ["stored-email-body"],
+                "confidence": 0.99,
+                "reason": "Stored identity from an older matching version.",
+            }
+        }
+        gmail_import.candidates = {
+            "identity_match_version": "gmail_identity_v3",
+            "companies": [
+                {
+                    "company_id": self.company.id,
+                    "company_name": self.company.name,
+                    "match_method": "verified_email_domain",
+                }
+            ],
+            "contacts": [],
+            "recommended_company_id": self.company.id,
+            "recommended_contact_id": None,
+            "exact_company_match": False,
+        }
+        gmail_import.save(update_fields=["analysis", "candidates"])
+        quotation_count = Quotation.objects.count()
+
+        with self.assertRaisesRegex(
+            GmailInquiryImportError,
+            "Reanalyze this Gmail inquiry",
+        ):
+            confirm_gmail_inquiry_import(
+                gmail_import,
+                self.staff,
+                company=self.company,
+            )
+
+        gmail_import.refresh_from_db()
+        self.assertIsNone(gmail_import.inquiry_id)
+        self.assertIsNone(gmail_import.quotation_id)
+        self.assertEqual(Quotation.objects.count(), quotation_count)
+
+    def test_v3_identity_suggestion_requires_reanalysis_under_forward_rules(self):
+        gmail_import = self.issue_and_claim(
+            anchor="stored-v3-forward-candidate",
+        )
+        gmail_import.status = GmailInquiryImport.STATUS_REVIEW_REQUIRED
+        gmail_import.analysis = {
+            "thread_analysis": {
+                "customer_identity": {
+                    "company_name": self.company.name,
+                    "contact_name": self.contact.name,
+                    "contact_email": self.contact.email,
+                    "source_keys": ["stored-body"],
+                    "confidence": 0.99,
+                    "reason": "Previously analyzed identity.",
+                }
+            }
+        }
+        gmail_import.candidates = {
+            "identity_match_version": "gmail_identity_v3",
+            "sender_emails": ["buyer@example.com"],
+            "companies": [
+                {
+                    "company_id": self.company.id,
+                    "company_name": self.company.name,
+                    "confidence": 1.0,
+                    "match_method": "exact_company_email",
+                }
+            ],
+            "contacts": [],
+            "recommended_company_id": self.company.id,
+            "recommended_contact_id": self.contact.id,
+            "exact_company_match": True,
+        }
+        gmail_import.save(
+            update_fields=["status", "analysis", "candidates"]
         )
 
-    def test_stored_wrong_domain_suggestion_is_cleared_on_refresh(self):
+        refreshed = refresh_gmail_inquiry_identity_candidates(gmail_import)
+
+        self.assertIsNone(refreshed.candidates["recommended_company_id"])
+        self.assertIsNone(refreshed.candidates["recommended_contact_id"])
+        self.assertFalse(refreshed.candidates["exact_company_match"])
+        self.assertTrue(
+            refreshed.candidates["identity_reanalysis_required"]
+        )
+        self.assertTrue(
+            any(
+                "Reanalyze this Gmail inquiry" in warning
+                for warning in refreshed.analysis["warnings"]
+            )
+        )
+        self.assertEqual(
+            refreshed.candidates["identity_match_version"],
+            "gmail_identity_v3",
+        )
+        with CaptureQueriesContext(django_connection) as captured:
+            same = refresh_gmail_inquiry_identity_candidates(refreshed)
+        self.assertEqual(len(captured), 0)
+        self.assertTrue(same.candidates["identity_reanalysis_required"])
+
+    def test_unversioned_wrong_domain_suggestion_is_quarantined(self):
         company = Company.objects.create(
             name="HILTON DUBAI JUMEIRAH | HILTON DUBAI THE WALK",
         )
@@ -1431,11 +1869,10 @@ class GmailInquiryImportTests(TestCase):
         self.assertIsNone(
             refreshed.candidates["recommended_company_id"]
         )
-        self.assertEqual(
-            refreshed.candidates["identity_conflict"][
-                "conflicting_company_id"
-            ],
-            company.id,
+        self.assertNotIn("identity_conflict", refreshed.candidates)
+        self.assertEqual(refreshed.candidates["companies"], [])
+        self.assertTrue(
+            refreshed.candidates["identity_reanalysis_required"]
         )
 
     def test_identity_refresh_is_query_free_before_ai_identity_exists(self):
@@ -2259,6 +2696,76 @@ class GmailInquiryImportTests(TestCase):
         )
         with self.assertRaisesRegex(AIParseError, "unknown source"):
             _validate_native_thread_result(invalid, [message], evidence)
+
+        identity_without_provenance = native_analysis_result(
+            [native_message_result("prompt-injection")],
+            [],
+            customer_identity={
+                "company_name": "Invented Customer LLC",
+                "contact_name": "Buyer",
+                "contact_email": "buyer@example.com",
+                "source_keys": [],
+                "confidence": 0.99,
+                "reason": "Claimed without evidence.",
+            },
+        )
+        with self.assertRaisesRegex(
+            AIParseError,
+            "identity without source evidence",
+        ):
+            _validate_native_thread_result(
+                identity_without_provenance,
+                [message],
+                evidence,
+            )
+
+    def test_native_context_preserves_forwarded_boundary_as_unverified(self):
+        forwarded = (
+            "---------- Forwarded message ---------\n"
+            "From: Original Buyer <original@customer.example>\n"
+            "Date: Fri, 31 Jul 2026 at 10:00\n"
+            "Subject: RFQ 4421\nTo: quotes@example.com\n\n"
+            "Sterile Gauze | 20 | BOX"
+        )
+        message = gmail_message(
+            "forwarded-context",
+            sender="Forwarder <forwarder@internal.example>",
+            body="Please prepare this quotation.",
+        )
+        message.update(
+            {
+                "is_outbound": False,
+                "contains_unverified_forwarded_content": True,
+                "_forwarded_body_text": forwarded,
+                "_forwarded_body_html": "",
+            }
+        )
+        evidence = [
+            {
+                "source_key": "forwarded-body-source",
+                "gmail_message_id": "forwarded-context",
+                "kind": "email_body",
+                "filename": "",
+                "mime_type": "text/plain",
+                "rows": [],
+            }
+        ]
+
+        context = json.loads(
+            _native_thread_context(
+                [message],
+                evidence,
+                GmailInquiryImport.MODE_AI_THREAD,
+            )
+        )["timeline"][0]
+
+        self.assertEqual(context["body_text"], "Please prepare this quotation.")
+        self.assertEqual(context["forwarded_content_trust"], "unverified")
+        self.assertEqual(context["forwarded_body_text"], forwarded)
+        self.assertEqual(
+            context["sender"],
+            "Forwarder <forwarder@internal.example>",
+        )
 
     def test_native_schema_uses_citations_as_the_row_source_list(self):
         schema = _native_thread_schema(
@@ -3431,6 +3938,7 @@ class GmailInquiryImportTests(TestCase):
         mock_fetch_message.assert_called_once_with(
             self.connection,
             gmail_import.anchor_message_id,
+            preserve_forwarded=True,
         )
         mock_thread_metadata.assert_called_once_with(
             self.connection,
@@ -3644,6 +4152,141 @@ class GmailInquiryImportTests(TestCase):
             {"canonical-old-anchor", "canonical-latest"},
         )
         self.assertTrue(timeline_meta["truncated"])
+
+    @override_settings(QUOTATION_MAILBOX_AI_VISION_ENABLED=True)
+    @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")
+    @patch("quotations.gmail_inquiry_import._run_native_thread_analysis")
+    def test_forwarded_attachment_keeps_outer_provenance_and_blank_prices(
+        self,
+        mock_native_analysis,
+        mock_native_fetch,
+    ):
+        self.enable_native_attachment_ai()
+        content = b"%PDF-1.4 forwarded-rfq"
+        attachment = {
+            "filename": "forwarded-rfq.pdf",
+            "mime_type": "application/pdf",
+            "size": len(content),
+            "attachment_id": "forwarded-rfq-attachment",
+            "part_id": "2",
+        }
+        mock_native_fetch.return_value = (
+            {
+                "filename": attachment["filename"],
+                "mime_type": attachment["mime_type"],
+                "content": content,
+                "source_sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+                "detail": "high",
+            },
+            "",
+        )
+        message = gmail_message(
+            "outer-forward-message",
+            sender="Forwarder <forwarder@internal.example>",
+            body="Please quote the forwarded request.",
+            attachments=[attachment],
+        )
+        message.update(
+            {
+                "snippet": (
+                    "Forwarded From Buyer buyer@customer.example: "
+                    "Sterile Gauze 20 BOX"
+                ),
+                "contains_unverified_forwarded_content": True,
+                "_forwarded_body_text": (
+                    "---------- Forwarded message ---------\n"
+                    "From: Buyer <buyer@customer.example>\n"
+                    "Date: Fri, 31 Jul 2026 at 10:00\n"
+                    "Subject: RFQ\nTo: quotes@example.com\n\n"
+                    "See attached request."
+                ),
+                "_forwarded_body_html": "",
+            }
+        )
+        gmail_import = self.issue_and_claim(anchor="outer-forward-message")
+
+        def native_result(
+            messages,
+            sources,
+            file_inputs,
+            _gmail_import,
+            _actor,
+            *,
+            analysis_timings=None,
+        ):
+            self.assertEqual(file_inputs[0]["content"], content)
+            attachment_source = next(
+                source for source in sources if source["kind"] == "attachment"
+            )
+            self.assertEqual(
+                attachment_source["gmail_message_id"],
+                "outer-forward-message",
+            )
+            return validated_native_analysis_result(
+                messages,
+                sources,
+                [native_message_result("outer-forward-message")],
+                [
+                    native_row(
+                        attachment_source["source_key"],
+                        "Sterile Gauze",
+                        "20",
+                        "BOX",
+                        raw_source_text="Sterile Gauze | 20 | BOX",
+                        page_number=1,
+                    )
+                ],
+                customer_identity={
+                    "company_name": "Original Customer Medical Services LLC",
+                    "contact_name": "Buyer",
+                    "contact_email": "buyer@customer.example",
+                    "source_keys": [attachment_source["source_key"]],
+                    "confidence": 0.90,
+                    "reason": "Read from forwarded attachment evidence.",
+                },
+            )
+
+        mock_native_analysis.side_effect = native_result
+        result = _build_source_analysis(
+            [message],
+            self.connection,
+            gmail_import,
+            self.staff,
+            timeline_messages=[message],
+        )
+
+        row = result["preview"]["lines"][0]
+        self.assertIsNone(row["unit_price"])
+        self.assertIsNone(row["line_total"])
+        self.assertEqual(
+            result["attachment_manifest"][0]["gmail_message_id"],
+            "outer-forward-message",
+        )
+        self.assertTrue(
+            result["message_manifest"][0][
+                "contains_unverified_forwarded_content"
+            ]
+        )
+        self.assertNotIn(
+            "Sterile Gauze",
+            json.dumps(result["message_manifest"]),
+        )
+        self.assertEqual(
+            result["message_manifest"][0]["snippet"],
+            "Please quote the forwarded request.",
+        )
+        self.assertNotIn(
+            "buyer@customer.example",
+            json.dumps(result["message_manifest"]),
+        )
+        self.assertTrue(
+            any(
+                "forwarded inquiry" in warning.lower()
+                for warning in result["warnings"]
+            )
+        )
+        self.assertFalse(result["candidates"]["exact_company_match"])
 
     @override_settings(QUOTATION_MAILBOX_AI_VISION_ENABLED=True)
     @patch("quotations.gmail_inquiry_import._fetch_native_ai_attachment")

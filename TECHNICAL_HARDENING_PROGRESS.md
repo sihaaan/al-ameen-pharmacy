@@ -1056,6 +1056,146 @@
   after rollback rather than trusting output produced under a different
   inspection contract.
 
+### 2.5 — Preserve forwarded RFQs and canonicalize matching identities
+
+- Status: completed in code; not deployed.
+- Commit: this task checkpoint (`fix: harden forwarded Gmail identity`).
+- Finding verified:
+  - Gmail fetch removed valid forwarded RFQ text/HTML, while permissive edge
+    cases could duplicate or retain nested Outlook reply history.
+  - Gmail inquiry and mailbox-PO identity used collapsed/set-like sender
+    parsing in places, so multi-address or duplicate physical `From` fields
+    could appear exact. Reply preparation and Sent reconciliation also lacked
+    the original physical-header multiplicity.
+  - Matching did not consistently canonicalize root-dot and Unicode/IDNA
+    domains. Public-provider coverage was incomplete, and unsaved company-name
+    or acronym/domain inference could satisfy an automatic LPO identity gate.
+  - AI identity could be populated without source keys, and only explicitly
+    versioned v3 reviews were quarantined after trust-boundary changes.
+- Files changed:
+  - `backend/requirements.txt`
+  - `backend/quotations/email_identity.py`
+  - `backend/quotations/contract_intelligence.py`
+  - `backend/quotations/gmail_inquiry_import.py`
+  - `backend/quotations/mailbox_po_audit.py`
+  - `backend/quotations/mailbox_po_matching.py`
+  - `backend/quotations/mailbox_po_reconciliation.py`
+  - `backend/quotations/quotation_email_delivery.py`
+  - `backend/quotations/test_email_identity.py`
+  - `backend/quotations/test_gmail_inquiry_import.py`
+  - `backend/quotations/test_mailbox_po_adversarial.py`
+  - `backend/quotations/test_mailbox_po_audit.py`
+  - `backend/quotations/test_mailbox_po_matching.py`
+  - `backend/quotations/test_mailbox_po_reconciliation.py`
+  - `backend/quotations/test_mailbox_po_vision.py`
+  - `backend/quotations/test_quotation_email_delivery.py`
+  - `frontend/src/components/quotations/GmailInquiryReview.js`
+  - `frontend/src/components/quotations/GmailInquiryReview.test.js`
+  - `GMAIL_QUOTATION_ARCHITECTURE_REVIEW.md`
+  - `SECURITY.md`
+  - `OPERATIONS.md`
+  - `DEPLOYMENT.md`
+  - `TECHNICAL_HARDENING_PROGRESS.md`
+- Implementation:
+  - Gmail inquiry fetch opts into a strict, bounded forwarded-content path.
+    Gmail/Outlook headers must be complete and unique; empty optional `Cc`/`Bcc`
+    is accepted. Attachment-only forwarding is accepted only with a supported
+    non-inline PDF/Excel attachment. Outlook `Re:` ancestry, malformed headers,
+    and later nested thread history fail closed or are trimmed. Header-only,
+    plain, and HTML forwards are removed from the newest-body view and supplied
+    only as explicitly unverified transient analyzer input. When an ordinary
+    quoted-reply end cannot be mapped safely back to HTML, the current forward
+    remains as bounded text and HTML is omitted so older tables cannot leak in.
+  - Stored manifests retain only forward hashes, lengths, truncation, and an
+    unverified flag. Gmail's raw snippet is also replaced with a preview derived
+    from the sanitized outer body. Raw forwarded bodies are not persisted. Attachments remain
+    owned by the physical outer Gmail message; embedded forwarding headers
+    never replace its envelope sender, establish exact identity/contact, or
+    affect reply routing. Selling prices remain blank.
+  - Added pinned `idna==3.11` matching-only canonicalization using UTS #46 and
+    non-transitional IDNA 2008. One root dot and Unicode domains normalize to
+    lowercase ASCII; malformed, IP, single-label, empty-label, and overlong
+    values fail closed. Local dots and `+tags` are preserved. Public-provider
+    domains, including regional and legacy variants, never become company-
+    domain evidence; exact saved public-mail addresses remain usable.
+  - Added one shared singleton physical-`From` validator. Exactly one field
+    containing exactly one canonical address is required. Gmail intake,
+    mailbox-PO ranking, Gmail reply preparation, and Sent reconciliation all
+    preserve/check physical multiplicity. Ambiguous/malformed senders provide
+    no identity and can never trigger an automatic LPO link.
+  - Mailbox-PO reconciliation now passes stored full headers and uses
+    `mailbox_match_v6`, invalidating unsafe v5 reuse. Company-name/acronym
+    domain inference and same-domain/different-sender evidence remain visible
+    for review but cannot satisfy automatic identity. Automatic linking now
+    requires an exact saved sender, exact quotation reference, or selected
+    attachment identity.
+  - Gmail reply metadata now preserves every `From` and `Reply-To` field. A
+    singleton physical `From` is mandatory before a singleton `Reply-To` may be
+    used only for routing. Existing recipient, subject, thread, RFC Message-ID,
+    single-send, ambiguous lockout, and no-send reconciliation gates remain.
+    Newly verified replies carry a sender-validation contract; a frozen failed
+    reply from before that contract cannot be retried without a new reviewed
+    quotation revision.
+  - The Gmail matcher is `gmail_identity_v4`. Every unconfirmed non-v4 or
+    unversioned stored identity result is quarantined: candidates,
+    recommendations, and exact status are cleared and a reanalysis warning is
+    shown. Confirmed history is unchanged. Populated AI identity must cite at
+    least one valid current source, and forwarded-derived identity is visibly
+    labeled unverified in the review UI; purchaser auto-selection remains off.
+- Tests run:
+  - Full mailbox-PO/email-identity regression:
+    `DATABASE_URL=sqlite:///task25-mailbox-all-final5.sqlite3 python manage.py test quotations.test_email_identity quotations.test_mailbox_po_vision quotations.test_mailbox_po_resumable quotations.test_mailbox_po_reconciliation quotations.test_mailbox_po_portal_layouts quotations.test_mailbox_po_matching quotations.test_mailbox_po_identity_payload quotations.test_mailbox_po_candidate_precision quotations.test_mailbox_po_audit quotations.test_mailbox_po_adversarial --noinput --verbosity 1`
+    — 299/299 passed.
+  - Gmail import and documentation contracts:
+    `DATABASE_URL=sqlite:///task25-gmail-final4.sqlite3 python manage.py test quotations.test_gmail_inquiry_import quotations.test_documentation_contract --noinput --verbosity 1`
+    — 109/109 passed.
+  - Quotation email delivery:
+    `DATABASE_URL=sqlite:///task25-delivery-final5.sqlite3 python manage.py test quotations.test_quotation_email_delivery --noinput --verbosity 1`
+    — 71/71 passed.
+  - Gmail review frontend:
+    `CI=true npm test -- --watchAll=false --runInBand --runTestsByPath src/components/quotations/GmailInquiryReview.test.js`
+    — 27/27 passed; logged request errors are asserted failure-state tests.
+  - Complete quotation regression:
+    `DATABASE_URL=sqlite:///task25-all-quotations-final3.sqlite3 python manage.py test quotations --noinput --verbosity 1`
+    — 1,118/1,118 passed; 16 intentionally skipped.
+  - `npm run build` — compiled successfully (229.85 kB main JS and 41.36 kB
+    main CSS gzip output).
+  - `DATABASE_URL=sqlite:///task25-static-check.sqlite3 python manage.py check`
+    — no issues.
+  - `DATABASE_URL=sqlite:///task25-static-check.sqlite3 python manage.py makemigrations --check --dry-run`
+    — no changes detected.
+  - `python -m pip check`, `python -m compileall -q api quotations pharmacy_api`,
+    and `git diff --check` — passed.
+  - Two independent final reviews found no remaining Critical, High, or Medium
+    correctness/security issues. Their focused security set passed 9/9.
+- Migration: none. No stored address or confirmed import is rewritten.
+- API/frontend changes: no endpoint or request shape changed. Gmail reply
+  metadata is internal. Existing Gmail import/manifest/candidate responses gain
+  additive forward/trust/reanalysis flags and warnings. The review screen adds
+  an unverified-forward identity label and a prominent reanalysis action for
+  stale identity results. Automatic LPO status is now conservatively withheld
+  when identity depends only on inferred or same-domain evidence.
+- Accuracy/security impact: closes ambiguous sender identity across intake,
+  LPO matching, reply preparation, and reconciliation; prevents unproven domain
+  inference from creating an automatic link; and retains valid forwarded RFQ
+  content without trusting embedded headers. Gmail/manual routes, employee
+  review, row evidence, uncertainty, blank selling prices, suggestion-only
+  matching, preview-before-send, verified reply headers, one successful email
+  per revision, ambiguous-send lockout, and reconciliation-never-sends remain.
+  No AI prompt, output schema, model, OAuth scope, migration, or production
+  configuration changed.
+- Remaining risks: unsupported forwarding formats remain trimmed and require
+  manual intake. IDNA normalization does not prove ownership, affiliation,
+  DMARC, or resistance to visual homographs. The public-provider list is
+  maintained rather than obtained from a live service, so domain inference is
+  intentionally review-only. AI can still misread forwarded content; every
+  suggestion and row requires employee review against source evidence.
+- Rollback: revert this checkpoint before deployment; no database rollback is
+  needed. After deployment, rollback restores the older parser/matcher and
+  weakens these boundaries, so prefer a forward fix. Reanalyze unconfirmed
+  identity after any rollback rather than trusting results made under a
+  different matcher version.
+
 ## Phase 3
 
 Intentionally not implemented.

@@ -33,6 +33,11 @@ from .contract_intelligence import (
     get_valid_access_token,
     resolve_gmail_connection,
 )
+from .email_identity import (
+    canonical_singleton_header_address,
+    canonical_singleton_from_address,
+    canonicalize_email_address,
+)
 from .models import (
     Company,
     CompanyContact,
@@ -66,6 +71,7 @@ EMAIL_PREVIEW_FINGERPRINT_CONTRACT = "quotation_email_preview_v1"
 EMAIL_PREVIEW_FINGERPRINT_SALT = "quotations.email-preview-fingerprint.v1"
 QUOTATION_REVIEW_FINGERPRINT_CONTRACT = "quotation_editor_review_v1"
 QUOTATION_REVIEW_FINGERPRINT_SALT = "quotations.editor-review-fingerprint.v1"
+GMAIL_REPLY_SENDER_VALIDATION_CONTRACT = "gmail_reply_sender_identity_v1"
 MAX_OUTBOUND_MIME_BYTES = 35 * 1024 * 1024
 
 
@@ -130,6 +136,9 @@ def _preview_source_identity(delivery):
         "scope_email": str(trusted_source.get("scope_email") or "")
         .strip()
         .lower(),
+        "sender_validation_contract": str(
+            trusted_source.get("sender_validation_contract") or ""
+        ),
     }
 
 
@@ -621,10 +630,48 @@ def _sender_addresses(value):
     return result
 
 
-def _reply_recipient(metadata):
-    reply_to = str(metadata.get("reply_to") or "").strip()
+def _physical_from_address(metadata):
+    header_values = (
+        metadata.get("from_header_values")
+        if "from_header_values" in metadata
+        else None
+    )
+    address = canonical_singleton_from_address(
+        metadata.get("sender"),
+        from_header_values=header_values,
+    )
+    if not address:
+        raise QuotationEmailError(
+            "The source email has an ambiguous From address. Choose another source message.",
+            code="ambiguous_source_recipient",
+        )
+    return address
+
+
+def _reply_recipient(metadata, *, physical_sender=""):
+    reply_to_values = (
+        metadata.get("reply_to_header_values")
+        if "reply_to_header_values" in metadata
+        else None
+    )
+    if reply_to_values is not None:
+        reply_to_values = list(reply_to_values or [])
+        reply_to = str(reply_to_values[0] if reply_to_values else "").strip()
+    else:
+        reply_to = str(metadata.get("reply_to") or "").strip()
     if reply_to:
-        return _one_header_address(reply_to, label="Reply-To")
+        reply_to_address = canonical_singleton_header_address(
+            reply_to,
+            header_values=reply_to_values,
+        )
+        if not reply_to_address:
+            raise QuotationEmailError(
+                "The source email has an ambiguous Reply-To address. Choose another source message.",
+                code="ambiguous_source_recipient",
+            )
+        return reply_to_address
+    if physical_sender:
+        return physical_sender
     return _one_header_address(metadata.get("sender"), label="From")
 
 
@@ -741,19 +788,26 @@ def _validated_reply_source(
             "The Gmail source has no valid RFC Message-ID, so a safe threaded reply cannot be prepared. Choose another source message.",
             code="source_message_id_missing",
         )
-    if scope_email and scope_email.lower() not in set(_sender_addresses(metadata.get("sender"))):
+    physical_sender = _physical_from_address(metadata)
+    canonical_scope_email = canonicalize_email_address(scope_email)
+    if scope_email and canonical_scope_email != physical_sender:
         raise QuotationEmailError(
             "The selected Gmail message is not from the confirmed email address.",
             code="gmail_source_sender_mismatch",
         )
-    recipient = _reply_recipient(metadata)
-    mailbox_email = str(getattr(connection, "email", "") or "").strip().lower()
-    if recipient == mailbox_email:
+    recipient = _reply_recipient(
+        metadata,
+        physical_sender=physical_sender,
+    )
+    mailbox_email = canonicalize_email_address(
+        getattr(connection, "email", "")
+    )
+    if canonicalize_email_address(recipient) == mailbox_email:
         raise QuotationEmailError(
             "The reply recipient resolves to the shared mailbox itself.",
             code="gmail_self_recipient",
         )
-    sender_name, sender_email = parseaddr(str(metadata.get("sender") or ""))
+    sender_name, _sender_email = parseaddr(str(metadata.get("sender") or ""))
     received_at = metadata.get("sent_at")
     if hasattr(received_at, "isoformat"):
         received_at = received_at.isoformat()
@@ -762,12 +816,13 @@ def _validated_reply_source(
         "recipient": recipient,
         "subject": subject,
         "trusted_source": {
+            "sender_validation_contract": GMAIL_REPLY_SENDER_VALIDATION_CONTRACT,
             "sender_name": sender_name,
-            "sender_email": sender_email.lower(),
+            "sender_email": physical_sender,
             "reply_to_email": recipient,
             "subject": subject,
             "received_at": received_at,
-            "scope_email": scope_email.lower(),
+            "scope_email": canonical_scope_email,
         },
     }
 
@@ -1078,6 +1133,24 @@ def _apply_outbound_snapshot(delivery, snapshot):
     return delivery
 
 
+def _require_current_gmail_reply_sender_contract(delivery):
+    if delivery.delivery_mode != QuotationEmailDelivery.MODE_GMAIL_REPLY:
+        return
+    contract = str(
+        (delivery.trusted_source or {}).get("sender_validation_contract") or ""
+    )
+    if contract != GMAIL_REPLY_SENDER_VALIDATION_CONTRACT:
+        raise QuotationEmailError(
+            "This saved Gmail reply predates the current sender verification rules and cannot be retried safely. Create and review a quotation revision before sending.",
+            code="gmail_reply_source_reverification_required",
+            http_status=409,
+            retryable=False,
+            quote_finalized=delivery.quotation.status
+            in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT},
+            delivery=delivery,
+        )
+
+
 def prepare_email_preview(
     quotation,
     actor,
@@ -1109,6 +1182,7 @@ def prepare_email_preview(
         # refetch a newer source message or rewrite any customer-facing field.
         existing.actor = actor
         _apply_outbound_snapshot(existing, existing_snapshot)
+        _require_current_gmail_reply_sender_contract(existing)
         if expected_preview_fingerprint:
             _require_current_email_preview(
                 quotation,
@@ -1354,6 +1428,7 @@ def _validate_editable_fields(delivery, data):
     if data.get("confirm_recipient") is not True:
         raise QuotationEmailError("Confirm the recipient before sending the quotation.")
     if delivery.delivery_mode == QuotationEmailDelivery.MODE_GMAIL_REPLY:
+        _require_current_gmail_reply_sender_contract(delivery)
         trusted_to = _reply_recipient(
             {
                 "reply_to": (delivery.trusted_source or {}).get("reply_to_email") or "",
@@ -2007,10 +2082,7 @@ def _reconcile_delivery_with_gmail(delivery, actor, *, attempt_id=None):
         if "SENT" not in label_ids:
             continue
         try:
-            sender_email = _one_header_address(
-                metadata.get("sender"),
-                label="From",
-            )
+            sender_email = _physical_from_address(metadata)
         except QuotationEmailError as exc:
             metadata_errors.append(exc)
             continue

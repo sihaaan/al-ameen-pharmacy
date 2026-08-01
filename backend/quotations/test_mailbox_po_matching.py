@@ -95,6 +95,224 @@ def message(
 
 
 class MailboxQuotationRankingTests(TestCase):
+    def test_ambiguous_physical_from_cannot_supply_identity_or_automatic_match(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+        )
+        base_po = replace(
+            message(
+                [pline(1, "Nitrile Gloves", 10, 5)],
+                refs=(quotation.quotation_number,),
+                total=50,
+            ),
+            company_name="",
+        )
+        ambiguous_cases = (
+            # No original header list: the raw sender itself has two addresses.
+            ("buyer@acme.example, attacker@evil.example", None),
+            # Duplicate identical addresses in one physical field.
+            (
+                "buyer@acme.example",
+                ("buyer@acme.example, buyer@acme.example",),
+            ),
+            # Duplicate physical fields, even when their values are identical.
+            (
+                "buyer@acme.example",
+                ("buyer@acme.example", "buyer@acme.example"),
+            ),
+            # A malformed token beside the saved buyer address.
+            (
+                "buyer@acme.example",
+                ("not-an-address, Buyer <buyer@acme.example>",),
+            ),
+        )
+
+        for sender, from_header_values in ambiguous_cases:
+            with self.subTest(sender=sender, from_header_values=from_header_values):
+                result = rank_message_to_quotations(
+                    replace(
+                        base_po,
+                        sender=sender,
+                        from_header_values=from_header_values,
+                    ),
+                    [quotation],
+                )
+
+                self.assertEqual(result.status, AMBIGUOUS, result.reason)
+                self.assertIsNone(result.automatic_winner)
+                self.assertFalse(result.candidates[0].exact_sender)
+                identity = next(
+                    component
+                    for component in result.candidates[0].components
+                    if component.signal == "customer_identity"
+                )
+                self.assertEqual(identity.score, 0)
+                self.assertEqual(identity.detail, "no customer identity signal")
+                self.assertIn(
+                    "physical From header is missing, malformed, or ambiguous",
+                    result.automatic_blockers,
+                )
+
+    def test_one_preserved_physical_from_retains_existing_exact_sender_behavior(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+        )
+        po = replace(
+            message([pline(1, "Nitrile Gloves", 10, 5)], total=50),
+            sender="collapsed-first-value@example.invalid",
+            from_header_values=("Acme Buyer <buyer@acme.example>",),
+        )
+
+        result = rank_message_to_quotations(po, [quotation])
+
+        self.assertEqual(result.status, AUTOMATIC, result.reason)
+        self.assertTrue(result.automatic_winner.exact_sender)
+
+    def test_mapping_preserves_duplicate_from_header_fields(self):
+        canonical = canonicalize_message(
+            {
+                "sender": "buyer@acme.example",
+                "full_headers": [
+                    {"name": "From", "value": "buyer@acme.example"},
+                    {"name": "from", "value": "buyer@acme.example"},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            canonical.from_header_values,
+            ("buyer@acme.example", "buyer@acme.example"),
+        )
+
+    def test_exact_sender_uses_canonical_root_dot_and_idn_domain(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            emails=("Buyer@b\u00fccher.example",),
+        )
+        po = message([pline(1, "Nitrile Gloves", 10, 5)], total=50)
+        po = replace(po, sender="Buyer <BUYER@xn--bcher-kva.example.>")
+
+        result = rank_message_to_quotations(po, [quotation])
+
+        identity = next(
+            component
+            for component in result.automatic_winner.components
+            if component.signal == "customer_identity"
+        )
+        self.assertIn("exact customer sender", identity.detail)
+
+    def test_plus_tag_is_not_collapsed_into_an_exact_sender(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            emails=("buyer@acme.com",),
+        )
+        po = message([pline(1, "Nitrile Gloves", 10, 5)], total=50)
+        po = replace(po, sender="Buyer <buyer+rfq@acme.com>")
+
+        result = rank_message_to_quotations(po, [quotation])
+
+        self.assertEqual(result.status, AMBIGUOUS)
+        self.assertIsNone(result.automatic_winner)
+        identity = next(
+            component
+            for component in result.candidates[0].components
+            if component.signal == "customer_identity"
+        )
+        self.assertNotIn("exact customer sender", identity.detail)
+        self.assertIn("customer domain acme.com", identity.detail)
+        self.assertIn(
+            "no exact quotation, exact saved sender, or selected-attachment customer identity",
+            result.automatic_blockers,
+        )
+
+    def test_same_domain_different_sender_is_always_review_only(self):
+        provider_domains = (
+            "mailfence.com",
+            "web.de",
+            "qq.com",
+            "126.com",
+            "163.com",
+            "naver.com",
+            "mailbox.org",
+            "gmx.at",
+            "orange.fr",
+            "seznam.cz",
+        )
+        for index, domain in enumerate(provider_domains, start=1):
+            with self.subTest(domain=domain):
+                quotation = quote(
+                    index,
+                    f"QT-20260701-{index:04d}",
+                    [qline(index, "Nitrile Gloves", 10, 5)],
+                    emails=(f"buyer@{domain}",),
+                )
+                po = replace(
+                    message(
+                        [pline(1, "Nitrile Gloves", 10, 5)],
+                        total=50,
+                    ),
+                    sender=f"Unrelated Sender <attacker@{domain}>",
+                    company_name="",
+                )
+
+                result = rank_message_to_quotations(po, [quotation])
+
+                self.assertEqual(result.status, AMBIGUOUS, result.reason)
+                self.assertIsNone(result.automatic_winner)
+                identity = next(
+                    component
+                    for component in result.candidates[0].components
+                    if component.signal == "customer_identity"
+                )
+                self.assertIn(f"customer domain {domain}", identity.detail)
+                self.assertIn(
+                    "no exact quotation, exact saved sender, or selected-attachment customer identity",
+                    result.automatic_blockers,
+                )
+
+    def test_exact_public_mail_address_remains_valid_identity_evidence(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            emails=("buyer@yahoo.fr",),
+        )
+        po = message([pline(1, "Nitrile Gloves", 10, 5)], total=50)
+        po = replace(po, sender="Buyer <BUYER@YAHOO.FR.>")
+
+        result = rank_message_to_quotations(po, [quotation])
+
+        identity = next(
+            component
+            for component in result.automatic_winner.components
+            if component.signal == "customer_identity"
+        )
+        self.assertIn("exact customer sender", identity.detail)
+
+    def test_regional_public_provider_cannot_be_company_domain_evidence(self):
+        quotation = quote(
+            1,
+            "QT-20260701-0001",
+            [qline(11, "Nitrile Gloves", 10, 5)],
+            company="Yahoo France",
+            emails=(),
+        )
+        po = message([pline(1, "Nitrile Gloves", 10, 5)], total=50)
+        po = replace(po, sender="buyer@yahoo.fr.", company_name="")
+
+        result = rank_message_to_quotations(po, [quotation])
+
+        self.assertEqual(result.status, UNMATCHED)
+        self.assertEqual(result.candidates, ())
+
     def test_exact_quote_reference_is_strongest_and_rejects_other_quotes(self):
         first = quote(1, "QT-20260701-0001", [qline(11, "Nitrile Gloves", 10, 5)])
         second = quote(2, "QT-20260701-0002", [qline(21, "Nitrile Gloves", 10, 5)])
@@ -1201,7 +1419,7 @@ class MailboxQuotationRankingTests(TestCase):
             any("customer identity" in reason for reason, _count in result.rejection_summary)
         )
 
-    def test_company_acronym_can_identify_a_customer_when_contact_email_is_missing(self):
+    def test_company_acronym_is_review_only_when_contact_email_is_missing(self):
         sabc_quote = quote(
             1,
             "QT-20260701-0001",
@@ -1223,15 +1441,21 @@ class MailboxQuotationRankingTests(TestCase):
 
         result = rank_message_to_quotations(sabc_po, [sabc_quote])
 
-        self.assertEqual(result.status, AUTOMATIC)
+        self.assertEqual(result.status, AMBIGUOUS)
         identity = next(
             component
-            for component in result.automatic_winner.components
+            for component in result.candidates[0].components
             if component.signal == "customer_identity"
         )
         self.assertIn("acronym", identity.detail)
+        self.assertTrue(
+            any(
+                "exact saved sender" in blocker
+                for blocker in result.automatic_blockers
+            )
+        )
 
-    def test_compact_company_name_can_identify_real_customer_sender_domains(self):
+    def test_compact_company_name_domain_inference_is_review_only(self):
         cases = (
             ("Dubai Scholars Private School", "clinic@dubaischolars.com"),
             ("Mohammed Abdulmohsin Al Kharafi", "buyer@ae.malkharafi.com"),
@@ -1263,7 +1487,7 @@ class MailboxQuotationRankingTests(TestCase):
 
                 result = rank_message_to_quotations(po, [quotation])
 
-                self.assertEqual(result.status, AUTOMATIC)
+                self.assertEqual(result.status, AMBIGUOUS)
 
         ecc_quote = quote(
             99,

@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.3.0 |
+| Document version | 1.4.0 |
 | Status | Initial current-state runbook; unresolved items are marked explicitly |
 | Owner | Assign a primary and backup production operator |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This runbook preserves employee review, blank selling prices, suggestion-only
@@ -60,6 +60,12 @@ not in the repository.
 - Spot-check that new parsed quotation rows have evidence and blank selling prices.
 - Review attachment hard failures and fidelity warnings; compare warning-only
   rows with the visible customer source rather than clearing warnings blindly.
+- Reanalyze any pre-v4 Gmail identity review that displays the matcher-upgrade
+  warning; unversioned results are included, and their cleared historical
+  company/contact suggestion must not be trusted.
+- For forwarded RFQs, verify the original Gmail message and confirm that the
+  suggested customer belongs to the forwarded request, not the employee or
+  intermediary who forwarded it.
 
 ### Weekly
 
@@ -73,6 +79,17 @@ not in the repository.
 - Check database capacity/connections, Railway memory/CPU/restarts, Gmail API
   errors, and OpenAI spend/budget alerts in their provider consoles.
 - Check private-source missing-file reports until durable storage exists.
+- Review recurring ambiguous/duplicate `From`, cross-domain `Reply-To`, invalid
+  IDN/domain, and truncated-forward warnings. These are review signals, not
+  permission to infer a customer from the embedded forwarded headers.
+- Treat company-name/acronym-to-domain and same-domain/different-sender matches
+  as review suggestions. Automatic identity requires an exact saved sender,
+  exact quotation reference, or customer identity in the selected PO
+  attachment. Never override an automatic-match
+  blocker manually without checking the source document.
+- Do not retry a frozen failed Gmail reply that reports
+  `gmail_reply_source_reverification_required`; it predates the current sender
+  validation contract. Create and review a quotation revision instead.
 - Review staff/superuser access and the shared credential owner's status.
 
 ### Before every release

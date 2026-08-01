@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.5.0 |
+| Document version | 1.6.0 |
 | Status | Current-state reference; branch-only hardening is identified explicitly |
 | Owner | Al Ameen quotation-system maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint on `codex/technical-hardening` |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint on `codex/technical-hardening` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 | Scope | Gmail/manual inquiry intake, review, quotation creation, and reviewed Gmail delivery |
 
@@ -175,8 +175,9 @@ Key defaults and enforced ceilings are intentionally separate:
 
 The Gmail request includes message boundaries, chronology, sender direction,
 headers, each selected message's newest non-quoted body within configured
-bounds, supported original document bytes, and server-created opaque source
-keys. The application sends those bodies/files to the provider with
+bounds, strictly recognized forwarded content marked as unverified, supported
+original document bytes, and server-created opaque source keys. The
+application sends those bodies/files to the provider with
 `store=false` and does not persist complete Gmail bodies or original document
 bytes locally; provider/project retention and residency remain external,
 operator-verified settings. The application retains identifiers, headers or
@@ -238,6 +239,59 @@ inline-image content; Gmail provider submission can still use a byte-identical
 warning-only PDF after every hard check passes. No OAuth scope, provider, AI
 model, prompt, schema, or production configuration changed.
 
+#### Task 2.5 forwarded-content and identity boundary
+
+**Implemented in reviewed branch.** Gmail inquiry fetches opt into preserving a
+forward only when a standard Gmail/Outlook marker or an Outlook `FW`/`Fwd`
+header block contains one `From`, `To`, `Subject`, and `Date` or `Sent` field,
+followed by content or a supported non-inline PDF/Excel attachment. Empty
+optional `Cc`/`Bcc` fields are allowed; duplicate or malformed fields fail
+closed. Outlook `Re:`/`Original Message` ancestry remains ordinary quoted
+history, and later nested reply/forward history is trimmed after the first
+validated forward. Header-only and HTML-only forwards are separated from the
+newest message body. HTML tables remain available when their end boundary can
+be mapped safely; a later ordinary quoted-reply boundary is retained as bounded
+flattened text only so older quoted tables cannot enter analysis.
+
+The outer/newest body and physical Gmail envelope remain separate from the
+private forwarded body. Only bounded length/hash/flag metadata is persisted;
+Gmail's raw snippet is replaced with one derived from the sanitized outer body;
+the complete forwarded body is transient provider input. Embedded `From` and
+`Reply-To` text is explicitly unverified and never copied into the physical
+sender, exact-email/domain matching, contact auto-selection, or delivery
+routing. A recognized forward also suppresses deterministic matching from the
+outer transport sender/signature. AI may still suggest a uniquely matching
+company name from forwarded evidence, but it remains review-only and cannot
+set `exact_company_match`.
+
+Matching-only email normalization now uses pinned IDNA 2008 with UTS #46
+non-transitional processing, lowercase ASCII domains, and one optional DNS
+root dot. Invalid, IP-literal, single-label, overlong, and malformed values
+fail closed. Unicode and punycode domains compare consistently without
+confusable folding; local-part dots and `+tags` are preserved. Regional public
+mail domains cannot establish private-company domain evidence, while an exact
+full saved public-mail address can still match. Arbitrary company/domain-name,
+acronym, and same-domain/different-sender inference is review-only for automatic
+LPO matching. Automatic identity requires an exact saved sender, exact
+quotation reference, or selected attachment corroboration. Multiple or
+duplicate physical `From` fields/addresses cannot
+produce an exact match or automatic LPO link. Gmail reply preparation and Sent
+reconciliation also require exactly one physical `From`; only after that check
+may a singleton `Reply-To` determine routing.
+
+Newly verified Gmail replies store `gmail_reply_sender_identity_v1` in their
+trusted source. A frozen failed reply without that validation contract is
+blocked before re-fetch or provider send and requires a new reviewed quotation
+revision; current-contract retries still reuse the exact frozen MIME.
+
+The matcher version is `gmail_identity_v4`. Every unconfirmed review without
+that exact version has stored company/contact candidates, recommendations, and
+the exact-match flag quarantined and displays a reanalysis warning; evidence is
+retained. Populated AI identity must cite at least one valid source key, so
+unknown provenance cannot bypass forwarded-origin safeguards. Confirmed
+historical imports are never mutated. No AI prompt, output schema, model, OAuth
+scope, or selling-price behavior changed.
+
 ### 5.2 Versioned contract
 
 **Implemented in reviewed branch.** Current code constants are:
@@ -246,7 +300,7 @@ model, prompt, schema, or production configuration changed.
 |---|---|
 | Gmail pipeline | `gmail_inquiry_v2` |
 | Gmail schema | `gmail_inquiry_native_v2` |
-| Gmail identity matcher | `gmail_identity_v3` |
+| Gmail identity matcher | `gmail_identity_v4` |
 | Manual AI cleanup | `manual_ai_cleanup_v1` |
 | Mailbox PO vision | `mailbox_po_vision_v1` |
 | AI parse observability | `ai_parse_observability_v1` |
@@ -274,8 +328,9 @@ selling prices are blanked.
 
 AI may transcribe company/contact evidence, but deterministic ranking decides
 whether it maps uniquely to stored records. Exact contact email, company email,
-private domain, signature wording, branch specificity, and saved records are
-considered conservatively. Ambiguous sibling branches remain unselected.
+canonical private domain, signature wording, branch specificity, and saved
+records are considered conservatively. Ambiguous sibling branches, ambiguous
+physical senders, and forwarded transport identities remain unselected.
 
 Products are suggestions from exact aliases, normalized names, company history,
 and previous relationships. The employee confirms matches. The requested
@@ -349,10 +404,11 @@ authorization. No send occurs until the explicit action. A draft can be
 finalized without sending.
 
 For Gmail-origin quotations, the server re-fetches the relevant inbound
-message, derives exactly one customer recipient from `Reply-To` or `From`,
-rejects ambiguous/self recipients, preserves the source subject, and supplies
-the Gmail thread ID plus RFC `In-Reply-To` and `References`. Verified To and
-subject are server-enforced.
+message, requires exactly one physical `From` header containing one valid
+address, then derives exactly one customer recipient from a singleton
+`Reply-To` or that verified `From`. It rejects ambiguous/self recipients,
+preserves the source subject, and supplies the Gmail thread ID plus RFC
+`In-Reply-To` and `References`. Verified To and subject are server-enforced.
 
 Manual quotations default to a new email with explicit recipient confirmation.
 An employee may instead search an exact expected sender and select one exact

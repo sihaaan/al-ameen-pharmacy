@@ -7,6 +7,7 @@ searching a capped candidate window per quotation.
 """
 
 import hashlib
+import html
 import os
 import re
 import secrets
@@ -338,7 +339,318 @@ def _trim_quoted_html(value):
     return value[:500_000]
 
 
-def fetch_mailbox_message(connection, message_id):
+FORWARDED_MESSAGE_MARKER_RE = re.compile(
+    r"^\s*(?:-{3,}\s*forwarded message\s*-{3,}|"
+    r"-{3,}\s*original message\s*-{3,})\s*$",
+    re.IGNORECASE,
+)
+FORWARDED_HEADER_RE = re.compile(
+    r"^\s*(from|date|sent|to|cc|bcc|reply-to|subject)\s*:\s*(.*?)\s*$",
+    re.IGNORECASE,
+)
+ORDINARY_QUOTED_REPLY_RE = re.compile(
+    r"^\s*on .+ wrote:\s*$",
+    re.IGNORECASE,
+)
+OUTLOOK_FORWARD_SUBJECT_RE = re.compile(
+    r"^\s*(?:fw|fwd)\s*:",
+    re.IGNORECASE,
+)
+REPLY_SUBJECT_RE = re.compile(
+    r"^\s*re\s*:",
+    re.IGNORECASE,
+)
+MAX_FORWARDED_HEADER_LINES = 24
+MAX_PRESERVED_FORWARDED_TEXT_CHARS = 500_000
+MAX_PRESERVED_FORWARDED_HTML_CHARS = 500_000
+
+
+def _has_supported_non_inline_forward_attachment(mime_payload):
+    """Return whether Gmail exposes a supported, non-inline document part.
+
+    This is intentionally metadata-only.  It permits a validated forwarded
+    header block with no body text when the request itself is an attached PDF
+    or spreadsheet, without fetching attachment bytes or mistaking signature
+    images for inquiry evidence.
+    """
+
+    for part in _walk_parts(mime_payload or {}):
+        filename = str(part.get("filename") or "").strip()
+        extension = os.path.splitext(filename)[1].lower()
+        if not filename or extension not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+            continue
+        body = part.get("body") or {}
+        if not (body.get("attachmentId") or body.get("data")):
+            continue
+        disposition = str(
+            _header(part.get("headers") or [], "Content-Disposition") or ""
+        ).strip().casefold()
+        content_id = str(
+            _header(part.get("headers") or [], "Content-ID") or ""
+        ).strip()
+        if disposition.startswith("inline"):
+            continue
+        if content_id and not disposition.startswith("attachment"):
+            continue
+        return True
+    return False
+
+
+def _strict_forwarded_text_details(
+    value,
+    *,
+    allow_outlook_header_block=False,
+    allow_attachment_only=False,
+    outer_subject="",
+):
+    """Return a bounded forwarded block and its source-line boundaries.
+
+    Forwarded headers are untrusted message content.  This helper deliberately
+    preserves them only as private extraction context; callers must never use
+    them as the Gmail envelope sender or verified customer identity.
+    """
+
+    empty = {
+        "text": "",
+        "truncated": False,
+        "start_line": None,
+        "end_line": None,
+        "end_reason": "",
+        "has_marker": False,
+    }
+
+    value = str(value or "")
+    lines = value.splitlines()
+    marker_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if FORWARDED_MESSAGE_MARKER_RE.match(line)
+        ),
+        None,
+    )
+    has_marker = marker_index is not None
+    if marker_index is None:
+        if not allow_outlook_header_block:
+            return empty
+        marker_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if FORWARDED_HEADER_RE.match(line)
+                and FORWARDED_HEADER_RE.match(line).group(1).casefold()
+                == "from"
+            ),
+            None,
+        )
+        if marker_index is None:
+            return empty
+        header_start = marker_index
+    else:
+        marker_text = str(lines[marker_index] or "").casefold()
+        if (
+            "original message" in marker_text
+            and REPLY_SUBJECT_RE.match(str(outer_subject or ""))
+            and not OUTLOOK_FORWARD_SUBJECT_RE.match(str(outer_subject or ""))
+        ):
+            # Outlook uses this delimiter for quoted reply ancestry as well as
+            # genuine forwards.  A Re: message is therefore not sufficient
+            # evidence that the physical message author forwarded this block.
+            return empty
+        header_start = marker_index + 1
+    # A forwarded block nested inside an ordinary quoted reply is thread
+    # history, not a forward made by the current physical Gmail message.
+    if any(
+        ORDINARY_QUOTED_REPLY_RE.match(line)
+        for line in lines[:marker_index]
+    ):
+        return empty
+
+    headers = {}
+    header_started = False
+    body_start = None
+    header_limit = min(
+        len(lines),
+        header_start + MAX_FORWARDED_HEADER_LINES,
+    )
+    for index in range(header_start, header_limit):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped:
+            if header_started and {
+                "from",
+                "to",
+                "subject",
+            }.issubset(headers) and ({"date", "sent"} & headers.keys()):
+                body_start = index + 1
+                break
+            continue
+        match = FORWARDED_HEADER_RE.match(line)
+        if match:
+            header_started = True
+            name = match.group(1).casefold()
+            value_text = match.group(2).strip()
+            if name in headers:
+                return empty
+            if not value_text:
+                if name in {"cc", "bcc"}:
+                    headers[name] = ""
+                    continue
+                return empty
+            headers[name] = value_text
+            continue
+        if header_started and line[:1].isspace():
+            # Permit a folded RFC-style header value, but do not treat it as a
+            # new identity field.
+            continue
+        required_headers_present = bool(
+            {"from", "to", "subject"}.issubset(headers)
+            and ({"date", "sent"} & headers.keys())
+        )
+        if required_headers_present:
+            body_start = index
+            break
+        return empty
+
+    if body_start is None:
+        required_headers_present = bool(
+            {"from", "to", "subject"}.issubset(headers)
+            and ({"date", "sent"} & headers.keys())
+        )
+        if required_headers_present:
+            body_start = header_limit
+    if body_start is None:
+        return empty
+
+    end_line = len(lines)
+    end_reason = ""
+    for index in range(body_start, len(lines)):
+        if FORWARDED_MESSAGE_MARKER_RE.match(lines[index]):
+            end_line = index
+            end_reason = "nested_forward"
+            break
+        if ORDINARY_QUOTED_REPLY_RE.match(lines[index]):
+            end_line = index
+            end_reason = "quoted_reply"
+            break
+    has_body = any(line.strip() for line in lines[body_start:end_line])
+    if not has_body and not allow_attachment_only:
+        return empty
+
+    forwarded = "\n".join(lines[marker_index:end_line]).strip()
+    if not forwarded:
+        return empty
+    truncated = len(forwarded) > MAX_PRESERVED_FORWARDED_TEXT_CHARS
+    return {
+        "text": forwarded[:MAX_PRESERVED_FORWARDED_TEXT_CHARS],
+        "truncated": truncated,
+        "start_line": marker_index,
+        "end_line": end_line,
+        "end_reason": end_reason,
+        "has_marker": has_marker,
+    }
+
+
+def _strict_forwarded_text(
+    value,
+    *,
+    allow_outlook_header_block=False,
+    allow_attachment_only=False,
+    outer_subject="",
+):
+    details = _strict_forwarded_text_details(
+        value,
+        allow_outlook_header_block=allow_outlook_header_block,
+        allow_attachment_only=allow_attachment_only,
+        outer_subject=outer_subject,
+    )
+    return details["text"], details["truncated"]
+
+
+def _forward_detection_text_from_html(value):
+    """Convert HTML structure to lines for strict forwarded-header checks."""
+
+    value = re.sub(
+        r"(?is)<(script|style).*?>.*?</\1>",
+        " ",
+        str(value or ""),
+    )
+    value = re.sub(
+        r"(?is)<br\s*/?>|</(?:div|p|tr|li|h[1-6])\s*>",
+        "\n",
+        value,
+    )
+    value = re.sub(r"(?is)</(?:td|th)\s*>", "\t", value)
+    value = re.sub(r"(?is)<.*?>", " ", value)
+    return html.unescape(value)
+
+
+def _forwarded_html_fragment(
+    value,
+    *,
+    allow_outlook_header_block=False,
+    allow_attachment_only=False,
+    outer_subject="",
+):
+    """Return a forwarded HTML fragment after independent strict validation."""
+
+    value = str(value or "")
+    text_details = _strict_forwarded_text_details(
+        _forward_detection_text_from_html(value),
+        allow_outlook_header_block=allow_outlook_header_block,
+        allow_attachment_only=allow_attachment_only,
+        outer_subject=outer_subject,
+    )
+    if not text_details["text"]:
+        return "", False, None
+
+    container_patterns = (
+        r"(?is)<(?:div|blockquote)\b[^>]*class=[\"'][^\"']*"
+        r"\bgmail_quote\b[^\"']*[\"'][^>]*>",
+        r"(?is)<div\b[^>]*id=[\"']divRplyFwdMsg[\"'][^>]*>",
+    )
+    start = None
+    for pattern in container_patterns:
+        match = re.search(pattern, value)
+        if match and (start is None or match.start() < start):
+            start = match.start()
+    if start is None:
+        marker = re.search(
+            r"(?is)(?:-{3,}\s*forwarded(?:\s|&nbsp;)+message\s*-{3,}|"
+            r"-{3,}\s*original(?:\s|&nbsp;)+message\s*-{3,})",
+            value,
+        )
+        start = marker.start() if marker else 0
+    if text_details["end_reason"] == "quoted_reply":
+        # We can validate and trim the text boundary precisely, but arbitrary
+        # HTML tags/entities make a safe end-offset mapping impossible.
+        # Omitting HTML here preserves the bounded forwarded text while
+        # preventing an older quoted table from reaching the analyzer.  The
+        # validated start is still returned so callers can isolate newest text.
+        return "", False, start
+    forwarded_html = value[start:].strip()
+    nested_marker_pattern = re.compile(
+        r"(?is)(?:-{3,}\s*forwarded(?:\s|&nbsp;)+message\s*-{3,}|"
+        r"-{3,}\s*original(?:\s|&nbsp;)+message\s*-{3,})"
+    )
+    nested_markers = list(nested_marker_pattern.finditer(forwarded_html))
+    marker_to_trim = 1 if text_details["has_marker"] else 0
+    if len(nested_markers) > marker_to_trim:
+        forwarded_html = forwarded_html[: nested_markers[marker_to_trim].start()].rstrip()
+    truncated = len(forwarded_html) > MAX_PRESERVED_FORWARDED_HTML_CHARS
+    return (
+        forwarded_html[:MAX_PRESERVED_FORWARDED_HTML_CHARS],
+        truncated,
+        start,
+    )
+
+
+def fetch_mailbox_message(
+    connection,
+    message_id,
+    *,
+    preserve_forwarded=False,
+):
     """Fetch one full Gmail message, including every header and newest body.
 
     MIME attachment bytes are not fetched here. Inline bytes present in the
@@ -375,10 +687,95 @@ def fetch_mailbox_message(connection, message_id):
             part["body"] = body
     headers = mime_payload.get("headers") or []
     body_parts = _message_body_parts(mime_payload)
-    newest_body = _trim_quoted_reply("\n".join(value for value in body_parts if value))
-    newest_body_html = _trim_quoted_html(
-        "\n".join(value for value in _message_html_parts(mime_payload) if value)
+    complete_body_text = "\n".join(
+        value for value in body_parts if value
     )
+    complete_body_html = "\n".join(
+        value
+        for value in _message_html_parts(mime_payload)
+        if value
+    )
+    newest_body = _trim_quoted_reply(complete_body_text)
+    newest_body_html = _trim_quoted_html(complete_body_html)
+    message_subject = _header(headers, "Subject")
+    allow_outlook_header_block = bool(
+        OUTLOOK_FORWARD_SUBJECT_RE.match(message_subject)
+    )
+    allow_attachment_only = _has_supported_non_inline_forward_attachment(
+        mime_payload
+    )
+    forwarded_body_text = ""
+    forwarded_body_html = ""
+    forwarded_text_truncated = False
+    forwarded_html_truncated = False
+    if preserve_forwarded:
+        forwarded_text_details = _strict_forwarded_text_details(
+            complete_body_text,
+            allow_outlook_header_block=allow_outlook_header_block,
+            allow_attachment_only=allow_attachment_only,
+            outer_subject=message_subject,
+        )
+        forwarded_body_text = forwarded_text_details["text"]
+        forwarded_text_truncated = forwarded_text_details["truncated"]
+        if (
+            forwarded_body_text
+            and not forwarded_text_details["has_marker"]
+            and forwarded_text_details["start_line"] is not None
+        ):
+            newest_body = _trim_quoted_reply(
+                "\n".join(
+                    complete_body_text.splitlines()[
+                        : forwarded_text_details["start_line"]
+                    ]
+                )
+            )
+        if complete_body_html:
+            html_detection_details = _strict_forwarded_text_details(
+                _forward_detection_text_from_html(complete_body_html),
+                allow_outlook_header_block=allow_outlook_header_block,
+                allow_attachment_only=allow_attachment_only,
+                outer_subject=message_subject,
+            )
+            (
+                forwarded_body_html,
+                forwarded_html_truncated,
+                forwarded_html_start,
+            ) = _forwarded_html_fragment(
+                complete_body_html,
+                allow_outlook_header_block=allow_outlook_header_block,
+                allow_attachment_only=allow_attachment_only,
+                outer_subject=message_subject,
+            )
+            if (
+                not forwarded_body_text
+                and html_detection_details["text"]
+            ):
+                forwarded_body_text = html_detection_details["text"]
+                forwarded_text_truncated = html_detection_details[
+                    "truncated"
+                ]
+            if (
+                html_detection_details["text"]
+                and forwarded_html_start is not None
+                and not html_detection_details["has_marker"]
+            ):
+                newest_body_html = _trim_quoted_html(
+                    complete_body_html[:forwarded_html_start]
+                )
+            if (
+                html_detection_details["text"]
+                and forwarded_html_start is not None
+                and not forwarded_text_details["text"]
+            ):
+                # HTML-only messages otherwise expose the same header-only
+                # Outlook forward through the plain-text fallback generated
+                # by ``_message_body_parts``.  Derive the newest visible text
+                # from the independently validated HTML boundary instead.
+                newest_body = _trim_quoted_reply(
+                    _forward_detection_text_from_html(
+                        complete_body_html[:forwarded_html_start]
+                    )
+                )
     private_attachment_refs = _attachment_refs(mime_payload, message_id, include_inline_data=True)
     public_attachment_refs = [
         {key: value for key, value in attachment.items() if key != "_inline_data"}
@@ -389,7 +786,7 @@ def fetch_mailbox_message(connection, message_id):
         "gmail_thread_id": payload.get("threadId") or "",
         "label_ids": [_database_text(label) for label in (payload.get("labelIds") or [])],
         "full_headers": _public_headers(headers),
-        "subject": _header(headers, "Subject"),
+        "subject": message_subject,
         "sender": _header(headers, "From"),
         "recipients": _header(headers, "To"),
         "cc": _header(headers, "Cc"),
@@ -399,6 +796,18 @@ def fetch_mailbox_message(connection, message_id):
         "newest_body_text": newest_body,
         # Private parse aid: callers must hash/use this value in memory only.
         "newest_body_html": newest_body_html,
+        # Private, unverified parse aids for the Gmail inquiry route.  These
+        # values never alter the physical Gmail envelope sender and are not
+        # populated unless the caller opts in and a complete forwarded-header
+        # structure is present.
+        "_forwarded_body_text": forwarded_body_text,
+        "_forwarded_body_html": forwarded_body_html,
+        "_forwarded_content_truncated": bool(
+            forwarded_text_truncated or forwarded_html_truncated
+        ),
+        "contains_unverified_forwarded_content": bool(
+            forwarded_body_text or forwarded_body_html
+        ),
         "attachment_manifest": public_attachment_refs,
         "_attachment_refs": private_attachment_refs,
     }

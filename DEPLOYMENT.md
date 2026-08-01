@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.3.0 |
+| Document version | 2.4.0 |
 | Status | Operator guide; live values require independent verification |
 | Owner | Al Ameen platform maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This guide separates repository behavior from live provider configuration. A
@@ -97,6 +97,17 @@ Before release, save:
 - database snapshot/restore point appropriate to the change;
 - approved rollback decision, including whether the migration is reversible;
 - expected environment-variable diff with values redacted.
+
+Task 2.5 adds a direct `idna==3.11` runtime pin for matching-only email-domain
+normalization. It has no migration, environment-variable, OAuth, AI model,
+prompt, schema, or infrastructure change. After installing requirements, run a
+Gmail forward/identity smoke test and reanalyze any unconfirmed review that
+shows the pre-v4 matcher warning, including unversioned records; never trust its
+cleared old suggestion. Also verify that duplicate/multi-address `From` headers
+cannot prepare a Gmail reply, reconcile a Sent message, or create an automatic
+mailbox-LPO match. Confirm that a same-domain but different sender remains
+review-only, and that a legacy frozen Gmail reply without the current sender
+validation contract is blocked before any provider call.
 
 ## 4. Backend service
 

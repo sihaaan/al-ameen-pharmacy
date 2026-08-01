@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
-from email.utils import getaddresses
 from io import BytesIO
 
 from django.conf import settings
@@ -52,6 +51,12 @@ from .contract_intelligence import (
     resolve_gmail_connection,
 )
 from .company_matching import score_company_name
+from .email_identity import (
+    canonical_email_addresses,
+    canonical_singleton_from_address,
+    canonicalize_email_address,
+    is_private_email_domain,
+)
 from .import_parsers import (
     ALLOWED_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -59,7 +64,6 @@ from .import_parsers import (
 from .mailbox_po_audit import fetch_mailbox_message
 from .mailbox_po_matching import (
     company_private_sender_domain_identity,
-    is_private_email_domain,
     normalize_company_identity_text,
 )
 from .matching import (
@@ -696,37 +700,54 @@ def _thread_message_metadata(connection, thread_id):
 
 
 def _email_addresses(value):
-    return {
-        address.strip().lower()
-        for _name, address in getaddresses([str(value or "")])
-        if address and "@" in address
-    }
+    return set(canonical_email_addresses(str(value or "")))
+
+
+def _single_physical_from_address(message):
+    """Return one canonical RFC From address, or fail closed as ambiguous."""
+
+    if "full_headers" in message:
+        header_values = tuple(
+            str(header.get("value") or "")
+            for header in message.get("full_headers") or []
+            if isinstance(header, dict)
+            and str(header.get("name") or "").strip().casefold() == "from"
+        )
+    else:
+        header_values = None
+    return canonical_singleton_from_address(
+        message.get("sender"),
+        from_header_values=header_values,
+    )
 
 
 def _is_outbound_message(message, mailbox_email):
+    mailbox_email = (
+        canonicalize_email_address(mailbox_email)
+        or str(mailbox_email or "").strip().casefold()
+    )
     labels = {
         str(value or "").strip().upper()
         for value in message.get("label_ids") or []
     }
     return (
         "SENT" in labels
-        or mailbox_email in _email_addresses(message.get("sender"))
+        or _single_physical_from_address(message) == mailbox_email
     )
 
 
 def _is_verified_mailbox_sent_message(message, mailbox_email):
     """Use Gmail provenance plus an exact From identity for overflow trust."""
 
-    mailbox_email = str(mailbox_email or "").strip().lower()
+    mailbox_email = canonicalize_email_address(mailbox_email)
     labels = {
         str(value or "").strip().upper()
         for value in message.get("label_ids") or []
     }
-    sender_addresses = _email_addresses(message.get("sender"))
     return bool(
         mailbox_email
         and "SENT" in labels
-        and sender_addresses == {mailbox_email}
+        and _single_physical_from_address(message) == mailbox_email
     )
 
 
@@ -840,8 +861,14 @@ def _is_clear_non_item_email_prose_row(row):
 def _public_message_manifest(message, mailbox_email):
     body = str(message.get("newest_body_text") or "")
     body_html = str(message.get("newest_body_html") or "")
+    forwarded_body = str(message.get("_forwarded_body_text") or "")
+    forwarded_body_html = str(message.get("_forwarded_body_html") or "")
+    contains_forwarded = bool(
+        message.get("contains_unverified_forwarded_content")
+        and (forwarded_body or forwarded_body_html)
+    )
     attachments = message.get("attachment_manifest") or []
-    return {
+    manifest = {
         "gmail_message_id": message.get("gmail_message_id") or "",
         "gmail_thread_id": message.get("gmail_thread_id") or "",
         "label_ids": message.get("label_ids") or [],
@@ -851,7 +878,14 @@ def _public_message_manifest(message, mailbox_email):
         "cc": str(message.get("cc") or ""),
         "reply_to": str(message.get("reply_to") or "")[:500],
         "sent_at": _json_safe(message.get("sent_at")),
-        "snippet": str(message.get("snippet") or "")[:1000],
+        # Gmail's snippet is generated from the raw message and can include
+        # unverified forwarded headers/body text. Once a forward is
+        # recognized, persist only a preview derived from the sanitized outer
+        # message body; the forwarded material itself is represented below by
+        # bounded hashes and lengths.
+        "snippet": (
+            body if contains_forwarded else str(message.get("snippet") or "")
+        )[:1000],
         "body_sha256": hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest(),
         "body_length": len(body),
         "body_html_sha256": (
@@ -867,6 +901,32 @@ def _public_message_manifest(message, mailbox_email):
         "analysis_reason": "Awaiting thread analysis.",
         "analysis_confidence": 0.0,
     }
+    if contains_forwarded:
+        manifest.update(
+            {
+                "contains_unverified_forwarded_content": True,
+                "forwarded_content_truncated": bool(
+                    message.get("_forwarded_content_truncated")
+                ),
+                "forwarded_body_sha256": (
+                    hashlib.sha256(
+                        forwarded_body.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    if forwarded_body
+                    else ""
+                ),
+                "forwarded_body_length": len(forwarded_body),
+                "forwarded_body_html_sha256": (
+                    hashlib.sha256(
+                        forwarded_body_html.encode("utf-8", errors="ignore")
+                    ).hexdigest()
+                    if forwarded_body_html
+                    else ""
+                ),
+                "forwarded_body_html_length": len(forwarded_body_html),
+            }
+        )
+    return manifest
 
 
 def _public_attachment_manifest(message):
@@ -910,7 +970,11 @@ def _public_attachment_manifest(message):
 
 
 def _fetch_analysis_messages(gmail_import, connection):
-    anchor = fetch_mailbox_message(connection, gmail_import.anchor_message_id)
+    anchor = fetch_mailbox_message(
+        connection,
+        gmail_import.anchor_message_id,
+        preserve_forwarded=True,
+    )
     canonical_anchor_id = _normalize_gmail_id(
         anchor.get("gmail_message_id") or gmail_import.anchor_message_id
     )
@@ -994,6 +1058,7 @@ def _fetch_analysis_messages(gmail_import, connection):
             else fetch_mailbox_message(
                 connection,
                 requested_message_id,
+                preserve_forwarded=True,
             )
         )
         canonical_message_id = _normalize_gmail_id(
@@ -1051,7 +1116,7 @@ AI_COMPANY_NAME_STRONG_SCORE = 88
 AI_COMPANY_NAME_MIN_MARGIN = 8
 AI_IDENTITY_MIN_CONFIDENCE = 0.65
 AI_IDENTITY_STRONG_CONFIDENCE = 0.85
-GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v3"
+GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v4"
 COMPANY_IDENTITY_LEGAL_SUFFIXES = {
     "co",
     "company",
@@ -1109,8 +1174,8 @@ CONTACT_NAME_NOISE = {
 
 
 def _email_domain(value):
-    value = str(value or "").strip().casefold()
-    return value.rsplit("@", 1)[-1] if "@" in value else ""
+    canonical = canonicalize_email_address(value)
+    return canonical.rsplit("@", 1)[-1] if canonical else ""
 
 
 def _saved_contact_emails(contact):
@@ -1122,9 +1187,9 @@ def _saved_contact_emails(contact):
     """
 
     values = {
-        str(contact.email or "").strip().casefold(),
+        canonicalize_email_address(contact.email),
         *(
-            match.group(0).strip().casefold()
+            canonicalize_email_address(match.group(0))
             for match in SAVED_CONTACT_EMAIL_RE.finditer(
                 str(contact.name or "")
             )
@@ -1340,7 +1405,10 @@ def _inbound_signature_identity_by_message(
 ):
     signatures = {}
     for message in messages:
-        if _is_outbound_message(message, mailbox_email):
+        if (
+            _is_outbound_message(message, mailbox_email)
+            or message.get("contains_unverified_forwarded_content")
+        ):
             continue
         message_id = str(message.get("gmail_message_id") or "")
         if not message_id:
@@ -1407,20 +1475,71 @@ def _company_contact_candidates(
     active_companies=None,
     active_contacts=None,
 ):
-    mailbox_email = str(mailbox_email or "").strip().casefold()
+    mailbox_email = (
+        canonicalize_email_address(mailbox_email)
+        or str(mailbox_email or "").strip().casefold()
+    )
     sender_evidence = {}
+    observed_sender_evidence = {}
+    identity_warnings = []
+    unverified_forwarded_source_keys = set()
     for message in messages:
         if _is_outbound_message(message, mailbox_email):
             continue
         message_id = str(message.get("gmail_message_id") or "")
+        observed_addresses = _email_addresses(message.get("sender"))
+        for address in observed_addresses:
+            if address != mailbox_email:
+                observed_sender_evidence.setdefault(address, set()).add(
+                    message_id
+                )
+
+        physical_from = _single_physical_from_address(message)
+        if message.get("contains_unverified_forwarded_content"):
+            unverified_forwarded_source_keys.add(
+                _source_key(message_id, "body", "newest")
+            )
+            for attachment in message.get("attachment_manifest") or []:
+                if not isinstance(attachment, dict):
+                    continue
+                unverified_forwarded_source_keys.add(
+                    _source_key(
+                        message_id,
+                        "attachment",
+                        attachment.get("attachment_id")
+                        or attachment.get("part_id")
+                        or os.path.basename(
+                            str(attachment.get("filename") or "")
+                        )[:255],
+                    )
+                )
+            identity_warnings.append(
+                "A forwarded inquiry was included. Its embedded From and "
+                "Reply-To details are unverified evidence and were not used "
+                "for deterministic customer matching."
+            )
+        elif not physical_from:
+            identity_warnings.append(
+                "An inbound message has an ambiguous or invalid From header; "
+                "it was not used for deterministic customer matching."
+            )
+        elif physical_from != mailbox_email:
+            sender_evidence.setdefault(physical_from, set()).add(message_id)
+
+        reply_to_addresses = _email_addresses(message.get("reply_to"))
+        if physical_from and len(reply_to_addresses) == 1:
+            from_domain = _email_domain(physical_from)
+            reply_domain = _email_domain(next(iter(reply_to_addresses)))
+            if from_domain and reply_domain and from_domain != reply_domain:
+                identity_warnings.append(
+                    "An inbound Reply-To domain differs from its physical From "
+                    "domain. Reply-To remains routing-only and was not used for "
+                    "customer matching."
+                )
         # Reply-To is controlled by the sender and can point at an unrelated
         # saved customer. Without authenticated alignment evidence it must not
-        # participate in customer identity or direct-quote readiness. V1 uses
-        # only the actual inbound From address.
-        for address in _email_addresses(message.get("sender")):
-            if address == mailbox_email:
-                continue
-            sender_evidence.setdefault(address, set()).add(message_id)
+        # participate in customer identity or direct-quote readiness. The
+        # matcher uses only one canonical, unambiguous physical From address.
 
     if active_companies is None or active_contacts is None:
         active_companies, active_contacts = (
@@ -1504,14 +1623,14 @@ def _company_contact_candidates(
 
     normalized_contact_email = {}
     for contact in active_contacts:
-        structured_email = str(contact.email or "").strip().casefold()
+        structured_email = canonicalize_email_address(contact.email)
         for email in _saved_contact_emails(contact):
             normalized_contact_email.setdefault(email, []).append(
                 (contact, bool(structured_email and email == structured_email))
             )
     normalized_company_email = {}
     for company in active_companies:
-        email = str(company.email or "").strip().casefold()
+        email = canonicalize_email_address(company.email)
         if email:
             normalized_company_email.setdefault(email, []).append(company)
 
@@ -1784,7 +1903,12 @@ def _company_contact_candidates(
         else None
     )
     return {
-        "sender_emails": sorted(sender_evidence),
+        "sender_emails": sorted(observed_sender_evidence),
+        "verified_identity_sender_emails": sorted(sender_evidence),
+        "identity_warnings": list(dict.fromkeys(identity_warnings)),
+        "unverified_forwarded_identity_source_keys": sorted(
+            unverified_forwarded_source_keys
+        ),
         "companies": company_rows,
         "contacts": contact_rows,
         "recommended_company_id": recommended_company_id,
@@ -2480,25 +2604,45 @@ def _native_thread_context(messages, sources, mode):
         message_id = str(message.get("gmail_message_id") or "")
         body_text = str(message.get("newest_body_text") or "")
         body_html = str(message.get("newest_body_html") or "")
-        timeline.append(
-            {
-                "sequence": sequence,
-                "gmail_message_id": message_id,
-                "direction": (
-                    "outbound" if message.get("is_outbound") else "inbound"
-                ),
-                "sent_at": _json_safe(message.get("sent_at")) or "",
-                "subject": str(message.get("subject") or ""),
-                "sender": str(message.get("sender") or ""),
-                "recipients": str(message.get("recipients") or ""),
-                "body_text": body_text,
-                # Preserve HTML tables when Gmail supplies them; otherwise the
-                # plain body is authoritative and avoids duplicate signature
-                # markup/noise.
-                "body_html": body_html if "<table" in body_html.lower() else "",
-                "sources": sources_by_message.get(message_id, []),
-            }
+        forwarded_body_text = str(message.get("_forwarded_body_text") or "")
+        forwarded_body_html = str(message.get("_forwarded_body_html") or "")
+        contains_forwarded = bool(
+            message.get("contains_unverified_forwarded_content")
+            and (forwarded_body_text or forwarded_body_html)
         )
+        timeline_entry = {
+            "sequence": sequence,
+            "gmail_message_id": message_id,
+            "direction": (
+                "outbound" if message.get("is_outbound") else "inbound"
+            ),
+            "sent_at": _json_safe(message.get("sent_at")) or "",
+            "subject": str(message.get("subject") or ""),
+            "sender": str(message.get("sender") or ""),
+            "recipients": str(message.get("recipients") or ""),
+            "body_text": body_text,
+            # Preserve HTML tables when Gmail supplies them; otherwise the
+            # plain body is authoritative and avoids duplicate signature
+            # markup/noise.
+            "body_html": body_html if "<table" in body_html.lower() else "",
+            "sources": sources_by_message.get(message_id, []),
+        }
+        if contains_forwarded:
+            # A structurally recognized forward is useful request evidence,
+            # but its embedded headers are never promoted to verified Gmail
+            # sender identity. Keep the boundary explicit for the analyzer.
+            timeline_entry.update(
+                {
+                    "forwarded_content_trust": "unverified",
+                    "forwarded_body_text": forwarded_body_text,
+                    "forwarded_body_html": (
+                        forwarded_body_html
+                        if "<table" in forwarded_body_html.lower()
+                        else ""
+                    ),
+                }
+            )
+        timeline.append(timeline_entry)
     payload = {
         "mode": mode,
         "timeline": timeline,
@@ -3048,6 +3192,17 @@ def _validate_native_thread_result(raw_result, messages, evidence):
     )
     if any(key not in sources for key in identity_source_keys):
         raise AIParseError("Gmail AI returned an unknown customer identity source.")
+    identity_company_name = str(identity.get("company_name") or "")[:255]
+    identity_contact_name = str(identity.get("contact_name") or "")[:255]
+    identity_contact_email = str(identity.get("contact_email") or "")[:254]
+    if (
+        identity_company_name
+        or identity_contact_name
+        or identity_contact_email
+    ) and not identity_source_keys:
+        raise AIParseError(
+            "Gmail AI returned customer identity without source evidence."
+        )
     return {
         "messages": message_results,
         "rows": final_rows,
@@ -3055,9 +3210,9 @@ def _validate_native_thread_result(raw_result, messages, evidence):
         "thread_summary": str(raw_result.get("thread_summary") or "")[:2000],
         "usage": raw_result.get("_usage") or {},
         "customer_identity": {
-            "company_name": str(identity.get("company_name") or "")[:255],
-            "contact_name": str(identity.get("contact_name") or "")[:255],
-            "contact_email": str(identity.get("contact_email") or "")[:254],
+            "company_name": identity_company_name,
+            "contact_name": identity_contact_name,
+            "contact_email": identity_contact_email,
             "source_keys": identity_source_keys,
             "confidence": max(
                 0.0,
@@ -3103,8 +3258,17 @@ def _apply_ai_identity_candidates(
 
     company_name = str(identity.get("company_name") or "").strip()
     contact_name = str(identity.get("contact_name") or "").strip()
-    contact_email = str(identity.get("contact_email") or "").strip().casefold()
+    contact_email = canonicalize_email_address(identity.get("contact_email"))
     source_keys = list(identity.get("source_keys") or [])
+    identity_uses_unverified_forward = bool(
+        set(source_keys)
+        & set(
+            candidates.get("unverified_forwarded_identity_source_keys")
+            or []
+        )
+    )
+    if identity_uses_unverified_forward:
+        candidates["ai_identity_unverified_forwarded"] = True
     ai_reason = (
         str(identity.get("reason") or "").strip()
         or "AI read this identity from the selected customer evidence."
@@ -3154,7 +3318,7 @@ def _apply_ai_identity_candidates(
             saved_emails = _saved_contact_emails(contact)
             if contact_email not in saved_emails:
                 continue
-            structured_email = str(contact.email or "").strip().casefold()
+            structured_email = canonicalize_email_address(contact.email)
             if structured_email and structured_email == contact_email:
                 structured_email_contacts.append(contact)
             else:
@@ -3306,6 +3470,10 @@ def _apply_ai_identity_candidates(
     recommended_company_id = candidates.get("recommended_company_id")
     if not recommended_company_id:
         return candidates
+    if identity_uses_unverified_forward:
+        # The forwarded name can remain a company review suggestion, but an
+        # embedded forwarded person/email must never auto-select a purchaser.
+        return candidates
 
     company_contacts = [
         contact
@@ -3386,12 +3554,72 @@ def _apply_ai_identity_candidates(
     return candidates
 
 
-def refresh_gmail_inquiry_identity_candidates(gmail_import):
-    """Apply the current zero-AI identity ranker once to a stored analysis.
+GMAIL_IDENTITY_REANALYSIS_WARNING = (
+    "Customer identity matching rules changed. Reanalyze this Gmail inquiry "
+    "before relying on a company or contact suggestion."
+)
 
-    This makes already-analyzed reviews benefit from matcher fixes without
-    resending customer content to the AI. The version marker keeps normal
-    polling reads query-free after the one-time refresh.
+
+def _stored_gmail_identity_exists(candidates, analysis):
+    candidates = candidates or {}
+    identity = dict(
+        candidates.get("ai_identity")
+        or ((analysis or {}).get("thread_analysis") or {}).get(
+            "customer_identity"
+        )
+        or {}
+    )
+    return bool(
+        any(
+            str(identity.get(field) or "").strip()
+            for field in ("company_name", "contact_name", "contact_email")
+        )
+        or candidates.get("companies")
+        or candidates.get("contacts")
+        or candidates.get("recommended_company_id")
+        or candidates.get("recommended_contact_id")
+        or candidates.get("exact_company_match")
+    )
+
+
+def _gmail_identity_requires_reanalysis(candidates, analysis):
+    candidates = candidates or {}
+    return bool(
+        candidates.get("identity_reanalysis_required")
+        or (
+            candidates.get("identity_match_version")
+            != GMAIL_IDENTITY_MATCH_VERSION
+            and _stored_gmail_identity_exists(candidates, analysis)
+        )
+    )
+
+
+def _quarantine_stale_gmail_identity(candidates, analysis):
+    candidates = dict(candidates or {})
+    analysis = dict(analysis or {})
+    candidates["companies"] = []
+    candidates["contacts"] = []
+    candidates["recommended_company_id"] = None
+    candidates["recommended_contact_id"] = None
+    candidates["exact_company_match"] = False
+    candidates["identity_reanalysis_required"] = True
+    candidates.pop("identity_conflict", None)
+    identity_warnings = list(candidates.get("identity_warnings") or [])
+    identity_warnings.append(GMAIL_IDENTITY_REANALYSIS_WARNING)
+    candidates["identity_warnings"] = list(dict.fromkeys(identity_warnings))
+    analysis_warnings = list(analysis.get("warnings") or [])
+    analysis_warnings.append(GMAIL_IDENTITY_REANALYSIS_WARNING)
+    analysis["warnings"] = list(dict.fromkeys(analysis_warnings))
+    return _json_safe(candidates), _json_safe(analysis)
+
+
+def refresh_gmail_inquiry_identity_candidates(gmail_import):
+    """Quarantine unconfirmed identity results from older matching rules.
+
+    Forwarded-origin trust and canonical address handling cannot be
+    reconstructed reliably from the privacy-safe stored manifest. Any
+    unconfirmed identity result without the current version is therefore
+    cleared and must be reanalyzed from Gmail source evidence.
     """
 
     refreshable_statuses = {
@@ -3402,19 +3630,12 @@ def refresh_gmail_inquiry_identity_candidates(gmail_import):
         return gmail_import
 
     current_candidates = dict(gmail_import.candidates or {})
-    if (
-        current_candidates.get("identity_match_version")
-        == GMAIL_IDENTITY_MATCH_VERSION
+    if not _gmail_identity_requires_reanalysis(
+        current_candidates,
+        gmail_import.analysis,
     ):
         return gmail_import
-    current_identity = dict(
-        current_candidates.get("ai_identity")
-        or (
-            (gmail_import.analysis or {}).get("thread_analysis") or {}
-        ).get("customer_identity")
-        or {}
-    )
-    if not current_identity:
+    if current_candidates.get("identity_reanalysis_required"):
         return gmail_import
 
     with transaction.atomic():
@@ -3424,67 +3645,18 @@ def refresh_gmail_inquiry_identity_candidates(gmail_import):
         if locked.status not in refreshable_statuses:
             return locked
         candidates = dict(locked.candidates or {})
-        if (
-            candidates.get("identity_match_version")
-            == GMAIL_IDENTITY_MATCH_VERSION
-        ):
-            return locked
-
-        identity = dict(
-            candidates.get("ai_identity")
-            or (
-                (locked.analysis or {}).get("thread_analysis") or {}
-            ).get("customer_identity")
-            or {}
-        )
-        if not identity:
-            return locked
-        companies = [
-            {**row}
-            for row in candidates.get("companies") or []
-            if not str(row.get("match_method") or "").startswith("ai_")
-        ]
-        contacts = [
-            {**row}
-            for row in candidates.get("contacts") or []
-            if not str(row.get("match_method") or "").startswith("ai_")
-        ]
-        retained_company_ids = {
-            row.get("company_id")
-            for row in companies
-        }
-        retained_contact_ids = {
-            row.get("contact_id")
-            for row in contacts
-        }
-        candidates["companies"] = companies
-        candidates["contacts"] = contacts
-        if (
-            candidates.get("recommended_company_id")
-            not in retained_company_ids
-        ):
-            candidates["recommended_company_id"] = None
-        if (
-            candidates.get("recommended_contact_id")
-            not in retained_contact_ids
-        ):
-            candidates["recommended_contact_id"] = None
-        candidates.pop("identity_conflict", None)
-
-        active_companies, active_contacts = (
-            _active_customer_identity_records()
-        )
-        candidates = _apply_ai_identity_candidates(
+        if not _gmail_identity_requires_reanalysis(
             candidates,
-            identity,
-            active_companies=active_companies,
-            active_contacts=active_contacts,
+            locked.analysis,
+        ):
+            return locked
+        if candidates.get("identity_reanalysis_required"):
+            return locked
+        locked.candidates, locked.analysis = _quarantine_stale_gmail_identity(
+            candidates,
+            locked.analysis,
         )
-        candidates["identity_match_version"] = (
-            GMAIL_IDENTITY_MATCH_VERSION
-        )
-        locked.candidates = _json_safe(candidates)
-        locked.save(update_fields=["candidates"])
+        locked.save(update_fields=["candidates", "analysis"])
         return locked
 
 
@@ -3551,6 +3723,11 @@ def _build_source_analysis(
             "manually if older context is required."
         )
     for message in messages:
+        if message.get("_forwarded_content_truncated"):
+            warnings.append(
+                "A forwarded email body exceeded the safe analysis bound and "
+                "was truncated. Staff must verify the original Gmail message."
+            )
         attachment_count = len(message.get("attachment_manifest") or [])
         if attachment_count > MAX_ATTACHMENT_METADATA_PER_MESSAGE:
             warnings.append(
@@ -3794,10 +3971,47 @@ def _build_source_analysis(
         semantic_messages.append(message)
         body_text = str(message.get("newest_body_text") or "")
         body_html = str(message.get("newest_body_html") or "")
-        if not outbound and (body_text or body_html):
+        forwarded_body_text = str(message.get("_forwarded_body_text") or "")
+        forwarded_body_html = str(message.get("_forwarded_body_html") or "")
+        contains_forwarded = bool(
+            message.get("contains_unverified_forwarded_content")
+            and (forwarded_body_text or forwarded_body_html)
+        )
+        if not outbound and (
+            body_text
+            or body_html
+            or (contains_forwarded and (forwarded_body_text or forwarded_body_html))
+        ):
             body_source_key = _source_key(message_id, "body", "newest")
-            body_material = (
-                body_text + ("\n" + body_html if "<table" in body_html.lower() else "")
+            if contains_forwarded:
+                body_material = json.dumps(
+                    {
+                        "body_text": body_text,
+                        "body_html": (
+                            body_html if "<table" in body_html.lower() else ""
+                        ),
+                        "forwarded_content_trust": "unverified",
+                        "forwarded_body_text": forwarded_body_text,
+                        "forwarded_body_html": (
+                            forwarded_body_html
+                            if "<table" in forwarded_body_html.lower()
+                            else ""
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            else:
+                body_material = body_text + (
+                    "\n" + body_html if "<table" in body_html.lower() else ""
+                )
+            has_html_table = bool(
+                "<table" in body_html.lower()
+                or (
+                    contains_forwarded
+                    and "<table" in forwarded_body_html.lower()
+                )
             )
             evidence.append(
                 {
@@ -3807,7 +4021,7 @@ def _build_source_analysis(
                     "filename": "",
                     "mime_type": (
                         "text/html"
-                        if "<table" in body_html.lower()
+                        if has_html_table
                         else "text/plain"
                     ),
                     "attachment_id": "",
@@ -3824,6 +4038,7 @@ def _build_source_analysis(
                     "source_subject": str(message.get("subject") or "")[:500],
                     "source_sender": str(message.get("sender") or "")[:500],
                     "source_sent_at": _json_safe(message.get("sent_at")),
+                    "contains_unverified_forwarded_content": contains_forwarded,
                 }
             )
 
@@ -4270,6 +4485,7 @@ def _build_source_analysis(
         active_contacts=active_contacts,
     )
     candidates["identity_match_version"] = GMAIL_IDENTITY_MATCH_VERSION
+    warnings.extend(candidates.get("identity_warnings") or [])
     recommended_company = None
     if candidates.get("recommended_company_id"):
         recommended_company = Company.objects.filter(
@@ -4327,6 +4543,7 @@ def _build_source_analysis(
                 [
                     str(message.get("subject") or ""),
                     str(message.get("newest_body_text") or "")[:2000],
+                    str(message.get("_forwarded_body_text") or "")[:2000],
                 ]
             )
         )
@@ -4335,6 +4552,7 @@ def _build_source_analysis(
                 [
                     str(message.get("subject") or ""),
                     str(message.get("newest_body_text") or "")[:2000],
+                    str(message.get("_forwarded_body_text") or "")[:2000],
                 ]
             )
         )
@@ -5227,6 +5445,14 @@ def confirm_gmail_inquiry_import(
         }:
             raise GmailInquiryImportError(
                 "Analyze this Gmail inquiry before creating a quotation."
+            )
+        if _gmail_identity_requires_reanalysis(
+            locked.candidates,
+            locked.analysis,
+        ):
+            raise GmailInquiryImportError(
+                "Customer identity matching rules changed. Reanalyze this "
+                "Gmail inquiry before creating the quotation."
             )
 
         if company is None:

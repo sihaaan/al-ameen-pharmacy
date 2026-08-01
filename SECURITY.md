@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.4.0 |
+| Document version | 2.5.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, plus the Task 2.4 worktree checkpoint |
+| Reviewed code | `d88b767` baseline through Task 2.2, Task 2.3 checkpoint `fc4c77c`, Task 2.4 checkpoint `f9a5835`, plus the Task 2.5 worktree checkpoint |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
@@ -59,6 +59,29 @@ configuration. Complete the unchecked verification items for each release.
   delivery-state checks prevent ordinary double sends.
 - An ambiguous result becomes `unknown`; blind retry is blocked. Reconciliation
   verifies Sent/From/RFC Message-ID/thread evidence and never sends email.
+- Forwarded inquiry bodies are transient, bounded, unverified evidence. Strict
+  Gmail/Outlook structure is required before preservation; embedded forwarding
+  headers never replace the physical Gmail sender or participate in exact
+  identity, contact selection, or reply routing. A forwarded transport sender
+  is also excluded from deterministic customer recommendation.
+- Customer matching canonicalizes domains with pinned non-transitional IDNA
+  2008/UTS #46 rules, rejects malformed/IP/single-label identities, preserves
+  local-part dots and `+tags`, and blocks regional public-mail domains from
+  private-domain inference. Company/domain-name, acronym, and a different
+  sender on the same domain remain review-only for automatic LPO linking.
+  Automatic identity requires an exact saved sender, exact quotation
+  reference, or customer identity in the selected attachment.
+  Multiple/duplicate physical `From` fields or addresses fail closed in Gmail
+  intake, mailbox-PO matching, reply preparation, and Sent reconciliation.
+  A singleton `Reply-To` is routing-only and is considered only after the
+  physical `From` check; cross-domain intake use remains visibly warned.
+- Newly prepared Gmail replies record the strict sender-validation contract.
+  A frozen failed reply without that contract cannot be retried, preventing a
+  historical weakly parsed sender or `Reply-To` from reaching Gmail.
+- AI-provided company/contact identity must cite at least one current evidence
+  source. Unconfirmed identity results from any pre-v4 or unversioned matcher
+  are quarantined until Gmail evidence is reanalyzed; confirmed history is not
+  rewritten.
 
 ### AI and evidence
 

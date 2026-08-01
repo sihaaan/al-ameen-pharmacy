@@ -612,6 +612,17 @@ def _header(headers, name):
     return ""
 
 
+def _header_values(headers, name):
+    """Return every physical value for a Gmail metadata header."""
+
+    wanted = str(name or "").strip().lower()
+    return [
+        str(header.get("value") or "")
+        for header in headers or []
+        if str(header.get("name") or "").strip().lower() == wanted
+    ]
+
+
 def _message_datetime(message):
     internal = message.get("internalDate")
     if internal:
@@ -862,7 +873,9 @@ def gmail_fetch_reply_metadata(connection, message_id):
         "label_ids": list(payload.get("labelIds") or []),
         "subject": _header(headers, "Subject"),
         "sender": _header(headers, "From"),
+        "from_header_values": _header_values(headers, "From"),
         "reply_to": _header(headers, "Reply-To"),
+        "reply_to_header_values": _header_values(headers, "Reply-To"),
         "recipients": _header(headers, "To"),
         "cc": _header(headers, "Cc"),
         "rfc_message_id": _header(headers, "Message-ID"),

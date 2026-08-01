@@ -29,6 +29,8 @@ dj-database-url==3.0.1
 
 # Environment Variables - Load .env file
 python-dotenv==1.1.1
+# IDNA 2008/UTS #46 email-domain identity normalization
+idna==3.11
 
 # ASGI Server - For async support
 asgiref==3.9.1

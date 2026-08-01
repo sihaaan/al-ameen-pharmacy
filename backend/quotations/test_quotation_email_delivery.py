@@ -26,6 +26,7 @@ from .contract_intelligence import (
     GMAIL_SEND_SCOPE,
     encrypt_token,
     exchange_gmail_code,
+    gmail_fetch_reply_metadata,
 )
 from .models import (
     Company,
@@ -117,14 +118,22 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         rfc_message_id="<customer-1@example.com>",
         references="<older@example.com>",
         label_ids=None,
+        from_header_values=None,
+        reply_to_header_values=None,
     ):
+        if from_header_values is None:
+            from_header_values = [sender]
+        if reply_to_header_values is None:
+            reply_to_header_values = [reply_to] if reply_to else []
         return {
             "gmail_message_id": message_id,
             "gmail_thread_id": thread_id,
             "label_ids": ["INBOX"] if label_ids is None else list(label_ids),
             "subject": subject,
             "sender": sender,
+            "from_header_values": list(from_header_values),
             "reply_to": reply_to,
+            "reply_to_header_values": list(reply_to_header_values),
             "recipients": "pharmacydxb@gmail.com",
             "cc": "",
             "rfc_message_id": rfc_message_id,
@@ -521,6 +530,140 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertNotEqual(
             changed_source.data["preview_fingerprint"],
             response.data["preview_fingerprint"],
+        )
+
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_gmail_reply_without_reply_to_uses_verified_physical_from(self, fetch):
+        quotation = self.create_quote()
+        self.gmail_link(quotation)
+        fetch.return_value = self.source_metadata(
+            message_id="gmail-followup-2",
+            reply_to="",
+        )
+
+        response = self.client.get(
+            reverse("quotation-email-preview", args=[quotation.id])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["to"], ["buyer@example.com"])
+
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_gmail_reply_rejects_every_ambiguous_physical_from_shape(self, fetch):
+        quotation = self.create_quote()
+        self.gmail_link(quotation)
+        ambiguous_cases = [
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                sender="buyer@example.com, attacker@evil.example",
+            ),
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                sender="buyer@example.com, buyer@example.com",
+            ),
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                from_header_values=[
+                    "Customer Buyer <buyer@example.com>",
+                    "Customer Buyer <buyer@example.com>",
+                ],
+            ),
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                sender="malformed-address, Customer Buyer <buyer@example.com>",
+            ),
+        ]
+
+        for metadata in ambiguous_cases:
+            with self.subTest(metadata=metadata):
+                fetch.return_value = metadata
+                response = self.client.get(
+                    reverse("quotation-email-preview", args=[quotation.id])
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(
+                    response.data["code"],
+                    "ambiguous_source_recipient",
+                )
+        self.assertFalse(
+            QuotationEmailDelivery.objects.filter(quotation=quotation).exists()
+        )
+
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_gmail_reply_rejects_every_ambiguous_reply_to_shape(self, fetch):
+        quotation = self.create_quote()
+        self.gmail_link(quotation)
+        ambiguous_cases = [
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                reply_to="Bad <> , orders@example.com",
+            ),
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                reply_to="orders@example.com, orders@example.com",
+            ),
+            self.source_metadata(
+                message_id="gmail-followup-2",
+                reply_to_header_values=[
+                    "orders@example.com",
+                    "attacker@evil.example",
+                ],
+            ),
+        ]
+
+        for metadata in ambiguous_cases:
+            with self.subTest(metadata=metadata):
+                fetch.return_value = metadata
+                response = self.client.get(
+                    reverse("quotation-email-preview", args=[quotation.id])
+                )
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_400_BAD_REQUEST,
+                )
+                self.assertEqual(
+                    response.data["code"],
+                    "ambiguous_source_recipient",
+                )
+
+    @patch("quotations.contract_intelligence._json_request")
+    @patch(
+        "quotations.contract_intelligence.get_valid_access_token",
+        return_value="access-token",
+    )
+    def test_reply_metadata_preserves_duplicate_header_fields(
+        self,
+        _token,
+        request,
+    ):
+        request.return_value = {
+            "id": "message-duplicates",
+            "threadId": "thread-duplicates",
+            "internalDate": "1785600000000",
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": "buyer@example.com"},
+                    {"name": "From", "value": "attacker@evil.example"},
+                    {"name": "Reply-To", "value": "orders@example.com"},
+                    {"name": "Reply-To", "value": "other@example.com"},
+                    {"name": "Subject", "value": "RFQ"},
+                    {"name": "Message-ID", "value": "<rfq@example.com>"},
+                ]
+            },
+        }
+
+        metadata = gmail_fetch_reply_metadata(
+            self.connection,
+            "message-duplicates",
+        )
+
+        self.assertEqual(
+            metadata["from_header_values"],
+            ["buyer@example.com", "attacker@evil.example"],
+        )
+        self.assertEqual(
+            metadata["reply_to_header_values"],
+            ["orders@example.com", "other@example.com"],
         )
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
@@ -952,6 +1095,54 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         )
         self.assertEqual(snapshot.delivery_mode, QuotationEmailDelivery.MODE_GMAIL_REPLY)
         self.assertEqual(snapshot.gmail_api_thread_id, "gmail-thread-1")
+        self.assertEqual(
+            snapshot.delivery.trusted_source["sender_validation_contract"],
+            "gmail_reply_sender_identity_v1",
+        )
+
+    @patch("quotations.quotation_email_delivery.build_quotation_pdf", return_value=b"reply-pdf")
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=RuntimeError("Google API request failed with HTTP 400: invalid"),
+    )
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_legacy_frozen_gmail_reply_without_sender_contract_cannot_retry(
+        self,
+        fetch,
+        send,
+        _pdf,
+    ):
+        quotation = self.create_quote()
+        self.gmail_link(quotation)
+        fetch.return_value = self.source_metadata(message_id="gmail-legacy-reply")
+        retry_payload = self.gmail_payload(quotation=quotation)
+
+        first = self.client.post(
+            reverse("quotation-finalize-and-send", args=[quotation.id]),
+            retry_payload,
+            format="json",
+        )
+        delivery = QuotationEmailDelivery.objects.get(quotation=quotation)
+        trusted_source = dict(delivery.trusted_source or {})
+        trusted_source.pop("sender_validation_contract", None)
+        delivery.trusted_source = trusted_source
+        delivery.save(update_fields=["trusted_source", "updated_at"])
+        fetches_before_retry = fetch.call_count
+
+        second = self.client.post(
+            reverse("quotation-send-email", args=[quotation.id]),
+            retry_payload,
+            format="json",
+        )
+
+        self.assertEqual(first.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(second.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            second.data["code"],
+            "gmail_reply_source_reverification_required",
+        )
+        self.assertEqual(fetch.call_count, fetches_before_retry)
+        self.assertEqual(send.call_count, 1)
 
     @patch(
         "quotations.quotation_email_delivery.build_quotation_pdf",
@@ -1601,6 +1792,55 @@ class QuotationEmailDeliveryAPITests(APITestCase):
                 quotation.refresh_from_db()
                 self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
                 self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
+        send.assert_not_called()
+
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_reconcile_never_accepts_duplicate_physical_from_fields(
+        self,
+        search,
+        fetch,
+        send,
+    ):
+        quotation = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        delivery = QuotationEmailDelivery.objects.create(
+            quotation=quotation,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {"messages": [{"id": "gmail-ambiguous-from"}]}
+        fetch.return_value = self.source_metadata(
+            message_id="gmail-ambiguous-from",
+            thread_id="gmail-reconciled-thread",
+            sender="Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+            from_header_values=[
+                "Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+                "Al Ameen Pharmacy <pharmacydxb@gmail.com>",
+            ],
+            rfc_message_id=delivery.outbound_rfc_message_id,
+            label_ids=["SENT"],
+        )
+
+        response = self.client.post(
+            reverse("quotation-reconcile-email", args=[quotation.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(response.data["code"], "gmail_reconciliation_unavailable")
+        delivery.refresh_from_db()
+        quotation.refresh_from_db()
+        self.assertEqual(delivery.status, QuotationEmailDelivery.STATUS_UNKNOWN)
+        self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
         send.assert_not_called()
 
     @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
