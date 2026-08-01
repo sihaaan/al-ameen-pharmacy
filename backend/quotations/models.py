@@ -2433,7 +2433,14 @@ class QuotationOutcomePOImport(models.Model):
     parse_method = models.CharField(max_length=100, blank=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default=STATUS_PARSED)
     parsed_rows = models.JSONField(default=list, blank=True)
-    parsed_meta = models.JSONField(default=dict, blank=True)
+    # Keep the database default as well as the Python default so the previous
+    # application release can continue inserting rows while migrations and
+    # application instances overlap during a rolling deployment.
+    parsed_meta = models.JSONField(
+        default=dict,
+        db_default=models.Value({}, output_field=models.JSONField()),
+        blank=True,
+    )
     suggestions = models.JSONField(default=list, blank=True)
     unmatched_po_rows = models.JSONField(default=list, blank=True)
     missing_quote_line_ids = models.JSONField(default=list, blank=True)

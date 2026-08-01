@@ -251,6 +251,14 @@ structured inspection metadata, do not reverse `0036` as an ordinary rollback:
 that would delete the retained evidence. Keep the column and prefer a forward
 fix or a compatibility rollback.
 
+Corrected `0036` intentionally retains the database `{}` default so an older
+application process can continue to INSERT while a rolling deployment is in
+progress. `0038_ensure_po_import_parsed_meta_db_default` is the forward-only
+repair for a target that already recorded the earlier `0036` without that
+persistent default. Its reverse operation does not drop the database default;
+do not remove the default manually while old code can serve traffic. Reversing
+`0036` remains destructive once structured evidence has been retained.
+
 After deployment, first restore an accidentally tightened environment limit
 to its previous reviewed value or prefer a forward fix. A full code rollback
 must revert inspection call sites and their tests together; it weakens
@@ -325,6 +333,7 @@ Primary implementation and test locations:
 - `backend/quotations/models.py`
 - `backend/quotations/serializers.py`
 - `backend/quotations/migrations/0036_quotationoutcomepoimport_parsed_meta.py`
+- `backend/quotations/migrations/0038_ensure_po_import_parsed_meta_db_default.py`
 - `backend/api/upload_validation.py`
 - `backend/api/serializers.py`
 - `backend/quotations/test_attachment_fidelity.py`
@@ -334,6 +343,7 @@ Primary implementation and test locations:
 - `backend/quotations/test_reference_attachment_fidelity.py`
 - `backend/quotations/test_import_rule_fidelity.py`
 - `backend/quotations/test_documentation_contract.py`
+- `backend/quotations/test_migration_0036_compatibility.py`
 
 See also [SECURITY.md](SECURITY.md), [OPERATIONS.md](OPERATIONS.md),
 [DEPLOYMENT.md](DEPLOYMENT.md), and

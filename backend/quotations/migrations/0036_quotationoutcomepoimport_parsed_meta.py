@@ -10,6 +10,10 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="quotationoutcomepoimport",
             name="parsed_meta",
-            field=models.JSONField(blank=True, default=dict),
+            field=models.JSONField(
+                blank=True,
+                db_default=models.Value({}, output_field=models.JSONField()),
+                default=dict,
+            ),
         ),
     ]

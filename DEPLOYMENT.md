@@ -199,8 +199,9 @@ Migration success is not automatically reversible. Rolling the application
 image back does not undo schema changes or data mutations.
 
 Against the dated production baseline, a full hardening-branch promotion is
-expected to include additive/state migrations `quotations.0035`, `0036`, and
-`0037`; verify the live plan independently because production may have changed.
+expected to include additive/state migrations `quotations.0035`, `0036`,
+`0037`, and `0038`; verify the live plan independently because production may
+have changed.
 Task 2.8 itself adds no Django migration and does not run any production
 migration.
 
@@ -292,6 +293,26 @@ review the defaults and any environment overrides against memory/CPU capacity,
 then test a normal file, a warning-only fidelity file, and a hard failure on
 every enabled route. Passing these checks is not malware/AV proof, and parsers
 are not sandboxed.
+
+The corrected, unreleased form of `0036` retains the PostgreSQL/SQLite database
+default `{}` as well as the Python `dict` default. This is intentional rolling-
+deployment compatibility: a pre-hardening application process does not know
+about `parsed_meta` and omits the column from its INSERT, so the database must
+supply the empty object until every old process is gone. The new application
+continues to create independent Python dictionaries and can read, insert, and
+update structured metadata normally. New application code is not safe before
+`0036` because the column does not yet exist.
+
+`quotations.0038_ensure_po_import_parsed_meta_db_default` is the forward-only,
+idempotent repair for a target that may already have recorded the original
+`0036`, whose generated PostgreSQL SQL dropped the temporary default. On
+PostgreSQL it performs only `ALTER COLUMN parsed_meta SET DEFAULT '{}'::jsonb`
+and does not rewrite rows. A fresh SQLite database already receives the
+persistent default in corrected `0036`; if an older SQLite target lacks it,
+`0038` uses Django's schema editor to preserve the logical rows while rebuilding
+that table. Before promotion, PostgreSQL `sqlmigrate quotations 0036` must show
+the JSONB default on the `ADD COLUMN` and no later `DROP DEFAULT`; the migration
+plan must also include `0038`.
 
 ### Gmail/AI disclosure
 
@@ -477,6 +498,12 @@ an explicit security decision and must include their tests and documentation.
 Re-run fresh previews after rollback; do not reuse a result produced under a
 different inspection contract. No provider, OAuth, AI, or infrastructure
 rollback is required because Task 2.4 changes none of them.
+
+`0038` deliberately has a no-op reverse operation: marking it unapplied does
+not drop the database default. Do not manually drop that default while any old
+application instance can still serve traffic, and normally retain it after
+cutover because it is compatible with both releases. Reversing `0036` still
+drops the entire column and is destructive once structured evidence exists.
 
 ### Task 2.2 migration note
 

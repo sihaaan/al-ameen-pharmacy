@@ -97,8 +97,9 @@ not in the repository.
 Use [DEPLOYMENT.md](DEPLOYMENT.md). Record exact commit, deployment IDs,
 migration plan, backup/recovery point, operator, UTC time, and smoke-test result.
 Against the dated production baseline, the full hardening branch is expected to
-apply `quotations.0035`, `0036`, and `0037`; verify the current live plan rather
-than assuming that snapshot is unchanged. Task 2.8 adds no Django migration.
+apply `quotations.0035`, `0036`, `0037`, and `0038`; verify the current live
+plan rather than assuming that snapshot is unchanged. Task 2.8 adds no Django
+migration.
 Verify that outcome-PO inspection metadata survives a parse/reload smoke test
 and retain all Task 2.2 delivery evidence tables.
 
