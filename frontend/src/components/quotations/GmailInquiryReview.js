@@ -21,6 +21,36 @@ const entityId = (value) => (
     : firstDefined(value, '')
 );
 
+const gmailReviewUiV2Enabled = (record) => (
+  record?.workflow_features?.gmail_review_ui_v2 === true
+);
+
+const identityReviewState = (record) => {
+  const nested = firstDefined(record?.identity_review, record?.analysis?.identity_review, {}) || {};
+  const approvalValues = [
+    record?.identity_review_approved,
+    nested.approved,
+    nested.is_approved,
+  ];
+  const approvalValue = approvalValues.find(
+    (value) => value !== undefined && value !== null
+  );
+  return {
+    hasApproval: approvalValue !== undefined,
+    approved: approvalValue === true,
+    fingerprint: String(firstDefined(
+      record?.identity_review_fingerprint,
+      nested.fingerprint,
+      ''
+    )),
+    suggestionApprovable: firstDefined(
+      record?.identity_suggestion_approvable,
+      nested.suggestion_approvable,
+      false
+    ) === true,
+  };
+};
+
 export const gmailImportRecordFromPayload = (payload) => {
   const data = payload?.data || payload || {};
   return firstDefined(
@@ -540,7 +570,9 @@ const GmailInquiryReview = ({
   const [selectedMessageIds, setSelectedMessageIds] = useState([]);
   const [reviewLines, setReviewLines] = useState([]);
   const [reviewDirty, setReviewDirty] = useState(false);
+  const [dirtyReviewRowKeys, setDirtyReviewRowKeys] = useState(() => new Set());
   const [identityConfirmed, setIdentityConfirmed] = useState(false);
+  const [identityReviewApproved, setIdentityReviewApproved] = useState(false);
   const [loading, setLoading] = useState(true);
   const [companiesLoading, setCompaniesLoading] = useState(true);
   const [contactsLoading, setContactsLoading] = useState(false);
@@ -579,7 +611,19 @@ const GmailInquiryReview = ({
         || String(previous.analyzed_at ?? '') !== String(next.analyzed_at ?? '')
         || String(previous.source_fingerprint ?? '') !== String(next.source_fingerprint ?? '')
       );
-      if (identityChanged || analysisChanged) setIdentityConfirmed(false);
+      if (identityChanged || analysisChanged) {
+        setIdentityConfirmed(false);
+      }
+      if (gmailReviewUiV2Enabled(next)) {
+        const incomingApproval = identityReviewState(incoming);
+        if (incomingApproval.hasApproval) {
+          setIdentityReviewApproved(incomingApproval.approved);
+        } else if (identityChanged || analysisChanged) {
+          setIdentityReviewApproved(false);
+        }
+      }
+    } else if (gmailReviewUiV2Enabled(next)) {
+      setIdentityReviewApproved(identityReviewState(next).approved);
     }
     setCompanyId(String(entityId(company) || ''));
     setContactId(String(entityId(contact) || ''));
@@ -588,6 +632,7 @@ const GmailInquiryReview = ({
       setSelectedMessageIds(initiallySelectedMessageIds(next));
       setReviewLines(normalizeReviewLines(next));
       setReviewDirty(false);
+      setDirtyReviewRowKeys(new Set());
     }
     return incoming;
   }, []);
@@ -716,6 +761,7 @@ const GmailInquiryReview = ({
     setErrorInfo(null);
     setNotice(null);
     setIdentityConfirmed(false);
+    setIdentityReviewApproved(false);
     let replacementImportId = '';
     let analysisImportId = targetId;
     let analysisRequested = false;
@@ -745,6 +791,7 @@ const GmailInquiryReview = ({
         // message selection is being analyzed.
         setReviewLines([]);
         setReviewDirty(false);
+        setDirtyReviewRowKeys(new Set());
       }
       const effectiveImportId = entityId(selectionRecord) || targetId;
       analysisImportId = effectiveImportId;
@@ -885,6 +932,8 @@ const GmailInquiryReview = ({
 
   const recordId = entityId(record);
   const status = importStatus(record || {});
+  const gmailReviewUiV2 = gmailReviewUiV2Enabled(record || {});
+  const identityReview = identityReviewState(record || {});
   const messages = useMemo(() => importMessages(record || {}), [record]);
   const messagesById = useMemo(
     () => new Map(messages.map((message, index) => [messageIdentity(message, index), message])),
@@ -1024,6 +1073,7 @@ const GmailInquiryReview = ({
   const patchIdentity = async (patch) => {
     if (!recordId) return;
     const generation = ++companyPatchGenerationRef.current;
+    const previousRecord = recordRef.current;
     setBusyAction('identity');
     setErrorInfo(null);
     try {
@@ -1033,6 +1083,32 @@ const GmailInquiryReview = ({
       }
     } catch (error) {
       if (mountedRef.current && generation === companyPatchGenerationRef.current) {
+        try {
+          const recoveryResponse = await quotationAPI.gmailInquiryImports.retrieve(recordId);
+          if (mountedRef.current && generation === companyPatchGenerationRef.current) {
+            applyPayload(recoveryResponse.data);
+          }
+        } catch {
+          if (mountedRef.current && generation === companyPatchGenerationRef.current) {
+            const previousCompany = firstDefined(
+              previousRecord?.selected_company,
+              previousRecord?.company,
+              previousRecord?.company_id,
+              ''
+            );
+            const previousContact = firstDefined(
+              previousRecord?.selected_contact,
+              previousRecord?.contact,
+              previousRecord?.contact_id,
+              ''
+            );
+            const previousCompanyId = String(entityId(previousCompany) || '');
+            const previousContactId = String(entityId(previousContact) || '');
+            setCompanyId(previousCompanyId);
+            setContactId(previousContactId);
+            setIdentityReviewApproved(identityReviewState(previousRecord || {}).approved);
+          }
+        }
         await handleError(
           error,
           'Save Gmail inquiry customer selection',
@@ -1051,6 +1127,7 @@ const GmailInquiryReview = ({
     setCompanyId(normalized);
     setContactId('');
     setIdentityConfirmed(false);
+    setIdentityReviewApproved(false);
     if (company) setCompanies((current) => mergeEntities(current, [company]));
     patchIdentity({ company: normalized || null, contact: null });
   };
@@ -1059,21 +1136,42 @@ const GmailInquiryReview = ({
     const normalized = String(value || '');
     setContactId(normalized);
     setIdentityConfirmed(false);
+    setIdentityReviewApproved(false);
     patchIdentity({ company: companyId || null, contact: normalized || null });
   };
 
   const updateReviewLine = (index, field, value) => {
+    const rowKey = reviewRowKey(reviewLines[index] || {});
+    const reviewUiV2 = gmailReviewUiV2Enabled(recordRef.current || {});
     setReviewLines((current) => current.map((line, candidateIndex) => (
       candidateIndex === index
         ? {
           ...line,
           [field]: value,
+          // Correcting a substantive field is itself an explicit staff
+          // review. An unchanged uncertain row still needs the separate
+          // "Mark reviewed" action below.
           staff_reviewed: field === 'included' ? line.staff_reviewed : true,
         }
         : line
     )));
+    const dirtyKey = rowKey || `__missing-row-${index}`;
+    setDirtyReviewRowKeys((current) => new Set([...current, dirtyKey]));
     setReviewDirty(true);
-    setIdentityConfirmed(false);
+    if (!reviewUiV2) setIdentityConfirmed(false);
+  };
+
+  const markReviewLineReviewed = (index) => {
+    const line = reviewLines[index] || {};
+    const rowKey = reviewRowKey(line);
+    if (!rowKey || reviewLineInvalid(line)) return;
+    setReviewLines((current) => current.map((candidate, candidateIndex) => (
+      candidateIndex === index
+        ? { ...candidate, staff_reviewed: true }
+        : candidate
+    )));
+    setDirtyReviewRowKeys((current) => new Set([...current, rowKey]));
+    setReviewDirty(true);
   };
 
   const saveReviewLines = async () => {
@@ -1085,7 +1183,14 @@ const GmailInquiryReview = ({
       });
       return;
     }
-    const missingStableKeys = reviewLines.some((line) => !reviewRowKey(line));
+    const reviewUiV2 = gmailReviewUiV2Enabled(recordRef.current || {});
+    const linesToSave = reviewUiV2
+      ? reviewLines.filter((line, index) => (
+        dirtyReviewRowKeys.has(reviewRowKey(line))
+        || dirtyReviewRowKeys.has(`__missing-row-${index}`)
+      ))
+      : reviewLines;
+    const missingStableKeys = linesToSave.some((line) => !reviewRowKey(line));
     if (missingStableKeys) {
       setNotice({
         type: 'error',
@@ -1099,12 +1204,13 @@ const GmailInquiryReview = ({
     setNotice(null);
     try {
       const response = await quotationAPI.gmailInquiryImports.update(recordId, {
-        review_lines: reviewLines.map((line) => ({
+        review_lines: linesToSave.map((line) => ({
           row_key: reviewRowKey(line),
           raw_name: String(line.raw_name || '').trim(),
           quantity: line.quantity === '' || line.quantity === null ? null : line.quantity,
           unit: String(line.unit || '').trim(),
           included: Boolean(line.included),
+          ...(reviewUiV2 ? { reviewed: Boolean(line.staff_reviewed) } : {}),
         })),
       });
       if (!actionIsCurrent(actionGeneration)) return;
@@ -1112,6 +1218,7 @@ const GmailInquiryReview = ({
       const effectiveImportId = entityId(incoming) || recordId;
       setReviewLines(normalizeReviewLines(recordRef.current || incoming));
       setReviewDirty(false);
+      setDirtyReviewRowKeys(new Set());
       if (String(effectiveImportId) !== String(recordId)) onClaimed?.(effectiveImportId);
       setNotice({
         type: 'success',
@@ -1123,6 +1230,59 @@ const GmailInquiryReview = ({
           error,
           'Save reviewed Gmail inquiry rows',
           `PATCH /quotations/gmail-inquiry-imports/${recordId}/`
+        );
+      }
+    } finally {
+      if (actionIsCurrent(actionGeneration)) setBusyAction('');
+    }
+  };
+
+  const approveCompany = async ({ company, contact = '', suggested = false }) => {
+    const normalizedCompanyId = String(
+      entityId(company)
+      || (company && typeof company === 'object' ? company.company_id : '')
+      || company
+      || ''
+    );
+    const normalizedContactId = String(entityId(contact) || contact || '');
+    const currentRecord = recordRef.current || {};
+    const fingerprint = identityReviewState(currentRecord).fingerprint;
+    if (
+      !recordId
+      || !normalizedCompanyId
+      || !fingerprint
+      || busyAction
+      || analysisActive
+    ) return;
+    const actionGeneration = ++actionGenerationRef.current;
+    setBusyAction('approve-company');
+    setErrorInfo(null);
+    setNotice(null);
+    setIdentityReviewApproved(false);
+    setCompanyId(normalizedCompanyId);
+    setContactId(normalizedContactId);
+    if (company && typeof company === 'object') {
+      setCompanies((current) => mergeEntities(current, [company]));
+    }
+    try {
+      const response = await quotationAPI.gmailInquiryImports.approveCompany(recordId, {
+        company: normalizedCompanyId,
+        contact: normalizedContactId || null,
+        suggested: Boolean(suggested),
+        identity_review_fingerprint: fingerprint,
+      });
+      if (!actionIsCurrent(actionGeneration)) return;
+      applyPayload(response.data, { preserveSelection: true });
+      setNotice({
+        type: 'success',
+        message: 'Customer company approved for this Gmail evidence.',
+      });
+    } catch (error) {
+      if (actionIsCurrent(actionGeneration)) {
+        await handleError(
+          error,
+          'Approve Gmail inquiry company',
+          `POST /quotations/gmail-inquiry-imports/${recordId}/approve_company/`
         );
       }
     } finally {
@@ -1201,7 +1361,8 @@ const GmailInquiryReview = ({
   };
 
   const confirmImport = async () => {
-    if (!recordId || !companyId || !identityConfirmed || busyAction || analysisActive) return;
+    const identityApproved = gmailReviewUiV2 ? identityReviewApproved : identityConfirmed;
+    if (!recordId || !companyId || !identityApproved || busyAction || analysisActive) return;
     const actionGeneration = ++actionGenerationRef.current;
     setBusyAction('confirm');
     setErrorInfo(null);
@@ -1211,6 +1372,9 @@ const GmailInquiryReview = ({
         company: companyId,
         contact: contactId || null,
       };
+      if (gmailReviewUiV2) {
+        payload.identity_review_fingerprint = identityReview.fingerprint;
+      }
       const includedSourceKeys = reviewLines
         .filter((line) => line.included)
         .flatMap(sourceKeysForLine)
@@ -1272,6 +1436,19 @@ const GmailInquiryReview = ({
     || aiIdentityEmail
   );
   const companySuggestion = suggestedCompany(record || {});
+  const companySuggestionId = String(firstDefined(
+    entityId(companySuggestion),
+    companySuggestion?.company_id,
+    ''
+  ));
+  const selectedCompanyIsSuggestion = Boolean(
+    companySuggestionId && companySuggestionId === String(companyId)
+  );
+  const selectedSuggestionCanUseOneClickApproval = Boolean(
+    identityReview.suggestionApprovable
+    && selectedCompanyIsSuggestion
+    && !contactId
+  );
   const companySuggestionEvidence = companySuggestion
     ? companySuggestionEvidenceLabel(companySuggestion)
     : '';
@@ -1301,7 +1478,7 @@ const GmailInquiryReview = ({
     || analysisActive
     || reviewDirty
     || !companyId
-    || !identityConfirmed
+    || !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
     || !messageSelectionValid
     || invalidIncludedLines.length > 0
     || uncertainIncludedLines.length > 0
@@ -1431,11 +1608,34 @@ const GmailInquiryReview = ({
             </div>
             <button
               type="button"
-              className="qm-secondary"
-              disabled={readOnlyImport || analysisActive || Boolean(busyAction)}
-              onClick={() => selectCompany(companySuggestion.id, companySuggestion)}
+              className={
+                gmailReviewUiV2 && identityReview.suggestionApprovable
+                  ? 'qm-primary'
+                  : 'qm-secondary'
+              }
+              disabled={
+                readOnlyImport
+                || analysisActive
+                || Boolean(busyAction)
+                || (
+                  gmailReviewUiV2
+                  && identityReview.suggestionApprovable
+                  && !identityReview.fingerprint
+                )
+              }
+              onClick={() => (
+                gmailReviewUiV2 && identityReview.suggestionApprovable
+                  ? approveCompany({ company: companySuggestion, contact: '', suggested: true })
+                  : selectCompany(companySuggestionId, companySuggestion)
+              )}
             >
-              Use suggested company
+              {busyAction === 'approve-company'
+                ? 'Approving...'
+                : gmailReviewUiV2 && identityReview.suggestionApprovable
+                  ? 'Approve suggested company'
+                  : gmailReviewUiV2
+                    ? 'Select company for manual approval'
+                  : 'Use suggested company'}
             </button>
           </div>
         )}
@@ -1537,15 +1737,62 @@ const GmailInquiryReview = ({
             )}</strong>
           </div>
         </div>
-        <label className="qm-checkbox qm-gmail-identity-confirmation">
-          <input
-            type="checkbox"
-            checked={identityConfirmed}
-            disabled={readOnlyImport || !companyId || analysisActive || Boolean(busyAction)}
-            onChange={(event) => setIdentityConfirmed(event.target.checked)}
-          />
-          I checked the sender and evidence and confirm that this inquiry belongs to the selected company.
-        </label>
+        {gmailReviewUiV2 ? (
+          <div
+            className={`qm-gmail-identity-approval${identityReviewApproved ? ' is-approved' : ''}`}
+          >
+            <div role="status" aria-live="polite">
+              <strong>
+                {identityReviewApproved
+                  ? 'Company approved for this evidence'
+                  : 'Company approval required'}
+              </strong>
+              <span>
+                {identityReviewApproved
+                  ? `Approved as ${selectedCompany?.name || 'the selected company'}. Row-only edits will not remove this approval.`
+                  : companyId
+                    ? 'Review the sender and evidence, then approve the selected company. A purchaser is never selected automatically.'
+                    : 'Choose a company, or use the suggested-company approval above. A purchaser is optional and never selected automatically.'}
+              </span>
+            </div>
+            {!identityReviewApproved && companyId && (
+              <button
+                type="button"
+                className="qm-primary"
+                disabled={
+                  readOnlyImport
+                  || analysisActive
+                  || Boolean(busyAction)
+                  || !identityReview.fingerprint
+                }
+                onClick={() => approveCompany({
+                  company: selectedCompany || companyId,
+                  contact: contactId,
+                  suggested: selectedSuggestionCanUseOneClickApproval,
+                })}
+              >
+                {busyAction === 'approve-company'
+                  ? 'Approving...'
+                  : selectedSuggestionCanUseOneClickApproval
+                    ? 'Approve suggested company'
+                    : 'Approve selected company'}
+              </button>
+            )}
+            {!identityReview.fingerprint && !readOnlyImport && (
+              <small>Reanalyze this Gmail inquiry to create a current identity-review fingerprint.</small>
+            )}
+          </div>
+        ) : (
+          <label className="qm-checkbox qm-gmail-identity-confirmation">
+            <input
+              type="checkbox"
+              checked={identityConfirmed}
+              disabled={readOnlyImport || !companyId || analysisActive || Boolean(busyAction)}
+              onChange={(event) => setIdentityConfirmed(event.target.checked)}
+            />
+            I checked the sender and evidence and confirm that this inquiry belongs to the selected company.
+          </label>
+        )}
       </div>
 
       <div className="qm-panel qm-gmail-lines-panel">
@@ -1704,9 +1951,26 @@ const GmailInquiryReview = ({
                         : <span className={`qm-gmail-confidence ${confidence >= 85 ? 'high' : confidence >= 65 ? 'medium' : 'low'}`}>{confidence}%</span>}
                     </td>
                     <td data-label="Status">
-                      <span className={`qm-gmail-line-status status-${line.staff_reviewed ? 'reviewed' : lineStatus}`}>
-                        {line.staff_reviewed ? 'staff reviewed' : lineStatus.replaceAll('_', ' ')}
-                      </span>
+                      <div className="qm-gmail-row-review-state">
+                        <span className={`qm-gmail-line-status status-${line.staff_reviewed ? 'reviewed' : lineStatus}`}>
+                          {line.staff_reviewed ? 'staff reviewed' : lineStatus.replaceAll('_', ' ')}
+                        </span>
+                        {gmailReviewUiV2 && reviewLineUncertain(line) && !line.staff_reviewed && (
+                          <button
+                            type="button"
+                            className="qm-secondary small qm-gmail-mark-reviewed"
+                            disabled={
+                              readOnlyImport
+                              || analysisActive
+                              || Boolean(busyAction)
+                              || reviewLineInvalid(line)
+                            }
+                            onClick={() => markReviewLineReviewed(index)}
+                          >
+                            Mark reviewed
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td data-label="Source evidence">
                       <div className="qm-gmail-row-evidence">
@@ -1805,7 +2069,7 @@ const GmailInquiryReview = ({
                         ? 'Retry analysis above or exclude every row without source evidence.'
                         : !companyId
                           ? 'Select the customer company first.'
-                          : !identityConfirmed
+                          : !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
                             ? 'Confirm the customer identity first.'
                             : !messageSelectionValid
                               ? 'This Gmail import has no usable source messages. Return to Gmail and import it again.'

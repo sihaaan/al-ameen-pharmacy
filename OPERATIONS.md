@@ -58,6 +58,23 @@ decisions. A database rollback is normally unnecessary; if explicitly
 approved, reverse `0039` only after all application instances have the flag
 disabled because reversal deletes the metrics table.
 
+### Persisted Gmail company and uncertainty review
+
+`QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` defaults to `0`. When enabled, the
+browser receives a keyed, opaque identity-review fingerprint and the server
+records the employee's explicit company acknowledgement. The acknowledgement
+survives item wording, quantity, unit, inclusion, and row-review edits, but it
+becomes invalid after source selection, analysis generation, company/contact,
+sender evidence, or identity evidence changes. An unchanged uncertain row has
+a visible `Mark reviewed` action; a substantive correction plus save is also
+an explicit review decision.
+
+One-click approval is available only for a current safe recommendation and
+always leaves the purchaser blank. Forwarded-only, conflicting, ambiguous, or
+missing identities require manual company selection and approval. Monitor 409
+stale-review responses and rejected suggestion attempts during rollout. Set
+the flag back to `0` for immediate rollback; no database reversal is needed.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

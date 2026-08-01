@@ -87,12 +87,22 @@ from .gmail_workflow_metrics import (
     EVENT_ANALYSIS_FAILED,
     EVENT_ANALYSIS_REQUESTED,
     EVENT_ANALYSIS_STARTED,
+    EVENT_COMPANY_APPROVED,
     EVENT_HANDOFF_CLAIMED,
     EVENT_HANDOFF_CREATED,
     EVENT_REVIEWED_ROWS_SAVED,
     record_gmail_workflow_metric,
 )
+from .gmail_review_state import (
+    GMAIL_IDENTITY_MATCH_VERSION,
+    build_gmail_identity_approval,
+    clear_gmail_identity_approval,
+    gmail_identity_approval_is_current,
+    gmail_identity_evidence_fingerprint,
+    gmail_suggested_company_is_approvable,
+)
 from .services import create_imported_inquiry, create_quotation_from_inquiry
+from .workflow_features import gmail_review_ui_v2_enabled
 
 
 HANDOFF_TOKEN_BYTES = 32
@@ -288,6 +298,10 @@ class GmailInquiryImportError(ValidationError):
 
 class GmailInquiryImportBusy(GmailInquiryImportError):
     """The same intake is already being analyzed by another request."""
+
+
+class GmailInquiryImportStale(GmailInquiryImportError):
+    """The employee acted on an older analysis or identity projection."""
 
 
 @dataclass(frozen=True)
@@ -1294,7 +1308,6 @@ AI_COMPANY_NAME_STRONG_SCORE = 88
 AI_COMPANY_NAME_MIN_MARGIN = 8
 AI_IDENTITY_MIN_CONFIDENCE = 0.65
 AI_IDENTITY_STRONG_CONFIDENCE = 0.85
-GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v4"
 COMPANY_IDENTITY_LEGAL_SUFFIXES = {
     "co",
     "company",
@@ -4027,7 +4040,7 @@ def _gmail_identity_requires_reanalysis(candidates, analysis):
 
 def _quarantine_stale_gmail_identity(candidates, analysis):
     candidates = dict(candidates or {})
-    analysis = dict(analysis or {})
+    analysis = clear_gmail_identity_approval(analysis)
     candidates["companies"] = []
     candidates["contacts"] = []
     candidates["recommended_company_id"] = None
@@ -5255,13 +5268,23 @@ def update_gmail_inquiry_identity(
                 "A confirmed Gmail inquiry cannot be changed or revised."
             )
         _assert_claim_owner(locked, actor)
-        if company is not None and not isinstance(company, Company):
-            company = Company.objects.filter(pk=company, is_active=True).first()
+        if company is not None and (
+            gmail_review_ui_v2_enabled() or not isinstance(company, Company)
+        ):
+            company_id = getattr(company, "pk", company)
+            company = Company.objects.filter(
+                pk=company_id,
+                is_active=True,
+            ).first()
             if not company:
                 raise GmailInquiryImportError("Select an active customer company.")
-        if contact is not None and not isinstance(contact, CompanyContact):
+        if contact is not None and (
+            gmail_review_ui_v2_enabled()
+            or not isinstance(contact, CompanyContact)
+        ):
+            contact_id = getattr(contact, "pk", contact)
             contact = CompanyContact.objects.filter(
-                pk=contact,
+                pk=contact_id,
                 is_active=True,
             ).first()
             if not contact:
@@ -5270,14 +5293,140 @@ def update_gmail_inquiry_identity(
             raise GmailInquiryImportError(
                 "The selected contact does not belong to that company."
             )
+        identity_changed = bool(
+            locked.selected_company_id != getattr(company, "pk", None)
+            or locked.selected_contact_id != getattr(contact, "pk", None)
+        )
         locked.selected_company = company
         locked.selected_contact = contact
+        update_fields = [
+            "selected_company",
+            "selected_contact",
+            "updated_at",
+        ]
+        if gmail_review_ui_v2_enabled() and identity_changed:
+            locked.analysis = clear_gmail_identity_approval(locked.analysis)
+            update_fields.append("analysis")
+        locked.save(update_fields=update_fields)
+        return locked
+
+
+def approve_gmail_inquiry_company(
+    gmail_import,
+    actor,
+    *,
+    company,
+    contact=None,
+    suggested=False,
+    identity_review_fingerprint,
+):
+    """Persist one explicit, evidence-bound company acknowledgement."""
+
+    _require_staff(actor)
+    if not gmail_review_ui_v2_enabled():
+        raise GmailInquiryImportError(
+            "The persisted Gmail company approval workflow is not enabled."
+        )
+    with transaction.atomic():
+        locked = _record_for_update(gmail_import)
+        if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
+            raise GmailInquiryImportError(
+                "A confirmed Gmail inquiry cannot be changed or revised."
+            )
+        _assert_claim_owner(locked, actor)
+        if locked.status not in {
+            GmailInquiryImport.STATUS_READY,
+            GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+        }:
+            raise GmailInquiryImportError(
+                "Analyze this Gmail inquiry before approving its company."
+            )
+        if _gmail_identity_requires_reanalysis(locked.candidates, locked.analysis):
+            raise GmailInquiryImportError(
+                "Customer identity matching rules changed. Reanalyze this Gmail inquiry."
+            )
+        current_fingerprint = gmail_identity_evidence_fingerprint(locked)
+        company_id = getattr(company, "pk", company)
+        company = Company.objects.filter(pk=company_id, is_active=True).first()
+        if not company:
+            raise GmailInquiryImportError("Select an active customer company.")
+        if contact is not None:
+            contact_id = getattr(contact, "pk", contact)
+            contact = CompanyContact.objects.filter(
+                pk=contact_id,
+                is_active=True,
+            ).first()
+            if not contact:
+                raise GmailInquiryImportError("Select an active customer contact.")
+        if contact and contact.company_id != company.id:
+            raise GmailInquiryImportError(
+                "The selected contact does not belong to that company."
+            )
+        approval = dict((locked.analysis or {}).get("identity_approval") or {})
+        submitted_fingerprint = str(identity_review_fingerprint or "")
+        if (
+            gmail_identity_approval_is_current(locked)
+            and locked.selected_company_id == company.id
+            and locked.selected_contact_id == getattr(contact, "pk", None)
+            and any(
+                hmac.compare_digest(submitted_fingerprint, candidate)
+                for candidate in {
+                    current_fingerprint,
+                    str(approval.get("request_fingerprint") or ""),
+                }
+                if candidate
+            )
+        ):
+            return locked
+        if not hmac.compare_digest(
+            submitted_fingerprint,
+            current_fingerprint,
+        ):
+            raise GmailInquiryImportStale(
+                "The customer identity evidence changed. Review it again."
+            )
+        if suggested:
+            if (
+                (locked.candidates or {}).get("recommended_company_id")
+                != company.id
+                or not gmail_suggested_company_is_approvable(locked)
+            ):
+                raise GmailInquiryImportError(
+                    "The suggested company is missing, conflicting, or needs manual review."
+                )
+            # A one-click recommendation never chooses a purchaser.
+            contact = None
+        if (
+            locked.selected_company_id == company.id
+            and locked.selected_contact_id == getattr(contact, "pk", None)
+            and gmail_identity_approval_is_current(locked)
+        ):
+            return locked
+
+        locked.selected_company = company
+        locked.selected_contact = contact
+        analysis = clear_gmail_identity_approval(locked.analysis)
+        locked.analysis = analysis
+        analysis["identity_approval"] = build_gmail_identity_approval(
+            locked,
+            actor,
+            suggested=suggested,
+            request_fingerprint=submitted_fingerprint,
+        )
+        locked.analysis = _json_safe(analysis)
         locked.save(
             update_fields=[
                 "selected_company",
                 "selected_contact",
+                "analysis",
                 "updated_at",
             ]
+        )
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_COMPANY_APPROVED,
+            outcome_code="success",
+            feature_flags={"gmail_review_ui_v2": True},
         )
         return locked
 
@@ -5336,6 +5485,8 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
                 "One or more reviewed Gmail rows are stale. Reopen the analysis."
             )
 
+        reviewed_count = 0
+        review_ui_v2 = gmail_review_ui_v2_enabled()
         for submitted in review_lines:
             target = by_key[str(submitted.get("row_key") or "").strip()]
             raw_name = str(submitted.get("raw_name") or "").strip()
@@ -5375,21 +5526,52 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
                 raise GmailInquiryImportError(
                     "A reviewed Gmail unit exceeds 50 characters."
                 )
+            try:
+                previous_quantity = Decimal(str(target.get("quantity") or ""))
+            except Exception:
+                previous_quantity = None
+            substantive_change = bool(
+                raw_name != str(target.get("raw_name") or "").strip()
+                or quantity != previous_quantity
+                or unit != str(target.get("unit") or "").strip()
+                or included != bool(target.get("included", True))
+            )
+            mark_reviewed = bool(
+                not review_ui_v2
+                or submitted.get("reviewed") is True
+                or substantive_change
+            )
             target["raw_name"] = raw_name
             target["quantity"] = str(quantity) if quantity is not None else None
             target["unit"] = unit
             target["included"] = included
-            target["reviewed_by_user"] = True
-            target["reviewed_by_user_id"] = actor.pk
-            target["reviewed_at"] = timezone.now().isoformat()
-            target["review_status"] = "manual"
-            if included and str(target.get("operation") or "") == "uncertain":
+            if mark_reviewed:
+                target["reviewed_by_user"] = True
+                target["reviewed_by_user_id"] = actor.pk
+                target["reviewed_at"] = timezone.now().isoformat()
+                target["review_status"] = "manual"
+                reviewed_count += 1
+            if (
+                mark_reviewed
+                and included
+                and str(target.get("operation") or "") == "uncertain"
+            ):
                 target["original_operation"] = "uncertain"
                 target["operation"] = "changed"
                 target["parse_status"] = "parsed"
                 target["semantic_reason"] = (
                     f"{target.get('semantic_reason') or ''} Explicitly reviewed by staff."
                 ).strip()
+            elif (
+                review_ui_v2
+                and mark_reviewed
+                and included
+                and str(target.get("parse_status") or "") == "ignored"
+            ):
+                # Re-including a previously excluded row is an explicit staff
+                # decision. Do not leave the row in the server-side ignored
+                # state where confirmation would silently omit it.
+                target["parse_status"] = "parsed"
             if not included:
                 target["parse_status"] = "ignored"
 
@@ -5403,7 +5585,7 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
             locked,
             EVENT_REVIEWED_ROWS_SAVED,
             counts={
-                "reviewed_row_count": len(review_lines),
+                "reviewed_row_count": reviewed_count,
                 "included_row_count": sum(
                     1
                     for row in rows
@@ -5475,15 +5657,20 @@ def analyze_gmail_inquiry_import(
         locked.analysis_started_at = timezone.now()
         locked.analysis_attempts += 1
         locked.errors = []
-        locked.save(
-            update_fields=[
-                "status",
-                "analysis_started_at",
-                "analysis_attempts",
-                "errors",
-                "updated_at",
-            ]
-        )
+        analysis_update_fields = [
+            "status",
+            "analysis_started_at",
+            "analysis_attempts",
+            "errors",
+            "updated_at",
+        ]
+        if (
+            gmail_review_ui_v2_enabled()
+            and "identity_approval" in (locked.analysis or {})
+        ):
+            locked.analysis = clear_gmail_identity_approval(locked.analysis)
+            analysis_update_fields.append("analysis")
+        locked.save(update_fields=analysis_update_fields)
         analysis_attempt = locked.analysis_attempts
         analysis_fingerprint = locked.source_fingerprint
         analysis_contracts = {
@@ -5860,6 +6047,7 @@ def confirm_gmail_inquiry_import(
     company=None,
     contact=None,
     selected_source_keys=None,
+    identity_review_fingerprint=None,
 ):
     """Create one inquiry and its first quotation, or return the existing pair."""
 
@@ -5995,6 +6183,25 @@ def confirm_gmail_inquiry_import(
             raise GmailInquiryImportError(
                 "The selected contact does not belong to that company."
             )
+        if gmail_review_ui_v2_enabled():
+            if identity_review_fingerprint and not hmac.compare_digest(
+                str(identity_review_fingerprint),
+                gmail_identity_evidence_fingerprint(locked),
+            ):
+                raise GmailInquiryImportStale(
+                    "The customer identity approval changed. Review it again."
+                )
+            if not gmail_identity_approval_is_current(locked):
+                raise GmailInquiryImportError(
+                    "Review and explicitly approve the customer company before creating the quotation."
+                )
+            if (
+                locked.selected_company_id != company.id
+                or locked.selected_contact_id != getattr(contact, "pk", None)
+            ):
+                raise GmailInquiryImportError(
+                    "The confirmed company or contact changed. Approve it again."
+                )
 
         rows = _selected_analysis_rows(locked, selected_source_keys)
         rows = _rows_for_company(rows, company)

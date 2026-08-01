@@ -268,6 +268,23 @@ no quotation or delivery rollback is required. Prefer retaining the additive
 table during an application rollback. Reversing `0039` deletes metrics only
 and must happen after every running application instance has the flag disabled.
 
+### Gmail review UI V2 (disabled by default)
+
+`QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=0` preserves the existing review UI and
+confirmation contract. Enabling it exposes a server-owned workflow flag and
+requires staff to persist an evidence-bound company acknowledgement before a
+new Gmail inquiry can create a quotation. It also permits an explicit
+`reviewed` decision for an unchanged uncertain row. Suggested-company approval
+never selects a purchaser, and forwarded-only, missing, stale, ambiguous, or
+conflicting suggestions cannot use the one-click approval path.
+
+No migration is required: the bounded approval audit is stored in the existing
+Gmail import analysis JSON. Roll out after the application code is deployed,
+then enable for a controlled mailbox cohort. Roll back by setting the flag to
+`0`; legacy company confirmation and full-row review behavior remain intact.
+Disabling the flag does not delete approval audit data and does not change any
+Inquiry, Quotation, Product, price, preview, or delivery record.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

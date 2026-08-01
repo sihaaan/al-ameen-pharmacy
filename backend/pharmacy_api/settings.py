@@ -382,6 +382,11 @@ QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED = env_bool(
     "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
     False,
 )
+# Persisted company acknowledgement and explicit per-row review controls.
+QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED = env_bool(
+    "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

@@ -104,6 +104,10 @@ const quotationAPI = {
     retrieve: (id) => axiosInstance.get(`/quotations/gmail-inquiry-imports/${id}/`),
     update: (id, data) => axiosInstance.patch(`/quotations/gmail-inquiry-imports/${id}/`, data),
     analyze: (id, data = {}) => axiosInstance.post(`/quotations/gmail-inquiry-imports/${id}/analyze/`, data),
+    approveCompany: (id, data) => axiosInstance.post(
+      `/quotations/gmail-inquiry-imports/${id}/approve_company/`,
+      data
+    ),
     confirm: (id, data) => axiosInstance.post(`/quotations/gmail-inquiry-imports/${id}/confirm/`, data),
     attachment: (id, sourceKey) => axiosInstance.get(
       `/quotations/gmail-inquiry-imports/${id}/attachment/`,

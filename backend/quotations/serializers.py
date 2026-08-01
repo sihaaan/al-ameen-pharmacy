@@ -10,11 +10,13 @@ from api.serializers import ProductListSerializer
 from api.upload_validation import validate_image_upload
 
 from .company_matching import find_similar_companies
+from .gmail_review_state import gmail_identity_review_projection
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
 from .private_storage import is_valid_private_ref
 from .quotation_email_delivery import quotation_review_fingerprint
 from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
+from .workflow_features import gmail_review_ui_v2_enabled, quotation_workflow_features
 from .models import (
     Company,
     CompanyContact,
@@ -259,6 +261,10 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
     lines = serializers.SerializerMethodField()
     inquiry_id = serializers.IntegerField(read_only=True)
     quotation_id = serializers.IntegerField(read_only=True)
+    workflow_features = serializers.SerializerMethodField()
+    identity_review = serializers.SerializerMethodField()
+    identity_review_fingerprint = serializers.SerializerMethodField()
+    identity_review_approved = serializers.SerializerMethodField()
 
     class Meta:
         model = GmailInquiryImport
@@ -301,6 +307,10 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
             "subject",
             "preview",
             "lines",
+            "workflow_features",
+            "identity_review",
+            "identity_review_fingerprint",
+            "identity_review_approved",
             "confirmed_at",
             "created_at",
             "updated_at",
@@ -364,6 +374,28 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
 
     def get_lines(self, obj):
         return ((obj.analysis or {}).get("preview") or {}).get("lines") or []
+
+    def get_workflow_features(self, _obj):
+        return quotation_workflow_features()
+
+    def _identity_review_projection(self, obj):
+        cache = getattr(self, "_gmail_identity_review_cache", {})
+        key = (obj.pk, obj.updated_at)
+        if key not in cache:
+            cache[key] = gmail_identity_review_projection(obj)
+            self._gmail_identity_review_cache = cache
+        return cache[key]
+
+    def get_identity_review(self, obj):
+        return self._identity_review_projection(obj)
+
+    def get_identity_review_fingerprint(self, obj):
+        return self._identity_review_projection(obj)[
+            "identity_review_fingerprint"
+        ]
+
+    def get_identity_review_approved(self, obj):
+        return self._identity_review_projection(obj)["approved"]
 
 
 class GmailInquiryClaimSerializer(serializers.Serializer):
@@ -448,6 +480,12 @@ class GmailInquiryConfirmSerializer(serializers.Serializer):
         required=False,
         allow_empty=False,
     )
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
 
     def validate(self, attrs):
         company = attrs.get("company")
@@ -478,6 +516,36 @@ class GmailInquiryConfirmSerializer(serializers.Serializer):
         return attrs
 
 
+class GmailInquiryApproveCompanySerializer(serializers.Serializer):
+    company = serializers.PrimaryKeyRelatedField(
+        queryset=Company.objects.filter(is_active=True),
+    )
+    contact = serializers.PrimaryKeyRelatedField(
+        queryset=CompanyContact.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    suggested = serializers.BooleanField()
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+    )
+
+    def validate(self, attrs):
+        company = attrs["company"]
+        contact = attrs.get("contact")
+        if contact and contact.company_id != company.id:
+            raise serializers.ValidationError(
+                {"contact": "Contact must belong to the selected company."}
+            )
+        if attrs.get("suggested") and contact:
+            raise serializers.ValidationError(
+                {"contact": "A suggested company approval cannot select a purchaser."}
+            )
+        return attrs
+
+
 class GmailInquiryReviewLineUpdateSerializer(serializers.Serializer):
     row_key = serializers.CharField(min_length=16, max_length=64)
     raw_name = serializers.CharField(
@@ -496,16 +564,20 @@ class GmailInquiryReviewLineUpdateSerializer(serializers.Serializer):
         trim_whitespace=True,
     )
     included = serializers.BooleanField()
+    reviewed = serializers.BooleanField(required=False)
 
     def to_internal_value(self, data):
         if isinstance(data, dict):
-            unknown = set(data) - {
+            allowed = {
                 "row_key",
                 "raw_name",
                 "quantity",
                 "unit",
                 "included",
             }
+            if gmail_review_ui_v2_enabled():
+                allowed.add("reviewed")
+            unknown = set(data) - allowed
             if unknown:
                 raise serializers.ValidationError(
                     {

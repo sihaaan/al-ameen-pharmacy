@@ -26,6 +26,7 @@ jest.mock('../../api/quotations', () => ({
       retrieve: jest.fn(),
       update: jest.fn(),
       analyze: jest.fn(),
+      approveCompany: jest.fn(),
       confirm: jest.fn(),
       attachment: jest.fn(),
     },
@@ -199,6 +200,14 @@ describe('GmailInquiryReview', () => {
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValue({ data: baseRecord });
     quotationAPI.gmailInquiryImports.update.mockResolvedValue({ data: reviewedRecord });
     quotationAPI.gmailInquiryImports.analyze.mockResolvedValue({ data: reviewedRecord });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValue({
+      data: {
+        ...baseRecord,
+        workflow_features: { gmail_review_ui_v2: true },
+        identity_review_approved: true,
+        identity_review_fingerprint: 'identity-fingerprint-v2',
+      },
+    });
     quotationAPI.gmailInquiryImports.confirm.mockResolvedValue({
       data: {
         ...reviewedRecord,
@@ -1011,5 +1020,343 @@ describe('GmailInquiryReview', () => {
     fireEvent.click(screen.getByRole('button', { name: /open linked quotation/i }));
     expect(onOpenQuote).toHaveBeenCalledWith(99);
     expect(screen.queryByRole('button', { name: /confirm & open quotation/i })).not.toBeInTheDocument();
+  });
+
+  test('uses one server-verified action to approve a suggested company without selecting a purchaser', async () => {
+    const unapprovedRecord = {
+      ...baseRecord,
+      company: null,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: false,
+      identity_review_fingerprint: 'identity-fingerprint-v2',
+      identity_review: { suggestion_approvable: true },
+    };
+    const approvedRecord = {
+      ...unapprovedRecord,
+      company: 7,
+      identity_review_approved: true,
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unapprovedRecord });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: approvedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const approveSuggestion = await screen.findByRole('button', {
+      name: /approve suggested company/i,
+    });
+    expect(screen.queryByLabelText(/confirm that this inquiry belongs/i)).not.toBeInTheDocument();
+    fireEvent.click(approveSuggestion);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      suggested: true,
+      identity_review_fingerprint: 'identity-fingerprint-v2',
+    }));
+    expect(await screen.findByText(/company approved for this evidence/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Contact / Purchaser')).toHaveValue('');
+  });
+
+  test('can approve an already-selected safe suggestion', async () => {
+    const selectedSuggestion = {
+      ...baseRecord,
+      company: 7,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: false,
+      identity_review_fingerprint: 'identity-fingerprint-selected',
+      identity_review: { suggestion_approvable: true },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: selectedSuggestion });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({
+      data: { ...selectedSuggestion, identity_review_approved: true },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: /approve suggested company/i,
+    }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      suggested: true,
+      identity_review_fingerprint: 'identity-fingerprint-selected',
+    }));
+    expect(await screen.findByText(/company approved for this evidence/i)).toBeInTheDocument();
+  });
+
+  test('keeps the approval action available after a transient suggested-approval failure', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const unapprovedRecord = {
+      ...baseRecord,
+      company: null,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: false,
+      identity_review_fingerprint: 'identity-fingerprint-retry',
+      identity_review: { suggestion_approvable: true },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unapprovedRecord });
+    quotationAPI.gmailInquiryImports.approveCompany
+      .mockRejectedValueOnce(new Error('temporary network failure'))
+      .mockResolvedValueOnce({
+        data: {
+          ...unapprovedRecord,
+          company: 7,
+          identity_review_approved: true,
+        },
+      });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: /approve suggested company/i,
+    }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledTimes(1));
+    const retryButton = await screen.findByRole('button', {
+      name: /approve suggested company/i,
+    });
+    await waitFor(() => expect(retryButton).toBeEnabled());
+    fireEvent.click(retryButton);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/company approved for this evidence/i)).toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
+  test('marks one uncertain row reviewed and saves only that dirty row while preserving company approval', async () => {
+    const approvedRecord = {
+      ...baseRecord,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: true,
+      identity_review_fingerprint: 'identity-fingerprint-v2',
+    };
+    const savedRecord = {
+      ...approvedRecord,
+      analysis: {
+        ...approvedRecord.analysis,
+        preview: {
+          ...approvedRecord.analysis.preview,
+          lines: [{
+            ...approvedRecord.analysis.preview.lines[0],
+            reviewed_by_user: true,
+          }],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: approvedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: savedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(/company approved for this evidence/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /mark reviewed/i }));
+    expect(screen.getByText('staff reviewed')).toBeInTheDocument();
+    expect(screen.getByText(/company approved for this evidence/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /save reviewed rows/i }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      review_lines: [{
+        row_key: 'row-key-000000000001',
+        raw_name: 'Bandage',
+        quantity: '10.000',
+        unit: 'Pcs',
+        included: true,
+        reviewed: true,
+      }],
+    }));
+    expect(screen.getByText(/company approved for this evidence/i)).toBeInTheDocument();
+
+    const confirmButton = screen.getByRole('button', { name: /confirm & open quotation/i });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      identity_review_fingerprint: 'identity-fingerprint-v2',
+      selected_source_keys: ['attachment:opaque-1'],
+    }));
+  });
+
+  test('treats a substantive row correction as explicit review in the v2 payload', async () => {
+    const approvedRecord = {
+      ...baseRecord,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: true,
+      identity_review_fingerprint: 'identity-fingerprint-v2',
+    };
+    const correctedRecord = {
+      ...approvedRecord,
+      analysis: {
+        ...approvedRecord.analysis,
+        preview: {
+          ...approvedRecord.analysis.preview,
+          lines: [{
+            ...approvedRecord.analysis.preview.lines[0],
+            raw_name: 'Sterile Bandage',
+            reviewed_by_user: true,
+          }],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: approvedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: correctedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    expect(screen.getByText('staff reviewed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /save reviewed rows/i }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      review_lines: [{
+        row_key: 'row-key-000000000001',
+        raw_name: 'Sterile Bandage',
+        quantity: '10.000',
+        unit: 'Pcs',
+        included: true,
+        reviewed: true,
+      }],
+    }));
+    expect(screen.getByText(/company approved for this evidence/i)).toBeInTheDocument();
+  });
+
+  test('requires fresh server approval after a company or purchaser selection changes', async () => {
+    const approvedRecord = {
+      ...reviewedRecord,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: true,
+      identity_review_fingerprint: 'identity-fingerprint-v2',
+    };
+    const changedRecord = {
+      ...approvedRecord,
+      contact: 8,
+      identity_review_approved: false,
+      identity_review_fingerprint: 'identity-fingerprint-v2-contact',
+    };
+    const reapprovedRecord = {
+      ...changedRecord,
+      identity_review_approved: true,
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: approvedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: changedRecord });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: reapprovedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(/company approved for this evidence/i)).toBeInTheDocument();
+    const contactSelect = screen.getByLabelText('Contact / Purchaser');
+    await waitFor(() => expect(contactSelect).toBeEnabled());
+    fireEvent.change(contactSelect, { target: { value: '8' } });
+    expect(screen.getByText(/company approval required/i)).toBeInTheDocument();
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: '8',
+    }));
+
+    fireEvent.click(await screen.findByRole('button', { name: /approve selected company/i }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: '8',
+      suggested: false,
+      identity_review_fingerprint: 'identity-fingerprint-v2-contact',
+    }));
+    expect(await screen.findByText(/company approved for this evidence/i)).toBeInTheDocument();
+  });
+
+  test('reconciles the server identity after an ambiguous selection response', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const approvedRecord = {
+      ...reviewedRecord,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: true,
+      identity_review_fingerprint: 'identity-fingerprint-before-patch',
+    };
+    const recoveredRecord = {
+      ...approvedRecord,
+      contact: 8,
+      identity_review_approved: false,
+      identity_review_fingerprint: 'identity-fingerprint-after-patch',
+    };
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: approvedRecord })
+      .mockResolvedValueOnce({ data: recoveredRecord });
+    quotationAPI.gmailInquiryImports.update.mockRejectedValueOnce(
+      new Error('response was not received')
+    );
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({
+      data: { ...recoveredRecord, identity_review_approved: true },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const contactSelect = await screen.findByLabelText('Contact / Purchaser');
+    await waitFor(() => expect(contactSelect).toBeEnabled());
+    fireEvent.change(contactSelect, { target: { value: '8' } });
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2));
+    const approveButton = await screen.findByRole('button', {
+      name: /approve selected company/i,
+    });
+    await waitFor(() => expect(approveButton).toBeEnabled());
+    fireEvent.click(approveButton);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: '8',
+      suggested: false,
+      identity_review_fingerprint: 'identity-fingerprint-after-patch',
+    }));
+    consoleError.mockRestore();
+  });
+
+  test('requires manual company approval when the server marks a suggestion as conflicting', async () => {
+    const conflictingRecord = {
+      ...baseRecord,
+      company: null,
+      contact: null,
+      workflow_features: { gmail_review_ui_v2: true },
+      identity_review_approved: false,
+      identity_review_fingerprint: 'identity-fingerprint-conflict',
+      identity_review: { suggestion_approvable: false },
+    };
+    const selectedRecord = {
+      ...conflictingRecord,
+      company: 7,
+    };
+    const approvedRecord = {
+      ...selectedRecord,
+      identity_review_approved: true,
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: conflictingRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: selectedRecord });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: approvedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByRole('button', {
+      name: /select company for manual approval/i,
+    })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /approve suggested company/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /select company for manual approval/i }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+    }));
+
+    fireEvent.click(await screen.findByRole('button', { name: /approve selected company/i }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      suggested: false,
+      identity_review_fingerprint: 'identity-fingerprint-conflict',
+    }));
   });
 });

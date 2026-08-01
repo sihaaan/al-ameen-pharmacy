@@ -73,7 +73,9 @@ from .attachment_inspection import inspect_pdf_attachment, validate_pdf_page_geo
 from .gmail_inquiry_import import (
     GmailInquiryImportBusy,
     GmailInquiryImportError,
+    GmailInquiryImportStale,
     analyze_gmail_inquiry_import,
+    approve_gmail_inquiry_company,
     claim_gmail_inquiry_handoff,
     confirm_gmail_inquiry_import,
     refresh_gmail_inquiry_identity_candidates,
@@ -94,6 +96,7 @@ from .gmail_workflow_metrics import (
     workflow_elapsed_ms,
 )
 from .import_parsers import parse_file_preview, parse_text_preview
+from .workflow_features import gmail_review_ui_v2_enabled
 from .mailbox_po_audit import (
     assert_mailbox_po_audit_repairable,
     mailbox_po_audit_repair_remaining,
@@ -176,6 +179,7 @@ from .serializers import (
     ContractIntelligenceRunSerializer,
     ContractIntelligenceSourceSerializer,
     GmailInquiryAnalyzeSerializer,
+    GmailInquiryApproveCompanySerializer,
     GmailInquiryClaimSerializer,
     GmailInquiryConfirmSerializer,
     GmailInquiryImportSerializer,
@@ -1912,7 +1916,7 @@ class GmailInquiryImportViewSet(
     def _workflow_error(self, exc):
         response_status = (
             status.HTTP_409_CONFLICT
-            if isinstance(exc, GmailInquiryImportBusy)
+            if isinstance(exc, (GmailInquiryImportBusy, GmailInquiryImportStale))
             else status.HTTP_400_BAD_REQUEST
         )
         return Response(
@@ -1991,6 +1995,26 @@ class GmailInquiryImportViewSet(
         )
 
     @action(detail=True, methods=["post"])
+    def approve_company(self, request, pk=None):
+        gmail_import = self.get_object()
+        serializer = GmailInquiryApproveCompanySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            approved = approve_gmail_inquiry_company(
+                gmail_import,
+                request.user,
+                **serializer.validated_data,
+            )
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+        return Response(
+            GmailInquiryImportSerializer(
+                approved,
+                context={"request": request},
+            ).data
+        )
+
+    @action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):
         gmail_import = self.get_object()
         metric_started = time.perf_counter()
@@ -2019,13 +2043,14 @@ class GmailInquiryImportViewSet(
             metric_duration = workflow_elapsed_ms(metric_started)
             # Attribute the terminal action to the handoff that the employee
             # acted on, even when thread idempotency reuses a canonical import.
-            record_gmail_workflow_metric(
-                gmail_import,
-                EVENT_COMPANY_APPROVED,
-                duration_ms=metric_duration,
-                counts=metric_counts,
-                outcome_code="confirmed",
-            )
+            if not gmail_review_ui_v2_enabled():
+                record_gmail_workflow_metric(
+                    gmail_import,
+                    EVENT_COMPANY_APPROVED,
+                    duration_ms=metric_duration,
+                    counts=metric_counts,
+                    outcome_code="confirmed",
+                )
             record_gmail_workflow_metric(
                 gmail_import,
                 EVENT_QUOTATION_CREATED_OR_REUSED,
