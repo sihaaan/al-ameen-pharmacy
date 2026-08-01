@@ -34,6 +34,7 @@ from .models import (
     CompanyContact,
     GmailInquiryImport,
     GmailOAuthConnection,
+    GmailWorkflowMetric,
     Quotation,
     QuotationAuditLog,
     QuotationEmailDelivery,
@@ -43,6 +44,14 @@ from .models import (
     QuotationEmailThreadSelection,
     QuotationLine,
     QuotationSettings,
+)
+from .gmail_workflow_metrics import (
+    EVENT_EMAIL_PREVIEW_OPENED,
+    EVENT_RECONCILIATION_COMPLETED,
+    EVENT_SEND_CONFIRMED,
+    EVENT_SEND_FAILED,
+    EVENT_SEND_INITIATED,
+    EVENT_SEND_LEFT_UNKNOWN,
 )
 from .quotation_email_delivery import (
     _delivery_snapshot,
@@ -847,6 +856,184 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(event.event_type, QuotationEmailDeliveryAttemptEvent.EVENT_PROVIDER_SENT)
         self.assertEqual(event.provider_message_id, "gmail-sent-1")
         self.assertEqual(event.provider_thread_id, "gmail-thread-1")
+
+    @override_settings(QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED=True)
+    @patch(
+        "quotations.quotation_email_delivery.build_quotation_pdf",
+        return_value=b"%PDF-metric",
+    )
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        return_value={"id": "gmail-metric-sent", "threadId": "gmail-thread-1"},
+    )
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_workflow_metrics_cover_preview_send_and_idempotent_success(
+        self,
+        fetch,
+        send,
+        _pdf,
+    ):
+        quotation = self.create_quote()
+        gmail_import = self.gmail_link(quotation)
+        fetch.return_value = self.source_metadata(message_id="gmail-followup-2")
+        review_fingerprint = self.quotation_review_fingerprint(quotation)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            preview = self.client.get(
+                reverse("quotation-email-preview", args=[quotation.id]),
+                {"quotation_review_fingerprint": review_fingerprint},
+            )
+        self.assertEqual(preview.status_code, status.HTTP_200_OK, preview.data)
+        preview_metric = GmailWorkflowMetric.objects.get(
+            gmail_import=gmail_import,
+            event_name=EVENT_EMAIL_PREVIEW_OPENED,
+        )
+        self.assertEqual(preview_metric.outcome_code, "success")
+
+        payload = self.gmail_payload(
+            include_preview=False,
+            preview_fingerprint=preview.data["preview_fingerprint"],
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            first = self.client.post(
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                payload,
+                format="json",
+            )
+        self.assertEqual(first.status_code, status.HTTP_200_OK, first.data)
+        self.assertEqual(
+            list(
+                GmailWorkflowMetric.objects.filter(
+                    gmail_import=gmail_import,
+                    event_name__in={EVENT_SEND_INITIATED, EVENT_SEND_CONFIRMED},
+                )
+                .order_by("created_at", "pk")
+                .values_list("event_name", "outcome_code")
+            ),
+            [(EVENT_SEND_INITIATED, "success"), (EVENT_SEND_CONFIRMED, "confirmed")],
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            repeated = self.client.post(
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                payload,
+                format="json",
+            )
+        self.assertEqual(repeated.status_code, status.HTTP_200_OK, repeated.data)
+        self.assertTrue(repeated.data["idempotent"])
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(
+            GmailWorkflowMetric.objects.filter(
+                gmail_import=gmail_import,
+                event_name=EVENT_SEND_CONFIRMED,
+                outcome_code="reused",
+            ).count(),
+            1,
+        )
+
+    @override_settings(QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED=True)
+    @patch(
+        "quotations.quotation_email_delivery.build_quotation_pdf",
+        return_value=b"%PDF-metric-unknown",
+    )
+    @patch(
+        "quotations.quotation_email_delivery.gmail_send_raw_message",
+        side_effect=urllib.error.URLError("timeout"),
+    )
+    @patch(
+        "quotations.quotation_email_delivery.gmail_search_messages",
+        return_value={"messages": []},
+    )
+    @patch("quotations.quotation_email_delivery.gmail_fetch_reply_metadata")
+    def test_workflow_metrics_cover_ambiguous_send_lockout(
+        self,
+        fetch,
+        _search,
+        _send,
+        _pdf,
+    ):
+        quotation = self.create_quote()
+        gmail_import = self.gmail_link(quotation)
+        fetch.return_value = self.source_metadata(message_id="gmail-followup-2")
+        preview_fingerprint = self.preview_fingerprint(quotation)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("quotation-finalize-and-send", args=[quotation.id]),
+                self.gmail_payload(
+                    include_preview=False,
+                    preview_fingerprint=preview_fingerprint,
+                ),
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "delivery_unknown")
+        unknown_metric = GmailWorkflowMetric.objects.get(
+            gmail_import=gmail_import,
+            event_name=EVENT_SEND_LEFT_UNKNOWN,
+        )
+        self.assertEqual(unknown_metric.outcome_code, "unknown")
+
+    @override_settings(QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED=True)
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    @patch("quotations.quotation_email_delivery.gmail_search_messages")
+    def test_workflow_metrics_cover_blocked_send_and_not_found_reconciliation(
+        self,
+        search,
+        send,
+    ):
+        blocked_quote = self.create_quote()
+        blocked_import = self.gmail_link(blocked_quote)
+        with self.captureOnCommitCallbacks(execute=True):
+            blocked = self.client.post(
+                reverse("quotation-finalize-and-send", args=[blocked_quote.id]),
+                self.gmail_payload(include_preview=False),
+                format="json",
+            )
+        self.assertEqual(blocked.status_code, status.HTTP_400_BAD_REQUEST)
+        blocked_metric = GmailWorkflowMetric.objects.get(
+            gmail_import=blocked_import,
+            event_name=EVENT_SEND_FAILED,
+        )
+        self.assertEqual(blocked_metric.outcome_code, "blocked")
+        send.assert_not_called()
+
+        unknown_quote = self.create_quote(status_value=Quotation.STATUS_FINALIZED)
+        unknown_import = GmailInquiryImport.objects.create(
+            gmail_connection=self.connection,
+            mailbox_email=self.connection.email,
+            gmail_thread_id="gmail-thread-metric-reconcile",
+            anchor_message_id="gmail-metric-reconcile",
+            status=GmailInquiryImport.STATUS_CONFIRMED,
+            quotation=unknown_quote,
+        )
+        QuotationEmailDelivery.objects.create(
+            quotation=unknown_quote,
+            gmail_connection=self.connection,
+            actor=self.staff,
+            delivery_mode=QuotationEmailDelivery.MODE_NEW_EMAIL,
+            status=QuotationEmailDelivery.STATUS_UNKNOWN,
+            to_addresses=["buyer@example.com"],
+            subject="Quotation",
+            body="Attached.",
+            attachment_filename="quotation.pdf",
+            attempt_count=1,
+        )
+        search.return_value = {"messages": []}
+        with self.captureOnCommitCallbacks(execute=True):
+            reconciled = self.client.post(
+                reverse("quotation-reconcile-email", args=[unknown_quote.id]),
+                {},
+                format="json",
+            )
+        self.assertEqual(reconciled.status_code, status.HTTP_200_OK, reconciled.data)
+        self.assertFalse(reconciled.data["reconciled"])
+        reconciliation_metric = GmailWorkflowMetric.objects.get(
+            gmail_import=unknown_import,
+            event_name=EVENT_RECONCILIATION_COMPLETED,
+        )
+        self.assertEqual(reconciliation_metric.outcome_code, "not_found")
 
     def test_late_failure_cannot_downgrade_terminal_sent_delivery(self):
         quotation = self.create_quote(status_value=Quotation.STATUS_SENT)

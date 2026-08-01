@@ -376,6 +376,12 @@ QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED = env_bool(
     "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
     False,
 )
+# Content-free employee-funnel metrics are opt-in. Enabling this flag requires
+# migration 0039; it never changes Gmail, quotation, pricing, or send behavior.
+QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

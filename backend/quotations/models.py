@@ -9,6 +9,19 @@ from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
+from .gmail_workflow_metrics import (
+    CACHE_STATE_CHOICES,
+    GMAIL_WORKFLOW_EVENT_CHOICES,
+    MAX_METRIC_DURATION_MS,
+    OUTCOME_CODE_CHOICES,
+    SELECTION_MODE_CHOICES,
+    default_metric_contract_versions,
+    default_metric_feature_flags,
+    validate_metric_contract_versions,
+    validate_metric_counts,
+    validate_metric_feature_flags,
+)
+
 
 CONFIRMED_LPO_STATUS_DOWNGRADE_ERROR = (
     "A confirmed LPO cannot be moved back to a non-confirmed status. "
@@ -612,6 +625,89 @@ class GmailInquiryHandoffToken(models.Model):
         indexes = [
             models.Index(fields=["gmail_import", "expires_at"]),
         ]
+
+
+class GmailWorkflowMetricQuerySet(models.QuerySet):
+    def bulk_create(self, objs, *args, **kwargs):
+        for obj in objs:
+            obj.full_clean()
+        return super().bulk_create(objs, *args, **kwargs)
+
+    def update(self, **kwargs):
+        raise ValidationError("Gmail workflow metrics are append-only.")
+
+    def delete(self):
+        raise ValidationError("Gmail workflow metrics are append-only.")
+
+
+class GmailWorkflowMetric(models.Model):
+    """Content-free, append-only event in the employee Gmail funnel.
+
+    ``gmail_import`` provides the internal binding required for duration and
+    funnel analysis. It is intentionally absent from the exportable telemetry
+    envelope produced by ``export_gmail_workflow_metric``.
+    """
+
+    gmail_import = models.ForeignKey(
+        GmailInquiryImport,
+        on_delete=models.CASCADE,
+        related_name="workflow_metrics",
+        db_index=False,
+    )
+    event_name = models.CharField(max_length=40, choices=GMAIL_WORKFLOW_EVENT_CHOICES)
+    duration_ms = models.PositiveBigIntegerField(null=True, blank=True)
+    counts = models.JSONField(default=dict, blank=True, validators=[validate_metric_counts])
+    selection_mode = models.CharField(
+        max_length=30,
+        choices=SELECTION_MODE_CHOICES,
+        blank=True,
+    )
+    cache_state = models.CharField(
+        max_length=20,
+        choices=CACHE_STATE_CHOICES,
+        default="not_applicable",
+    )
+    feature_flags = models.JSONField(
+        default=default_metric_feature_flags,
+        validators=[validate_metric_feature_flags],
+    )
+    outcome_code = models.CharField(
+        max_length=30,
+        choices=OUTCOME_CODE_CHOICES,
+        blank=True,
+    )
+    contract_versions = models.JSONField(
+        default=default_metric_contract_versions,
+        validators=[validate_metric_contract_versions],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = GmailWorkflowMetricQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+        indexes = [
+            models.Index(fields=["event_name", "created_at"]),
+            models.Index(fields=["gmail_import", "created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(duration_ms__isnull=True)
+                    | models.Q(duration_ms__lte=MAX_METRIC_DURATION_MS)
+                ),
+                name="gmail_workflow_metric_duration_bounded",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Gmail workflow metrics are append-only.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Gmail workflow metrics are append-only.")
 
 
 class MailboxPOAuditRun(models.Model):

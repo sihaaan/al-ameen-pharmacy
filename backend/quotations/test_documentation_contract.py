@@ -200,6 +200,7 @@ class DocumentationContractTests(SimpleTestCase):
             "SENTRY_TRACES_SAMPLE_RATE",
             "DJANGO_LOG_LEVEL",
             "DJANGO_REQUEST_LOG_LEVEL",
+            "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):

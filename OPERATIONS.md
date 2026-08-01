@@ -33,6 +33,31 @@ configuration as complete.
 
 Do not infer current provider configuration from this table after its date.
 
+### Privacy-safe Gmail employee-funnel metrics
+
+The `QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED` feature flag defaults to `0`.
+When enabled after migration `quotations.0039_gmailworkflowmetric`, it records
+content-free workflow events in an additive PostgreSQL table. Each row is
+bound internally to its Gmail import for funnel/duration analysis; supported
+telemetry output deliberately excludes the import ID and every Gmail,
+quotation, delivery, user, and handoff identifier.
+
+Only the documented event choices, bounded numeric durations/counts, selection
+mode, cache state, Boolean flag state, safe outcome codes, and validated
+contract versions are accepted. Never add arbitrary metadata or exception
+messages to this channel. In particular, do not add names, addresses, email
+addresses, subjects, filenames, Gmail message/thread IDs, item text, document
+contents, prices, recipients, tokens, or raw AI output.
+
+Before enabling, assign a retention owner and alert owner, apply `0039`, and
+verify the flag-off path first. Monitor event volumes and missing-stage ratios,
+not customer-level content. Disable the flag for immediate rollback. The
+workflow remains operational if a metric cannot be written, and metric
+persistence never changes quotation, pricing, preview, send, or reconciliation
+decisions. A database rollback is normally unnecessary; if explicitly
+approved, reverse `0039` only after all application instances have the flag
+disabled because reversal deletes the metrics table.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

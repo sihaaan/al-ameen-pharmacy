@@ -245,6 +245,29 @@ AI timeout, a 180-second native Gmail AI timeout, and a 300-second Gunicorn
 timeout. Long Gmail analysis is synchronous; browser polling makes its state
 resumable but does not create a background worker.
 
+### Gmail workflow metrics (disabled by default)
+
+`QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED=0` is the safe repository default.
+Migration `quotations.0039_gmailworkflowmetric` adds only a new metrics table;
+it does not rewrite Gmail imports, inquiries, quotations, delivery records, or
+customer content. Old application code can run after the migration. New code
+can run before it only while this flag remains disabled; apply the migration
+before any rollout that sets the flag to `1`.
+
+Enabled metrics are linked internally to a `GmailInquiryImport`, but the
+supported telemetry envelope omits database IDs and stores only an allow-listed
+event, bounded numeric duration/counts, selection mode, cache state, safe
+outcome code, feature-flag state, and contract versions. It cannot accept
+names, addresses, email addresses, subjects, filenames, Gmail IDs, item text,
+document contents, prices, recipients, handoff/OAuth tokens, or raw model
+output. There is no public API for these rows.
+
+Rollout requires an approved retention/monitoring owner and a staging check
+that the flag-off workflow is unchanged. Roll back by setting the flag to `0`;
+no quotation or delivery rollback is required. Prefer retaining the additive
+table during an application rollback. Reversing `0039` deletes metrics only
+and must happen after every running application instance has the flag disabled.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

@@ -82,6 +82,16 @@ from .models import (
     QuotationSettings,
     normalize_label,
 )
+from .gmail_workflow_metrics import (
+    EVENT_ANALYSIS_COMPLETED,
+    EVENT_ANALYSIS_FAILED,
+    EVENT_ANALYSIS_REQUESTED,
+    EVENT_ANALYSIS_STARTED,
+    EVENT_HANDOFF_CLAIMED,
+    EVENT_HANDOFF_CREATED,
+    EVENT_REVIEWED_ROWS_SAVED,
+    record_gmail_workflow_metric,
+)
 from .services import create_imported_inquiry, create_quotation_from_inquiry
 
 
@@ -110,6 +120,67 @@ NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 GMAIL_AI_PIPELINE_VERSION = "gmail_inquiry_v2"
 GMAIL_AI_SCHEMA_NAME = "gmail_inquiry_native_v2"
 GMAIL_SEMANTIC_CACHE_VERSION = "gmail_semantic_cache_v1"
+
+
+def _workflow_duration_ms(started_at, ended_at=None):
+    if not started_at:
+        return None
+    ended_at = ended_at or timezone.now()
+    try:
+        return max(0, round((ended_at - started_at).total_seconds() * 1000))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _workflow_analysis_dimensions(gmail_import, result=None):
+    result = result if isinstance(result, dict) else {}
+    preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+    rows = preview.get("lines") if isinstance(preview.get("lines"), list) else []
+    usage = (
+        (result.get("thread_analysis") or {}).get("ai_usage")
+        if isinstance(result.get("thread_analysis"), dict)
+        else {}
+    ) or {}
+    observation = usage.get("observability") if isinstance(usage, dict) else {}
+    observation = observation if isinstance(observation, dict) else {}
+    contract = observation.get("contract") if isinstance(observation.get("contract"), dict) else {}
+    if observation.get("application_cache_hit") is True:
+        cache_state = "hit"
+    elif observation.get("provider_call_attempted") is True:
+        cache_state = "miss"
+    else:
+        cache_state = "unknown"
+    return {
+        "counts": {
+            "analysis_attempt_count": gmail_import.analysis_attempts,
+            "message_count": len(gmail_import.message_manifest or []),
+            "selected_message_count": len(gmail_import.selected_message_ids or []),
+            "attachment_count": len(gmail_import.attachment_manifest or []),
+            "included_row_count": sum(
+                1
+                for row in rows
+                if isinstance(row, dict) and row.get("included") is not False
+            ),
+            "uncertain_row_count": sum(
+                1
+                for row in rows
+                if isinstance(row, dict)
+                and row.get("included") is not False
+                and (
+                    str(row.get("operation") or "") == "uncertain"
+                    or str(row.get("parse_status") or "") in {"needs_review", "unparsed"}
+                )
+            ),
+        },
+        "cache_state": cache_state,
+        "contract_versions": {
+            "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+            "ai_schema": GMAIL_AI_SCHEMA_NAME,
+            "ai_prompt": contract.get("prompt_sha256") or "",
+            "ai_observability": observation.get("version") or "",
+            "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+        },
+    }
 ANALYSIS_TIMING_KEYS = (
     "gmail_thread_fetch",
     "source_preparation",
@@ -445,6 +516,14 @@ def issue_gmail_inquiry_handoff(
                 ]
             )
             _store_handoff_token(confirmed, token_hash, expires_at)
+            record_gmail_workflow_metric(
+                confirmed,
+                EVENT_HANDOFF_CREATED,
+                counts={
+                    "selected_message_count": len(selected),
+                },
+                outcome_code="reused",
+            )
             return confirmed, raw_token
 
         gmail_import, _created = GmailInquiryImport.objects.get_or_create(
@@ -510,6 +589,14 @@ def issue_gmail_inquiry_handoff(
         gmail_import.handoff_used_at = None
         gmail_import.save()
         _store_handoff_token(gmail_import, token_hash, expires_at)
+        record_gmail_workflow_metric(
+            gmail_import,
+            EVENT_HANDOFF_CREATED,
+            counts={
+                "selected_message_count": len(selected),
+            },
+            outcome_code="created" if _created else "reused",
+        )
     return gmail_import, raw_token
 
 
@@ -530,6 +617,7 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
     if token_record:
         gmail_import = _record_for_update(token_record.gmail_import_id)
         token_expires_at = token_record.expires_at
+        handoff_created_at = token_record.created_at
     else:
         try:
             gmail_import = GmailInquiryImport.objects.select_for_update().get(
@@ -540,6 +628,10 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
                 "Gmail inquiry handoff token is invalid."
             ) from exc
         token_expires_at = gmail_import.handoff_expires_at
+        # Legacy one-slot handoffs predate the token ledger, so their exact
+        # issue time is unknowable. Omit duration rather than report the
+        # import's potentially months-old creation time.
+        handoff_created_at = None
 
     now = timezone.now()
     if not token_expires_at or token_expires_at < now:
@@ -555,6 +647,11 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
             "Another staff member has already claimed this Gmail inquiry."
         )
 
+    handoff_was_unused = (
+        not token_record.used_at
+        if token_record is not None
+        else not gmail_import.handoff_used_at
+    )
     update_fields = ["updated_at"]
     if (
         gmail_import.status != GmailInquiryImport.STATUS_CONFIRMED
@@ -573,6 +670,20 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
         gmail_import.status = GmailInquiryImport.STATUS_CLAIMED
         update_fields.append("status")
     gmail_import.save(update_fields=update_fields)
+    if handoff_was_unused:
+        record_gmail_workflow_metric(
+            gmail_import,
+            EVENT_HANDOFF_CLAIMED,
+            duration_ms=_workflow_duration_ms(handoff_created_at, now),
+            counts={
+                "selected_message_count": len(gmail_import.selected_message_ids or []),
+            },
+            outcome_code=(
+                "reused"
+                if gmail_import.status == GmailInquiryImport.STATUS_CONFIRMED
+                else "success"
+            ),
+        )
     return gmail_import
 
 
@@ -5288,6 +5399,19 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
         analysis["reviewed_by_user_id"] = actor.pk
         locked.analysis = _json_safe(analysis)
         locked.save(update_fields=["analysis", "updated_at"])
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_REVIEWED_ROWS_SAVED,
+            counts={
+                "reviewed_row_count": len(review_lines),
+                "included_row_count": sum(
+                    1
+                    for row in rows
+                    if isinstance(row, dict) and row.get("included") is not False
+                ),
+            },
+            outcome_code="success",
+        )
         return locked
 
 
@@ -5362,6 +5486,32 @@ def analyze_gmail_inquiry_import(
         )
         analysis_attempt = locked.analysis_attempts
         analysis_fingerprint = locked.source_fingerprint
+        analysis_contracts = {
+            "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+            "ai_schema": GMAIL_AI_SCHEMA_NAME,
+            "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+        }
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_ANALYSIS_REQUESTED,
+            counts={
+                "analysis_attempt_count": analysis_attempt,
+                "selected_message_count": len(locked.selected_message_ids or []),
+            },
+            outcome_code="success",
+            contract_versions=analysis_contracts,
+        )
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_ANALYSIS_STARTED,
+            duration_ms=_elapsed_ms(total_started),
+            counts={
+                "analysis_attempt_count": analysis_attempt,
+                "selected_message_count": len(locked.selected_message_ids or []),
+            },
+            outcome_code="success",
+            contract_versions=analysis_contracts,
+        )
 
     try:
         fetch_started = time.perf_counter()
@@ -5435,6 +5585,25 @@ def analyze_gmail_inquiry_import(
         )
         if not marked_failed:
             return _record(locked)
+        failed_import = _record(locked)
+        record_gmail_workflow_metric(
+            failed_import,
+            EVENT_ANALYSIS_FAILED,
+            duration_ms=analysis_timings.get("total"),
+            counts={
+                "analysis_attempt_count": analysis_attempt,
+                "message_count": len(failed_import.message_manifest or []),
+                "selected_message_count": len(failed_import.selected_message_ids or []),
+                "attachment_count": len(failed_import.attachment_manifest or []),
+            },
+            cache_state="unknown",
+            outcome_code="failure",
+            contract_versions={
+                "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+                "ai_schema": GMAIL_AI_SCHEMA_NAME,
+                "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+            },
+        )
         if isinstance(exc, GmailInquiryImportError):
             raise
         raise GmailInquiryImportError(
@@ -5509,6 +5678,18 @@ def analyze_gmail_inquiry_import(
             "timings_ms": _analysis_timing_snapshot(analysis_timings),
         }
         locked.save(update_fields=["analysis", "updated_at"])
+    metric_dimensions = _workflow_analysis_dimensions(locked, result)
+    record_gmail_workflow_metric(
+        locked,
+        EVENT_ANALYSIS_COMPLETED,
+        duration_ms=analysis_timings.get("total"),
+        outcome_code=(
+            "ready"
+            if locked.status == GmailInquiryImport.STATUS_READY
+            else "review_required"
+        ),
+        **metric_dimensions,
+    )
     return _record(locked)
 
 
