@@ -2,16 +2,19 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.8.0 |
+| Document version | 2.9.0 |
 | Status | Repository control reference and operator checklist; not a certification |
 | Owner | Al Ameen platform maintainers and designated production operators |
 | Last verified | 2026-08-01 |
-| Reviewed code | Production baseline `70d3da7`; hardening committed through `7bc7054` plus the Task 2.8 branch checkpoint |
+| Reviewed code | Production baseline `70d3da7`; Task 2.8 pre-remediation checkpoint `7bc7054`; release remediation reviewed through `7a29096123c09879579e8215d409a00cc23465e6` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 Source control can prove implemented controls and tests; it cannot prove live
 secrets, provider policy, OAuth publication, backups, or current production
 configuration. Complete the unchecked verification items for each release.
+The exact value shapes, safe verification steps, failures, rollbacks, and gate
+levels are in
+[RELEASE_CONFIGURATION_PACK.md](RELEASE_CONFIGURATION_PACK.md).
 
 ## 1. Implemented repository controls
 
@@ -257,8 +260,9 @@ Record operator, evidence link, and UTC time for every checked item.
 - [ ] Railway Config File Path is `/backend/railway.json`; its guarded
       pre-deploy command, direct same-database `MIGRATION_DATABASE_URL`, bounded
       timeouts, migration plan, least privilege, and recovery point are verified.
-- [ ] Expected branch migrations `0035`, `0036`, and `0037` are reconciled
-      against the live plan; Task 2.8 itself adds no Django migration.
+- [ ] Expected branch migrations `0035`, `0036`, `0037`, and forward
+      compatibility repair `0038` are reconciled against the live plan; Task
+      2.8 itself adds no Django migration.
 - [ ] Private quotation evidence has an accepted durability/recovery posture.
 - [ ] Google scopes, mailbox, owners, publication/verification, and reconnect tested.
 - [ ] OpenAI project/model, processor terms, retention, and privacy gates approved.

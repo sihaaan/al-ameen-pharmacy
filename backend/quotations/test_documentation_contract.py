@@ -26,6 +26,7 @@ PRIMARY_DOCUMENTS = (
     "DEPLOYMENT.md",
     "SECURITY.md",
     "OPERATIONS.md",
+    "RELEASE_CONFIGURATION_PACK.md",
     "gmail_addon/README.md",
 )
 
@@ -108,6 +109,43 @@ class DocumentationContractTests(SimpleTestCase):
         for phrase in required_phrases:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, content)
+
+    def test_release_configuration_pack_is_fail_closed_and_operator_ready(self):
+        content = read_repository_file("RELEASE_CONFIGURATION_PACK.md")
+        required_phrases = (
+            "no external setting has been applied",
+            "QUOTATION_EVIDENCE_STORAGE_BACKEND",
+            "QUOTATION_EVIDENCE_STORAGE_OPTIONS_JSON",
+            "exact-key",
+            "SHA-256",
+            "dual-read",
+            "MIGRATION_DATABASE_URL",
+            "/backend/railway.json",
+            "quotations.0038",
+            "GMAIL_ADDON_SHARED_MAILBOX_EMAIL",
+            "pharmacydxb@gmail.com",
+            "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
+            "Keep 0 during this remediation",
+            "transfer_shared_gmail_owner",
+            "command intentionally refuses both dry-run and",
+            "Owner/successor read-only preflight",
+            "There is no general scheduled purge",
+            "no dedicated public liveness/readiness URL",
+            "SENTRY_DSN",
+            "There is no scheduler/worker",
+            "existing reconciliation action, which searches and never",
+            "No external value in this pack is a merge blocker",
+        )
+        for phrase in required_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, content)
+
+        self.assertNotIn("--confirm-mailbox pharmacydxb@gmail.com --apply", content)
+        self.assertIn("assert not settings.QUOTATION_GMAIL", content)
+        self.assertIn(
+            "Do not change the flag or run that",
+            content,
+        )
 
     def test_addon_document_separates_manifest_and_website_scopes(self):
         content = read_repository_file("gmail_addon/README.md")

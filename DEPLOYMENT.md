@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| Document version | 2.5.0 |
+| Document version | 2.6.0 |
 | Status | Operator guide; live values require independent verification |
 | Owner | Al Ameen platform maintainers |
 | Last verified | 2026-08-01 |
-| Reviewed code | `70d3da7` production baseline; hardening committed through `7bc7054` plus the Task 2.8 branch checkpoint |
+| Reviewed code | `70d3da7` production baseline; Task 2.8 pre-remediation checkpoint `7bc7054`; release remediation reviewed through `7a29096123c09879579e8215d409a00cc23465e6` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This guide separates repository behavior from live provider configuration. A
@@ -16,6 +16,8 @@ when completing any production checklist.
 
 See [OPERATIONS.md](OPERATIONS.md) for monitoring, backup, incident, and
 recovery procedures; [SECURITY.md](SECURITY.md) for security controls;
+[RELEASE_CONFIGURATION_PACK.md](RELEASE_CONFIGURATION_PACK.md) for the exact
+external release gates and operator evidence record;
 [FRONTEND_DEPENDENCY_SECURITY.md](FRONTEND_DEPENDENCY_SECURITY.md) for the
 time-bounded frontend audit decision;
 [ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)

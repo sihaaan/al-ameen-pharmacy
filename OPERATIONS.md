@@ -2,16 +2,19 @@
 
 | Field | Value |
 |---|---|
-| Document version | 1.7.0 |
+| Document version | 1.8.0 |
 | Status | Initial current-state runbook; unresolved items are marked explicitly |
 | Owner | Assign a primary and backup production operator |
 | Last verified | 2026-08-01 |
-| Reviewed code | Production baseline `70d3da7`; hardening committed through `7bc7054` plus the Task 2.8 branch checkpoint |
+| Reviewed code | Production baseline `70d3da7`; Task 2.8 pre-remediation checkpoint `7bc7054`; release remediation reviewed through `7a29096123c09879579e8215d409a00cc23465e6` |
 | Production snapshot | Railway deployment `c234c4bc-ba7e-4ed0-ab88-b5a1dcc2a6b8`, commit `70d3da7162b63864e479e9a1998aa138046c2433` |
 
 This runbook preserves employee review, blank selling prices, suggestion-only
 matching, evidence, preview-before-send, verified reply headers, one successful
 send per revision, ambiguous-send lockout, and reconciliation that never sends email.
+Use [RELEASE_CONFIGURATION_PACK.md](RELEASE_CONFIGURATION_PACK.md) for the
+setting-by-setting staging and production gates; that pack records no live
+configuration as complete.
 
 ## 1. Current operational truth
 
