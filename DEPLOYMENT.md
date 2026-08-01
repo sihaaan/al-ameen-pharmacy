@@ -16,6 +16,8 @@ when completing any production checklist.
 
 See [OPERATIONS.md](OPERATIONS.md) for monitoring, backup, incident, and
 recovery procedures; [SECURITY.md](SECURITY.md) for security controls;
+[FRONTEND_DEPENDENCY_SECURITY.md](FRONTEND_DEPENDENCY_SECURITY.md) for the
+time-bounded frontend audit decision;
 [ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md](ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md)
 for Task 2.4 attachment limits; and
 [gmail_addon/README.md](gmail_addon/README.md) for the Gmail add-on.
@@ -82,7 +84,13 @@ cd ../frontend
 npm ci
 npm run test:ci
 npm run build
+npm audit --omit=dev
 ```
+
+The frontend audit must satisfy the release rules in
+[FRONTEND_DEPENDENCY_SECURITY.md](FRONTEND_DEPENDENCY_SECURITY.md): zero
+Critical findings, no unlisted High path, and no expired exception. Never use
+`npm audit fix --force` as a release shortcut.
 
 The canonical production-equivalent quotation-concurrency lane is
 `postgres-concurrency` in `.github/workflows/ci.yml`. It uses PostgreSQL 17.10,

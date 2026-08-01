@@ -17,6 +17,13 @@
     "serve": "^14.2.5",
     "web-vitals": "^2.1.4"
   },
+  "overrides": {
+    "brace-expansion@1": "1.1.18",
+    "brace-expansion@2": "2.1.4",
+    "fast-uri": "3.1.5",
+    "underscore": "1.13.8",
+    "websocket-driver": "0.7.5"
+  },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
