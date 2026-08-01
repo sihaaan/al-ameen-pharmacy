@@ -960,7 +960,11 @@ class QuotationWorkflowTests(APITestCase):
             "sender": "buyer@workflow.example",
             "recipients": "pharmacy@example.com",
             "subject": f"LPO for {quotation.quotation_number}",
-            "sent_at": timezone.now(),
+            # Keep the fixture strictly after the quotation timestamp. On
+            # Windows, consecutive ``timezone.now()`` calls can share the
+            # same clock tick, which correctly makes the scanner reject the
+            # mocked message as not newer than the quotation.
+            "sent_at": quotation.sent_at + timedelta(seconds=1),
             "snippet": "Please find attached purchase order.",
             "attachments": [{"filename": "po.pdf", "size": 1234}],
         }
@@ -1151,7 +1155,11 @@ class QuotationWorkflowTests(APITestCase):
             "sender": "buyer@workflow.example",
             "recipients": "pharmacy@example.com",
             "subject": "LPO accepted",
-            "sent_at": timezone.now(),
+            # Both quotations must predate this shared mocked Gmail message.
+            # Using ``timezone.now()`` here is flaky on coarse-resolution
+            # clocks because it can equal the second quotation's timestamp.
+            "sent_at": max(first_quote.sent_at, second_quote.sent_at)
+            + timedelta(seconds=1),
             "snippet": "Please find attached purchase order.",
             "attachments": [{"filename": "po.pdf", "size": 1234}],
         }
