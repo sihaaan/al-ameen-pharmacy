@@ -1416,8 +1416,8 @@
 - Status: completed and tested on the branch; repository configuration is
   prepared but no Railway setting, credential, production migration, or
   deployment was changed.
-- Commit: this Task 2.8 checkpoint (`fix: guard deployment migrations and
-  database interruptions`); record the resulting SHA from Git history.
+- Commit: `6f4fdfa` (`fix: guard deployment migrations and database
+  interruptions`).
 - Files changed:
   - `backend/railway.json`
   - `backend/run_deploy_migrations.py`
