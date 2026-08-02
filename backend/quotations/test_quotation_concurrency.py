@@ -1887,4 +1887,4 @@ class GmailBackgroundJobConcurrencyTests(TransactionTestCase):
             self.gmail_import.status,
             GmailInquiryImport.STATUS_ANALYZING,
         )
-        self.assertEqual(self.gmail_import.analysis_result, {})
+        self.assertEqual(self.gmail_import.analysis, {})
