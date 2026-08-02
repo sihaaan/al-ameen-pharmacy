@@ -120,6 +120,7 @@ SAFE_COMPARISON_KEYS = {
     "matched_row_count",
     "row_precision_bp",
     "row_recall_bp",
+    "row_exact_bp",
     "item_name_exact_bp",
     "quantity_exact_bp",
     "unit_exact_bp",
@@ -617,6 +618,10 @@ def _result_messages(result):
     return {}
 
 
+def _comparison_text(value):
+    return "" if value is None else str(value)
+
+
 def _result_rows(result):
     rows = result.get("rows") if isinstance(result, dict) else []
     normalized = []
@@ -652,9 +657,9 @@ def _result_rows(result):
                 "operation": str(row.get("operation") or ""),
                 "status": str(row.get("parse_status") or ""),
                 "price": (
-                    str(row.get("customer_unit_price") or ""),
-                    str(row.get("customer_line_total") or ""),
-                    str(row.get("customer_vat") or ""),
+                    _comparison_text(row.get("customer_unit_price")),
+                    _comparison_text(row.get("customer_line_total")),
+                    _comparison_text(row.get("customer_vat")),
                 ),
                 # Citation order has no semantic meaning. Sorting preserves
                 # duplicates while keeping the comparison content-free.
@@ -680,21 +685,39 @@ def compare_baseline_and_shadow(baseline, shadow):
         baseline_by_name[row["name"]].append(row)
     for row in shadow_rows:
         shadow_by_name[row["name"]].append(row)
-    matched_count = sum(
-        min(count, Counter(row["name"] for row in shadow_rows)[name])
-        for name, count in Counter(row["name"] for row in baseline_rows).items()
-    )
-    matched_pairs = []
-    for name in baseline_by_name.keys() & shadow_by_name.keys():
-        matched_pairs.extend(zip(baseline_by_name[name], shadow_by_name[name]))
+    baseline_name_counts = Counter(row["name"] for row in baseline_rows)
+    shadow_name_counts = Counter(row["name"] for row in shadow_rows)
+    matched_count = sum((baseline_name_counts & shadow_name_counts).values())
     baseline_count = len(baseline_rows)
     shadow_count = len(shadow_rows)
 
     def exact(field):
+        exact_count = 0
+        for name in baseline_by_name.keys() & shadow_by_name.keys():
+            wanted = Counter(row[field] for row in baseline_by_name[name])
+            got = Counter(row[field] for row in shadow_by_name[name])
+            exact_count += sum((wanted & got).values())
         return _basis_points(
-            sum(1 for wanted, got in matched_pairs if wanted[field] == got[field]),
+            exact_count,
             baseline_count,
         )
+
+    semantic_fields = (
+        "name",
+        "quantity",
+        "unit",
+        "operation",
+        "status",
+        "price",
+        "citations",
+    )
+    baseline_signatures = Counter(
+        tuple(row[field] for field in semantic_fields) for row in baseline_rows
+    )
+    shadow_signatures = Counter(
+        tuple(row[field] for field in semantic_fields) for row in shadow_rows
+    )
+    row_exact_count = sum((baseline_signatures & shadow_signatures).values())
 
     baseline_messages = _result_messages(baseline if isinstance(baseline, dict) else {})
     shadow_messages = _result_messages(shadow if isinstance(shadow, dict) else {})
@@ -721,6 +744,7 @@ def compare_baseline_and_shadow(baseline, shadow):
         "matched_row_count": min(matched_count, MAX_METRIC_COUNT),
         "row_precision_bp": _basis_points(matched_count, shadow_count),
         "row_recall_bp": _basis_points(matched_count, baseline_count),
+        "row_exact_bp": _basis_points(row_exact_count, baseline_count),
         "item_name_exact_bp": _basis_points(matched_count, baseline_count),
         "quantity_exact_bp": exact("quantity"),
         "unit_exact_bp": exact("unit"),

@@ -400,11 +400,19 @@ class GmailCompactShadowTests(SimpleTestCase):
         sanitized = sanitize_comparison(
             {
                 "row_recall_bp": 999_999,
+                "row_exact_bp": 999_999,
                 "baseline_row_count": -5,
                 "raw_item": "PRIVATE ITEM",
             }
         )
-        self.assertEqual(sanitized, {"row_recall_bp": 10_000, "baseline_row_count": 0})
+        self.assertEqual(
+            sanitized,
+            {
+                "row_recall_bp": 10_000,
+                "row_exact_bp": 10_000,
+                "baseline_row_count": 0,
+            },
+        )
         usage = sanitize_usage(
             {
                 "prompt_tokens": -3,
@@ -458,6 +466,71 @@ class GmailCompactShadowTests(SimpleTestCase):
             compare_baseline_and_shadow(baseline, shadow)["citation_exact_bp"],
             0,
         )
+
+    def test_duplicate_item_rows_compare_order_independently(self):
+        baseline = copy.deepcopy(self.baseline)
+        duplicate = copy.deepcopy(baseline["rows"][0])
+        duplicate["quantity"] = "24"
+        duplicate["citations"][0]["cell_range"] = "B8:G8"
+        duplicate["citations"][0]["raw_source_text"] = (
+            "Sterile Gauze 4 x 4 | 24 | BOX"
+        )
+        baseline["rows"].append(duplicate)
+        shadow = copy.deepcopy(baseline)
+        shadow["rows"].reverse()
+
+        metrics = compare_baseline_and_shadow(baseline, shadow)
+
+        self.assertEqual(metrics["quantity_exact_bp"], 10_000)
+        self.assertEqual(metrics["citation_exact_bp"], 10_000)
+        self.assertEqual(metrics["row_exact_bp"], 10_000)
+
+    def test_row_exact_metric_detects_swapped_duplicate_row_associations(self):
+        baseline = copy.deepcopy(self.baseline)
+        duplicate = copy.deepcopy(baseline["rows"][0])
+        duplicate["quantity"] = "24"
+        duplicate["citations"][0]["cell_range"] = "B8:G8"
+        duplicate["citations"][0]["raw_source_text"] = (
+            "Sterile Gauze 4 x 4 | 24 | BOX"
+        )
+        baseline["rows"].append(duplicate)
+        shadow = copy.deepcopy(baseline)
+        shadow["rows"][0]["quantity"], shadow["rows"][1]["quantity"] = (
+            shadow["rows"][1]["quantity"],
+            shadow["rows"][0]["quantity"],
+        )
+
+        metrics = compare_baseline_and_shadow(baseline, shadow)
+
+        # The individual value sets still match, but no complete semantic row does.
+        self.assertEqual(metrics["quantity_exact_bp"], 10_000)
+        self.assertEqual(metrics["citation_exact_bp"], 10_000)
+        self.assertEqual(metrics["row_exact_bp"], 0)
+
+    def test_numeric_zero_customer_price_and_vat_evidence_is_not_blank(self):
+        baseline = copy.deepcopy(self.baseline)
+        shadow = copy.deepcopy(self.baseline)
+        for key in (
+            "customer_unit_price",
+            "customer_line_total",
+            "customer_vat",
+        ):
+            baseline["rows"][0][key] = 0
+            shadow["rows"][0][key] = ""
+
+        metrics = compare_baseline_and_shadow(baseline, shadow)
+        self.assertEqual(metrics["customer_price_evidence_exact_bp"], 0)
+        self.assertEqual(metrics["row_exact_bp"], 0)
+
+        for key in (
+            "customer_unit_price",
+            "customer_line_total",
+            "customer_vat",
+        ):
+            shadow["rows"][0][key] = "0"
+        metrics = compare_baseline_and_shadow(baseline, shadow)
+        self.assertEqual(metrics["customer_price_evidence_exact_bp"], 10_000)
+        self.assertEqual(metrics["row_exact_bp"], 10_000)
 
     def test_cache_key_is_hash_only_and_changes_with_exact_inputs(self):
         key = compact_cache_key(
