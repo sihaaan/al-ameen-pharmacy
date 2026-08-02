@@ -386,6 +386,38 @@ immediately by setting the unified-workspace flag to `0`; the old Gmail review
 and quotation editor remain available, and already-created drafts require no
 data reversal.
 
+### Bounded parallel Gmail intake reads (disabled by default)
+
+`QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=0` preserves the established
+sequential Gmail inquiry retrieval path exactly. When strictly enabled,
+`QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT=4` permits between 1 and 8 concurrent
+read-only Gmail requests. The backend resolves and verifies the designated
+mailbox token once on the request thread, completes canonical anchor, thread,
+ownership, and selected-message membership checks using metadata, and only
+then schedules the exact selected message bodies. Unselected messages and
+excluded/outbound attachments are never fetched for analysis.
+
+Only selected PDF/Excel attachment byte reads run in the bounded pool. Results
+are reduced in original source order, then the existing untrusted PDF/Excel
+safety inspections run one at a time on the coordinator. The same per-file,
+file-count, combined-byte, and fail-closed rules apply, so completion order
+cannot alter evidence, cache fingerprints, or AI input order. The pool uses a
+sliding in-flight window to bound memory when Gmail omits declared file sizes.
+Worker threads receive only the already-resolved access token and bounded
+source primitives; they never refresh credentials, parse documents, use ORM
+objects, or write progress.
+
+The intake-only GET wrapper retries transient connection failures, HTTP 429,
+and HTTP 5xx at most twice after the initial request. It never retries 401,
+403, or 404, respects a bounded `Retry-After`, and does not wrap Gmail send or
+other mutation calls. Partial message retrieval fails the whole analysis;
+partial attachment retrieval preserves the existing required-evidence
+lockout and prevents the AI provider call.
+
+No migration, API, frontend, OAuth-scope, package, provider, model, prompt,
+worker, or infrastructure change is required. Roll back immediately by setting
+`QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=0`; no stored data needs reversal.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

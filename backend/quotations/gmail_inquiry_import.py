@@ -13,12 +13,16 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
+import urllib.error
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 
 from django.conf import settings
@@ -154,6 +158,184 @@ NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 GMAIL_AI_PIPELINE_VERSION = "gmail_inquiry_v2"
 GMAIL_AI_SCHEMA_NAME = "gmail_inquiry_native_v2"
 GMAIL_SEMANTIC_CACHE_VERSION = "gmail_semantic_cache_v1"
+DEFAULT_GMAIL_PARALLEL_FETCH_LIMIT = 4
+MIN_GMAIL_PARALLEL_FETCH_LIMIT = 1
+MAX_GMAIL_PARALLEL_FETCH_LIMIT = 8
+GMAIL_INTAKE_GET_MAX_ATTEMPTS = 3
+GMAIL_INTAKE_GET_BACKOFF_SECONDS = (0.2, 0.5)
+GMAIL_INTAKE_GET_MAX_RETRY_AFTER_SECONDS = 2.0
+_GMAIL_INTAKE_RETRY_LOCK = threading.Lock()
+
+
+def _gmail_parallel_fetch_enabled():
+    """Enable parallel reads only for the strict Boolean rollout value."""
+
+    return (
+        getattr(settings, "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED", False)
+        is True
+    )
+
+
+def _gmail_parallel_fetch_limit():
+    try:
+        configured = int(
+            getattr(
+                settings,
+                "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
+                DEFAULT_GMAIL_PARALLEL_FETCH_LIMIT,
+            )
+        )
+    except (TypeError, ValueError):
+        configured = DEFAULT_GMAIL_PARALLEL_FETCH_LIMIT
+    return min(
+        MAX_GMAIL_PARALLEL_FETCH_LIMIT,
+        max(MIN_GMAIL_PARALLEL_FETCH_LIMIT, configured),
+    )
+
+
+def _gmail_intake_http_error(exc):
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, urllib.error.HTTPError):
+            return current
+        current = getattr(current, "__cause__", None) or getattr(
+            current,
+            "__context__",
+            None,
+        )
+    return None
+
+
+def _gmail_intake_http_status(exc):
+    http_error = _gmail_intake_http_error(exc)
+    if http_error is not None:
+        return int(http_error.code or 0)
+    message = str(exc or "")
+    status_match = re.search(r"\bHTTP\s+(\d{3})\b", message, re.IGNORECASE)
+    return int(status_match.group(1)) if status_match else 0
+
+
+def _gmail_intake_retryable_get_error(exc):
+    """Classify only transient failures from read-only Gmail intake GETs."""
+
+    status = _gmail_intake_http_status(exc)
+    if status:
+        return status == 429 or 500 <= status <= 599
+    return isinstance(
+        exc,
+        (TimeoutError, ConnectionError, urllib.error.URLError),
+    )
+
+
+def _gmail_intake_retry_delay(exc, attempt):
+    delay = GMAIL_INTAKE_GET_BACKOFF_SECONDS[attempt]
+    http_error = _gmail_intake_http_error(exc)
+    if http_error is not None and (
+        int(http_error.code or 0) == 429
+        or 500 <= int(http_error.code or 0) <= 599
+    ):
+        retry_after = str(
+            (getattr(http_error, "headers", None) or {}).get(
+                "Retry-After",
+                "",
+            )
+        ).strip()
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                delay = (retry_at - timezone.now()).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return min(
+        GMAIL_INTAKE_GET_MAX_RETRY_AFTER_SECONDS,
+        max(GMAIL_INTAKE_GET_BACKOFF_SECONDS[attempt], float(delay)),
+    )
+
+
+def _gmail_intake_safe_error(exc):
+    status = _gmail_intake_http_status(exc)
+    if status in {401, 403}:
+        return GmailInquiryImportError(
+            "Gmail access is no longer authorized. Reconnect the shared "
+            "mailbox and retry analysis."
+        )
+    if status == 404:
+        return GmailInquiryImportError(
+            "A selected Gmail message or attachment is no longer available. "
+            "Open the thread again and retry."
+        )
+    if status == 429 or 500 <= status <= 599 or _gmail_intake_retryable_get_error(exc):
+        return GmailInquiryImportError(
+            "Gmail temporarily could not read the selected inquiry. Retry "
+            "analysis shortly."
+        )
+    return GmailInquiryImportError(
+        "Gmail could not read the selected inquiry. Open the thread again "
+        "and retry."
+    )
+
+
+def _gmail_intake_json_get(url, *, token, timeout=60):
+    """Retry bounded transient failures for Gmail intake GET requests only."""
+
+    for attempt in range(GMAIL_INTAKE_GET_MAX_ATTEMPTS):
+        try:
+            return _json_request(url, token=token, timeout=timeout)
+        except Exception as exc:
+            if (
+                not _gmail_intake_retryable_get_error(exc)
+                or attempt + 1 >= GMAIL_INTAKE_GET_MAX_ATTEMPTS
+            ):
+                raise _gmail_intake_safe_error(exc) from exc
+            # Serialize retry delays across workers so a Gmail throttle does
+            # not cause the bounded pool to amplify a retry burst.
+            with _GMAIL_INTAKE_RETRY_LOCK:
+                time.sleep(_gmail_intake_retry_delay(exc, attempt))
+    raise AssertionError("unreachable Gmail intake GET retry state")
+
+
+def _bounded_ordered_parallel_results(tasks, worker, *, limit):
+    """Yield worker results in input order with only ``limit`` in flight."""
+
+    tasks = list(tasks)
+    if not tasks:
+        return
+    executor = ThreadPoolExecutor(
+        max_workers=limit,
+        thread_name_prefix="gmail-intake-read",
+    )
+    futures = {}
+    next_to_submit = 0
+
+    def submit_one(index):
+        task = tasks[index]
+
+        def captured():
+            try:
+                return worker(task), None
+            except Exception as exc:  # reduced deterministically on caller thread
+                return None, exc
+
+        futures[index] = executor.submit(captured)
+
+    try:
+        while next_to_submit < min(limit, len(tasks)):
+            submit_one(next_to_submit)
+            next_to_submit += 1
+        for index, task in enumerate(tasks):
+            value, error = futures.pop(index).result()
+            yield task, value, error
+            if next_to_submit < len(tasks):
+                submit_one(next_to_submit)
+                next_to_submit += 1
+    finally:
+        for future in futures.values():
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _workflow_duration_ms(started_at, ended_at=None):
@@ -207,6 +389,9 @@ def _workflow_analysis_dimensions(gmail_import, result=None):
             ),
         },
         "cache_state": cache_state,
+        "feature_flags": {
+            "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+        },
         "contract_versions": {
             "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
             "ai_schema": GMAIL_AI_SCHEMA_NAME,
@@ -782,8 +967,15 @@ def _max_thread_messages():
     return min(max(configured, 1), 100)
 
 
-def _thread_message_metadata(connection, thread_id):
-    token = get_valid_access_token(connection)
+def _thread_message_metadata(
+    connection,
+    thread_id,
+    *,
+    access_token=None,
+    request_json=None,
+):
+    token = access_token or get_valid_access_token(connection)
+    json_request = request_json or _json_request
     query = urllib.parse.urlencode(
         [
             ("format", "metadata"),
@@ -794,7 +986,7 @@ def _thread_message_metadata(connection, thread_id):
             ("metadataHeaders", "Reply-To"),
         ]
     )
-    payload = _json_request(
+    payload = json_request(
         f"{GMAIL_API_BASE}/threads/{urllib.parse.quote(str(thread_id))}?{query}",
         token=token,
     )
@@ -863,10 +1055,17 @@ def _thread_message_metadata(connection, thread_id):
     }
 
 
-def _message_metadata(connection, message_id):
+def _message_metadata(
+    connection,
+    message_id,
+    *,
+    access_token=None,
+    request_json=None,
+):
     """Resolve one Gmail message without retrieving its body or MIME parts."""
 
-    token = get_valid_access_token(connection)
+    token = access_token or get_valid_access_token(connection)
+    json_request = request_json or _json_request
     query = urllib.parse.urlencode(
         [
             ("format", "metadata"),
@@ -877,7 +1076,7 @@ def _message_metadata(connection, message_id):
             ("metadataHeaders", "Reply-To"),
         ]
     )
-    payload = _json_request(
+    payload = json_request(
         f"{GMAIL_API_BASE}/messages/"
         f"{urllib.parse.quote(str(message_id))}?{query}",
         token=token,
@@ -1173,7 +1372,7 @@ def _public_attachment_manifest(message):
     return public
 
 
-def _fetch_analysis_messages(gmail_import, connection):
+def _fetch_analysis_messages_sequential(gmail_import, connection):
     selected_ids = _normalize_message_ids(
         gmail_import.selected_message_ids,
         fallback=gmail_import.anchor_message_id,
@@ -1336,6 +1535,216 @@ def _fetch_analysis_messages(gmail_import, connection):
     timeline_result["returned_count"] = len(merged_timeline)
     timeline_result["canonical_anchor_message_id"] = canonical_anchor_id
     return thread_id, messages, merged_timeline, timeline_result
+
+
+def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
+    """Verify canonical membership first, then fetch selected bodies in parallel."""
+
+    selected_ids = _normalize_message_ids(
+        gmail_import.selected_message_ids,
+        fallback=gmail_import.anchor_message_id,
+    )
+    anchor_metadata = _message_metadata(
+        None,
+        gmail_import.anchor_message_id,
+        access_token=access_token,
+        request_json=_gmail_intake_json_get,
+    )
+    canonical_anchor_id = _normalize_gmail_id(
+        anchor_metadata.get("gmail_message_id")
+        or gmail_import.anchor_message_id
+    )
+    anchor_thread_id = str(
+        anchor_metadata.get("gmail_thread_id") or ""
+    ).strip()
+    configured_thread_id = str(gmail_import.gmail_thread_id or "").strip()
+    lookup_thread_id = configured_thread_id or anchor_thread_id
+    if lookup_thread_id:
+        timeline_result = _thread_message_metadata(
+            None,
+            lookup_thread_id,
+            access_token=access_token,
+            request_json=_gmail_intake_json_get,
+        )
+        canonical_thread_id = str(
+            timeline_result.get("gmail_thread_id") or ""
+        ).strip()
+        all_thread_message_ids = {
+            str(message_id or "")
+            for message_id in timeline_result.get("message_ids") or []
+        }
+        if (
+            canonical_anchor_id not in all_thread_message_ids
+            or (
+                anchor_thread_id
+                and canonical_thread_id
+                and anchor_thread_id != canonical_thread_id
+            )
+        ):
+            raise GmailInquiryImportError(
+                "The Gmail handoff thread does not match the selected message."
+            )
+        thread_id = anchor_thread_id or canonical_thread_id
+    else:
+        thread_id = ""
+        all_thread_message_ids = {canonical_anchor_id}
+        timeline_result = {
+            "messages": [],
+            "total_count": 1,
+            "returned_count": 1,
+            "limit": _max_thread_messages(),
+            "truncated": False,
+            "gmail_thread_id": "",
+            "message_ids": [canonical_anchor_id],
+        }
+
+    timeline_messages = list(timeline_result["messages"])
+    timeline_ids = {
+        str(message.get("gmail_message_id") or "")
+        for message in timeline_messages
+    }
+    if canonical_anchor_id not in timeline_ids:
+        limit = max(1, int(timeline_result.get("limit") or 1))
+        timeline_messages = (
+            [anchor_metadata]
+            if limit == 1
+            else [anchor_metadata, *timeline_messages[-(limit - 1) :]]
+        )
+
+    if gmail_import.mode == GmailInquiryImport.MODE_CURRENT_MESSAGE:
+        requested_message_ids = [canonical_anchor_id]
+    elif gmail_import.mode == GmailInquiryImport.MODE_SELECTED_MESSAGES:
+        requested_message_ids = []
+        for selected_id in selected_ids:
+            if selected_id in {
+                gmail_import.anchor_message_id,
+                canonical_anchor_id,
+            }:
+                canonical_selected_id = canonical_anchor_id
+                selected_metadata = anchor_metadata
+            elif selected_id in all_thread_message_ids:
+                canonical_selected_id = selected_id
+                selected_metadata = None
+            else:
+                selected_metadata = _message_metadata(
+                    None,
+                    selected_id,
+                    access_token=access_token,
+                    request_json=_gmail_intake_json_get,
+                )
+                canonical_selected_id = _normalize_gmail_id(
+                    selected_metadata.get("gmail_message_id") or selected_id
+                )
+            selected_thread_id = str(
+                (selected_metadata or {}).get("gmail_thread_id") or thread_id
+            ).strip()
+            if (
+                canonical_selected_id not in all_thread_message_ids
+                or not thread_id
+                or selected_thread_id != thread_id
+            ):
+                raise GmailInquiryImportError(
+                    "Every selected Gmail message must belong to the same thread."
+                )
+            if canonical_selected_id not in requested_message_ids:
+                requested_message_ids.append(canonical_selected_id)
+    else:
+        if not thread_id:
+            raise GmailInquiryImportError(
+                "Gmail did not provide a thread for AI-assisted analysis."
+            )
+        requested_message_ids = [
+            str(message.get("gmail_message_id") or "")
+            for message in timeline_messages
+            if message.get("gmail_message_id")
+        ]
+        if canonical_anchor_id not in requested_message_ids:
+            requested_message_ids.append(canonical_anchor_id)
+
+    def fetch_body(message_id):
+        return fetch_mailbox_message(
+            None,
+            message_id,
+            preserve_forwarded=True,
+            access_token=access_token,
+            request_json=_gmail_intake_json_get,
+        )
+
+    messages = []
+    seen_message_ids = set()
+    tasks = list(enumerate(requested_message_ids))
+    ordered_results = _bounded_ordered_parallel_results(
+        tasks,
+        lambda task: fetch_body(task[1]),
+        limit=_gmail_parallel_fetch_limit(),
+    )
+    try:
+        for (_index, requested_message_id), message, error in ordered_results:
+            if error is not None:
+                raise error
+            canonical_message_id = _normalize_gmail_id(
+                message.get("gmail_message_id") or requested_message_id
+            )
+            message_thread_id = str(
+                message.get("gmail_thread_id") or ""
+            ).strip()
+            if (
+                canonical_message_id != requested_message_id
+                or canonical_message_id not in all_thread_message_ids
+                or (thread_id and message_thread_id != thread_id)
+            ):
+                raise GmailInquiryImportError(
+                    "Every selected Gmail message must belong to the same thread."
+                )
+            if canonical_message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(canonical_message_id)
+            messages.append(message)
+    finally:
+        ordered_results.close()
+
+    messages.sort(
+        key=lambda message: (
+            str(_json_safe(message.get("sent_at")) or ""),
+            str(message.get("gmail_message_id") or ""),
+        )
+    )
+    full_by_id = {
+        str(message.get("gmail_message_id") or ""): message
+        for message in messages
+    }
+    merged_timeline = []
+    seen = set()
+    for message in timeline_messages:
+        message_id = str(message.get("gmail_message_id") or "")
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        merged_timeline.append(full_by_id.get(message_id, message))
+    for message in messages:
+        message_id = str(message.get("gmail_message_id") or "")
+        if message_id and message_id not in seen:
+            seen.add(message_id)
+            merged_timeline.append(message)
+    merged_timeline.sort(
+        key=lambda message: (
+            str(_json_safe(message.get("sent_at")) or ""),
+            str(message.get("gmail_message_id") or ""),
+        )
+    )
+    timeline_result["returned_count"] = len(merged_timeline)
+    timeline_result["canonical_anchor_message_id"] = canonical_anchor_id
+    return thread_id, messages, merged_timeline, timeline_result
+
+
+def _fetch_analysis_messages(gmail_import, connection):
+    if not _gmail_parallel_fetch_enabled():
+        return _fetch_analysis_messages_sequential(gmail_import, connection)
+    token = get_valid_access_token(connection)
+    return _fetch_analysis_messages_parallel(
+        gmail_import,
+        access_token=token,
+    )
 
 
 COMPANY_INFERENCE_MIN_CONFIDENCE = 0.85
@@ -2199,6 +2608,137 @@ def _looks_like_signature_image_bundle_member(
     return bool(has_supported_document and generic_image_count >= 3)
 
 
+def _native_attachment_parallel_tasks(
+    messages,
+    *,
+    mailbox_email,
+    max_bytes,
+    max_native_files,
+):
+    """Plan only source-selected PDF/Excel reads in deterministic order."""
+
+    tasks = []
+    statically_blocked = False
+    for message_sequence, message in enumerate(messages, start=1):
+        outbound = _is_outbound_message(message, mailbox_email)
+        all_attachments = message.get("attachment_manifest") or []
+        message_attachments = all_attachments[
+            :MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ]
+        if (
+            not _is_verified_mailbox_sent_message(message, mailbox_email)
+            and len(all_attachments) > MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ):
+            statically_blocked = True
+            continue
+        body_text = str(message.get("newest_body_text") or "")
+        for attachment_index, attachment in enumerate(message_attachments):
+            if not isinstance(attachment, dict):
+                continue
+            extension = _attachment_extension(attachment)
+            if outbound or extension not in NATIVE_AI_FILE_EXTENSIONS:
+                continue
+            if statically_blocked:
+                continue
+            if int(attachment.get("size") or 0) > int(max_bytes):
+                statically_blocked = True
+                continue
+            if len(tasks) >= int(max_native_files):
+                continue
+            private_attachment = next(
+                (
+                    candidate
+                    for candidate in message.get("_attachment_refs") or []
+                    if (
+                        attachment.get("attachment_id")
+                        and str(candidate.get("attachment_id") or "")
+                        == str(attachment.get("attachment_id") or "")
+                    )
+                    or (
+                        attachment.get("part_id")
+                        and str(candidate.get("part_id") or "")
+                        == str(attachment.get("part_id") or "")
+                    )
+                ),
+                attachment,
+            )
+            tasks.append(
+                {
+                    "key": (message_sequence, attachment_index),
+                    "message_id": str(message.get("gmail_message_id") or ""),
+                    "attachment": dict(private_attachment),
+                }
+            )
+    return tasks
+
+
+def _prefetch_native_ai_attachments(
+    messages,
+    *,
+    mailbox_email,
+    access_token,
+    max_bytes,
+    max_total_bytes,
+    max_native_files,
+):
+    """Fetch bytes concurrently, then inspect each file in source order."""
+
+    tasks = _native_attachment_parallel_tasks(
+        messages,
+        mailbox_email=mailbox_email,
+        max_bytes=max_bytes,
+        max_native_files=max_native_files,
+    )
+    outcomes = {}
+    accepted_bytes = 0
+
+    def worker(task):
+        return _fetch_native_attachment_bytes(
+            None,
+            task["message_id"],
+            task["attachment"],
+            max_bytes=max_bytes,
+            access_token=access_token,
+            request_json=_gmail_intake_json_get,
+        )
+
+    ordered_results = _bounded_ordered_parallel_results(
+        tasks,
+        worker,
+        limit=_gmail_parallel_fetch_limit(),
+    )
+    try:
+        for task, value, error in ordered_results:
+            if error is None:
+                try:
+                    value = _inspect_native_ai_attachment(
+                        task["attachment"],
+                        value,
+                        max_bytes=max_bytes,
+                    )
+                except Exception as exc:
+                    error = exc
+            outcomes[task["key"]] = {
+                "value": value,
+                "error": error,
+            }
+            if error is not None:
+                break
+            native_input, skipped_reason = value
+            if skipped_reason:
+                break
+            if accepted_bytes + int(native_input.get("size") or 0) > int(
+                max_total_bytes
+            ):
+                # The normal source-order reducer records the same required
+                # failure; stopping here merely avoids fetching later files.
+                break
+            accepted_bytes += int(native_input.get("size") or 0)
+    finally:
+        ordered_results.close()
+    return outcomes
+
+
 def _attachment_extension(attachment):
     extension = os.path.splitext(
         str((attachment or {}).get("filename") or "")
@@ -2278,21 +2818,15 @@ def _validation_error_text(exc):
     )[:500]
 
 
-def _fetch_native_ai_attachment(
+def _fetch_native_attachment_bytes(
     connection,
     message_id,
     attachment,
     *,
     max_bytes,
-    progress_callback=None,
+    access_token=None,
+    request_json=None,
 ):
-    """Fetch one original Gmail attachment for a single native AI request.
-
-    This deliberately does not parse, normalize, render, or rewrite the file.
-    The model receives the original customer bytes; only provenance metadata
-    and a digest are retained by the application.
-    """
-
     extension = _attachment_extension(attachment)
     if extension not in NATIVE_AI_FILE_EXTENSIONS:
         if extension == ".xlsb":
@@ -2315,8 +2849,9 @@ def _fetch_native_ai_attachment(
             raise GmailInquiryImportError(
                 "Gmail did not provide content for this attachment."
             )
-        token = get_valid_access_token(connection)
-        attachment_payload = _json_request(
+        token = access_token or get_valid_access_token(connection)
+        json_request = request_json or _json_request
+        attachment_payload = json_request(
             f"{GMAIL_API_BASE}/messages/"
             f"{urllib.parse.quote(str(message_id))}/attachments/"
             f"{urllib.parse.quote(attachment_id)}",
@@ -2331,6 +2866,19 @@ def _fetch_native_ai_attachment(
         raise GmailInquiryImportError(
             f"{attachment.get('filename') or 'Gmail attachment'} is too large."
         )
+    return bytes(content)
+
+
+def _inspect_native_ai_attachment(
+    attachment,
+    content,
+    *,
+    max_bytes,
+    progress_callback=None,
+):
+    """Inspect already-fetched bytes on the coordinator thread."""
+
+    extension = _attachment_extension(attachment)
     content = bytes(content)
     source_sha256 = hashlib.sha256(content).hexdigest()
     page_count = 0
@@ -2561,6 +3109,41 @@ def _fetch_native_ai_attachment(
         "spreadsheet_total_cells": spreadsheet_total_cells,
         **public_inspection,
     }, ""
+
+
+def _fetch_native_ai_attachment(
+    connection,
+    message_id,
+    attachment,
+    *,
+    max_bytes,
+    progress_callback=None,
+    access_token=None,
+    request_json=None,
+):
+    """Fetch and inspect one original Gmail attachment for native AI.
+
+    The sequential compatibility path composes the same byte retrieval and
+    inspection stages. Parallel intake workers call only the byte stage; the
+    coordinator retains serialized parsing of untrusted documents.
+    """
+
+    content = _fetch_native_attachment_bytes(
+        connection,
+        message_id,
+        attachment,
+        max_bytes=max_bytes,
+        access_token=access_token,
+        request_json=request_json,
+    )
+    if isinstance(content, tuple):
+        return content
+    return _inspect_native_ai_attachment(
+        attachment,
+        content,
+        max_bytes=max_bytes,
+        progress_callback=progress_callback,
+    )
 
 
 def _source_key(message_id, kind, identifier):
@@ -4161,6 +4744,7 @@ def _build_source_analysis(
     analysis_timings=None,
     allow_semantic_cache_read=True,
     progress_callback=None,
+    gmail_access_token=None,
 ):
     """Analyze complete selected bodies and original attachments in one AI pass."""
 
@@ -4459,6 +5043,28 @@ def _build_source_analysis(
     if progress_callback is not None and attachment_manifest:
         progress_callback(STAGE_FETCHING_ATTACHMENTS)
 
+    parallel_attachment_outcomes = {}
+    if (
+        _gmail_parallel_fetch_enabled()
+        and native_files_allowed
+        and attachment_manifest
+    ):
+        gmail_access_token = gmail_access_token or get_valid_access_token(
+            connection
+        )
+        if progress_callback is not None:
+            # Retrieval and inspection share one coarse stage in parallel
+            # mode, but this ORM-backed callback remains on the coordinator.
+            progress_callback(STAGE_INSPECTING_DOCUMENTS)
+        parallel_attachment_outcomes = _prefetch_native_ai_attachments(
+            messages,
+            mailbox_email=mailbox_email,
+            access_token=gmail_access_token,
+            max_bytes=max_bytes,
+            max_total_bytes=max_total_bytes,
+            max_native_files=max_native_files,
+        )
+
     for message_sequence, original_message in enumerate(messages, start=1):
         message = {**original_message}
         message_id = str(message.get("gmail_message_id") or "")
@@ -4599,7 +5205,7 @@ def _build_source_analysis(
             # whose metadata set is incomplete. The bounded marker above is
             # enough for staff review without widening the metadata cap.
             continue
-        for attachment in message_attachments:
+        for attachment_index, attachment in enumerate(message_attachments):
             if not isinstance(attachment, dict):
                 continue
             filename = os.path.basename(
@@ -4738,17 +5344,30 @@ def _build_source_analysis(
                 attachment,
             )
             try:
-                native_attachment_options = {"max_bytes": max_bytes}
-                if progress_callback is not None:
-                    native_attachment_options["progress_callback"] = (
-                        progress_callback
+                if _gmail_parallel_fetch_enabled():
+                    prefetched = parallel_attachment_outcomes.get(
+                        (message_sequence, attachment_index)
                     )
-                native_input, skipped_reason = _fetch_native_ai_attachment(
-                    connection,
-                    message_id,
-                    private_attachment,
-                    **native_attachment_options,
-                )
+                    if prefetched is None:
+                        raise GmailInquiryImportError(
+                            "A selected Gmail attachment could not be prepared "
+                            "within the bounded analysis plan."
+                        )
+                    if prefetched["error"] is not None:
+                        raise prefetched["error"]
+                    native_input, skipped_reason = prefetched["value"]
+                else:
+                    native_attachment_options = {"max_bytes": max_bytes}
+                    if progress_callback is not None:
+                        native_attachment_options["progress_callback"] = (
+                            progress_callback
+                        )
+                    native_input, skipped_reason = _fetch_native_ai_attachment(
+                        connection,
+                        message_id,
+                        private_attachment,
+                        **native_attachment_options,
+                    )
             except Exception as exc:
                 record_required_attachment_failure(
                     manifest=manifest,
@@ -5874,6 +6493,9 @@ def analyze_gmail_inquiry_import(
                 "selected_message_count": len(locked.selected_message_ids or []),
             },
             outcome_code="success",
+            feature_flags={
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
             contract_versions=analysis_contracts,
         )
         record_gmail_workflow_metric(
@@ -5885,6 +6507,9 @@ def analyze_gmail_inquiry_import(
                 "selected_message_count": len(locked.selected_message_ids or []),
             },
             outcome_code="success",
+            feature_flags={
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
             contract_versions=analysis_contracts,
         )
 
@@ -5897,8 +6522,20 @@ def analyze_gmail_inquiry_import(
         report_progress(STAGE_PREPARING)
         fetch_started = time.perf_counter()
         connection = _connected_mailbox_for_import(locked, actor)
+        gmail_access_token = (
+            get_valid_access_token(connection)
+            if _gmail_parallel_fetch_enabled()
+            else None
+        )
         report_progress(STAGE_FETCHING_MESSAGES)
-        fetched = _fetch_analysis_messages(locked, connection)
+        fetched = (
+            _fetch_analysis_messages_parallel(
+                locked,
+                access_token=gmail_access_token,
+            )
+            if gmail_access_token
+            else _fetch_analysis_messages(locked, connection)
+        )
         analysis_timings["gmail_thread_fetch"] = _elapsed_ms(fetch_started)
         if len(fetched) == 3:
             thread_id, messages, timeline_messages = fetched
@@ -5933,6 +6570,10 @@ def analyze_gmail_inquiry_import(
             "analysis_timings": analysis_timings,
             "allow_semantic_cache_read": not force,
         }
+        if gmail_access_token:
+            source_analysis_options["gmail_access_token"] = (
+                gmail_access_token
+            )
         if progress_binding is not None:
             source_analysis_options["progress_callback"] = report_progress
         result = _build_source_analysis(
@@ -5989,6 +6630,9 @@ def analyze_gmail_inquiry_import(
             },
             cache_state="unknown",
             outcome_code="failure",
+            feature_flags={
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
             contract_versions={
                 "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
                 "ai_schema": GMAIL_AI_SCHEMA_NAME,
@@ -6125,6 +6769,9 @@ def analyze_gmail_inquiry_import(
             },
             cache_state="unknown",
             outcome_code="failure",
+            feature_flags={
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
             contract_versions={
                 "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
                 "ai_schema": GMAIL_AI_SCHEMA_NAME,

@@ -152,6 +152,33 @@ cleared in the browser and rejected by the server. The employee must make an
 explicit Product correction; this remains suggestion-only and does not create
 or learn aliases.
 
+### Bounded parallel Gmail intake reads
+
+`QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED` defaults to `0`, retaining the exact
+sequential Gmail inquiry retrieval path. In staging, begin with
+`QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT=4` (the application clamps it to 1-8).
+Canonical message/thread ownership and the complete selected-message boundary
+are verified before any body worker starts. The same request-thread token is
+then used for bounded, read-only message and eligible PDF/Excel attachment
+GETs; workers cannot refresh credentials, parse untrusted documents, touch
+models, or report progress. Attachment safety inspection remains serialized on
+the request coordinator after deterministic source-order reduction.
+
+Monitor Gmail fetch duration, safe fetch failures, 429/5xx rates, attachment
+failure lockouts, analysis cache-hit rate, and content-fingerprint equivalence
+against the sequential path. Content-free workflow metrics include the
+`gmail_parallel_fetch` Boolean, so enabled and sequential rollout windows can
+be compared without recording Gmail or customer content. Transient GET retries
+are bounded and honor a capped `Retry-After`; HTTP 401, 403, and 404
+authorization/not-found failures are terminal. Gmail send, preview,
+reconciliation, and every mutation path remain unchanged and receive no
+automatic retry.
+
+Rollback is immediate: set `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=0` and the
+next analysis uses the prior sequential implementation. There is no migration,
+API/frontend behavior, OAuth scope, worker, package, provider/model/prompt, or
+stored-data rollback.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

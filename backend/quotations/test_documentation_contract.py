@@ -206,6 +206,8 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
             "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
             "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+            "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
+            "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -294,6 +296,22 @@ class DocumentationContractTests(SimpleTestCase):
         self.assertIn("Customer budget/source prices are never read", deployment)
         self.assertIn("Exact\ndouble clicks", deployment)
         self.assertIn("not eligible to auto-preview", operations)
+
+    def test_parallel_gmail_reads_are_bounded_default_off_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED", content)
+            self.assertIn("QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("sequential", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("401", content)
+            self.assertIn("429", content)
+            self.assertIn("Gmail send", content)
+        self.assertIn("sliding in-flight window", deployment)
+        self.assertIn("original source order", deployment)
+        self.assertIn("1-8", operations)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

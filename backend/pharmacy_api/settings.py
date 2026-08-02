@@ -412,6 +412,22 @@ QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED = env_bool(
     "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
     False,
 )
+# Optional bounded concurrency for read-only Gmail inquiry retrieval. The
+# disabled path retains the established sequential fetch behavior exactly.
+QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED = env_bool(
+    "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
+    False,
+)
+try:
+    QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = int(
+        os.environ.get("QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT", "4")
+    )
+except (TypeError, ValueError):
+    QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = 4
+QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = min(
+    8,
+    max(1, QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT),
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",
