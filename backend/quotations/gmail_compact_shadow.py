@@ -34,6 +34,7 @@ MAX_CONTEXT_CHARS = 120_000
 MAX_METRIC_COUNT = 1_000_000
 MAX_METRIC_DURATION_MS = 7 * 24 * 60 * 60 * 1000
 MAX_TOKEN_COUNT = 2_000_000_000
+IDENTITY_CONFIDENCE_THRESHOLDS_BP = (6_500, 7_500, 8_500, 9_000)
 
 MESSAGE_CLASSIFICATIONS = {
     "i": "initial_inquiry",
@@ -126,6 +127,8 @@ SAFE_COMPARISON_KEYS = {
     "unit_exact_bp",
     "operation_exact_bp",
     "uncertainty_exact_bp",
+    "row_confidence_exact_bp",
+    "row_confidence_band_exact_bp",
     "customer_price_evidence_exact_bp",
     "citation_exact_bp",
     "message_decision_total",
@@ -133,6 +136,9 @@ SAFE_COMPARISON_KEYS = {
     "message_decision_exact_bp",
     "identity_exact_bp",
     "identity_evidence_exact_bp",
+    "identity_confidence_exact_bp",
+    "identity_confidence_band_exact_bp",
+    "identity_confidence_absolute_delta_bp",
     "baseline_warning_count",
     "shadow_warning_count",
     "warning_exact_bp",
@@ -622,6 +628,16 @@ def _comparison_text(value):
     return "" if value is None else str(value)
 
 
+def _confidence_basis_points(value):
+    try:
+        value = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if not math.isfinite(value):
+        return 0
+    return min(10_000, max(0, int(round(value * 10_000))))
+
+
 def _result_rows(result):
     rows = result.get("rows") if isinstance(result, dict) else []
     normalized = []
@@ -649,6 +665,11 @@ def _result_rows(result):
             if key in row
             for value in (row.get(key),)
         )
+        confidence_bp = _confidence_basis_points(
+            row.get("parse_confidence")
+            if "parse_confidence" in row
+            else row.get("confidence")
+        )
         normalized.append(
             {
                 "name": str(row.get("raw_name") or row.get("item_name") or ""),
@@ -656,6 +677,8 @@ def _result_rows(result):
                 "unit": str(row.get("unit") or ""),
                 "operation": str(row.get("operation") or ""),
                 "status": str(row.get("parse_status") or ""),
+                "confidence_bp": confidence_bp,
+                "confidence_band": int(confidence_bp >= 7_000),
                 "price": (
                     _comparison_text(row.get("customer_unit_price")),
                     _comparison_text(row.get("customer_line_total")),
@@ -708,6 +731,8 @@ def compare_baseline_and_shadow(baseline, shadow):
         "unit",
         "operation",
         "status",
+        "confidence_bp",
+        "confidence_band",
         "price",
         "citations",
     )
@@ -736,6 +761,20 @@ def compare_baseline_and_shadow(baseline, shadow):
     identity_sources_exact = Counter(
         str(value) for value in (baseline_identity.get("source_keys") or [])
     ) == Counter(str(value) for value in (shadow_identity.get("source_keys") or []))
+    baseline_identity_confidence = _confidence_basis_points(
+        baseline_identity.get("confidence")
+    )
+    shadow_identity_confidence = _confidence_basis_points(
+        shadow_identity.get("confidence")
+    )
+    baseline_identity_band = sum(
+        baseline_identity_confidence >= threshold
+        for threshold in IDENTITY_CONFIDENCE_THRESHOLDS_BP
+    )
+    shadow_identity_band = sum(
+        shadow_identity_confidence >= threshold
+        for threshold in IDENTITY_CONFIDENCE_THRESHOLDS_BP
+    )
     baseline_warnings = Counter(str(value) for value in ((baseline or {}).get("warnings") or []))
     shadow_warnings = Counter(str(value) for value in ((shadow or {}).get("warnings") or []))
     return {
@@ -750,6 +789,8 @@ def compare_baseline_and_shadow(baseline, shadow):
         "unit_exact_bp": exact("unit"),
         "operation_exact_bp": exact("operation"),
         "uncertainty_exact_bp": exact("status"),
+        "row_confidence_exact_bp": exact("confidence_bp"),
+        "row_confidence_band_exact_bp": exact("confidence_band"),
         "customer_price_evidence_exact_bp": exact("price"),
         "citation_exact_bp": exact("citations"),
         "message_decision_total": min(message_total, MAX_METRIC_COUNT),
@@ -757,6 +798,17 @@ def compare_baseline_and_shadow(baseline, shadow):
         "message_decision_exact_bp": _basis_points(message_exact, message_total),
         "identity_exact_bp": 10_000 if identity_exact else 0,
         "identity_evidence_exact_bp": 10_000 if identity_sources_exact else 0,
+        "identity_confidence_exact_bp": (
+            10_000
+            if baseline_identity_confidence == shadow_identity_confidence
+            else 0
+        ),
+        "identity_confidence_band_exact_bp": (
+            10_000 if baseline_identity_band == shadow_identity_band else 0
+        ),
+        "identity_confidence_absolute_delta_bp": abs(
+            baseline_identity_confidence - shadow_identity_confidence
+        ),
         "baseline_warning_count": min(len((baseline or {}).get("warnings") or []), MAX_METRIC_COUNT),
         "shadow_warning_count": min(len((shadow or {}).get("warnings") or []), MAX_METRIC_COUNT),
         "warning_exact_bp": 10_000 if baseline_warnings == shadow_warnings else 0,

@@ -532,6 +532,58 @@ class GmailCompactShadowTests(SimpleTestCase):
         self.assertEqual(metrics["customer_price_evidence_exact_bp"], 10_000)
         self.assertEqual(metrics["row_exact_bp"], 10_000)
 
+    def test_row_confidence_and_decision_band_differences_are_visible(self):
+        baseline = copy.deepcopy(self.baseline)
+        shadow = copy.deepcopy(self.baseline)
+        baseline["rows"][0]["parse_confidence"] = 0.70
+        baseline["rows"][0].pop("confidence", None)
+        shadow["rows"][0]["parse_confidence"] = 0.69
+        shadow["rows"][0].pop("confidence", None)
+
+        metrics = compare_baseline_and_shadow(baseline, shadow)
+
+        self.assertEqual(metrics["row_confidence_exact_bp"], 0)
+        self.assertEqual(metrics["row_confidence_band_exact_bp"], 0)
+        self.assertEqual(metrics["row_exact_bp"], 0)
+
+    def test_identity_confidence_and_decision_band_differences_are_visible(self):
+        baseline = copy.deepcopy(self.baseline)
+        shadow = copy.deepcopy(self.baseline)
+        baseline["customer_identity"]["confidence"] = 0.64
+        shadow["customer_identity"]["confidence"] = 0.66
+
+        metrics = compare_baseline_and_shadow(baseline, shadow)
+
+        self.assertEqual(metrics["identity_exact_bp"], 10_000)
+        self.assertEqual(metrics["identity_evidence_exact_bp"], 10_000)
+        self.assertEqual(metrics["identity_confidence_exact_bp"], 0)
+        self.assertEqual(metrics["identity_confidence_band_exact_bp"], 0)
+        self.assertEqual(metrics["identity_confidence_absolute_delta_bp"], 200)
+
+    def test_confidence_metrics_survive_content_free_sanitization(self):
+        sanitized = sanitize_comparison(
+            {
+                "row_confidence_exact_bp": 9_999,
+                "row_confidence_band_exact_bp": 8_888,
+                "identity_confidence_exact_bp": 7_777,
+                "identity_confidence_band_exact_bp": 6_666,
+                "identity_confidence_absolute_delta_bp": 555,
+                "private_identity": "PRIVATE CUSTOMER",
+            }
+        )
+
+        self.assertEqual(
+            sanitized,
+            {
+                "row_confidence_exact_bp": 9_999,
+                "row_confidence_band_exact_bp": 8_888,
+                "identity_confidence_exact_bp": 7_777,
+                "identity_confidence_band_exact_bp": 6_666,
+                "identity_confidence_absolute_delta_bp": 555,
+            },
+        )
+        self.assertNotIn("PRIVATE", json.dumps(sanitized))
+
     def test_cache_key_is_hash_only_and_changes_with_exact_inputs(self):
         key = compact_cache_key(
             self.boundary,
@@ -700,7 +752,11 @@ class GmailCompactShadowTests(SimpleTestCase):
                         value == 10_000
                         for key, value in metrics.items()
                         if key.endswith("_bp")
+                        and not key.endswith("_absolute_delta_bp")
                     )
+                )
+                self.assertEqual(
+                    metrics["identity_confidence_absolute_delta_bp"], 0
                 )
                 self.assertEqual(metrics["blank_selling_price_violations"], 0)
                 self.assertTrue(
