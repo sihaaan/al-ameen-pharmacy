@@ -7,6 +7,7 @@ history, quotations, or revisions. Confirmation creates at most one Inquiry
 and its first draft Quotation.
 """
 
+import copy
 import hashlib
 import hmac
 import json
@@ -110,6 +111,7 @@ from .gmail_review_state import (
     gmail_review_rows_fingerprint,
     gmail_suggested_company_is_approvable,
 )
+from .gmail_compact_shadow import run_compact_shadow, sanitize_shadow_report
 from .gmail_analysis_progress import (
     STAGE_ANALYZING_WITH_AI,
     STAGE_FETCHING_ATTACHMENTS,
@@ -174,6 +176,19 @@ def _gmail_parallel_fetch_enabled():
 
     return (
         getattr(settings, "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED", False)
+        is True
+    )
+
+
+def _gmail_compact_schema_shadow_enabled():
+    """Enable the non-authoritative compact call only for strict true."""
+
+    return (
+        getattr(
+            settings,
+            "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+            False,
+        )
         is True
     )
 
@@ -398,6 +413,7 @@ def _workflow_analysis_dimensions(
         "cache_state": cache_state,
         "feature_flags": {
             "background_analysis": bool(background_analysis),
+            "compact_schema_shadow": _gmail_compact_schema_shadow_enabled(),
             "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
         },
         "contract_versions": {
@@ -3907,6 +3923,26 @@ def _run_native_thread_analysis(
                     ),
                     success=True,
                 )
+                if (
+                    _gmail_compact_schema_shadow_enabled()
+                    and progress_callback is not None
+                ):
+                    progress_callback(STAGE_ANALYZING_WITH_AI)
+                _maybe_run_compact_schema_shadow(
+                    messages=messages,
+                    sources=sources,
+                    file_inputs=file_inputs,
+                    gmail_import=gmail_import,
+                    actor=actor,
+                    baseline_result=validated_result,
+                    provider_name=provider_name,
+                    model=model,
+                )
+                if (
+                    _gmail_compact_schema_shadow_enabled()
+                    and progress_callback is not None
+                ):
+                    progress_callback(STAGE_ANALYZING_WITH_AI)
                 validated_result["_timings_ms"] = (
                     _analysis_timing_snapshot(analysis_timings)
                 )
@@ -4010,6 +4046,27 @@ def _run_native_thread_analysis(
         ),
         success=True,
     )
+    if (
+        _gmail_compact_schema_shadow_enabled()
+        and progress_callback is not None
+    ):
+        progress_callback(STAGE_ANALYZING_WITH_AI)
+    _maybe_run_compact_schema_shadow(
+        messages=messages,
+        sources=sources,
+        file_inputs=file_inputs,
+        gmail_import=gmail_import,
+        actor=actor,
+        baseline_result=validated_result,
+        provider_name=provider_name,
+        model=model,
+        provider_runner=provider.clean_rows,
+    )
+    if (
+        _gmail_compact_schema_shadow_enabled()
+        and progress_callback is not None
+    ):
+        progress_callback(STAGE_ANALYZING_WITH_AI)
     validated_result["_timings_ms"] = _analysis_timing_snapshot(
         analysis_timings
     )
@@ -4353,6 +4410,155 @@ def _validate_native_thread_result(raw_result, messages, evidence):
             "reason": str(identity.get("reason") or "")[:1000],
         },
     }
+
+
+def _persist_compact_shadow_metric(
+    report,
+    *,
+    actor,
+    provider_name,
+    model,
+    has_native_files,
+    binding_sha256,
+):
+    """Persist only the compact module's bounded content-free report."""
+
+    if (
+        getattr(settings, "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED", False)
+        is not True
+    ):
+        return
+    report = sanitize_shadow_report(report)
+    contract = report.get("contract") if isinstance(report.get("contract"), dict) else {}
+    context_hash = str(contract.get("contract_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", context_hash):
+        context_hash = ""
+    binding_sha256 = str(binding_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", binding_sha256):
+        binding_sha256 = ""
+    failure_category = str(report.get("failure_category") or "")
+    if failure_category not in {
+        "",
+        "contract",
+        "cache",
+        "provider",
+        "validation",
+        "comparison",
+    }:
+        failure_category = "validation"
+    try:
+        # A savepoint prevents optional experiment telemetry from breaking an
+        # authoritative analysis transaction if its write ever fails.
+        with transaction.atomic():
+            AIParseLog.objects.create(
+                actor=(
+                    actor
+                    if getattr(actor, "is_authenticated", False)
+                    else None
+                ),
+                provider=str(provider_name or "")[:40],
+                model=str(model or "")[:120],
+                mode=(
+                    AIParseLog.MODE_VISION
+                    if has_native_files
+                    else AIParseLog.MODE_TEXT
+                ),
+                source_type="gmail_compact_shadow",
+                source_sha256=binding_sha256,
+                context_hash=context_hash,
+                cache_hit=report.get("cache_state") == "hit",
+                text_length=0,
+                page_count=0,
+                image_count=0,
+                usage={"shadow_experiment": copy.deepcopy(report)},
+                success=report.get("status") == "success",
+                error=(
+                    ""
+                    if report.get("status") == "success"
+                    else f"compact_shadow_{failure_category or 'validation'}"
+                ),
+            )
+    except Exception:
+        # Do not log exception text: database/provider errors can contain
+        # customer identifiers. Shadow observability is always expendable.
+        return
+
+
+def _maybe_run_compact_schema_shadow(
+    *,
+    messages,
+    sources,
+    file_inputs,
+    gmail_import,
+    actor,
+    baseline_result,
+    provider_name,
+    model,
+    provider_runner=None,
+):
+    """Compare the compact contract without changing the baseline result."""
+
+    if not _gmail_compact_schema_shadow_enabled():
+        return None
+    try:
+        runner = provider_runner or get_ai_parse_provider(
+            provider_name
+        ).clean_rows
+
+        binding_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "cache_key_hint": "compact_shadow_v1",
+                    "gmail_import_id": getattr(gmail_import, "pk", None),
+                    "source_fingerprint": str(
+                        getattr(gmail_import, "source_fingerprint", "") or ""
+                    ),
+                    "analysis_attempt": int(
+                        getattr(gmail_import, "analysis_attempts", 0) or 0
+                    ),
+                    "analysis_generation": str(
+                        getattr(
+                            gmail_import,
+                            "analysis_progress_generation",
+                            "",
+                        )
+                        or ""
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        def validate_expanded(expanded):
+            return _validate_native_thread_result(
+                expanded,
+                copy.deepcopy(messages),
+                copy.deepcopy(sources),
+            )
+
+        return run_compact_shadow(
+            messages=copy.deepcopy(messages),
+            sources=copy.deepcopy(sources),
+            file_inputs=copy.deepcopy(file_inputs),
+            mode=gmail_import.mode,
+            baseline_result=copy.deepcopy(baseline_result),
+            provider_runner=runner,
+            provider_name=provider_name,
+            model=model,
+            expanded_validator=validate_expanded,
+            metrics_sink=lambda report: _persist_compact_shadow_metric(
+                report,
+                actor=actor,
+                provider_name=provider_name,
+                model=model,
+                has_native_files=bool(file_inputs),
+                binding_sha256=binding_sha256,
+            ),
+        )
+    except Exception:
+        # The experiment can never affect baseline analysis availability.
+        return None
 
 
 def _apply_ai_identity_candidates(

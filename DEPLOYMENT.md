@@ -486,6 +486,41 @@ No migration, API, frontend, OAuth-scope, package, provider, model, prompt,
 worker, or infrastructure change is required. Roll back immediately by setting
 `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=0`; no stored data needs reversal.
 
+### Compact Gmail contract experiment (shadow-only, disabled by default)
+
+`QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED=0` makes no extra provider call
+and preserves the established `gmail_inquiry_native_v2` result and cache as the
+only authoritative analysis. When strictly enabled, each successful current
+baseline result is copied into an isolated comparison boundary. A second call
+to the already configured provider/model uses
+`gmail_inquiry_compact_shadow_v1`, `gmail_inquiry_compact_v1`, and the distinct
+`gmail_compact_shadow_cache_v1` namespace. Opaque aliases replace Gmail message
+IDs and source keys in the response contract; the full selected email/document
+context remains untrusted provider input because it is required for semantic
+analysis.
+
+The compact output is expanded and passed through the existing native
+validator using deep copies of both messages and evidence. It is then
+discarded. It cannot replace baseline rows, mutate evidence, select a company,
+contact, purchaser, or Product, set a selling price, create/finalize a
+quotation, preview/send email, or write a baseline cache entry. Raw or expanded
+shadow output is never persisted. If workflow metrics are separately enabled,
+only a re-sanitized numeric agreement/token/duration report and contract/input
+hashes are written to `AIParseLog`; customer text, addresses, Gmail IDs,
+filenames, source keys, prices, and raw output are rejected from that envelope.
+The current application intentionally bypasses persisted shadow result caching
+even though the namespace is contract-tested, so repeated enabled analyses can
+make repeated provider calls.
+
+There is no migration, API, frontend, OAuth-scope, package, model, or
+infrastructure change. This flag is for synthetic/non-production evaluation
+only. It adds a synchronous provider call, including when the baseline is an
+application-cache hit, and therefore can add provider latency and cost. Do not
+enable it without an approved test key/budget; prefer the durable background
+worker and monitor its lease heartbeat if it is ever evaluated. Rollback is
+immediate: set the flag to `0`, which removes all compact provider activity and
+leaves the baseline path and its cache unchanged.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

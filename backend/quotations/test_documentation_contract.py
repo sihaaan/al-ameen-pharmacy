@@ -13,6 +13,11 @@ from quotations.gmail_inquiry_import import (
     GMAIL_AI_SCHEMA_NAME,
     GMAIL_IDENTITY_MATCH_VERSION,
 )
+from quotations.gmail_compact_shadow import (
+    GMAIL_COMPACT_CACHE_NAMESPACE,
+    GMAIL_COMPACT_PIPELINE_VERSION,
+    GMAIL_COMPACT_SCHEMA_NAME,
+)
 from quotations.models import (
     QuotationEmailDeliveryAttemptEvent,
     QuotationEmailOutboundSnapshot,
@@ -209,6 +214,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
+            "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -338,6 +344,29 @@ class DocumentationContractTests(SimpleTestCase):
         self.assertIn("sliding in-flight window", deployment)
         self.assertIn("original source order", deployment)
         self.assertIn("1-8", operations)
+
+    def test_compact_gmail_shadow_is_default_off_discarded_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn(
+                "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+                content,
+            )
+            self.assertIn("shadow", content.lower())
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("raw", content.lower())
+            self.assertIn("provider", content.lower())
+            self.assertIn("rollback", content.lower())
+        for version in (
+            GMAIL_COMPACT_PIPELINE_VERSION,
+            GMAIL_COMPACT_SCHEMA_NAME,
+            GMAIL_COMPACT_CACHE_NAMESPACE,
+        ):
+            self.assertIn(version, deployment)
+        self.assertIn("discarded", deployment)
+        self.assertIn("test key", operations)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

@@ -435,6 +435,12 @@ QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED = env_bool(
     "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
     False,
 )
+# Internal comparison only. The compact contract is never authoritative and
+# cannot change any employee-visible Gmail analysis result.
+QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED = env_bool(
+    "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

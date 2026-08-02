@@ -236,6 +236,34 @@ next analysis uses the prior sequential implementation. There is no migration,
 API/frontend behavior, OAuth scope, worker, package, provider/model/prompt, or
 stored-data rollback.
 
+### Compact Gmail contract experiment (shadow-only)
+
+`QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED` defaults to `0`; with that
+value there is no shadow provider activity. Enabling it never changes the
+employee-visible baseline result. The server validates compact output against
+deep copies, compares it, discards it, and retains the existing native schema,
+cache, evidence, blank-price behavior, company/Product review, and delivery
+controls as authoritative. No raw compact response is stored. Privacy-safe
+experiment metrics are persisted only when the existing workflow-metrics flag
+is also enabled.
+
+This experiment currently bypasses persisted shadow output caching. Expect one
+additional provider call for every successful baseline analysis, including a
+baseline cache hit, and monitor input/output tokens, provider duration,
+validation duration, total duration, row/message/evidence agreement, blank
+selling-price violations, and worker lease heartbeat. The metrics compare the
+shadow with the baseline; they do not prove that either result is correct and
+do not measure final deterministic company/contact ambiguity. The repository's
+30-case corpus has no checked-in live-model prediction baseline, so do not
+promote this experiment without a separately approved synthetic-provider run,
+test key, and budget.
+
+Rollback requires only setting the compact flag to `0`; the next analysis makes
+no compact call. There is no migration, stored customer result, baseline cache
+change, OAuth/model/package change, or data reversal. Do not enable this flag
+on a synchronous production web process or together with another shadow call
+until the resulting latency and background-job lease margin have been measured.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |
