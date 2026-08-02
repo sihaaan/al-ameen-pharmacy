@@ -77,7 +77,77 @@ customer content.
 
 ## Phase 2 checkpoint
 
-Pending.
+Complete. The Phase 2 implementation remains disabled by default and does not
+configure or start a worker service.
+
+| Task | Commit | Default-off flag | Result |
+| --- | --- | --- | --- |
+| 2.1 Unified Gmail inquiry and quotation workspace | `054ce5c1b0aa8b75e735b3756a58ed68d820bcde` | `QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` | One review/pricing surface with explicit company, uncertainty, Product, and price decisions; the established two-screen route remains the fallback. |
+| 2.2 Bounded parallel Gmail reads | `64392c310bbd51f3366223bf68ced67447c77d9b` | `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED` | Canonically verified message and attachment reads may run with a bounded limit (default `4`), then return to deterministic chronological order. |
+| 2.3 Durable background analysis | `93fb48d6f2b486ce375cec89726dd56904231d32` | `QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED` | PostgreSQL job/lease ledger, idempotent enqueue, safe progress, stale-result rejection, crash recovery, and a separate management-command worker. |
+| PostgreSQL test correction | `1ab7bd7a4f4adf5b6a6a78e9316e92855cc00fc3` | Not applicable | Corrected one concurrency assertion to use the model's actual `analysis` field; no application behavior changed. |
+
+### Phase 2 schema, API, and worker changes
+
+- `POST /api/quotations/gmail-inquiry-imports/{id}/confirm_and_prepare_quotation/`
+  is additive and available only when unified workspace and review UI V2 are
+  strictly enabled. It is source-, generation-, review-, and company-approval
+  bound, and atomically creates or reuses the hardened Inquiry/Quotation path.
+- Existing `POST .../analyze/` remains synchronous with HTTP 200 while
+  background analysis is disabled. When enabled, it idempotently returns the
+  current job (HTTP 202 while active, HTTP 200 for a current completed result).
+- Migration `quotations.0041_gmailinquiryanalysisjob` creates only an empty job
+  ledger. It has one uniqueness constraint per import/generation and one
+  partial uniqueness constraint for a queued/running job per import.
+- `python manage.py run_gmail_inquiry_worker` is prepared but no Railway worker,
+  scheduler, provider, credential, or production flag was configured.
+- Combined job transitions use import -> job -> user lock order. The short
+  claim transaction uses `SKIP LOCKED`; lease tokens, heartbeats, employee
+  authorization, canonical source fingerprints, and generations are
+  revalidated before provider work and again before persistence.
+
+### Phase 2 validation
+
+All tests used synthetic/local data, mocked Gmail/AI providers, local SQLite,
+or an isolated temporary PostgreSQL cluster. No live Gmail mailbox, customer
+content, paid provider, or production system was accessed.
+
+- Complete backend SQLite suite: `1,429/1,429` passed in 633.879 seconds;
+  `26` PostgreSQL-only cases were skipped as designed.
+- Local PostgreSQL 17.5 `READ COMMITTED` migration compatibility lane: `3/3`
+  passed. The exact concurrency command passed `25/25`, including all three
+  Gmail analysis-job races, under 5-second lock and 30-second statement limits.
+- Exact PostgreSQL 17.10 was unavailable locally. Protected CI is pinned to
+  `postgres:17.10-alpine`, asserts server version `170010` and `READ COMMITTED`,
+  and remains a release gate after the draft PR is opened.
+- Complete frontend suite: `320/320` passed across 20 suites on Node 20.20.2.
+- Frontend production build: compiled successfully.
+- Django system check: no issues. Migration drift: none. Python dependency
+  integrity: no broken requirements.
+- Frontend critical dependency audit: passed with zero Critical advisories.
+  The full audit reports 11 High, 7 Moderate, and 9 Low advisories, all High
+  paths covered by the repository's time-bounded FE-EX-002--005 exceptions.
+- Repository diff/whitespace checks: clean. The existing untracked `output/`
+  directory remained unchanged.
+
+### Phase 2 migration and rollback
+
+Deploy migration `0041` before enabling either web enqueueing or a worker. Old
+application code safely ignores the additive table. New code can run before
+the migration only while background analysis is disabled. For rollback, first
+disable enqueueing on every web process, drain or stop workers, and normally
+retain `0041`; reversing it destroys the job ledger and requires an explicit
+operator decision. Disabling unified workspace restores the previous Gmail
+review plus QuotationEditor route, disabling parallel reads restores sequential
+retrieval, and disabling background analysis restores synchronous analysis.
+
+### Phase 2 safety confirmation
+
+Phase 2 did not change AI models, prompts, OAuth scopes, verified Gmail
+recipient/thread handling, immutable outbound snapshots, send idempotency,
+reconciliation, selling-price defaults, Product/company approval rules, or
+row-evidence requirements. It did not send email, deploy, or alter Railway,
+Neon, Gmail, Cloudinary, production credentials, or customer content.
 
 ## Phase 3 checkpoint
 
