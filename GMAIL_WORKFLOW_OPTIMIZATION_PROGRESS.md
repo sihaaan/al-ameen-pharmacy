@@ -23,6 +23,9 @@ disabled by default, and no checkpoint authorizes deployment or flag rollout.
 
 ### Phase 1 schema and API changes
 
+- Migration `quotations.0039_gmailworkflowmetric` additively creates the
+  allow-listed, content-free workflow metric ledger and its bounded indexes
+  and duration constraint.
 - Migration `quotations.0040_gmailinquiryimport_analysis_progress` is additive
   and adds only bounded progress metadata with empty/zero/null defaults.
 - `GET /api/quotations/gmail-inquiry-imports/{id}/analysis_progress/` is
@@ -151,4 +154,158 @@ Neon, Gmail, Cloudinary, production credentials, or customer content.
 
 ## Phase 3 checkpoint
 
-Pending. Phase 3 remains shadow-only and disabled by default.
+Complete as internal experiments only. Both experiments remain strictly
+disabled by default and are not approved for rollout.
+
+| Task | Commit | Default-off flag | Result |
+| --- | --- | --- | --- |
+| 3.1 Compact Gmail AI schema shadow | `c5dda7b` | `QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED` | Adds a distinct compact contract, prompt/schema/pipeline/cache versions, baseline comparison, and privacy-safe metrics. The native result and cache remain authoritative. |
+| 3.1 association-safe metric correction | `fa6412a971e509188f68a338fe1c3d79e79cd25b` | Same flag | Makes duplicate-name row comparison order-independent while retaining whole-row association checks and numeric zero values. |
+| Cross-shadow confidence correction | `6c56a7e` | Both Phase 3 flags | Measures row and customer-identity confidence exactly and by production decision band so a threshold-crossing result cannot be reported as full agreement. |
+| 3.2 Clean-XLSX pre-extraction shadow | `e80257d` | `QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED` | Adds a bounded, fail-closed OOXML classifier/canonicalizer and a separate shadow runner. Eligible XLSX files retain exact visible sheet/cell provenance; every fidelity uncertainty falls back before an extra provider call. |
+| Full-suite contract correction | `084ed6e` | Not applicable | Extends the existing feature-flag telemetry assertion to require both Phase 3 flags to be present and false. No runtime behavior changed. |
+
+### Phase 3 baseline and evaluation limits
+
+`python manage.py evaluate_quotation_intake` validated all `30` cases in the
+fully synthetic `synthetic-quotation-intake-v1` corpus: `17` Gmail and `13`
+manual cases across clean/messy Excel, email tables, selectable/scanned PDF,
+follow-up, partial/full revision, conflict, and similar-company categories.
+This validates corpus structure and provenance only; it is not a live model
+accuracy result.
+
+No designated test key, approved provider budget, or checked-in baseline and
+shadow prediction set exists. In accordance with the project stop condition,
+no paid provider call was made. Row precision/recall, item/quantity/unit and
+revision accuracy, message decisions, identity ambiguity, tokens, provider
+duration, total provider time, and cost therefore remain unmeasured for the
+30-case baseline-versus-shadow comparison. Neither experiment satisfies its
+promotion gate until that separately approved benchmark shows no regression.
+
+The offline contract matrix still verifies that:
+
+- the baseline result is produced first and remains employee-visible;
+- baseline and shadow cache namespaces cannot overlap;
+- raw shadow responses and extracted customer content are discarded;
+- selling-price violations are detected and selling prices remain blank;
+- message, row, revision, warning, evidence, identity, and confidence
+  comparisons are content-free and association-sensitive;
+- citations bind to exact source/sheet/cell ranges, exact excerpts, and strict
+  numeric values under total/per-row resource ceilings;
+- formulas, hidden relevant content, ambiguous merges, inherited
+  date/locale-sensitive formats, conditional formatting, external links,
+  macros, protection, unsupported relationships/parts, malformed packages,
+  and every inspection/resource uncertainty fail closed to the native route;
+- prompt-injection text remains inert spreadsheet data.
+
+### Phase 3 compatibility and rollback
+
+Phase 3 adds no migration, public API, frontend behavior, package, OAuth scope,
+AI model selection, worker, or infrastructure requirement. With both flags at
+`0`, it performs no pre-extraction and no shadow provider activity. Rollback is
+therefore immediate: leave or set the relevant flag to `0`; there is no stored
+shadow result, customer record, or cache entry to reverse.
+
+## Final cumulative validation
+
+All commands used local/synthetic data, mocked Gmail and AI providers, an
+isolated SQLite test database, or the disposable local PostgreSQL test
+database. No production credential, mailbox, database, storage object, or
+customer content was accessed.
+
+- Full backend SQLite rerun: `1,519/1,519` passed in `636.674` seconds;
+  `26` PostgreSQL-only tests were skipped as designed. The first full run found
+  two subtest failures in one stale expected-dictionary assertion; commit
+  `084ed6e` strengthened it to assert both Phase 3 flags are false, and the
+  complete clean rerun passed.
+- Phase 3 shadow/contracts matrix: `108/108` passed. Existing authoritative
+  Gmail import regression: `110/110` passed. Independent cumulative audit:
+  `101/101` focused tests passed with no remaining Critical, High, or Medium
+  finding.
+- Local PostgreSQL `17.5` (`170005`) at `READ COMMITTED`: migration
+  compatibility `3/3` and concurrency `25/25` passed under 5-second lock and
+  30-second statement limits, including Product alias, Gmail job/credential,
+  unified-workspace, quotation, preview/send, and reconciliation races.
+  Protected CI remains pinned to exact PostgreSQL `17.10` (`170010`) and is a
+  release gate.
+- Clean frontend install completed. Dependency-tree integrity passed;
+  production audit has zero Critical advisories. The documented inventory is
+  `11` High, `7` Moderate, and `9` Low advisories under existing time-bounded
+  exceptions.
+- Complete frontend suite: `320/320` passed across `20` suites. Production
+  build compiled successfully.
+- Django system checks: no issues. Migration drift: none. Python dependency
+  integrity: no broken requirements. Documentation contracts and repository
+  whitespace checks passed.
+- The preserved untracked `output/` directory was not changed.
+
+## Feature flags and dependencies
+
+Every Boolean flag introduced by this branch defaults to `False` / `0`.
+
+| Flag | Dependency / rollback |
+| --- | --- |
+| `QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED` | Requires migration `0039` plus an approved retention/monitoring owner. Disable to stop new metrics. |
+| `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` | Independent review UI using existing analysis data. Disable to restore the established review controls. |
+| `QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED` | Effective only with Review UI V2. Disable to restore separate Save/Create and Save/Preview actions. |
+| `QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED` | Independent UI-only behavior. Disable to restore all-at-once editor loading. |
+| `QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED` | Requires migration `0040`. Disable to hide the private progress projection. |
+| `QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` | Effective only with Review UI V2. Disable to restore Gmail review followed by the separate QuotationEditor. |
+| `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED` | Read-only Gmail retrieval; disable for sequential reads. `QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT` defaults to `4` and is clamped to `1-8`. |
+| `QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED` | Requires `0040`, `0041`, PostgreSQL, and a separately operated worker. Disable web enqueueing before stopping/draining workers to restore synchronous analysis. |
+| `QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED` | Internal extra comparison call only. Keep disabled pending the approved benchmark. |
+| `QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED` | Internal clean-XLSX extra comparison call only. Keep disabled pending the approved benchmark. |
+
+Migrations `0039`, `0040`, and `0041` are additive. Old application code
+safely ignores them. New code can run before them only while the corresponding
+metrics/progress/background flags remain disabled. Normal application rollback
+should retain the tables; reversing `0041` destroys the job ledger and requires
+an explicit operator decision.
+
+## Workflow before and after
+
+Counts below cover a normal suggested-company case. Product corrections,
+uncertain rows, optional contact selection, and price-entry keystrokes remain
+variable and mandatory where applicable.
+
+| Journey | Visible surfaces | Approximate fixed significant actions |
+| --- | ---: | ---: |
+| Default Gmail route | Gmail add-on, Gmail review, quotation editor, verified email preview | About `7`; `8` when reviewed rows were edited |
+| Phase 1 review V2 plus chaining | Same four surfaces | About `5` |
+| Phase 2 unified workspace | Gmail add-on, unified review/pricing, verified email preview | About `4` |
+
+The optimized clean case combines suggested-company choice with the required
+identity acknowledgement, reviewed-row save with quotation preparation, and
+quotation-line save with preview opening. The unified workspace also removes
+the repeated row-review/pricing navigation. It removes roughly three fixed
+clicks in a clean case and four when rows changed, while retaining employee
+company approval, uncertainty decisions, Product approval/correction,
+employee-entered prices/VAT, row evidence, verified recipient/thread preview,
+and final send approval.
+
+Timing expectations are hypotheses until the metrics flag is deliberately
+rolled out. The click mechanics may save roughly `6-15` seconds; one fewer
+navigation/context switch and less repeated row scanning may save another
+`15-45` seconds, for a cautious `20-60` seconds of active employee time on a
+straightforward quotation. Progress makes the existing analysis wait clear and
+resumable; background jobs make it non-blocking; bounded parallel reads reduce
+only Gmail retrieval time. None proves lower provider latency. Phase 3 shadows
+would add a second provider call and therefore remain disabled.
+
+## Operator-owned rollout gates
+
+No rollout was performed. A later staged rollout must apply migrations in
+order, enable one Phase 1 flag at a time, validate the fallback route, then
+configure and monitor a separate background worker before considering its
+flag. Exact PostgreSQL 17.10 protected CI must be green. Metrics require an
+approved retention/monitoring owner; the worker requires lease/heartbeat and
+queue-depth alerts. Phase 3 additionally requires a designated synthetic test
+key and budget plus the complete 30-case accuracy/cost/latency report. No flag
+should be enabled merely because this branch is merged.
+
+The merged technical-hardening controls remain unchanged: signed Gmail
+requests and canonical refetch, employee-bound handoffs, source membership,
+explicit identity/Product/uncertainty review, blank selling prices, bounded
+evidence, verified recipient/thread preview, stale fingerprints, immutable
+outbound snapshots, duplicate-send prevention, ambiguous-send lockout, exact
+retry, and reconciliation that never sends.
