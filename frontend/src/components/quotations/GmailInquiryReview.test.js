@@ -279,6 +279,44 @@ const withAnalysisProgress = (source = baseRecord, progress = analysisProgress()
   analysis_progress: progress,
 });
 
+const hexGeneration = (digit) => String(digit).repeat(32);
+
+const backgroundAnalysisJob = (state = 'queued', overrides = {}) => ({
+  id: 901,
+  state,
+  analysis_attempt: 1,
+  source_generation: hexGeneration('1'),
+  progress_stage: state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : 'queued',
+  attempt_count: state === 'queued' ? 0 : 1,
+  safe_error_category: '',
+  queued_at: '2026-08-02T08:00:00Z',
+  started_at: null,
+  heartbeat_at: null,
+  completed_at: null,
+  updated_at: '2026-08-02T08:00:00Z',
+  terminal: ['completed', 'failed', 'superseded', 'cancelled'].includes(state),
+  retryable: state === 'failed',
+  ...overrides,
+});
+
+const withBackgroundAnalysis = (
+  source = baseRecord,
+  job = backgroundAnalysisJob(),
+  progress = analysisProgress('running', {
+    stage: 'queued',
+    source_generation: job.source_generation,
+    attempt: job.analysis_attempt,
+  })
+) => ({
+  ...withAnalysisProgress(source, progress),
+  workflow_features: {
+    ...(source.workflow_features || {}),
+    gmail_analysis_progress: true,
+    gmail_background_analysis: true,
+  },
+  analysis_job: job,
+});
+
 const deferred = () => {
   let resolve;
   let reject;
@@ -2692,5 +2730,366 @@ describe('GmailInquiryReview', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('applies an exact completed cache hit after selection deduplicates to another import', async () => {
+    const onClaimed = jest.fn();
+    const analysisRequest = deferred();
+    const progressRequest = deferred();
+    const generation = hexGeneration('c');
+    const claimedImportA = {
+      ...withAnalysisProgress({
+        ...baseRecord,
+        id: 31,
+        status: 'claimed',
+        source_fingerprint: 'source-import-a',
+        analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+      }, analysisProgress('idle', {
+        stage: '',
+        attempt: 0,
+        source_generation: '',
+      })),
+      workflow_features: {
+        gmail_analysis_progress: true,
+        gmail_background_analysis: true,
+      },
+      analysis_job: null,
+    };
+    const completedJob = backgroundAnalysisJob('completed', {
+      id: 905,
+      analysis_attempt: 4,
+      source_generation: generation,
+      progress_stage: 'completed',
+      attempt_count: 1,
+      terminal: true,
+    });
+    const completedImportB = withBackgroundAnalysis({
+      ...reviewedRecord,
+      id: 44,
+      status: 'review_required',
+      source_fingerprint: 'source-import-b',
+      analysis_attempts: 4,
+    }, completedJob, analysisProgress('completed', {
+      attempt: 4,
+      source_generation: generation,
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: claimedImportA });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: completedImportB });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(analysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(progressRequest.promise);
+
+    render(<GmailInquiryReview importId="31" onClaimed={onClaimed} />);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledWith(44, {
+      force: false,
+    }));
+    expect(onClaimed).toHaveBeenCalledWith(44);
+    expect(screen.queryByDisplayValue('Sterile Bandage')).not.toBeInTheDocument();
+
+    await act(async () => analysisRequest.resolve({
+      status: 200,
+      data: completedImportB,
+    }));
+
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    expect(screen.getByText(/analysis is ready for review/i)).toBeInTheDocument();
+    expect(screen.queryByText(/completed analysis could not be verified/i)).not.toBeInTheDocument();
+  });
+
+  test('accepts one durable 202 enqueue, blocks a synchronous double click, and refreshes only at completion', async () => {
+    const progressRequest = deferred();
+    const failedJob = backgroundAnalysisJob('failed', {
+      id: 910,
+      analysis_attempt: 2,
+      source_generation: hexGeneration('2'),
+      progress_stage: 'failed',
+      attempt_count: 1,
+      safe_error_category: 'ai_analysis_failed',
+      retryable: true,
+    });
+    const failedRecord = withBackgroundAnalysis(
+      { ...reviewedRecord, status: 'failed' },
+      failedJob,
+      analysisProgress('failed', {
+        attempt: 2,
+        source_generation: hexGeneration('2'),
+        safe_error_category: 'ai_analysis_failed',
+        retryable: true,
+      })
+    );
+    const queuedJob = backgroundAnalysisJob('queued', {
+      id: 911,
+      analysis_attempt: 3,
+      source_generation: hexGeneration('3'),
+    });
+    const queuedProgress = analysisProgress('running', {
+      stage: 'queued',
+      attempt: 3,
+      source_generation: hexGeneration('3'),
+    });
+    const queuedRecord = withBackgroundAnalysis(
+      { ...failedRecord, status: 'analyzing' },
+      queuedJob,
+      queuedProgress
+    );
+    const completedJob = backgroundAnalysisJob('completed', {
+      ...queuedJob,
+      progress_stage: 'completed',
+      attempt_count: 1,
+      completed_at: '2026-08-02T08:00:10Z',
+      terminal: true,
+    });
+    const completedRecord = withBackgroundAnalysis(
+      reviewedRecord,
+      completedJob,
+      analysisProgress('completed', {
+        attempt: 3,
+        source_generation: hexGeneration('3'),
+      })
+    );
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: failedRecord })
+      .mockResolvedValueOnce({ data: completedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockResolvedValueOnce({
+      status: 202,
+      data: queuedRecord,
+    });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(
+      progressRequest.promise
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+    const retryButton = await screen.findByRole('button', { name: 'Retry analysis' });
+    fireEvent.click(retryButton);
+    fireEvent.click(retryButton);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/analysis is queued.*leave this page/i)).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Sterile Bandage')).toBeDisabled();
+    expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(1);
+
+    await act(async () => progressRequest.resolve({
+      data: completedRecord.analysis_progress,
+    }));
+    expect(await screen.findByText(/analysis is ready for review/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1);
+  });
+
+  test('resumes an active durable job after reload without enqueueing another job', async () => {
+    const progressRequest = deferred();
+    const runningJob = backgroundAnalysisJob('running', {
+      id: 920,
+      analysis_attempt: 4,
+      source_generation: hexGeneration('4'),
+      progress_stage: 'inspecting_documents',
+      attempt_count: 1,
+    });
+    const runningRecord = withBackgroundAnalysis(
+      { ...reviewedRecord, status: 'analyzing' },
+      runningJob,
+      analysisProgress('running', {
+        stage: 'inspecting_documents',
+        attempt: 4,
+        source_generation: hexGeneration('4'),
+      })
+    );
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: runningRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(
+      progressRequest.promise
+    );
+
+    const { unmount } = render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText('Inspecting documents')).toBeInTheDocument();
+    await waitFor(() => expect(
+      quotationAPI.gmailInquiryImports.analysisProgress
+    ).toHaveBeenCalledWith('31'));
+    expect(quotationAPI.gmailInquiryImports.analyze).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('Sterile Bandage')).toBeDisabled();
+    unmount();
+  });
+
+  test.each([
+    ['superseded', /A newer source or analysis replaced this attempt/i],
+    ['cancelled', /This attempt was cancelled safely/i],
+  ])('shows a safe %s durable terminal state without exposing arbitrary job content', async (jobState, expectedCopy) => {
+    const stoppedJob = backgroundAnalysisJob(jobState, {
+      id: jobState === 'superseded' ? 930 : 931,
+      analysis_attempt: 5,
+      source_generation: hexGeneration(jobState === 'superseded' ? '5' : '6'),
+      progress_stage: 'failed',
+      safe_error_category: '',
+      detail: 'buyer@example.com private subject and raw worker trace',
+    });
+    const stoppedRecord = withBackgroundAnalysis(
+      { ...reviewedRecord, status: 'failed' },
+      stoppedJob,
+      analysisProgress('failed', {
+        attempt: 5,
+        source_generation: stoppedJob.source_generation,
+        safe_error_category: '',
+        retryable: true,
+      })
+    );
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: stoppedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(expectedCopy)).toBeInTheDocument();
+    expect(screen.getByText('Analysis stopped safely.')).toBeInTheDocument();
+    expect(screen.queryByText(/buyer@example.com private subject/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry analysis' })).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.analyze).not.toHaveBeenCalled();
+  });
+
+  test('rejects a durable 202 response whose job is not bound to its safe progress projection', async () => {
+    const progressRequest = deferred();
+    const failedRecord = withBackgroundAnalysis(
+      { ...reviewedRecord, status: 'failed' },
+      backgroundAnalysisJob('failed', {
+        analysis_attempt: 6,
+        source_generation: hexGeneration('7'),
+        progress_stage: 'failed',
+        safe_error_category: 'ai_analysis_failed',
+      }),
+      analysisProgress('failed', {
+        attempt: 6,
+        source_generation: hexGeneration('7'),
+        safe_error_category: 'ai_analysis_failed',
+      })
+    );
+    const mismatchedRecord = withBackgroundAnalysis(
+      { ...failedRecord, status: 'analyzing' },
+      backgroundAnalysisJob('queued', {
+        id: 941,
+        analysis_attempt: 7,
+        source_generation: hexGeneration('8'),
+      }),
+      analysisProgress('running', {
+        stage: 'queued',
+        attempt: 7,
+        source_generation: hexGeneration('9'),
+      })
+    );
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockResolvedValueOnce({
+      status: 202,
+      data: mismatchedRecord,
+    });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(
+      progressRequest.promise
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry analysis' }));
+
+    expect(await screen.findByText(/queued analysis could not be verified/i)).toBeInTheDocument();
+    expect(screen.queryByText(/analysis is queued.*leave this page/i)).not.toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1);
+  });
+
+  test('moves a durable poll to a newer retry attempt instead of polling the obsolete binding forever', async () => {
+    jest.useFakeTimers();
+    const firstJob = backgroundAnalysisJob('running', {
+      id: 950,
+      analysis_attempt: 8,
+      source_generation: hexGeneration('a'),
+      progress_stage: 'fetching_messages',
+      attempt_count: 1,
+    });
+    const runningRecord = withBackgroundAnalysis(
+      { ...reviewedRecord, status: 'analyzing' },
+      firstJob,
+      analysisProgress('running', {
+        stage: 'fetching_messages',
+        attempt: 8,
+        source_generation: hexGeneration('a'),
+      })
+    );
+    const completedRecord = withBackgroundAnalysis(
+      reviewedRecord,
+      backgroundAnalysisJob('completed', {
+        id: 951,
+        analysis_attempt: 9,
+        source_generation: hexGeneration('b'),
+        progress_stage: 'completed',
+        attempt_count: 1,
+        terminal: true,
+      }),
+      analysisProgress('completed', {
+        attempt: 9,
+        source_generation: hexGeneration('b'),
+      })
+    );
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: runningRecord })
+      .mockResolvedValueOnce({ data: completedRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress
+      .mockResolvedValueOnce({
+        data: analysisProgress('running', {
+          stage: 'analyzing_with_ai',
+          attempt: 9,
+          source_generation: hexGeneration('b'),
+        }),
+      })
+      .mockResolvedValueOnce({ data: completedRecord.analysis_progress });
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      expect(await screen.findByText(/newer Gmail analysis attempt is now being tracked/i)).toBeInTheDocument();
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(2);
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+      expect(quotationAPI.gmailInquiryImports.analyze).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('keeps the exact synchronous completed-response path when the background flag is off', async () => {
+    const progressRequest = deferred();
+    const failedRecord = withAnalysisProgress(
+      { ...baseRecord, status: 'failed' },
+      analysisProgress('failed', {
+        attempt: 10,
+        source_generation: 'synchronous-failed-generation',
+        safe_error_category: 'ai_analysis_failed',
+        retryable: true,
+      })
+    );
+    const completedRecord = withAnalysisProgress(
+      reviewedRecord,
+      analysisProgress('completed', {
+        attempt: 11,
+        source_generation: 'synchronous-completed-generation',
+      })
+    );
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockResolvedValueOnce({
+      status: 200,
+      data: completedRecord,
+    });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(
+      progressRequest.promise
+    );
+
+    render(<GmailInquiryReview importId="31" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry analysis' }));
+
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    expect(screen.queryByText(/leave this page and return/i)).not.toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1);
   });
 });

@@ -428,6 +428,13 @@ QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = min(
     8,
     max(1, QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT),
 )
+# Optional durable PostgreSQL-backed Gmail analysis. The web request only
+# enqueues when this is the strict Boolean true; otherwise the established
+# synchronous analyzer remains authoritative.
+QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

@@ -119,6 +119,7 @@ from .gmail_analysis_progress import (
     STAGE_PREPARING,
     STAGE_SAVING_RESULTS,
     STAGE_VALIDATING_EVIDENCE,
+    GmailAnalysisProgressBinding,
     advance_gmail_analysis_progress,
     clear_gmail_analysis_progress,
     finish_gmail_analysis_progress,
@@ -127,6 +128,7 @@ from .gmail_analysis_progress import (
 )
 from .services import create_imported_inquiry, create_quotation_from_inquiry
 from .workflow_features import (
+    gmail_background_analysis_enabled,
     gmail_chained_actions_enabled,
     gmail_review_ui_v2_enabled,
     gmail_unified_workspace_enabled,
@@ -348,7 +350,12 @@ def _workflow_duration_ms(started_at, ended_at=None):
         return None
 
 
-def _workflow_analysis_dimensions(gmail_import, result=None):
+def _workflow_analysis_dimensions(
+    gmail_import,
+    result=None,
+    *,
+    background_analysis=False,
+):
     result = result if isinstance(result, dict) else {}
     preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
     rows = preview.get("lines") if isinstance(preview.get("lines"), list) else []
@@ -390,6 +397,7 @@ def _workflow_analysis_dimensions(gmail_import, result=None):
         },
         "cache_state": cache_state,
         "feature_flags": {
+            "background_analysis": bool(background_analysis),
             "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
         },
         "contract_versions": {
@@ -1372,7 +1380,12 @@ def _public_attachment_manifest(message):
     return public
 
 
-def _fetch_analysis_messages_sequential(gmail_import, connection):
+def _fetch_analysis_messages_sequential(
+    gmail_import,
+    connection,
+    *,
+    coordinator_heartbeat=None,
+):
     selected_ids = _normalize_message_ids(
         gmail_import.selected_message_ids,
         fallback=gmail_import.anchor_message_id,
@@ -1393,6 +1406,8 @@ def _fetch_analysis_messages_sequential(gmail_import, connection):
             gmail_import.anchor_message_id,
         )
     )
+    if coordinator_heartbeat is not None:
+        coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
     canonical_anchor_id = _normalize_gmail_id(
         anchor.get("gmail_message_id") or gmail_import.anchor_message_id
     )
@@ -1404,6 +1419,8 @@ def _fetch_analysis_messages_sequential(gmail_import, connection):
             connection,
             lookup_thread_id,
         )
+        if coordinator_heartbeat is not None:
+            coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
         canonical_thread_id = str(
             timeline_result.get("gmail_thread_id") or ""
         ).strip()
@@ -1489,6 +1506,8 @@ def _fetch_analysis_messages_sequential(gmail_import, connection):
                 preserve_forwarded=True,
             )
         )
+        if coordinator_heartbeat is not None:
+            coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
         canonical_message_id = _normalize_gmail_id(
             message.get("gmail_message_id") or requested_message_id
         )
@@ -1537,7 +1556,12 @@ def _fetch_analysis_messages_sequential(gmail_import, connection):
     return thread_id, messages, merged_timeline, timeline_result
 
 
-def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
+def _fetch_analysis_messages_parallel(
+    gmail_import,
+    *,
+    access_token,
+    coordinator_heartbeat=None,
+):
     """Verify canonical membership first, then fetch selected bodies in parallel."""
 
     selected_ids = _normalize_message_ids(
@@ -1550,6 +1574,8 @@ def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
         access_token=access_token,
         request_json=_gmail_intake_json_get,
     )
+    if coordinator_heartbeat is not None:
+        coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
     canonical_anchor_id = _normalize_gmail_id(
         anchor_metadata.get("gmail_message_id")
         or gmail_import.anchor_message_id
@@ -1566,6 +1592,8 @@ def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
             access_token=access_token,
             request_json=_gmail_intake_json_get,
         )
+        if coordinator_heartbeat is not None:
+            coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
         canonical_thread_id = str(
             timeline_result.get("gmail_thread_id") or ""
         ).strip()
@@ -1632,6 +1660,8 @@ def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
                     access_token=access_token,
                     request_json=_gmail_intake_json_get,
                 )
+                if coordinator_heartbeat is not None:
+                    coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
                 canonical_selected_id = _normalize_gmail_id(
                     selected_metadata.get("gmail_message_id") or selected_id
                 )
@@ -1680,6 +1710,10 @@ def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
     )
     try:
         for (_index, requested_message_id), message, error in ordered_results:
+            # Futures only fetch bytes/JSON. Lease renewal and authorization
+            # checks stay on this coordinator thread after each bounded read.
+            if coordinator_heartbeat is not None:
+                coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
             if error is not None:
                 raise error
             canonical_message_id = _normalize_gmail_id(
@@ -1737,13 +1771,33 @@ def _fetch_analysis_messages_parallel(gmail_import, *, access_token):
     return thread_id, messages, merged_timeline, timeline_result
 
 
-def _fetch_analysis_messages(gmail_import, connection):
+def _fetch_analysis_messages(
+    gmail_import,
+    connection,
+    *,
+    coordinator_heartbeat=None,
+):
     if not _gmail_parallel_fetch_enabled():
-        return _fetch_analysis_messages_sequential(gmail_import, connection)
+        if coordinator_heartbeat is None:
+            return _fetch_analysis_messages_sequential(
+                gmail_import,
+                connection,
+            )
+        return _fetch_analysis_messages_sequential(
+            gmail_import,
+            connection,
+            coordinator_heartbeat=coordinator_heartbeat,
+        )
     token = get_valid_access_token(connection)
+    if coordinator_heartbeat is None:
+        return _fetch_analysis_messages_parallel(
+            gmail_import,
+            access_token=token,
+        )
     return _fetch_analysis_messages_parallel(
         gmail_import,
         access_token=token,
+        coordinator_heartbeat=coordinator_heartbeat,
     )
 
 
@@ -2680,6 +2734,7 @@ def _prefetch_native_ai_attachments(
     max_bytes,
     max_total_bytes,
     max_native_files,
+    coordinator_heartbeat=None,
 ):
     """Fetch bytes concurrently, then inspect each file in source order."""
 
@@ -2709,6 +2764,10 @@ def _prefetch_native_ai_attachments(
     )
     try:
         for task, value, error in ordered_results:
+            # Worker threads never touch Django. Renew the durable lease only
+            # while reducing completed reads on the coordinator thread.
+            if coordinator_heartbeat is not None:
+                coordinator_heartbeat(STAGE_INSPECTING_DOCUMENTS)
             if error is None:
                 try:
                     value = _inspect_native_ai_attachment(
@@ -4745,6 +4804,7 @@ def _build_source_analysis(
     allow_semantic_cache_read=True,
     progress_callback=None,
     gmail_access_token=None,
+    coordinator_heartbeat=None,
 ):
     """Analyze complete selected bodies and original attachments in one AI pass."""
 
@@ -5063,6 +5123,7 @@ def _build_source_analysis(
             max_bytes=max_bytes,
             max_total_bytes=max_total_bytes,
             max_native_files=max_native_files,
+            coordinator_heartbeat=coordinator_heartbeat,
         )
 
     for message_sequence, original_message in enumerate(messages, start=1):
@@ -5818,9 +5879,25 @@ def _mark_analysis_failed(
     timings_ms=None,
     progress_binding=None,
     progress_error_category="",
+    background_job_id=None,
+    background_lease_token="",
+    background_generation="",
 ):
     with transaction.atomic():
         gmail_import = _record_for_update(import_id)
+        if background_job_id is not None:
+            from .gmail_analysis_jobs import (
+                background_job_matches_locked_import,
+            )
+
+            if not background_job_matches_locked_import(
+                gmail_import,
+                job_id=background_job_id,
+                lease_token=background_lease_token,
+                expected_attempt=expected_attempt,
+                expected_generation=background_generation,
+            ):
+                return False
         if (
             gmail_import.status == GmailInquiryImport.STATUS_CONFIRMED
             or (
@@ -5897,10 +5974,6 @@ def update_gmail_inquiry_selection(
                 "A confirmed Gmail inquiry cannot be changed or revised."
             )
         _assert_claim_owner(locked, actor)
-        if locked.status == GmailInquiryImport.STATUS_ANALYZING:
-            raise GmailInquiryImportBusy(
-                "Wait for the current Gmail analysis before changing its messages."
-            )
         selected = _normalize_message_ids(
             selected_message_ids,
             fallback=(
@@ -5924,6 +5997,32 @@ def update_gmail_inquiry_selection(
             mode=mode,
             selected_message_ids=selected,
         )
+        background_job_superseded = False
+        if locked.status == GmailInquiryImport.STATUS_ANALYZING:
+            same_selection = bool(
+                hmac.compare_digest(
+                    str(locked.source_fingerprint or ""),
+                    fingerprint,
+                )
+                and locked.mode == mode
+                and list(locked.selected_message_ids or []) == selected
+            )
+            if gmail_background_analysis_enabled() and same_selection:
+                return locked
+            if gmail_background_analysis_enabled():
+                # Source-selection mutation owns the import lock first, then
+                # supersedes the active job. A worker with the old lease is
+                # consequently blocked by both generation and lease checks.
+                from .gmail_analysis_jobs import (
+                    supersede_active_gmail_analysis_jobs_locked,
+                )
+
+                supersede_active_gmail_analysis_jobs_locked(locked)
+                background_job_superseded = True
+            else:
+                raise GmailInquiryImportBusy(
+                    "Wait for the current Gmail analysis before changing its messages."
+                )
         existing = (
             GmailInquiryImport.objects.select_for_update()
             .filter(source_fingerprint=fingerprint)
@@ -5931,6 +6030,27 @@ def update_gmail_inquiry_selection(
             .first()
         )
         if existing:
+            if background_job_superseded:
+                # The employee moved to a deduplicated durable selection.
+                # Leave the abandoned source in a non-running state so its
+                # superseded worker cannot strand a phantom analysis.
+                locked.status = GmailInquiryImport.STATUS_CLAIMED
+                locked.analysis_started_at = None
+                locked.analyzed_at = None
+                clear_gmail_analysis_progress(locked)
+                locked.save(
+                    update_fields=[
+                        "status",
+                        "analysis_started_at",
+                        "analyzed_at",
+                        "analysis_progress_stage",
+                        "analysis_progress_attempt",
+                        "analysis_progress_generation",
+                        "analysis_progress_error_category",
+                        "analysis_progress_updated_at",
+                        "updated_at",
+                    ]
+                )
             if existing.claimed_by_id and existing.claimed_by_id != actor.id:
                 raise GmailInquiryImportError(
                     "Another staff member already prepared that Gmail message selection."
@@ -6398,6 +6518,11 @@ def analyze_gmail_inquiry_import(
     mode=None,
     force=False,
     reanalyze=False,
+    _background_job_id=None,
+    _background_lease_token="",
+    _background_attempt=None,
+    _background_generation="",
+    _background_heartbeat=None,
 ):
     """Fetch, parse, and cache one claimed Gmail intake without creating data."""
 
@@ -6405,6 +6530,13 @@ def analyze_gmail_inquiry_import(
     analysis_timings = {}
     progress_binding = None
     progress_stage = ""
+    background_analysis = _background_job_id is not None
+    if background_analysis and (
+        selected_message_ids is not None or mode is not None
+    ):
+        raise GmailInquiryImportError(
+            "A durable Gmail job cannot change its source selection."
+        )
     if selected_message_ids is not None or mode is not None:
         gmail_import = update_gmail_inquiry_selection(
             gmail_import,
@@ -6422,82 +6554,114 @@ def analyze_gmail_inquiry_import(
         locked = _record_for_update(gmail_import)
         if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
             return _record(locked)
-        if (
-            not force
-            and locked.status
-            in {
-                GmailInquiryImport.STATUS_READY,
-                GmailInquiryImport.STATUS_REVIEW_REQUIRED,
-            }
-            and (locked.analysis or {}).get("reviewed_at")
-        ):
-            # Staff-reviewed rows are user-authored workflow data, not an AI
-            # cache entry. A duplicate/non-force request must never replace
-            # those edits. The explicit Reanalyze action remains the only path
-            # that may intentionally rebuild them from source evidence.
-            return _record(locked)
-        # A pipeline version alone cannot prove semantic equivalence. Fetch
-        # the immutable Gmail sources and let the content/contract-bound cache
-        # decide reuse after it has verified provider, model, prompt, schema,
-        # pipeline, selected messages, source ownership, and attachment bytes.
-        if (
-            locked.status == GmailInquiryImport.STATUS_ANALYZING
-            and locked.analysis_started_at
-            and locked.analysis_started_at > timezone.now() - ANALYSIS_STALE_AFTER
-        ):
-            raise GmailInquiryImportBusy(
-                "This Gmail inquiry is already being analyzed. Retry shortly."
-            )
-        locked.status = GmailInquiryImport.STATUS_ANALYZING
-        locked.analysis_started_at = timezone.now()
-        locked.analysis_attempts += 1
-        locked.errors = []
-        analysis_update_fields = [
-            "status",
-            "analysis_started_at",
-            "analysis_attempts",
-            "errors",
-            "updated_at",
-        ]
-        progress_binding = initialize_gmail_analysis_progress(locked)
-        if progress_binding is not None:
-            progress_stage = locked.analysis_progress_stage
-            analysis_update_fields.extend(
-                [
-                    "analysis_progress_stage",
-                    "analysis_progress_attempt",
-                    "analysis_progress_generation",
-                    "analysis_progress_error_category",
-                    "analysis_progress_updated_at",
-                ]
-            )
-        if (
-            gmail_review_ui_v2_enabled()
-            and "identity_approval" in (locked.analysis or {})
-        ):
-            locked.analysis = clear_gmail_identity_approval(locked.analysis)
-            analysis_update_fields.append("analysis")
-        locked.save(update_fields=analysis_update_fields)
-        analysis_attempt = locked.analysis_attempts
-        analysis_fingerprint = locked.source_fingerprint
         analysis_contracts = {
             "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
             "ai_schema": GMAIL_AI_SCHEMA_NAME,
             "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
         }
-        record_gmail_workflow_metric(
-            locked,
-            EVENT_ANALYSIS_REQUESTED,
-            counts={
-                "analysis_attempt_count": analysis_attempt,
-                "selected_message_count": len(locked.selected_message_ids or []),
-            },
-            outcome_code="success",
-            feature_flags={
-                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
-            },
-            contract_versions=analysis_contracts,
-        )
+        if background_analysis:
+            from .gmail_analysis_jobs import (
+                background_job_matches_locked_import,
+            )
+
+            try:
+                expected_attempt = int(_background_attempt)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise GmailInquiryImportStale(
+                    "The durable Gmail analysis generation is invalid."
+                ) from exc
+            if not background_job_matches_locked_import(
+                locked,
+                job_id=_background_job_id,
+                lease_token=_background_lease_token,
+                expected_attempt=expected_attempt,
+                expected_generation=_background_generation,
+            ):
+                raise GmailInquiryImportStale(
+                    "The durable Gmail analysis generation is no longer current."
+                )
+            analysis_attempt = expected_attempt
+            analysis_fingerprint = str(locked.source_fingerprint or "")
+            progress_binding = GmailAnalysisProgressBinding(
+                import_id=locked.pk,
+                attempt=analysis_attempt,
+                source_fingerprint=analysis_fingerprint,
+                generation=str(_background_generation or ""),
+            )
+            progress_stage = str(locked.analysis_progress_stage or "")
+        else:
+            if (
+                not force
+                and locked.status
+                in {
+                    GmailInquiryImport.STATUS_READY,
+                    GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+                }
+                and (locked.analysis or {}).get("reviewed_at")
+            ):
+                # Staff-reviewed rows are user-authored workflow data, not an
+                # AI cache entry. Only explicit Reanalyze may rebuild them.
+                return _record(locked)
+            # Fetch immutable Gmail sources before deciding semantic-cache
+            # reuse; a pipeline version alone cannot prove equivalence.
+            if (
+                locked.status == GmailInquiryImport.STATUS_ANALYZING
+                and locked.analysis_started_at
+                and locked.analysis_started_at
+                > timezone.now() - ANALYSIS_STALE_AFTER
+            ):
+                raise GmailInquiryImportBusy(
+                    "This Gmail inquiry is already being analyzed. Retry shortly."
+                )
+            locked.status = GmailInquiryImport.STATUS_ANALYZING
+            locked.analysis_started_at = timezone.now()
+            locked.analysis_attempts += 1
+            locked.errors = []
+            analysis_update_fields = [
+                "status",
+                "analysis_started_at",
+                "analysis_attempts",
+                "errors",
+                "updated_at",
+            ]
+            progress_binding = initialize_gmail_analysis_progress(locked)
+            if progress_binding is not None:
+                progress_stage = locked.analysis_progress_stage
+                analysis_update_fields.extend(
+                    [
+                        "analysis_progress_stage",
+                        "analysis_progress_attempt",
+                        "analysis_progress_generation",
+                        "analysis_progress_error_category",
+                        "analysis_progress_updated_at",
+                    ]
+                )
+            if (
+                gmail_review_ui_v2_enabled()
+                and "identity_approval" in (locked.analysis or {})
+            ):
+                locked.analysis = clear_gmail_identity_approval(
+                    locked.analysis
+                )
+                analysis_update_fields.append("analysis")
+            locked.save(update_fields=analysis_update_fields)
+            analysis_attempt = locked.analysis_attempts
+            analysis_fingerprint = locked.source_fingerprint
+            record_gmail_workflow_metric(
+                locked,
+                EVENT_ANALYSIS_REQUESTED,
+                counts={
+                    "analysis_attempt_count": analysis_attempt,
+                    "selected_message_count": len(
+                        locked.selected_message_ids or []
+                    ),
+                },
+                outcome_code="success",
+                feature_flags={
+                    "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+                },
+                contract_versions=analysis_contracts,
+            )
         record_gmail_workflow_metric(
             locked,
             EVENT_ANALYSIS_STARTED,
@@ -6508,6 +6672,7 @@ def analyze_gmail_inquiry_import(
             },
             outcome_code="success",
             feature_flags={
+                "background_analysis": background_analysis,
                 "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
             },
             contract_versions=analysis_contracts,
@@ -6515,12 +6680,14 @@ def analyze_gmail_inquiry_import(
 
     def report_progress(stage):
         nonlocal progress_stage
+        if background_analysis and _background_heartbeat is not None:
+            _background_heartbeat(stage)
         if advance_gmail_analysis_progress(progress_binding, stage):
             progress_stage = stage
 
+    fetch_started = time.perf_counter()
     try:
         report_progress(STAGE_PREPARING)
-        fetch_started = time.perf_counter()
         connection = _connected_mailbox_for_import(locked, actor)
         gmail_access_token = (
             get_valid_access_token(connection)
@@ -6528,13 +6695,23 @@ def analyze_gmail_inquiry_import(
             else None
         )
         report_progress(STAGE_FETCHING_MESSAGES)
+        message_fetch_options = {}
+        if background_analysis and _background_heartbeat is not None:
+            message_fetch_options["coordinator_heartbeat"] = (
+                _background_heartbeat
+            )
         fetched = (
             _fetch_analysis_messages_parallel(
                 locked,
                 access_token=gmail_access_token,
+                **message_fetch_options,
             )
             if gmail_access_token
-            else _fetch_analysis_messages(locked, connection)
+            else _fetch_analysis_messages(
+                locked,
+                connection,
+                **message_fetch_options,
+            )
         )
         analysis_timings["gmail_thread_fetch"] = _elapsed_ms(fetch_started)
         if len(fetched) == 3:
@@ -6576,6 +6753,10 @@ def analyze_gmail_inquiry_import(
             )
         if progress_binding is not None:
             source_analysis_options["progress_callback"] = report_progress
+        if background_analysis and _background_heartbeat is not None:
+            source_analysis_options["coordinator_heartbeat"] = (
+                _background_heartbeat
+            )
         result = _build_source_analysis(
             messages,
             connection,
@@ -6614,6 +6795,9 @@ def analyze_gmail_inquiry_import(
             progress_error_category=progress_failure_category_for_stage(
                 progress_stage
             ),
+            background_job_id=_background_job_id,
+            background_lease_token=_background_lease_token,
+            background_generation=_background_generation,
         )
         if not marked_failed:
             return _record(locked)
@@ -6631,6 +6815,7 @@ def analyze_gmail_inquiry_import(
             cache_state="unknown",
             outcome_code="failure",
             feature_flags={
+                "background_analysis": background_analysis,
                 "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
             },
             contract_versions={
@@ -6652,6 +6837,20 @@ def analyze_gmail_inquiry_import(
             locked = _record_for_update(locked)
             if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
                 return _record(locked)
+            if background_analysis:
+                from .gmail_analysis_jobs import (
+                    bind_background_job_result_source_locked_import,
+                )
+
+                if not bind_background_job_result_source_locked_import(
+                    locked,
+                    job_id=_background_job_id,
+                    lease_token=_background_lease_token,
+                    expected_attempt=analysis_attempt,
+                    expected_generation=_background_generation,
+                    result_source_fingerprint=canonical_selection_fingerprint,
+                ):
+                    return _record(locked)
             if (
                 locked.analysis_attempts != analysis_attempt
                 or locked.source_fingerprint != analysis_fingerprint
@@ -6749,6 +6948,9 @@ def analyze_gmail_inquiry_import(
             progress_error_category=progress_failure_category_for_stage(
                 STAGE_SAVING_RESULTS
             ),
+            background_job_id=_background_job_id,
+            background_lease_token=_background_lease_token,
+            background_generation=_background_generation,
         )
         if not marked_failed:
             return _record(locked)
@@ -6770,6 +6972,7 @@ def analyze_gmail_inquiry_import(
             cache_state="unknown",
             outcome_code="failure",
             feature_flags={
+                "background_analysis": background_analysis,
                 "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
             },
             contract_versions={
@@ -6783,7 +6986,11 @@ def analyze_gmail_inquiry_import(
         raise GmailInquiryImportError(
             f"Gmail inquiry analysis failed. {str(exc)[:300]}"
         ) from exc
-    metric_dimensions = _workflow_analysis_dimensions(locked, result)
+    metric_dimensions = _workflow_analysis_dimensions(
+        locked,
+        result,
+        background_analysis=background_analysis,
+    )
     record_gmail_workflow_metric(
         locked,
         EVENT_ANALYSIS_COMPLETED,

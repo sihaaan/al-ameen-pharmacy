@@ -205,6 +205,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
             "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
             "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
+            "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
             "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
@@ -296,6 +297,31 @@ class DocumentationContractTests(SimpleTestCase):
         self.assertIn("Customer budget/source prices are never read", deployment)
         self.assertIn("Exact\ndouble clicks", deployment)
         self.assertIn("not eligible to auto-preview", operations)
+
+    def test_background_gmail_analysis_is_migration_first_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            with self.subTest(
+                document="deployment" if content is deployment else "operations"
+            ):
+                self.assertIn(
+                    "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
+                    content,
+                )
+                self.assertIn("0041", content)
+                self.assertIn(
+                    "python manage.py run_gmail_inquiry_worker",
+                    content,
+                )
+                self.assertIn("HTTP 202", content)
+                self.assertIn("synchronous", content.lower())
+                self.assertIn("stop the worker", content.lower())
+                self.assertIn("no Railway worker service", content)
+        self.assertIn("page\nreload resumes", deployment)
+        self.assertIn("heartbeat", operations.lower())
+        self.assertIn("crash", operations.lower())
+        self.assertIn("cannot\noverwrite", operations)
 
     def test_parallel_gmail_reads_are_bounded_default_off_and_reversible(self):
         deployment = read_repository_file("DEPLOYMENT.md")

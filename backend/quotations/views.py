@@ -82,6 +82,7 @@ from .gmail_inquiry_import import (
     refresh_gmail_inquiry_identity_candidates,
 )
 from .gmail_analysis_progress import gmail_analysis_progress_projection
+from .gmail_analysis_jobs import enqueue_gmail_inquiry_analysis
 from .gmail_workflow_metrics import (
     EVENT_COMPANY_APPROVED,
     EVENT_EMAIL_PREVIEW_OPENED,
@@ -99,6 +100,7 @@ from .gmail_workflow_metrics import (
 )
 from .import_parsers import parse_file_preview, parse_text_preview
 from .workflow_features import (
+    gmail_background_analysis_enabled,
     gmail_analysis_progress_enabled,
     gmail_chained_actions_enabled,
     gmail_review_ui_v2_enabled,
@@ -133,6 +135,7 @@ from .models import (
     ContractIntelligenceRun,
     ContractIntelligenceSource,
     GmailInquiryImport,
+    GmailInquiryAnalysisJob,
     GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
@@ -1936,6 +1939,16 @@ class GmailInquiryImportViewSet(
         gmail_import = refresh_gmail_inquiry_identity_candidates(
             self.get_object()
         )
+        if gmail_background_analysis_enabled():
+            # All terminal job transitions lock import -> job. Holding the
+            # import lock while serializing therefore yields one coherent
+            # progress/import/job snapshot under READ COMMITTED.
+            with transaction.atomic():
+                gmail_import = self.get_queryset().select_for_update().get(
+                    pk=gmail_import.pk
+                )
+                payload = self.get_serializer(gmail_import).data
+            return Response(payload)
         return Response(
             self.get_serializer(gmail_import).data
         )
@@ -1996,21 +2009,57 @@ class GmailInquiryImportViewSet(
         serializer.is_valid(raise_exception=True)
         payload = dict(serializer.validated_data)
         try:
-            analyzed = analyze_gmail_inquiry_import(
-                gmail_import,
-                request.user,
-                selected_message_ids=payload.get("selected_message_ids"),
-                mode=payload.get("mode"),
-                force=payload.get("force", False),
-                reanalyze=payload.get("reanalyze", False),
-            )
+            if gmail_background_analysis_enabled():
+                enqueue_result = enqueue_gmail_inquiry_analysis(
+                    gmail_import,
+                    request.user,
+                    selected_message_ids=payload.get(
+                        "selected_message_ids"
+                    ),
+                    mode=payload.get("mode"),
+                    force=payload.get("force", False),
+                    reanalyze=payload.get("reanalyze", False),
+                )
+                analyzed = enqueue_result.gmail_import
+            else:
+                enqueue_result = None
+                analyzed = analyze_gmail_inquiry_import(
+                    gmail_import,
+                    request.user,
+                    selected_message_ids=payload.get("selected_message_ids"),
+                    mode=payload.get("mode"),
+                    force=payload.get("force", False),
+                    reanalyze=payload.get("reanalyze", False),
+                )
         except GmailInquiryImportError as exc:
             return self._workflow_error(exc)
-        return Response(
-            GmailInquiryImportSerializer(
+        if enqueue_result is not None:
+            with transaction.atomic():
+                analyzed = self.get_queryset().select_for_update().get(
+                    pk=analyzed.pk
+                )
+                response_payload = GmailInquiryImportSerializer(
+                    analyzed,
+                    context={"request": request},
+                ).data
+        else:
+            response_payload = GmailInquiryImportSerializer(
                 analyzed,
                 context={"request": request},
             ).data
+        projected_job_state = str(
+            (response_payload.get("analysis_job") or {}).get("state") or ""
+        )
+        return Response(
+            response_payload,
+            status=(
+                status.HTTP_202_ACCEPTED
+                if enqueue_result is not None
+                and not enqueue_result.cache_hit
+                and projected_job_state
+                in GmailInquiryAnalysisJob.ACTIVE_STATUSES
+                else status.HTTP_200_OK
+            ),
         )
 
     @action(detail=True, methods=["post"])

@@ -11,6 +11,7 @@ from api.upload_validation import validate_image_upload
 
 from .company_matching import find_similar_companies
 from .gmail_analysis_progress import gmail_analysis_progress_projection
+from .gmail_analysis_jobs import gmail_analysis_job_projection
 from .gmail_review_state import (
     gmail_analysis_generation,
     gmail_identity_review_projection,
@@ -279,6 +280,7 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
     review_rows_fingerprint = serializers.SerializerMethodField()
     analysis_progress = serializers.SerializerMethodField()
     analysis_generation = serializers.SerializerMethodField()
+    analysis_job = serializers.SerializerMethodField()
 
     class Meta:
         model = GmailInquiryImport
@@ -328,6 +330,7 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
             "review_rows_fingerprint",
             "analysis_progress",
             "analysis_generation",
+            "analysis_job",
             "confirmed_at",
             "created_at",
             "updated_at",
@@ -426,6 +429,9 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
         if not gmail_unified_workspace_enabled():
             return None
         return gmail_analysis_generation(obj)
+
+    def get_analysis_job(self, obj):
+        return gmail_analysis_job_projection(obj)
 
 
 class GmailInquiryClaimSerializer(serializers.Serializer):

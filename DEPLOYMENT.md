@@ -242,8 +242,9 @@ inventory. Never commit filled values. At minimum verify these groups:
 The current defaults include an 8-second PostgreSQL connect timeout, a
 60-second persistent-connection lifetime with health checks, a 60-second text
 AI timeout, a 180-second native Gmail AI timeout, and a 300-second Gunicorn
-timeout. Long Gmail analysis is synchronous; browser polling makes its state
-resumable but does not create a background worker.
+timeout. Long Gmail analysis remains synchronous while the optional background
+flag is off. The repository contains a PostgreSQL-backed worker command, but
+no Railway worker service is configured or deployed by repository config.
 
 ### Gmail workflow metrics (disabled by default)
 
@@ -347,6 +348,73 @@ Prefer a schema-compatible application rollback that retains `0040`. Reversing
 `0040` removes only progress metadata but should be considered only before a
 newer application instance can query the fields and after active analyses have
 finished.
+
+### Durable background Gmail analysis (disabled by default)
+
+`QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` preserves the existing
+synchronous `POST /gmail-inquiry-imports/{id}/analyze/` behavior. When it is
+strictly enabled, the same action idempotently enqueues the import's current
+source/analysis generation and returns HTTP 202 with the full safe import
+projection plus an allow-listed `analysis_job`. Repeating the request for that
+same current generation returns the existing job rather than creating another.
+Import retrieval exposes the same safe job and progress projections, so a page
+reload resumes the existing lightweight
+`GET /gmail-inquiry-imports/{id}/analysis_progress/` polling and retrieves the
+full reviewed evidence only after terminal completion. The feature implies the
+existing content-free progress projection; it does not expose lease tokens,
+Gmail identifiers, message content, subjects, filenames, customer/item text,
+prices, OAuth credentials, or raw provider output.
+
+Migration `quotations.0041_gmailinquiryanalysisjob` adds only the durable job
+ledger, indexes, and uniqueness constraints. It does not rewrite or backfill
+Gmail imports, customer evidence, inquiries, quotations, Products, prices, or
+delivery records. Apply `0041` before deploying/enabling this application
+release. Old application code can run after the additive migration. New code
+can run before it only while the background flag is strictly disabled, because
+the disabled projection and synchronous route do not query the new table.
+
+The worker entry point is:
+
+```bash
+python manage.py run_gmail_inquiry_worker
+```
+
+Each job is employee/import-bound and unique for its current opaque source
+generation. A worker claims it with a short database transaction, then performs
+provider work without holding a row lock. Leases are heartbeated, bounded, and
+reclaimable after expiry; attempts are bounded so a repeatedly crashing job
+ends in an allow-listed safe failure instead of looping indefinitely. The
+worker revalidates ownership and source generation before provider work and
+again before persistence. A source-selection change supersedes the prior job,
+and an expired, cancelled, or stale job cannot overwrite a newer result. The
+worker only analyzes: it never creates/finalizes a quotation or previews,
+sends, retries, or reconciles email.
+
+No Railway worker service, process, scaling rule, or production environment
+change is configured by this repository. A separate operator-owned Railway
+service must eventually run the command above from the same release and use
+the same PostgreSQL database and approved application secrets; do not point it
+at a migration connection string. Migration-first rollout order is: apply and
+verify `0041`; deploy the application with the flag at `0`; verify the
+synchronous fallback; prepare one worker in an approved non-production
+environment with its service-level flag at `1` while web remains at `0`; verify
+the idle worker stays healthy; then enable the web flag and monitor queue age,
+lease expiry/reclaims, attempts, safe failures, and terminal latency. The
+worker command intentionally refuses to start while its own flag is disabled.
+If settings cannot be staged per service, coordinate the worker start and web
+flag change so a worker is ready before the first HTTP 202 response.
+
+Rollback order is fail-closed: stop the worker so it cannot claim more jobs,
+then set `QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` on every application
+process. New requests for unaffected imports immediately use the established
+synchronous route. Disabling the flag does not cancel an import that is already
+queued/running: that exact import can continue to return the existing Busy
+response until the worker is allowed to drain it before shutdown or the
+existing bounded stale-analysis window permits synchronous recovery. Leave its
+ledger row for audit and do not manually replay it. Prefer retaining additive
+migration `0041`; reverse it only after every new-code process and worker is
+stopped or rolled back and only with explicit approval, because reversal
+deletes the job ledger.
 
 ### Unified Gmail quotation workspace (disabled by default)
 

@@ -35,6 +35,11 @@ from .gmail_inquiry_import import (
     GMAIL_IDENTITY_MATCH_VERSION,
     approve_gmail_inquiry_company,
 )
+from .gmail_analysis_jobs import (
+    claim_next_gmail_analysis_job,
+    enqueue_gmail_inquiry_analysis,
+    process_claimed_gmail_analysis_job,
+)
 from .gmail_review_state import (
     gmail_analysis_generation,
     gmail_identity_evidence_fingerprint,
@@ -44,6 +49,7 @@ from .models import (
     Company,
     CompanyContact,
     GmailInquiryImport,
+    GmailInquiryAnalysisJob,
     GmailOAuthConnection,
     Quotation,
     QuotationAuditLog,
@@ -1729,3 +1735,156 @@ class QuotationConcurrencyTests(TransactionTestCase):
             ).count(),
             1,
         )
+
+
+@skipUnless(
+    connection.vendor == "postgresql",
+    "PostgreSQL row-lock semantics are required.",
+)
+@override_settings(
+    QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=True,
+    QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED=False,
+)
+class GmailBackgroundJobConcurrencyTests(TransactionTestCase):
+    """Production-lock checks for durable Gmail enqueue and job claiming."""
+
+    reset_sequences = True
+
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            username="gmail-job-concurrency-owner",
+            is_staff=True,
+        )
+        self.gmail_connection = GmailOAuthConnection.objects.create(
+            user=self.staff,
+            is_shared=True,
+            email="gmail-job-concurrency@example.com",
+            status=GmailOAuthConnection.STATUS_CONNECTED,
+        )
+        self.gmail_import = GmailInquiryImport.objects.create(
+            gmail_connection=self.gmail_connection,
+            mailbox_email=self.gmail_connection.email,
+            gmail_thread_id="gmail-job-concurrency-thread",
+            anchor_message_id="gmail-job-concurrency-message",
+            selected_message_ids=["gmail-job-concurrency-message"],
+            mode=GmailInquiryImport.MODE_CURRENT_MESSAGE,
+            source_fingerprint="f" * 64,
+            status=GmailInquiryImport.STATUS_CLAIMED,
+            claimed_by=self.staff,
+            claimed_at=timezone.now(),
+        )
+
+    def test_concurrent_enqueue_returns_one_generation(self):
+        barrier = Barrier(2)
+        results = Queue()
+
+        def enqueue(label):
+            close_old_connections()
+            try:
+                actor = User.objects.get(pk=self.staff.pk)
+                gmail_import = GmailInquiryImport.objects.get(
+                    pk=self.gmail_import.pk
+                )
+                barrier.wait(timeout=10)
+                result = enqueue_gmail_inquiry_analysis(
+                    gmail_import,
+                    actor,
+                )
+                results.put((label, "ok", result.job.pk, result.queued))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put((label, "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        workers = [
+            Thread(target=enqueue, args=("first",), daemon=True),
+            Thread(target=enqueue, args=("second",), daemon=True),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=15)
+
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        job_ids = {outcome[2] for outcome in outcomes}
+        self.assertNotIn(None, job_ids)
+        self.assertEqual(len(job_ids), 1)
+        self.assertCountEqual([outcome[3] for outcome in outcomes], [True, False])
+        self.assertEqual(GmailInquiryAnalysisJob.objects.count(), 1)
+        self.gmail_import.refresh_from_db()
+        self.assertEqual(self.gmail_import.analysis_attempts, 1)
+
+    def test_concurrent_workers_claim_job_at_most_once(self):
+        enqueue_gmail_inquiry_analysis(self.gmail_import, self.staff)
+        barrier = Barrier(2)
+        results = Queue()
+
+        def claim(label):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                job, token = claim_next_gmail_analysis_job(label)
+                results.put((label, getattr(job, "pk", None), bool(token)))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put((label, "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        workers = [
+            Thread(target=claim, args=("worker-one",), daemon=True),
+            Thread(target=claim, args=("worker-two",), daemon=True),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=15)
+
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        self.assertEqual(sum(1 for _label, job_id, _token in outcomes if job_id), 1)
+        job = GmailInquiryAnalysisJob.objects.get()
+        self.assertEqual(job.status, GmailInquiryAnalysisJob.STATUS_RUNNING)
+        self.assertEqual(job.attempt_count, 1)
+
+    def test_expired_lease_reclaim_rejects_the_previous_worker_token(self):
+        enqueue_gmail_inquiry_analysis(self.gmail_import, self.staff)
+
+        first_job, first_token = claim_next_gmail_analysis_job("worker-one")
+        self.assertIsNotNone(first_job)
+        self.assertTrue(first_token)
+
+        GmailInquiryAnalysisJob.objects.filter(pk=first_job.pk).update(
+            lease_expires_at=timezone.now() - timedelta(seconds=1)
+        )
+        reclaimed_job, reclaimed_token = claim_next_gmail_analysis_job("worker-two")
+        self.assertEqual(reclaimed_job.pk, first_job.pk)
+        self.assertTrue(reclaimed_token)
+        self.assertNotEqual(reclaimed_token, first_token)
+
+        processed = process_claimed_gmail_analysis_job(first_job, first_token)
+
+        self.assertFalse(processed)
+        reclaimed_job.refresh_from_db()
+        self.gmail_import.refresh_from_db()
+        self.assertEqual(
+            reclaimed_job.status,
+            GmailInquiryAnalysisJob.STATUS_RUNNING,
+        )
+        self.assertEqual(reclaimed_job.lease_owner, "worker-two")
+        self.assertEqual(reclaimed_job.lease_token, reclaimed_token)
+        self.assertEqual(
+            self.gmail_import.status,
+            GmailInquiryImport.STATUS_ANALYZING,
+        )
+        self.assertEqual(self.gmail_import.analysis_result, {})

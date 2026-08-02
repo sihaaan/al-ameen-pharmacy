@@ -11,6 +11,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from .gmail_inquiry_import import (
+    STAGE_FETCHING_MESSAGES,
     STAGE_INSPECTING_DOCUMENTS,
     GmailInquiryImportError,
     _build_source_analysis,
@@ -304,6 +305,48 @@ class GmailParallelMessageFetchTests(SimpleTestCase):
     @patch("quotations.gmail_inquiry_import._thread_message_metadata")
     @patch("quotations.gmail_inquiry_import._message_metadata")
     @patch("quotations.gmail_inquiry_import.get_valid_access_token", return_value="token")
+    def test_metadata_and_body_heartbeats_run_only_on_coordinator(
+        self,
+        _token,
+        message_metadata,
+        timeline_metadata,
+        fetch_body,
+    ):
+        message_metadata.side_effect = [
+            metadata("canonical-anchor"),
+            metadata("canonical-selected"),
+        ]
+        timeline_metadata.return_value = thread_metadata(
+            "canonical-anchor",
+            "canonical-selected",
+        )
+        fetch_body.return_value = message("canonical-selected")
+        caller_thread = threading.get_ident()
+        pulses = []
+
+        _fetch_analysis_messages(
+            self.gmail_import(
+                mode=GmailInquiryImport.MODE_SELECTED_MESSAGES,
+                anchor="msg-f:anchor",
+                selected=["msg-f:selected"],
+            ),
+            object(),
+            coordinator_heartbeat=lambda stage: pulses.append(
+                (stage, threading.get_ident())
+            ),
+        )
+
+        # Anchor metadata, thread metadata, selected-message metadata, body.
+        self.assertEqual(len(pulses), 4)
+        self.assertEqual(
+            pulses,
+            [(STAGE_FETCHING_MESSAGES, caller_thread)] * 4,
+        )
+
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import._message_metadata")
+    @patch("quotations.gmail_inquiry_import.get_valid_access_token", return_value="token")
     def test_one_body_failure_fails_the_whole_batch(
         self,
         _token,
@@ -352,7 +395,10 @@ class GmailParallelMessageFetchTests(SimpleTestCase):
 
 
 class GmailParallelFlagAndRetryTests(SimpleTestCase):
-    @override_settings(QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=False)
+    @override_settings(
+        QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=False,
+        QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=True,
+    )
     @patch("quotations.gmail_inquiry_import.get_valid_access_token")
     @patch("quotations.gmail_inquiry_import._fetch_analysis_messages_sequential")
     def test_flag_off_is_exact_sequential_fallback(self, sequential, token):
@@ -363,6 +409,39 @@ class GmailParallelFlagAndRetryTests(SimpleTestCase):
         self.assertIs(_fetch_analysis_messages(gmail_import, object()), sentinel)
         sequential.assert_called_once()
         token.assert_not_called()
+
+    @override_settings(
+        QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=False,
+        QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=True,
+    )
+    @patch("quotations.gmail_inquiry_import._thread_message_metadata")
+    @patch("quotations.gmail_inquiry_import.fetch_mailbox_message")
+    def test_sequential_reads_heartbeat_after_each_bounded_result(
+        self,
+        fetch_message,
+        timeline_metadata,
+    ):
+        fetch_message.side_effect = [
+            message("message-1"),
+            message("message-2"),
+        ]
+        timeline_metadata.return_value = thread_metadata(
+            "message-1",
+            "message-2",
+        )
+        pulses = []
+
+        _fetch_analysis_messages(
+            import_record(mode=GmailInquiryImport.MODE_AI_THREAD),
+            object(),
+            coordinator_heartbeat=pulses.append,
+        )
+
+        # Anchor result, thread metadata, and both selected body results.
+        self.assertEqual(
+            pulses,
+            [STAGE_FETCHING_MESSAGES] * 4,
+        )
 
     def test_parallel_limit_defaults_and_clamps(self):
         for configured, expected in (
@@ -378,7 +457,7 @@ class GmailParallelFlagAndRetryTests(SimpleTestCase):
             ):
                 self.assertEqual(_gmail_parallel_fetch_limit(), expected)
 
-    def test_analysis_metrics_record_only_the_parallel_flag_state(self):
+    def test_analysis_metrics_record_parallel_and_background_flag_state(self):
         gmail_import = SimpleNamespace(
             analysis_attempts=1,
             message_manifest=[],
@@ -392,7 +471,10 @@ class GmailParallelFlagAndRetryTests(SimpleTestCase):
                 dimensions = _workflow_analysis_dimensions(gmail_import)
                 self.assertEqual(
                     dimensions["feature_flags"],
-                    {"gmail_parallel_fetch": enabled},
+                    {
+                        "background_analysis": False,
+                        "gmail_parallel_fetch": enabled,
+                    },
                 )
 
     @patch("quotations.gmail_inquiry_import.time.sleep")
@@ -519,6 +601,9 @@ class GmailParallelAttachmentTests(SimpleTestCase):
             max_bytes=100,
             max_total_bytes=100,
             max_native_files=10,
+            coordinator_heartbeat=lambda stage: inspection_threads.append(
+                (stage, threading.get_ident())
+            ),
         )
 
         self.assertEqual(peak, 2)
@@ -526,7 +611,14 @@ class GmailParallelAttachmentTests(SimpleTestCase):
             list(outcomes),
             [(1, 0), (1, 1), (1, 2), (1, 3)],
         )
-        self.assertEqual(inspection_threads, [caller_thread] * 4)
+        self.assertEqual(
+            inspection_threads,
+            [
+                (STAGE_INSPECTING_DOCUMENTS, caller_thread),
+                caller_thread,
+            ]
+            * 4,
+        )
         self.assertTrue(
             all(call.kwargs["access_token"] == "token" for call in fetch.call_args_list)
         )

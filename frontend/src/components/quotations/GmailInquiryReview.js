@@ -26,6 +26,21 @@ const ANALYSIS_PROGRESS_STAGES = new Set([
 ]);
 const ANALYSIS_PROGRESS_POLL_MS = 700;
 const ANALYSIS_PROGRESS_MAX_TRANSIENT_FAILURES = 8;
+const ANALYSIS_SOURCE_GENERATION_PATTERN = /^[0-9a-f]{32}$/;
+const BACKGROUND_ANALYSIS_JOB_STATES = new Set([
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'superseded',
+  'cancelled',
+]);
+const ACTIVE_BACKGROUND_ANALYSIS_JOB_STATES = new Set(['queued', 'running']);
+const STOPPED_BACKGROUND_ANALYSIS_JOB_STATES = new Set([
+  'failed',
+  'superseded',
+  'cancelled',
+]);
 
 const ANALYSIS_STAGE_COPY = {
   '': ['Analysis in progress', 'Waiting for the next verified processing stage.'],
@@ -52,6 +67,11 @@ const ANALYSIS_FAILURE_COPY = {
   matching_failed: 'Review suggestions could not be prepared. Retry the analysis.',
   result_persistence_failed: 'The verified result could not be saved. Retry the analysis.',
   unexpected_failure: 'The analysis stopped unexpectedly. Retry the analysis.',
+};
+
+const BACKGROUND_ANALYSIS_STOP_COPY = {
+  superseded: 'A newer source or analysis replaced this attempt. The older result was not applied.',
+  cancelled: 'This attempt was cancelled safely before changing the review.',
 };
 
 const firstDefined = (...values) => values.find((value) => value !== undefined && value !== null);
@@ -83,6 +103,10 @@ const gmailUnifiedWorkspaceEnabled = (record) => (
   record?.workflow_features?.gmail_unified_workspace === true
 );
 
+const gmailBackgroundAnalysisEnabled = (record) => (
+  record?.workflow_features?.gmail_background_analysis === true
+);
+
 const gmailAnalysisProgressUnavailableInRecord = (record) => (
   record?.workflow_features?.gmail_analysis_progress !== true
 );
@@ -112,6 +136,49 @@ const normalizedAnalysisProgress = (value) => {
     retryable: value.retryable === true,
   };
 };
+
+const normalizedBackgroundAnalysisJob = (value) => {
+  if (!value || typeof value !== 'object') return null;
+  const state = String(value.state || '');
+  const numericId = Number(value.id);
+  const numericAttempt = Number(value.analysis_attempt);
+  const numericAttemptCount = Number(value.attempt_count);
+  const sourceGeneration = String(value.source_generation || '');
+  if (
+    !BACKGROUND_ANALYSIS_JOB_STATES.has(state)
+    || !Number.isInteger(numericId)
+    || numericId <= 0
+    || !Number.isInteger(numericAttempt)
+    || numericAttempt < 0
+    || !Number.isInteger(numericAttemptCount)
+    || numericAttemptCount < 0
+    || !ANALYSIS_SOURCE_GENERATION_PATTERN.test(sourceGeneration)
+  ) return null;
+  return {
+    id: numericId,
+    state,
+    analysis_attempt: numericAttempt,
+    source_generation: sourceGeneration,
+    progress_stage: String(value.progress_stage || ''),
+    attempt_count: numericAttemptCount,
+    safe_error_category: String(value.safe_error_category || ''),
+    queued_at: value.queued_at || null,
+    started_at: value.started_at || null,
+    heartbeat_at: value.heartbeat_at || null,
+    completed_at: value.completed_at || null,
+    updated_at: value.updated_at || null,
+    terminal: value.terminal === true,
+    retryable: value.retryable === true,
+  };
+};
+
+const backgroundAnalysisJobMatchesProgress = (job, progress) => Boolean(
+  job
+  && progress
+  && job.analysis_attempt === progress.attempt
+  && job.source_generation === progress.source_generation
+  && ANALYSIS_SOURCE_GENERATION_PATTERN.test(progress.source_generation)
+);
 
 const analysisProgressFromPayload = (payload) => {
   const data = payload?.data || payload || {};
@@ -815,6 +882,7 @@ const GmailInquiryReview = ({
   const companyPatchGenerationRef = useRef(0);
   const analysisProgressGenerationRef = useRef(0);
   const analysisProgressBindingRef = useRef(null);
+  const analysisEnqueueLockRef = useRef(false);
   const autoAnalyzeImportRef = useRef('');
   const chainedActionLockRef = useRef(false);
   const unifiedProductGenerationRef = useRef(0);
@@ -937,6 +1005,7 @@ const GmailInquiryReview = ({
       companyPatchGenerationRef.current += 1;
       analysisProgressGenerationRef.current += 1;
       analysisProgressBindingRef.current = null;
+      analysisEnqueueLockRef.current = false;
       chainedActionLockRef.current = false;
     };
   }, []);
@@ -1032,7 +1101,7 @@ const GmailInquiryReview = ({
     selectedIds = selectedMessageIds,
     mode = analysisMode,
   } = {}) => {
-    if (!targetId || busyAction) return null;
+    if (!targetId || busyAction || analysisEnqueueLockRef.current) return null;
     const normalizedMode = ANALYSIS_MODE_IDS.has(mode) ? mode : 'current_message';
     const normalizedSelectedIds = normalizedMode === 'selected_messages'
       ? [...new Set(asArray(selectedIds).map(String).filter(Boolean))]
@@ -1044,6 +1113,10 @@ const GmailInquiryReview = ({
       });
       return null;
     }
+    // React state does not update between two events in the same browser turn.
+    // Hold a synchronous lock as well so a double click can issue at most one
+    // enqueue request. The backend remains the durable idempotency authority.
+    analysisEnqueueLockRef.current = true;
     if (gmailAnalysisProgressEnabled(recordRef.current || {})) {
       stopAnalysisProgressPolling({ clearProgress: true });
     }
@@ -1057,6 +1130,8 @@ const GmailInquiryReview = ({
     let analysisImportId = targetId;
     let analysisRequested = false;
     let progressEnabledForRequest = false;
+    let backgroundEnabledForRequest = false;
+    let backgroundRequestAccepted = false;
     let progressBinding = null;
     try {
       const selectionResponse = await quotationAPI.gmailInquiryImports.update(targetId, {
@@ -1094,14 +1169,24 @@ const GmailInquiryReview = ({
       }
       analysisRequested = true;
       progressEnabledForRequest = gmailAnalysisProgressEnabled(nextSelectionRecord);
+      backgroundEnabledForRequest = gmailBackgroundAnalysisEnabled(nextSelectionRecord);
       const analysisRequest = quotationAPI.gmailInquiryImports.analyze(effectiveImportId, {
         force: Boolean(reanalyze),
       });
       if (progressEnabledForRequest) {
+        const existingJob = normalizedBackgroundAnalysisJob(
+          nextSelectionRecord.analysis_job
+        );
+        const existingProgress = analysisProgressFromPayload(selectionResponse.data);
+        const resumeExistingBackgroundJob = Boolean(
+          backgroundEnabledForRequest
+          && ACTIVE_BACKGROUND_ANALYSIS_JOB_STATES.has(existingJob?.state)
+          && backgroundAnalysisJobMatchesProgress(existingJob, existingProgress)
+        );
         progressBinding = beginAnalysisProgressPolling(
           effectiveImportId,
-          analysisProgressFromPayload(selectionResponse.data),
-          { newAttempt: true }
+          existingProgress,
+          { newAttempt: !resumeExistingBackgroundJob }
         );
       }
       if (replacementImportId && actionIsCurrent(actionGeneration)) {
@@ -1116,6 +1201,121 @@ const GmailInquiryReview = ({
         if (progressBinding) progressBinding.requestSettled = true;
         const responseRecord = gmailImportRecordFromPayload(response.data);
         const responseImportId = entityId(responseRecord);
+        const responseProgress = analysisProgressFromPayload(response.data);
+        const responseJob = backgroundEnabledForRequest
+          ? normalizedBackgroundAnalysisJob(responseRecord.analysis_job)
+          : null;
+        if (backgroundEnabledForRequest && response.status === 202) {
+          const currentBinding = analysisProgressBindingRef.current;
+          const acceptedCurrentJob = Boolean(
+            String(responseImportId || '') === String(analysisImportId)
+            && ACTIVE_BACKGROUND_ANALYSIS_JOB_STATES.has(responseJob?.state)
+            && backgroundAnalysisJobMatchesProgress(responseJob, responseProgress)
+            && progressBindingIsCurrent(currentBinding)
+            && currentBinding === progressBinding
+            && analysisProgressMatchesBinding(
+              responseProgress,
+              currentBinding,
+              { establishAttempt: true }
+            )
+          );
+          if (!acceptedCurrentJob) {
+            analysisEnqueueLockRef.current = false;
+            stopAnalysisProgressPolling();
+            setAnalysisProgressUnavailable(true);
+            setNotice(null);
+            setErrorInfo({
+              action: reanalyze ? 'Reanalyze Gmail inquiry' : 'Analyze Gmail inquiry',
+              endpoint: `POST /quotations/gmail-inquiry-imports/${analysisImportId}/analyze/`,
+              status: 'Invalid background status',
+              detail: 'The queued analysis could not be verified against the current inquiry. Refresh and retry safely.',
+            });
+            return null;
+          }
+          backgroundRequestAccepted = true;
+          setAnalysisProgress(responseProgress);
+          applyPayload(response.data, { preserveSelection: true });
+          setNotice({
+            type: 'info',
+            message: responseJob.state === 'queued'
+              ? 'Gmail inquiry analysis is queued. You can leave this page and return while processing continues.'
+              : 'Gmail inquiry analysis is running. You can leave this page and return while processing continues.',
+          });
+          return response.data;
+        }
+        if (
+          backgroundEnabledForRequest
+          && response.status === 200
+          && (
+            responseJob?.state === 'completed'
+            || responseProgress?.state === 'completed'
+          )
+        ) {
+          const currentBinding = analysisProgressBindingRef.current;
+          const currentRecordProgress = normalizedAnalysisProgress(
+            recordRef.current?.analysis_progress
+          );
+          const currentRecordJob = normalizedBackgroundAnalysisJob(
+            recordRef.current?.analysis_job
+          );
+          const responseAttempt = responseProgress?.attempt;
+          const newerAttemptAlreadyTracked = [
+            currentBinding?.attempt,
+            currentRecordProgress?.attempt,
+            currentRecordJob?.analysis_attempt,
+          ].some((attempt) => (
+            Number.isInteger(attempt)
+            && Number.isInteger(responseAttempt)
+            && attempt > responseAttempt
+          ));
+          const currentBindingConflicts = Boolean(
+            Number.isInteger(currentBinding?.attempt)
+            && currentBinding.attempt === responseAttempt
+            && currentBinding.sourceGeneration
+            && currentBinding.sourceGeneration !== responseProgress?.source_generation
+          );
+          if (newerAttemptAlreadyTracked || currentBindingConflicts) {
+            // A different browser can start a later attempt while this 200 is
+            // in transit. Keep the newer authenticated poll authoritative.
+            return response.data;
+          }
+          const acceptedCompletedSnapshot = Boolean(
+            String(responseImportId || '') === String(analysisImportId)
+            && responseJob?.state === 'completed'
+            && responseJob.terminal === true
+            && responseJob.progress_stage === 'completed'
+            && responseProgress?.state === 'completed'
+            && responseProgress.stage === 'completed'
+            && backgroundAnalysisJobMatchesProgress(responseJob, responseProgress)
+            && ['ready', 'review_required', 'confirmed'].includes(
+              importStatus(responseRecord)
+            )
+          );
+          if (!acceptedCompletedSnapshot) {
+            analysisEnqueueLockRef.current = false;
+            stopAnalysisProgressPolling();
+            setAnalysisProgressUnavailable(true);
+            setNotice(null);
+            setErrorInfo({
+              action: reanalyze ? 'Reanalyze Gmail inquiry' : 'Analyze Gmail inquiry',
+              endpoint: `POST /quotations/gmail-inquiry-imports/${analysisImportId}/analyze/`,
+              status: 'Invalid completed status',
+              detail: 'The completed analysis could not be verified against the current inquiry. Refresh and retry safely.',
+            });
+            return null;
+          }
+          setAnalysisProgress(responseProgress);
+          applyPayload(response.data);
+          analysisEnqueueLockRef.current = false;
+          stopAnalysisProgressPolling();
+          setNotice({
+            type: 'success',
+            message: reanalyze
+              ? 'The Gmail inquiry was analyzed again. Review the updated evidence below.'
+              : 'Gmail inquiry analysis is ready for review.',
+          });
+          return response.data;
+        }
         if (
           gmailAnalysisProgressUnavailableInRecord(responseRecord)
           && String(responseImportId || '') === String(analysisImportId)
@@ -1135,7 +1335,6 @@ const GmailInquiryReview = ({
           });
           return response.data;
         }
-        const responseProgress = analysisProgressFromPayload(response.data);
         const currentBinding = analysisProgressBindingRef.current;
         if (
           !progressBindingIsCurrent(currentBinding)
@@ -1176,6 +1375,7 @@ const GmailInquiryReview = ({
       if (progressEnabledForRequest) {
         if (progressBinding) progressBinding.requestSettled = true;
         if (!recoverableRequestFailure) {
+          analysisEnqueueLockRef.current = false;
           stopAnalysisProgressPolling();
           setAnalysisProgressUnavailable(true);
           setNotice(null);
@@ -1187,6 +1387,7 @@ const GmailInquiryReview = ({
           return null;
         }
         if (progressBindingIsCurrent(progressBinding)) {
+          backgroundRequestAccepted = backgroundEnabledForRequest;
           setNotice({
             type: 'info',
             message: 'The browser connection was interrupted. Live analysis status checks will continue safely.',
@@ -1238,6 +1439,9 @@ const GmailInquiryReview = ({
       );
       return null;
     } finally {
+      if (!backgroundRequestAccepted) {
+        analysisEnqueueLockRef.current = false;
+      }
       if (actionIsCurrent(actionGeneration)) setBusyAction('');
     }
   }, [
@@ -1257,6 +1461,7 @@ const GmailInquiryReview = ({
     const generation = ++requestGenerationRef.current;
     actionGenerationRef.current += 1;
     companyPatchGenerationRef.current += 1;
+    analysisEnqueueLockRef.current = false;
     stopAnalysisProgressPolling({ clearProgress: true });
     let cancelled = false;
     const loadImport = async () => {
@@ -1300,6 +1505,7 @@ const GmailInquiryReview = ({
       requestGenerationRef.current += 1;
       analysisProgressGenerationRef.current += 1;
       analysisProgressBindingRef.current = null;
+      analysisEnqueueLockRef.current = false;
     };
   }, [applyPayload, handleError, importId, onClaimed, stopAnalysisProgressPolling, token]);
 
@@ -1309,6 +1515,19 @@ const GmailInquiryReview = ({
   const gmailChainedActions = gmailChainedActionsEnabled(record || {});
   const gmailAnalysisProgress = gmailAnalysisProgressEnabled(record || {});
   const gmailUnifiedWorkspace = gmailUnifiedWorkspaceEnabled(record || {});
+  const gmailBackgroundAnalysis = gmailBackgroundAnalysisEnabled(record || {});
+  const backgroundAnalysisJob = useMemo(
+    () => normalizedBackgroundAnalysisJob(record?.analysis_job),
+    [record?.analysis_job]
+  );
+  const backgroundAnalysisJobActive = Boolean(
+    gmailBackgroundAnalysis
+    && ACTIVE_BACKGROUND_ANALYSIS_JOB_STATES.has(backgroundAnalysisJob?.state)
+  );
+  const backgroundAnalysisJobStopped = Boolean(
+    gmailBackgroundAnalysis
+    && STOPPED_BACKGROUND_ANALYSIS_JOB_STATES.has(backgroundAnalysisJob?.state)
+  );
   const nestedAnalysisProgress = useMemo(
     () => normalizedAnalysisProgress(record?.analysis_progress),
     [record?.analysis_progress]
@@ -1397,7 +1616,7 @@ const GmailInquiryReview = ({
   const analysisActive = !analysisProgressUnavailable && (
     gmailAnalysisProgress && currentAnalysisProgress
       ? currentAnalysisProgress.state === 'running'
-      : ACTIVE_ANALYSIS_STATUSES.has(status)
+      : backgroundAnalysisJobActive || ACTIVE_ANALYSIS_STATUSES.has(status)
   );
   const analysisRequestPending = ['analyze', 'reanalyze'].includes(busyAction);
   const analysisUiActive = analysisActive || (
@@ -1405,7 +1624,8 @@ const GmailInquiryReview = ({
     && !(gmailAnalysisProgress && ['completed', 'failed'].includes(currentAnalysisProgress?.state))
   );
   const analysisProgressFailed = Boolean(
-    gmailAnalysisProgress && currentAnalysisProgress?.state === 'failed'
+    (gmailAnalysisProgress && currentAnalysisProgress?.state === 'failed')
+    || backgroundAnalysisJobStopped
   );
   const analysisInteractionBlocked = (
     analysisActive
@@ -1420,6 +1640,7 @@ const GmailInquiryReview = ({
     && (
       RECOVERABLE_ANALYSIS_STATUSES.has(status)
       || analysisProgressFailed
+      || backgroundAnalysisJobStopped
       || analysisProgressUnavailable
       || (
         reviewLines.length === 0
@@ -1427,6 +1648,19 @@ const GmailInquiryReview = ({
       )
     )
   );
+
+  useEffect(() => {
+    if (!gmailBackgroundAnalysis) {
+      analysisEnqueueLockRef.current = false;
+      return;
+    }
+    if (!backgroundAnalysisJob) return;
+    analysisEnqueueLockRef.current = backgroundAnalysisJobActive;
+  }, [
+    backgroundAnalysisJob,
+    backgroundAnalysisJobActive,
+    gmailBackgroundAnalysis,
+  ]);
 
   useEffect(() => {
     const generation = ++unifiedProductGenerationRef.current;
@@ -1542,6 +1776,7 @@ const GmailInquiryReview = ({
     };
     const stopWithUnavailableProgress = (statusValue = 'Unavailable') => {
       if (!pollIsCurrent()) return;
+      analysisEnqueueLockRef.current = false;
       setAnalysisProgressUnavailable(true);
       setErrorInfo({
         action: 'Track Gmail inquiry analysis',
@@ -1566,6 +1801,7 @@ const GmailInquiryReview = ({
           if (binding.attempt === null) {
             binding.unboundPollCount += 1;
             if (binding.requestSettled && binding.unboundPollCount >= 6) {
+              analysisEnqueueLockRef.current = false;
               setErrorInfo({
                 action: 'Track Gmail inquiry analysis',
                 endpoint: `GET /quotations/gmail-inquiry-imports/${targetImportId}/analysis_progress/`,
@@ -1579,12 +1815,36 @@ const GmailInquiryReview = ({
               stopAnalysisProgressPolling();
               return;
             }
+          } else if (
+            progress
+            && progress.attempt > binding.attempt
+            && String(progress.source_generation || '')
+          ) {
+            // Another browser/worker may have safely retried the same import
+            // generation. The authenticated progress endpoint projects only
+            // the import's current job, so move the lightweight binding
+            // forward instead of polling the obsolete attempt forever.
+            binding.attempt = progress.attempt;
+            binding.sourceGeneration = progress.source_generation;
+            binding.unboundPollCount = 0;
+            setAnalysisProgress(progress);
+            setNotice({
+              type: 'info',
+              message: 'A newer Gmail analysis attempt is now being tracked.',
+            });
+          } else {
+            binding.unboundPollCount += 1;
+            if (binding.requestSettled && binding.unboundPollCount >= 6) {
+              stopWithUnavailableProgress('Stale status');
+              return;
+            }
           }
           schedulePoll();
           return;
         }
         setAnalysisProgress(progress);
         if (progress.state === 'failed') {
+          analysisEnqueueLockRef.current = false;
           setNotice(null);
           setBusyAction((current) => (
             ['analyze', 'reanalyze'].includes(current) ? '' : current
@@ -1602,6 +1862,7 @@ const GmailInquiryReview = ({
           }
           setAnalysisProgress(completedProgress);
           applyPayload(completedResponse.data);
+          analysisEnqueueLockRef.current = false;
           setNotice({
             type: 'success',
             message: 'Gmail inquiry analysis is ready for review.',
@@ -1622,6 +1883,7 @@ const GmailInquiryReview = ({
             if (!pollIsCurrent()) return;
             const fallbackRecord = gmailImportRecordFromPayload(fallbackResponse.data);
             if (gmailAnalysisProgressUnavailableInRecord(fallbackRecord)) {
+              analysisEnqueueLockRef.current = false;
               stopAnalysisProgressPolling({ clearProgress: true });
               const appliedFallbackRecord = applyPayload(fallbackResponse.data);
               const fallbackStatus = importStatus(appliedFallbackRecord);
@@ -2718,7 +2980,9 @@ const GmailInquiryReview = ({
     : ['Waiting for live analysis status', 'Waiting for the first verified processing stage.'];
   const currentAnalysisFailureCopy = ANALYSIS_FAILURE_COPY[
     currentAnalysisProgress?.safe_error_category
-  ] || ANALYSIS_FAILURE_COPY.unexpected_failure;
+      || backgroundAnalysisJob?.safe_error_category
+  ] || BACKGROUND_ANALYSIS_STOP_COPY[backgroundAnalysisJob?.state]
+    || ANALYSIS_FAILURE_COPY.unexpected_failure;
 
   if (loading && !record) {
     return (
@@ -2749,7 +3013,13 @@ const GmailInquiryReview = ({
           </div>
           <div className="qm-gmail-import-heading-actions">
             <span className={`qm-gmail-import-status status-${analysisUiActive ? 'analyzing' : status || 'pending'}`}>
-              {analysisUiActive ? 'Analyzing' : quoteId ? 'Quotation created' : status.replaceAll('_', ' ') || 'Ready for review'}
+              {analysisUiActive
+                ? 'Analyzing'
+                : analysisProgressFailed
+                  ? 'Analysis stopped'
+                  : quoteId
+                    ? 'Quotation created'
+                    : status.replaceAll('_', ' ') || 'Ready for review'}
             </span>
             {onBack && <button type="button" className="qm-secondary" onClick={onBack}>Back to inquiries</button>}
           </div>
@@ -2776,7 +3046,10 @@ const GmailInquiryReview = ({
             <span className="qm-gmail-live-status-label">Verified live stage</span>
           </div>
         )}
-        {gmailAnalysisProgress && currentAnalysisProgress?.state === 'failed' && (
+        {gmailAnalysisProgress && (
+          currentAnalysisProgress?.state === 'failed'
+          || backgroundAnalysisJobStopped
+        ) && (
           <div className="qm-feedback warning qm-gmail-analysis-safe-failure" role="status" aria-live="polite">
             <strong>Analysis stopped safely.</strong>
             <span>{currentAnalysisFailureCopy}</span>

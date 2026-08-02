@@ -28,7 +28,7 @@ configuration as complete.
 | Gmail | consumer mailbox `pharmacydxb@gmail.com`; add-on enabled in observed env | deployment/publication/verification and ownership records not in repo |
 | AI | observed OpenAI provider and moving `gpt-5.4` aliases | exact snapshot/provider policy must be recorded per evaluation |
 | Error monitoring | Sentry integration exists | `SENTRY_DSN` not configured in snapshot |
-| Async work | no Redis/background worker | Gmail analysis is synchronous with resumable status/polling |
+| Async work | no Redis/background worker service is configured | optional PostgreSQL job/lease code and worker command are prepared; Gmail analysis remains synchronous while its flag is off |
 | Retention | handoff tokens expire; no general scheduled purge | approve retention/deletion policy |
 
 Do not infer current provider configuration from this table after its date.
@@ -128,6 +128,63 @@ generation is still allowed to persist its terminal success/failure state. No
 worker service, provider,
 OAuth scope, AI model, prompt, email action, or infrastructure setting is added
 by this phase.
+
+### Durable background Gmail analysis (disabled by default)
+
+`QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED` defaults to `0`. With that value,
+the established synchronous analyzer and its existing progress behavior remain
+the exact fallback. Enabling the flag changes `POST
+/gmail-inquiry-imports/{id}/analyze/` to an idempotent enqueue action: HTTP 202
+returns the safe current import and `analysis_job`, and an exact repeated
+request returns the same generation-bound job. `GET` import retrieval plus the
+private, no-store `/analysis_progress/` endpoint let a browser resume after a
+reload without re-enqueueing or repeatedly transferring full email evidence.
+
+Apply and verify additive migration `0041_gmailinquiryanalysisjob` first. It
+creates the PostgreSQL orchestration ledger and no customer-content backfill.
+Old code remains compatible after the migration; new code must keep the flag
+off until the migration exists. There is no Railway worker service configured;
+this repository does not start or scale one. The operator-owned service command
+is:
+
+```bash
+python manage.py run_gmail_inquiry_worker
+```
+
+The worker uses short row-lock transactions for claims and persistence and
+does not hold them across Gmail, document, or AI work. It renews a bounded
+lease with heartbeats. An expired lease can be reclaimed after a crash, while
+bounded attempts eventually produce only an allow-listed safe failure. Before
+provider work and before persistence it rechecks the employee/import owner,
+source fingerprint, analysis attempt, and opaque generation. Source changes
+supersede the old job; cancelled, superseded, expired, or stale work cannot
+overwrite the current review. Workers never finalize quotations, choose
+companies/Products/prices, preview or send email, or run reconciliation.
+
+For a controlled rollout, record a database recovery point, apply `0041`,
+deploy web code with the flag at `0`, and prove synchronous analysis still
+works. Configure a separate non-production worker from the same immutable
+release and database with its service-level flag at `1` while web remains at
+`0`, then verify the idle worker is healthy. The command refuses to start when
+its own flag is disabled. Enable the web flag only after that worker is ready.
+If settings cannot be staged per service, coordinate worker start with the web
+flag change before the first HTTP 202 response. Monitor oldest queued age,
+queued/running/terminal counts, heartbeat age, lease reclaims, attempt count,
+safe failure categories, completion latency, and jobs whose import generation
+moved. An HTTP 202 without an operating worker is an operator error: disable
+the flag rather than asking employees to enqueue again.
+
+Rollback in this order: stop the worker first; set
+`QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` on every web/worker process;
+verify new requests for unaffected imports complete synchronously. Flag
+disablement does not cancel imports already queued/running; those exact imports
+can remain Busy until they were deliberately drained before worker shutdown or
+the existing bounded stale-analysis window permits synchronous recovery. Leave
+their job rows untouched for audit and never manually replay them. Retain
+migration `0041` for ordinary application rollback. Reverse it only after all
+new application and worker processes are stopped and only with explicit
+approval, because reversal deletes the job ledger rather than customer
+workflow records.
 
 ### Unified Gmail quotation workspace (disabled by default)
 

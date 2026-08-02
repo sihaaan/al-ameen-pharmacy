@@ -11,6 +11,9 @@ WORKFLOW_FEATURE_SETTINGS = {
     ),
     "gmail_analysis_progress": "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
     "gmail_unified_workspace": "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+    "gmail_background_analysis": (
+        "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED"
+    ),
 }
 
 
@@ -35,6 +38,13 @@ def quotation_workflow_features():
         features["gmail_unified_workspace"]
         and features["gmail_review_ui_v2"]
     )
+    # Durable jobs always expose the same content-free progress contract so a
+    # polling browser never has to reload full email evidence. This implication
+    # is one-way: enabling standalone synchronous progress does not enqueue.
+    features["gmail_analysis_progress"] = bool(
+        features["gmail_analysis_progress"]
+        or features["gmail_background_analysis"]
+    )
     return features
 
 
@@ -52,3 +62,7 @@ def gmail_analysis_progress_enabled():
 
 def gmail_unified_workspace_enabled():
     return quotation_workflow_features()["gmail_unified_workspace"]
+
+
+def gmail_background_analysis_enabled():
+    return quotation_workflow_features()["gmail_background_analysis"]

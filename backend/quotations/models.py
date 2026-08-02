@@ -620,6 +620,98 @@ class GmailInquiryImport(models.Model):
         return f"Gmail inquiry {self.anchor_message_id} ({self.status})"
 
 
+class GmailInquiryAnalysisJob(models.Model):
+    """Durable, leased execution record for one Gmail analysis generation."""
+
+    STATUS_QUEUED = "queued"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, "Queued"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_SUPERSEDED, "Superseded"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+    ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
+    TERMINAL_STATUSES = (
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+        STATUS_SUPERSEDED,
+        STATUS_CANCELLED,
+    )
+
+    job_uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    gmail_import = models.ForeignKey(
+        GmailInquiryImport,
+        on_delete=models.CASCADE,
+        related_name="analysis_jobs",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="requested_gmail_inquiry_analysis_jobs",
+    )
+    source_fingerprint = models.CharField(max_length=64)
+    result_source_fingerprint = models.CharField(max_length=64, blank=True)
+    analysis_attempt = models.PositiveIntegerField()
+    source_generation = models.CharField(max_length=32)
+    force_requested = models.BooleanField(default=False)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_QUEUED,
+        db_index=True,
+    )
+    progress_stage = models.CharField(max_length=40, default="queued")
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    lease_owner = models.CharField(max_length=128, blank=True)
+    lease_token = models.CharField(max_length=64, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    safe_error_category = models.CharField(max_length=64, blank=True)
+    queued_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+        indexes = [
+            models.Index(
+                fields=["status", "queued_at"],
+                name="gmail_job_status_queued_idx",
+            ),
+            models.Index(
+                fields=["gmail_import", "created_at"],
+                name="gmail_job_imp_created_idx",
+            ),
+            models.Index(
+                fields=["status", "lease_expires_at"],
+                name="gmail_job_status_lease_idx",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["gmail_import", "source_generation"],
+                name="uniq_gmail_analysis_import_generation",
+            ),
+            models.UniqueConstraint(
+                fields=["gmail_import"],
+                condition=models.Q(status__in=("queued", "running")),
+                name="uniq_active_gmail_analysis_job",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Gmail analysis job {self.job_uuid} ({self.status})"
+
+
 class GmailInquiryHandoffToken(models.Model):
     """One short-lived, one-way token digest for a Gmail intake handoff."""
 
