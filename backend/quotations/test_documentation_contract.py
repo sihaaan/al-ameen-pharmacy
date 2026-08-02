@@ -18,6 +18,15 @@ from quotations.gmail_compact_shadow import (
     GMAIL_COMPACT_PIPELINE_VERSION,
     GMAIL_COMPACT_SCHEMA_NAME,
 )
+from quotations.gmail_xlsx_preextract_runner import (
+    GMAIL_XLSX_SHADOW_CACHE_NAMESPACE,
+    GMAIL_XLSX_SHADOW_PIPELINE_VERSION,
+    GMAIL_XLSX_SHADOW_PROMPT_VERSION,
+    GMAIL_XLSX_SHADOW_SCHEMA_NAME,
+)
+from quotations.gmail_xlsx_preextract_shadow import (
+    SCHEMA_VERSION as XLSX_PREEXTRACT_SCHEMA_VERSION,
+)
 from quotations.models import (
     QuotationEmailDeliveryAttemptEvent,
     QuotationEmailOutboundSnapshot,
@@ -215,6 +224,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
             "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+            "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -367,6 +377,31 @@ class DocumentationContractTests(SimpleTestCase):
             self.assertIn(version, deployment)
         self.assertIn("discarded", deployment)
         self.assertIn("test key", operations)
+
+    def test_xlsx_preextract_shadow_is_default_off_discarded_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn(
+                "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
+                content,
+            )
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("native", content.lower())
+            self.assertIn("provider", content.lower())
+            self.assertIn("discard", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("rollback", content.lower())
+        for version in (
+            GMAIL_XLSX_SHADOW_PIPELINE_VERSION,
+            GMAIL_XLSX_SHADOW_SCHEMA_NAME,
+            GMAIL_XLSX_SHADOW_PROMPT_VERSION,
+            GMAIL_XLSX_SHADOW_CACHE_NAMESPACE,
+            XLSX_PREEXTRACT_SCHEMA_VERSION,
+        ):
+            self.assertIn(version, deployment)
+        self.assertIn("macro-free", deployment)
+        self.assertIn("synthetic evaluation key", deployment)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

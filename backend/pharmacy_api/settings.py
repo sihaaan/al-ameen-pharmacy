@@ -441,6 +441,12 @@ QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED = env_bool(
     "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
     False,
 )
+# Internal clean-XLSX pre-extraction comparison only. Native Gmail analysis
+# remains authoritative and this experiment is strictly disabled by default.
+QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED = env_bool(
+    "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

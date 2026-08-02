@@ -521,6 +521,51 @@ worker and monitor its lease heartbeat if it is ever evaluated. Rollback is
 immediate: set the flag to `0`, which removes all compact provider activity and
 leaves the baseline path and its cache unchanged.
 
+### Clean-XLSX pre-extraction experiment (shadow-only, disabled by default)
+
+`QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED=0` performs no XLSX
+pre-extraction and makes no additional provider call. The established native
+Gmail analysis always runs first and remains the only authoritative result and
+cache entry. When strictly enabled, only macro-free Transitional `.xlsx`
+attachments that pass the bounded, fail-closed OOXML inspection are converted
+to a complete canonical visible-cell representation. Any formula, hidden
+sheet/row/column that affects the represented source range, inherited
+row/column number format, conditional formatting, active filter or custom
+view, protection, external link, missing/duplicate/mismatched package
+relationship, unsupported extension, malformed package, ambiguous structure,
+or resource limit causes native fallback before the shadow provider is called.
+
+For an eligible experiment, a second synchronous call uses the existing
+configured provider/model with `gmail_inquiry_xlsx_preextract_shadow_v1`,
+`gmail_inquiry_xlsx_preextract_native_v1`,
+`gmail_xlsx_preextract_prompt_v1`, and the distinct
+`gmail_xlsx_preextract_shadow_cache_v1` namespace. The full selected email
+thread remains in context. The canonical visible-cell representation is bound
+to `gmail_xlsx_preextract_shadow_v1`. Each eligible original XLSX is replaced only in the
+shadow input by its exact canonical JSON. PDF, XLS, XLSB, scans, and other
+non-eligible files are never pre-extracted; in a mixed eligible-XLSX shadow call
+they remain unchanged native file inputs.
+
+The shadow output passes the existing native validator against deep copies and
+additional exact source-key, visible-sheet, bounded cell-range, exact excerpt,
+and pure-XLSX row-value provenance checks. Citation count and cumulative
+range-cell work are capped before evaluation. Its raw output and extracted rows are discarded;
+they cannot alter employee-visible evidence, company/Product suggestions,
+blank selling prices, quotation state, replies, or the semantic cache. When
+workflow metrics are separately enabled, only re-sanitized counts, hashes,
+token/timing totals, fallback categories, agreement basis points, and blank
+selling-price violations are written to `AIParseLog`. Customer text, Gmail
+identifiers, filenames, source keys, prices, and raw provider content are not
+stored in experiment telemetry.
+
+There is no migration, API/frontend behavior, OAuth scope, package, model, or
+infrastructure change. There is intentionally no persisted shadow-result cache,
+so enabled repeat analyses can repeat cost and latency. Do not enable without
+an approved synthetic evaluation key and budget, and enough durable-background
+worker lease margin for the additional synchronous call. Rollback is immediate:
+set `QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED=0`; no stored customer result
+or baseline cache needs reversal.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current

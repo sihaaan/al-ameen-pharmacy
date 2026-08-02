@@ -264,6 +264,33 @@ change, OAuth/model/package change, or data reversal. Do not enable this flag
 on a synchronous production web process or together with another shadow call
 until the resulting latency and background-job lease margin have been measured.
 
+### Clean-XLSX pre-extraction experiment (shadow-only)
+
+`QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED` is disabled by default. At
+`0`, it performs no inspection and no provider call. When enabled, the native
+Gmail result still runs first and remains authoritative. Only clean, fully
+represented Transitional XLSX files reach a second call; every uncertain or
+unsupported workbook fails closed to the already-completed native result. The
+shadow retains the full selected thread context, keeps non-XLSX native files,
+validates exact XLSX citations and row evidence, then discards the result.
+Inherited row/column number formats, conditional formatting, ambiguous package
+relationships, excessive citation counts, and excessive cumulative cited-cell
+work all fail closed without calling the shadow provider.
+
+Expect one additional configured-provider/model call for an eligible analysis,
+including a baseline cache hit. The experiment has no persisted shadow cache.
+Monitor eligibility/fallback counts, provider and total duration, tokens,
+whole-row and field agreement, source-evidence agreement, blank selling-price
+violations, failures, and durable worker heartbeat/lease margin. Privacy-safe
+metrics appear only when `QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED=1`; raw XLSX,
+email, provider output, filenames, source keys, customer identity, and prices
+must never appear in those records. Do not enable the compact and XLSX shadows
+together until their combined latency and budget have been measured.
+
+Rollback is immediate: set the XLSX shadow flag to `0`. There is no migration,
+API/frontend behavior change, stored shadow result, baseline cache change,
+OAuth scope, package, model, infrastructure, or data reversal.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

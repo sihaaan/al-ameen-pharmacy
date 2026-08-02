@@ -112,6 +112,10 @@ from .gmail_review_state import (
     gmail_suggested_company_is_approvable,
 )
 from .gmail_compact_shadow import run_compact_shadow, sanitize_shadow_report
+from .gmail_xlsx_preextract_runner import (
+    run_xlsx_preextract_shadow,
+    sanitize_xlsx_shadow_report,
+)
 from .gmail_analysis_progress import (
     STAGE_ANALYZING_WITH_AI,
     STAGE_FETCHING_ATTACHMENTS,
@@ -187,6 +191,19 @@ def _gmail_compact_schema_shadow_enabled():
         getattr(
             settings,
             "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+            False,
+        )
+        is True
+    )
+
+
+def _gmail_xlsx_preextract_shadow_enabled():
+    """Enable the non-authoritative clean-XLSX call only for strict true."""
+
+    return (
+        getattr(
+            settings,
+            "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
             False,
         )
         is True
@@ -415,6 +432,7 @@ def _workflow_analysis_dimensions(
             "background_analysis": bool(background_analysis),
             "compact_schema_shadow": _gmail_compact_schema_shadow_enabled(),
             "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            "xlsx_preextract_shadow": _gmail_xlsx_preextract_shadow_enabled(),
         },
         "contract_versions": {
             "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
@@ -3938,6 +3956,20 @@ def _run_native_thread_analysis(
                     provider_name=provider_name,
                     model=model,
                 )
+                _maybe_run_xlsx_preextract_shadow(
+                    messages=messages,
+                    sources=sources,
+                    file_inputs=file_inputs,
+                    gmail_import=gmail_import,
+                    actor=actor,
+                    baseline_result=validated_result,
+                    provider_name=provider_name,
+                    model=model,
+                    baseline_instructions=instructions,
+                    baseline_text_context=text_context,
+                    native_schema=native_schema,
+                    progress_callback=progress_callback,
+                )
                 if (
                     _gmail_compact_schema_shadow_enabled()
                     and progress_callback is not None
@@ -4061,6 +4093,21 @@ def _run_native_thread_analysis(
         provider_name=provider_name,
         model=model,
         provider_runner=provider.clean_rows,
+    )
+    _maybe_run_xlsx_preextract_shadow(
+        messages=messages,
+        sources=sources,
+        file_inputs=file_inputs,
+        gmail_import=gmail_import,
+        actor=actor,
+        baseline_result=validated_result,
+        provider_name=provider_name,
+        model=model,
+        baseline_instructions=instructions,
+        baseline_text_context=text_context,
+        native_schema=native_schema,
+        provider_runner=provider.clean_rows,
+        progress_callback=progress_callback,
     )
     if (
         _gmail_compact_schema_shadow_enabled()
@@ -4504,7 +4551,6 @@ def _maybe_run_compact_schema_shadow(
         runner = provider_runner or get_ai_parse_provider(
             provider_name
         ).clean_rows
-
         binding_sha256 = hashlib.sha256(
             json.dumps(
                 {
@@ -4555,6 +4601,158 @@ def _maybe_run_compact_schema_shadow(
                 has_native_files=bool(file_inputs),
                 binding_sha256=binding_sha256,
             ),
+        )
+    except Exception:
+        # The experiment can never affect baseline analysis availability.
+        return None
+
+
+def _persist_xlsx_preextract_shadow_metric(
+    report,
+    *,
+    actor,
+    provider_name,
+    model,
+    binding_sha256,
+):
+    """Persist only the XLSX runner's bounded, content-free report."""
+
+    if (
+        getattr(settings, "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED", False)
+        is not True
+    ):
+        return
+    report = sanitize_xlsx_shadow_report(report)
+    contract = report.get("contract") if isinstance(report.get("contract"), dict) else {}
+    context_hash = str(contract.get("contract_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", context_hash):
+        context_hash = ""
+    binding_sha256 = str(binding_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", binding_sha256):
+        binding_sha256 = ""
+    failure_category = str(report.get("failure_category") or "")
+    if failure_category not in {
+        "",
+        "input",
+        "preextract",
+        "heartbeat",
+        "provider",
+        "validation",
+        "comparison",
+    }:
+        failure_category = "validation"
+    failed = report.get("status") == "failure"
+    try:
+        # A savepoint isolates optional experiment telemetry from the
+        # authoritative Gmail analysis transaction.
+        with transaction.atomic():
+            AIParseLog.objects.create(
+                actor=(
+                    actor
+                    if getattr(actor, "is_authenticated", False)
+                    else None
+                ),
+                provider=str(provider_name or "")[:40],
+                model=str(model or "")[:120],
+                mode=AIParseLog.MODE_VISION,
+                source_type="gmail_xlsx_preextract_shadow",
+                source_sha256=binding_sha256,
+                context_hash=context_hash,
+                cache_hit=False,
+                text_length=0,
+                page_count=0,
+                image_count=0,
+                usage={"shadow_experiment": copy.deepcopy(report)},
+                success=not failed,
+                error=(
+                    f"xlsx_preextract_shadow_{failure_category or 'validation'}"
+                    if failed
+                    else ""
+                ),
+            )
+    except Exception:
+        # Never log exception text: provider/database errors can contain
+        # customer data. Optional shadow telemetry is always expendable.
+        return
+
+
+def _maybe_run_xlsx_preextract_shadow(
+    *,
+    messages,
+    sources,
+    file_inputs,
+    gmail_import,
+    actor,
+    baseline_result,
+    provider_name,
+    model,
+    baseline_instructions,
+    baseline_text_context,
+    native_schema,
+    provider_runner=None,
+    progress_callback=None,
+):
+    """Compare clean-XLSX pre-extraction without changing the baseline."""
+
+    if not _gmail_xlsx_preextract_shadow_enabled():
+        return None
+    try:
+        runner = provider_runner or get_ai_parse_provider(
+            provider_name
+        ).clean_rows
+        binding_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "cache_key_hint": "xlsx_preextract_shadow_v1",
+                    "gmail_import_id": getattr(gmail_import, "pk", None),
+                    "source_fingerprint": str(
+                        getattr(gmail_import, "source_fingerprint", "") or ""
+                    ),
+                    "analysis_attempt": int(
+                        getattr(gmail_import, "analysis_attempts", 0) or 0
+                    ),
+                    "analysis_generation": str(
+                        getattr(
+                            gmail_import,
+                            "analysis_progress_generation",
+                            "",
+                        )
+                        or ""
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        def validate_native(raw_result):
+            return _validate_native_thread_result(
+                raw_result,
+                copy.deepcopy(messages),
+                copy.deepcopy(sources),
+            )
+
+        heartbeat = None
+        if progress_callback is not None:
+            heartbeat = lambda: progress_callback(STAGE_ANALYZING_WITH_AI)
+        return run_xlsx_preextract_shadow(
+            file_inputs=copy.deepcopy(file_inputs),
+            baseline_result=copy.deepcopy(baseline_result),
+            provider_runner=runner,
+            provider_name=provider_name,
+            model=model,
+            baseline_instructions=baseline_instructions,
+            baseline_text_context=baseline_text_context,
+            native_schema=copy.deepcopy(native_schema),
+            native_validator=validate_native,
+            metrics_sink=lambda report: _persist_xlsx_preextract_shadow_metric(
+                report,
+                actor=actor,
+                provider_name=provider_name,
+                model=model,
+                binding_sha256=binding_sha256,
+            ),
+            heartbeat=heartbeat,
         )
     except Exception:
         # The experiment can never affect baseline analysis availability.
