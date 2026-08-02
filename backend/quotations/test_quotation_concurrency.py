@@ -36,6 +36,7 @@ from .gmail_inquiry_import import (
     approve_gmail_inquiry_company,
 )
 from .gmail_review_state import (
+    gmail_analysis_generation,
     gmail_identity_evidence_fingerprint,
     gmail_review_rows_fingerprint,
 )
@@ -1221,6 +1222,191 @@ class QuotationConcurrencyTests(TransactionTestCase):
             gmail_import.analysis["preview"]["lines"][0]["raw_name"],
             "First review",
         )
+
+    @override_settings(
+        QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED=True,
+    )
+    def test_identical_unified_preparations_create_one_quotation(self):
+        gmail_import = GmailInquiryImport.objects.create(
+            gmail_connection=self.gmail_connection,
+            mailbox_email=self.gmail_connection.email,
+            gmail_thread_id="thread-concurrent-unified",
+            anchor_message_id="message-concurrent-unified",
+            selected_message_ids=["message-concurrent-unified"],
+            mode=GmailInquiryImport.MODE_CURRENT_MESSAGE,
+            source_fingerprint="8" * 64,
+            status=GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+            analysis_attempts=3,
+            analysis_progress_generation="9" * 32,
+            analyzed_at=timezone.now(),
+            claimed_by=self.staff,
+            claimed_at=timezone.now(),
+            selected_company=self.company,
+            analysis={
+                "version": "gmail_inquiry_v2",
+                "content_fingerprint": "7" * 64,
+                "preview": {
+                    "parse_method": "gmail_native_ai_v2",
+                    "original_text": "Synthetic concurrent source",
+                    "warnings": [],
+                    "meta": {},
+                    "lines": [
+                        {
+                            "row_key": "6" * 32,
+                            "raw_name": "Concurrent Product",
+                            "raw_line": "Concurrent Product | 2 | PCS",
+                            "quantity": "2",
+                            "unit": "PCS",
+                            "unit_price": "999.00",
+                            "vat_rate": "0.00",
+                            "operation": "added",
+                            "parse_status": "parsed",
+                            "parse_confidence": 0.99,
+                            "included": True,
+                            "reviewed_by_user": False,
+                            "matched_product": self.product.pk,
+                            "matched_quote_item": None,
+                            "match_status": "unresolved",
+                            "_source_keys": ["body:item"],
+                        }
+                    ],
+                },
+            },
+            evidence=[{"source_key": "body:item", "kind": "email_body"}],
+            candidates={
+                "identity_match_version": GMAIL_IDENTITY_MATCH_VERSION,
+                "recommended_company_id": self.company.pk,
+                "recommended_contact_id": None,
+                "identity_conflict": False,
+                "identity_reanalysis_required": False,
+                "companies": [
+                    {
+                        "company_id": self.company.pk,
+                        "company_name": self.company.name,
+                        "confidence": 0.99,
+                        "match_method": "verified_email_domain",
+                        "evidence": [
+                            {
+                                "signal": "verified_email_domain",
+                                "value": "example.com",
+                                "message_ids": ["message-concurrent-unified"],
+                            }
+                        ],
+                    }
+                ],
+                "contacts": [],
+            },
+            message_manifest=[
+                {
+                    "gmail_message_id": "message-concurrent-unified",
+                    "subject": "Synthetic RFQ",
+                    "sender": "Buyer <accounts@example.com>",
+                    "sent_at": timezone.now().isoformat(),
+                    "is_outbound": False,
+                }
+            ],
+        )
+        gmail_import = approve_gmail_inquiry_company(
+            gmail_import,
+            self.staff,
+            company=self.company,
+            contact=None,
+            suggested=True,
+            identity_review_fingerprint=gmail_identity_evidence_fingerprint(
+                gmail_import
+            ),
+        )
+        payload = {
+            "expected_source_fingerprint": gmail_import.source_fingerprint,
+            "expected_analysis_attempt": gmail_import.analysis_attempts,
+            "expected_analysis_generation": gmail_analysis_generation(
+                gmail_import
+            ),
+            "expected_review_rows_fingerprint": gmail_review_rows_fingerprint(
+                gmail_import
+            ),
+            "identity_review_fingerprint": gmail_identity_evidence_fingerprint(
+                gmail_import
+            ),
+            "rows": [
+                {
+                    "row_key": "6" * 32,
+                    "raw_name": "Concurrent Product",
+                    "quantity": "2.000",
+                    "unit": "PCS",
+                    "included": True,
+                    "product": self.product.pk,
+                    "quote_item": None,
+                    "product_decision": "approve",
+                    "match_status": "confirmed",
+                    "unit_price": None,
+                    "vat_rate": "5.00",
+                }
+            ],
+        }
+        url = reverse(
+            "quotation-gmail-inquiry-import-confirm-and-prepare-quotation",
+            args=[gmail_import.pk],
+        )
+        first_inside_creation = Event()
+        release_first = Event()
+        results = Queue()
+
+        from . import gmail_inquiry_import as gmail_service
+
+        original_create = gmail_service.create_imported_inquiry
+
+        def paused_create(*args, **kwargs):
+            if current_thread().name == "first-unified-prepare":
+                first_inside_creation.set()
+                if not release_first.wait(timeout=10):
+                    raise AssertionError(
+                        "Timed out waiting to release first unified preparation."
+                    )
+            return original_create(*args, **kwargs)
+
+        first = Thread(
+            target=self._api_worker,
+            args=(results, "first", "post", url, payload),
+            name="first-unified-prepare",
+            daemon=True,
+        )
+        second = Thread(
+            target=self._api_worker,
+            args=(results, "second", "post", url, payload),
+            name="second-unified-prepare",
+            daemon=True,
+        )
+        with patch(
+            "quotations.gmail_inquiry_import.create_imported_inquiry",
+            side_effect=paused_create,
+        ):
+            try:
+                first.start()
+                self.assertTrue(first_inside_creation.wait(timeout=10))
+                second.start()
+                self.assertEqual(results.qsize(), 0)
+            finally:
+                release_first.set()
+                first.join(timeout=15)
+                if second.ident is not None:
+                    second.join(timeout=15)
+
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        self.assertCountEqual(
+            [(outcome[0], outcome[2]) for outcome in outcomes],
+            [("first", status.HTTP_201_CREATED), ("second", status.HTTP_200_OK)],
+        )
+        self.assertEqual(Quotation.objects.count(), 1)
+        self.assertEqual(QuotationLine.objects.count(), 1)
+        self.assertIsNone(QuotationLine.objects.get().unit_price)
 
     def test_email_bytes_are_built_while_customer_dependency_lock_is_held(self):
         quotation, _line = self.create_quote()

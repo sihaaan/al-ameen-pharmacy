@@ -205,6 +205,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
             "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
             "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
+            "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -278,6 +279,21 @@ class DocumentationContractTests(SimpleTestCase):
         self.assertIn("/analysis_progress/", deployment)
         self.assertIn("never contains Gmail identifiers", deployment)
         self.assertIn("Source-selection changes clear progress", operations)
+
+    def test_unified_gmail_workspace_is_documented_as_safe_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED", content)
+            self.assertIn("QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("finalizes", content.lower())
+            self.assertIn("or sends", content.lower())
+        self.assertIn("confirm_and_prepare_quotation", deployment)
+        self.assertIn("Customer budget/source prices are never read", deployment)
+        self.assertIn("Exact\ndouble clicks", deployment)
+        self.assertIn("not eligible to auto-preview", operations)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

@@ -37,6 +37,8 @@ const positiveId = (value) => {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
+const sha256Fingerprint = (value) => /^[0-9a-f]{64}$/.test(String(value || ''));
+
 export const quotationRouteFromSearch = (search) => {
   const params = new URLSearchParams(search || '');
   const gmailToken = params.get('gmail_import') || '';
@@ -77,15 +79,20 @@ const QuotationModule = () => {
   const [editingQuoteId, setEditingQuoteId] = useState(route.quoteId);
   const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [pendingEmailReview, setPendingEmailReview] = useState(null);
 
   useEffect(() => {
     setActiveTab(route.activeTab);
     if (route.quoteId) {
       setEditingQuoteId(route.quoteId);
       setReviewingOutcomeQuoteId(null);
+      setPendingEmailReview((current) => (
+        current && Number(current.quoteId) === Number(route.quoteId) ? current : null
+      ));
     } else {
       setEditingQuoteId(null);
       setReviewingOutcomeQuoteId(null);
+      setPendingEmailReview(null);
     }
   }, [
     route.activeTab,
@@ -104,9 +111,19 @@ const QuotationModule = () => {
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
 
-  const openQuote = useCallback((quoteId) => {
+  const openQuote = useCallback((quoteId, options = {}) => {
     const exactQuoteId = positiveId(quoteId);
     if (!exactQuoteId) return;
+    const exactReviewFingerprint = String(options.quotationReviewFingerprint || '');
+    setPendingEmailReview(
+      options.reviewEmail === true && sha256Fingerprint(exactReviewFingerprint)
+        ? {
+          quoteId: exactQuoteId,
+          quotationReviewFingerprint: exactReviewFingerprint,
+          requestKey: `${exactQuoteId}:${exactReviewFingerprint}`,
+        }
+        : null
+    );
     setEditingQuoteId(exactQuoteId);
     setReviewingOutcomeQuoteId(null);
     setActiveTab('quotes');
@@ -119,12 +136,14 @@ const QuotationModule = () => {
   }, [updateLocation]);
 
   const openOutcome = useCallback((quoteId) => {
+    setPendingEmailReview(null);
     setReviewingOutcomeQuoteId(quoteId);
     setEditingQuoteId(null);
     setActiveTab('quotes');
   }, []);
 
   const closeQuote = useCallback(() => {
+    setPendingEmailReview(null);
     setEditingQuoteId(null);
     setReviewingOutcomeQuoteId(null);
     refresh();
@@ -135,6 +154,7 @@ const QuotationModule = () => {
   }, [refresh, updateLocation]);
 
   const selectTab = useCallback((tabId) => {
+    setPendingEmailReview(null);
     setActiveTab(tabId);
     setEditingQuoteId(null);
     setReviewingOutcomeQuoteId(null);
@@ -158,6 +178,7 @@ const QuotationModule = () => {
   }, [updateLocation]);
 
   const closeGmailReview = useCallback(() => {
+    setPendingEmailReview(null);
     setActiveTab('inquiries');
     updateLocation((params) => {
       params.set('quotation_tab', 'inquiries');
@@ -211,7 +232,22 @@ const QuotationModule = () => {
           reviewingOutcomeQuoteId ? (
             <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} />
           ) : editingQuoteId ? (
-            <QuotationEditor quoteId={editingQuoteId} onClose={closeQuote} onReviewOutcome={openOutcome} />
+            <QuotationEditor
+              quoteId={editingQuoteId}
+              onClose={closeQuote}
+              onReviewOutcome={openOutcome}
+              initialEmailReviewFingerprint={
+                pendingEmailReview?.quoteId === editingQuoteId
+                  ? pendingEmailReview.quotationReviewFingerprint
+                  : ''
+              }
+              onInitialEmailReviewHandled={() => {
+                const handledKey = pendingEmailReview?.requestKey;
+                setPendingEmailReview((current) => (
+                  current?.requestKey === handledKey ? null : current
+                ));
+              }}
+            />
           ) : (
             <QuotationList key={refreshKey} onOpenQuote={openQuote} onReviewOutcome={openOutcome} />
           )

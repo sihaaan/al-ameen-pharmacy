@@ -27,6 +27,8 @@ from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from python_calamine import load_workbook as load_calamine_workbook
 
+from api.models import Product
+
 from .attachment_inspection import (
     inspect_pdf_attachment,
     inspect_spreadsheet_attachment,
@@ -79,6 +81,7 @@ from .models import (
     GmailInquiryImport,
     GmailOAuthConnection,
     Inquiry,
+    QuoteItem,
     QuotationSettings,
     normalize_label,
 )
@@ -97,6 +100,7 @@ from .gmail_review_state import (
     GMAIL_IDENTITY_MATCH_VERSION,
     build_gmail_identity_approval,
     clear_gmail_identity_approval,
+    gmail_analysis_generation,
     gmail_identity_approval_is_current,
     gmail_identity_evidence_fingerprint,
     gmail_review_rows_fingerprint,
@@ -121,6 +125,7 @@ from .services import create_imported_inquiry, create_quotation_from_inquiry
 from .workflow_features import (
     gmail_chained_actions_enabled,
     gmail_review_ui_v2_enabled,
+    gmail_unified_workspace_enabled,
 )
 
 
@@ -329,6 +334,18 @@ class GmailInquiryConfirmation:
     inquiry: Inquiry
     quotation: object
     created: bool
+
+
+@dataclass(frozen=True)
+class GmailUnifiedPreparation:
+    gmail_import: GmailInquiryImport
+    inquiry: Inquiry
+    quotation: object
+    created: bool
+    prepared: bool
+    preparation_reused: bool
+    reused_reason: str
+    prepared_review_fingerprint: str = ""
 
 
 def _require_staff(actor):
@@ -4998,6 +5015,15 @@ def _build_source_analysis(
             recommended_company,
             history_context=history_context,
         )
+        # Bind this suggestion to the customer context that produced it. A
+        # later manual company correction must not be able to approve a match
+        # derived from another customer's aliases/history as if it were still
+        # the current server suggestion.
+        matched["match_company_id"] = getattr(
+            recommended_company,
+            "pk",
+            None,
+        )
         if matched.get("matched_product") or matched.get("matched_quote_item"):
             suggested_reason = str(matched.get("match_reason") or "").strip()
             matched["match_reason"] = (
@@ -6237,6 +6263,7 @@ def _rows_for_company(rows, company):
                 "match_method",
                 "match_reason",
                 "match_status",
+                "match_company_id",
             }
         }
         apply_match_to_preview_line(
@@ -6244,6 +6271,7 @@ def _rows_for_company(rows, company):
             company,
             history_context=history_context,
         )
+        cleaned["match_company_id"] = getattr(company, "pk", None)
         if cleaned.get("matched_product") or cleaned.get("matched_quote_item"):
             suggested_reason = str(cleaned.get("match_reason") or "").strip()
             cleaned["match_reason"] = (
@@ -6283,6 +6311,422 @@ def _confirmation_received_at(gmail_import):
         None,
     )
     return (anchor or {}).get("sent_at") or None
+
+
+GMAIL_UNIFIED_PREPARATION_VERSION = "gmail_unified_preparation_v1"
+
+
+def _normalized_unified_preparation_rows(rows):
+    """Normalize the bounded employee payload used only for keyed idempotency."""
+
+    normalized = []
+    seen = set()
+    for row in rows or []:
+        row_key = str(row.get("row_key") or "").strip()
+        if not row_key or row_key in seen:
+            raise GmailInquiryImportError(
+                "Every Gmail row must be submitted exactly once."
+            )
+        seen.add(row_key)
+
+        def decimal_text(value):
+            if value in (None, ""):
+                return None
+            return format(Decimal(str(value)), "f")
+
+        normalized.append(
+            {
+                "row_key": row_key,
+                "raw_name": str(row.get("raw_name") or "").strip(),
+                "quantity": decimal_text(row.get("quantity")),
+                "unit": str(row.get("unit") or "").strip(),
+                "included": bool(row.get("included")),
+                "uncertainty_decision": str(
+                    row.get("uncertainty_decision") or ""
+                ),
+                "product_id": getattr(
+                    row.get("product"),
+                    "pk",
+                    row.get("product"),
+                ),
+                "quote_item_id": getattr(
+                    row.get("quote_item"),
+                    "pk",
+                    row.get("quote_item"),
+                ),
+                "product_decision": str(row.get("product_decision") or ""),
+                "match_status": str(row.get("match_status") or ""),
+                "unit_price": decimal_text(row.get("unit_price")),
+                "vat_rate": decimal_text(row.get("vat_rate")),
+            }
+        )
+    return sorted(normalized, key=lambda row: row["row_key"])
+
+
+def _gmail_unified_preparation_fingerprint(
+    gmail_import,
+    rows,
+    *,
+    expected_source_fingerprint,
+    expected_analysis_attempt,
+    expected_analysis_generation,
+    expected_review_rows_fingerprint,
+    identity_review_fingerprint,
+):
+    """Key an exact decision set without persisting raw rows or prices."""
+
+    encoded = json.dumps(
+        {
+            "contract": GMAIL_UNIFIED_PREPARATION_VERSION,
+            "gmail_import_id": gmail_import.pk,
+            "source_fingerprint": str(expected_source_fingerprint or ""),
+            "analysis_attempt": int(expected_analysis_attempt),
+            "analysis_generation": str(expected_analysis_generation or ""),
+            "review_rows_fingerprint": str(
+                expected_review_rows_fingerprint or ""
+            ),
+            "identity_review_fingerprint": str(
+                identity_review_fingerprint or ""
+            ),
+            "rows": _normalized_unified_preparation_rows(rows),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hmac.new(
+        str(settings.SECRET_KEY).encode("utf-8"),
+        encoded.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _require_current_unified_preparation_binding(
+    gmail_import,
+    *,
+    expected_source_fingerprint,
+    expected_analysis_attempt,
+    expected_analysis_generation,
+    expected_review_rows_fingerprint,
+    identity_review_fingerprint,
+):
+    """Validate the complete browser snapshot while the import row is locked."""
+
+    try:
+        expected_attempt = int(expected_analysis_attempt)
+    except (TypeError, ValueError) as exc:
+        raise GmailInquiryImportStale(
+            "The Gmail analysis changed. Reload the unified workspace."
+        ) from exc
+    current_identity = gmail_identity_evidence_fingerprint(gmail_import)
+    checks = (
+        hmac.compare_digest(
+            str(expected_source_fingerprint or ""),
+            str(gmail_import.source_fingerprint or ""),
+        ),
+        expected_attempt == gmail_import.analysis_attempts,
+        hmac.compare_digest(
+            str(expected_analysis_generation or ""),
+            gmail_analysis_generation(gmail_import),
+        ),
+        hmac.compare_digest(
+            str(expected_review_rows_fingerprint or ""),
+            gmail_review_rows_fingerprint(gmail_import),
+        ),
+        hmac.compare_digest(
+            str(identity_review_fingerprint or ""),
+            current_identity,
+        ),
+    )
+    if not all(checks):
+        raise GmailInquiryImportStale(
+            "The Gmail review changed in another session. Reload it before preparing the quotation."
+        )
+    if not gmail_identity_approval_is_current(gmail_import):
+        raise GmailInquiryImportError(
+            "Review and explicitly approve the current customer company before preparing the quotation."
+        )
+
+
+def _unified_prepared_rows(gmail_import, submitted_rows, actor):
+    """Merge explicit review decisions and return included quotation rows.
+
+    The import row must already be locked. Customer/source prices remain in
+    evidence and are never read here. The only selling price is the nullable
+    value submitted by the authenticated employee in this request.
+    """
+
+    analysis = dict(gmail_import.analysis or {})
+    preview = dict(analysis.get("preview") or {})
+    server_rows = [dict(row) for row in (preview.get("lines") or [])]
+    if not server_rows or any(not row.get("row_key") for row in server_rows):
+        raise GmailInquiryImportError(
+            "Reanalyze this Gmail inquiry before using the unified workspace."
+        )
+    server_by_key = {str(row["row_key"]): row for row in server_rows}
+    if len(server_by_key) != len(server_rows):
+        raise GmailInquiryImportError(
+            "The Gmail analysis contains duplicate row identifiers. Reanalyze this inquiry."
+        )
+    available_source_keys = {
+        str(source.get("source_key") or "")
+        for source in (gmail_import.evidence or [])
+        if isinstance(source, dict) and source.get("source_key")
+    }
+    normalized_submitted = _normalized_unified_preparation_rows(submitted_rows)
+    submitted_by_key = {row["row_key"]: row for row in normalized_submitted}
+    if set(submitted_by_key) != set(server_by_key):
+        raise GmailInquiryImportStale(
+            "The Gmail rows changed. Reload the unified workspace."
+        )
+
+    # Resolve catalogue availability in two bounded queries rather than once
+    # per included row. This validation intentionally stays inside the
+    # new-preparation branch: an exact lost-response retry must still reach
+    # its idempotency marker if a selected catalogue record was archived after
+    # the original transaction committed.
+    submitted_product_ids = {
+        row["product_id"]
+        for row in normalized_submitted
+        if row["included"] and row["product_id"]
+    }
+    submitted_quote_item_ids = {
+        row["quote_item_id"]
+        for row in normalized_submitted
+        if row["included"] and row["quote_item_id"]
+    }
+    active_products_by_id = Product.objects.exclude(status="archived").in_bulk(
+        submitted_product_ids
+    )
+    active_quote_items_by_id = QuoteItem.objects.filter(
+        is_active=True,
+    ).in_bulk(submitted_quote_item_ids)
+    active_product_ids = set(active_products_by_id)
+    active_quote_item_ids = set(active_quote_items_by_id)
+
+    prepared = []
+    reviewed_at = timezone.now().isoformat()
+    fallback_match_company_id = (gmail_import.candidates or {}).get(
+        "recommended_company_id"
+    )
+    for target in server_rows:
+        row_key = str(target["row_key"])
+        submitted = submitted_by_key[row_key]
+        operation = str(target.get("operation") or "")
+        parse_status = str(target.get("parse_status") or "")
+        # Capture the immutable analyzer suggestion before applying any
+        # employee selection. Product approval is meaningful only against
+        # this server-owned pair.
+        suggested_product_id = target.get("matched_product")
+        suggested_quote_item_id = target.get("matched_quote_item")
+        uncertain = bool(
+            operation == "uncertain"
+            or str(target.get("original_operation") or "") == "uncertain"
+            or parse_status in {"needs_review", "unparsed"}
+        )
+        decision = submitted["uncertainty_decision"]
+        included = submitted["included"]
+        if uncertain and decision not in {"approve", "correct", "exclude"}:
+            raise GmailInquiryImportError(
+                "Every uncertain Gmail row needs an approve, correct, or exclude decision."
+            )
+        if decision == "exclude" and included:
+            raise GmailInquiryImportError(
+                "An excluded uncertainty decision cannot include the row."
+            )
+        if decision in {"approve", "correct"} and not included:
+            raise GmailInquiryImportError(
+                "An approved or corrected uncertainty decision must include the row."
+            )
+        if not included and (
+            submitted["product_decision"] != "exclude"
+            or submitted["match_status"] != "ignored"
+            or submitted["product_id"]
+            or submitted["quote_item_id"]
+            or submitted["unit_price"] is not None
+        ):
+            raise GmailInquiryImportError(
+                "Excluded Gmail rows require an ignored Product decision and no selling price."
+            )
+        if operation in {"removed", "duplicate"} or parse_status == "ignored":
+            if included:
+                raise GmailInquiryImportError(
+                    "Removed, duplicate, or ignored Gmail rows must remain excluded."
+                )
+
+        try:
+            original_quantity = Decimal(str(target.get("quantity") or ""))
+        except Exception:
+            original_quantity = None
+        submitted_quantity = (
+            Decimal(submitted["quantity"])
+            if submitted["quantity"] is not None
+            else None
+        )
+        substantive_change = bool(
+            submitted["raw_name"] != str(target.get("raw_name") or "").strip()
+            or submitted_quantity != original_quantity
+            or submitted["unit"] != str(target.get("unit") or "").strip()
+            or included != bool(target.get("included", True))
+        )
+        if decision == "approve" and substantive_change:
+            raise GmailInquiryImportError(
+                "Use the correct decision when changing an uncertain Gmail row."
+            )
+        if decision == "correct" and not substantive_change:
+            raise GmailInquiryImportError(
+                "Use approve when an uncertain Gmail row does not need changes."
+            )
+
+        target["included"] = included
+        target["reviewed_by_user"] = True
+        target["reviewed_by_user_id"] = actor.pk
+        target["reviewed_at"] = reviewed_at
+        target["review_status"] = "manual"
+        if not included:
+            # Exclusion is a workflow decision, not an edit to the immutable
+            # extracted evidence. Keep the analyzer-issued wording, quantity,
+            # unit, VAT and source keys available for later audit/review.
+            target["parse_status"] = "ignored"
+            target["matched_product"] = None
+            target["matched_quote_item"] = None
+            target["match_status"] = "ignored"
+            continue
+
+        target["raw_name"] = submitted["raw_name"]
+        target["quantity"] = submitted["quantity"]
+        target["unit"] = submitted["unit"]
+        target["vat_rate"] = submitted["vat_rate"] or "0.00"
+
+        if not target["raw_name"] or submitted_quantity is None:
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs a valid item name, unit, and positive quantity."
+            )
+        if not target["unit"]:
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs a valid item name, unit, and positive quantity."
+            )
+        if submitted["match_status"] != "confirmed" or bool(
+            submitted["product_id"]
+        ) == bool(submitted["quote_item_id"]):
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs one explicitly confirmed existing Product or quotation item."
+            )
+        if (
+            submitted["product_id"]
+            and submitted["product_id"] not in active_product_ids
+        ):
+            raise GmailInquiryImportError(
+                "The selected Product is archived or unavailable. Choose an active existing Product."
+            )
+        if (
+            submitted["quote_item_id"]
+            and submitted["quote_item_id"] not in active_quote_item_ids
+        ):
+            raise GmailInquiryImportError(
+                "The selected quotation item is inactive or unavailable."
+            )
+        selected_pair = (
+            str(submitted["product_id"] or ""),
+            str(submitted["quote_item_id"] or ""),
+        )
+        suggested_pair = (
+            str(suggested_product_id or ""),
+            str(suggested_quote_item_id or ""),
+        )
+        suggestion_company_id = (
+            target.get("match_company_id")
+            if "match_company_id" in target
+            else fallback_match_company_id
+        )
+        suggestion_company_is_current = str(
+            suggestion_company_id or ""
+        ) == str(gmail_import.selected_company_id or "")
+        if submitted["product_decision"] == "approve":
+            if (
+                not suggestion_company_is_current
+                or bool(suggested_product_id) == bool(suggested_quote_item_id)
+                or selected_pair != suggested_pair
+            ):
+                raise GmailInquiryImportError(
+                    "Approve can only confirm the current server Product suggestion for the selected company. Choose the Product explicitly after changing company."
+                )
+        elif submitted["product_decision"] == "correct":
+            if (
+                suggestion_company_is_current
+                and selected_pair == suggested_pair
+                and any(suggested_pair)
+            ):
+                raise GmailInquiryImportError(
+                    "Use approve when keeping the current Product suggestion."
+                )
+            # Do not carry the analyzer's old candidate rationale onto a
+            # different employee-selected catalogue record. Preserve the
+            # source evidence, but make the saved match audit explicitly
+            # describe the staff correction.
+            target["match_candidates"] = []
+            target["match_confidence"] = None
+            target["match_method"] = "staff_corrected_existing_item"
+            target["match_reason"] = (
+                "Staff corrected the Product suggestion to an existing catalogue item."
+            )
+        else:
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs an explicit Product approval or correction."
+            )
+        target["matched_product"] = submitted["product_id"]
+        target["matched_quote_item"] = submitted["quote_item_id"]
+        target["match_status"] = submitted["match_status"]
+        target["match_company_id"] = gmail_import.selected_company_id
+        row_source_keys = {
+            str(value or "").strip()
+            for value in (target.get("_source_keys") or [])
+            if str(value or "").strip()
+        }
+        if not row_source_keys or not row_source_keys.issubset(
+            available_source_keys
+        ):
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs current bounded source evidence. Reanalyze this inquiry."
+            )
+        if uncertain:
+            target["original_operation"] = target.get("original_operation") or operation
+            target["operation"] = "changed" if decision == "correct" else "added"
+            target["parse_status"] = "parsed"
+        prepared.append(
+            {
+                **target,
+                "quantity": submitted_quantity,
+                "matched_product": submitted["product_id"],
+                "matched_quote_item": submitted["quote_item_id"],
+                "_matched_product_object": active_products_by_id.get(
+                    submitted["product_id"]
+                ),
+                "_matched_quote_item_object": active_quote_items_by_id.get(
+                    submitted["quote_item_id"]
+                ),
+                "match_status": "confirmed",
+                "match_confirmed_by_user": True,
+                "employee_unit_price": (
+                    Decimal(submitted["unit_price"])
+                    if submitted["unit_price"] is not None
+                    else None
+                ),
+                "employee_vat_rate": Decimal(submitted["vat_rate"] or "0.00"),
+            }
+        )
+
+    if not prepared:
+        raise GmailInquiryImportError(
+            "At least one reviewed Product row is required to prepare a quotation."
+        )
+    preview["lines"] = server_rows
+    analysis["preview"] = preview
+    analysis["reviewed_at"] = reviewed_at
+    analysis["reviewed_by_user_id"] = actor.pk
+    gmail_import.analysis = _json_safe(analysis)
+    return prepared
 
 
 def confirm_gmail_inquiry_import(
@@ -6547,3 +6991,327 @@ def confirm_gmail_inquiry_import(
             ]
         )
         return GmailInquiryConfirmation(locked, inquiry, quotation, created)
+
+
+def _linked_gmail_confirmation(gmail_import):
+    inquiry = gmail_import.inquiry
+    quotation = gmail_import.quotation
+    if not inquiry and quotation:
+        inquiry = quotation.inquiry
+    if inquiry and not quotation:
+        quotation = inquiry.quotations.order_by(
+            "-version",
+            "-created_at",
+            "-pk",
+        ).first()
+    return inquiry, quotation
+
+
+def confirm_and_prepare_gmail_quotation(
+    gmail_import,
+    actor,
+    *,
+    rows,
+    expected_source_fingerprint,
+    expected_analysis_attempt,
+    expected_analysis_generation,
+    expected_review_rows_fingerprint,
+    identity_review_fingerprint,
+):
+    """Atomically create and prepare one draft from explicit staff decisions.
+
+    Existing confirmed quotations are never edited by this action. An exact
+    same-import retry reuses the keyed preparation marker without replaying
+    writes; an already-confirmed sibling import returns the canonical thread
+    quotation unchanged so the client cannot treat it as newly prepared.
+    """
+
+    _require_staff(actor)
+    if not gmail_unified_workspace_enabled():
+        raise GmailInquiryImportError(
+            "The unified Gmail quotation workspace is not enabled."
+        )
+    snapshot = _record(gmail_import)
+    preparation_fingerprint = _gmail_unified_preparation_fingerprint(
+        snapshot,
+        rows,
+        expected_source_fingerprint=expected_source_fingerprint,
+        expected_analysis_attempt=expected_analysis_attempt,
+        expected_analysis_generation=expected_analysis_generation,
+        expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+        identity_review_fingerprint=identity_review_fingerprint,
+    )
+    with transaction.atomic():
+        # This is intentionally identical to the hardened confirmation order:
+        # mailbox connection first, then every import in the thread by PK,
+        # followed by the requested import and newly-created inquiry/quote.
+        if snapshot.gmail_connection_id:
+            GmailOAuthConnection.objects.select_for_update().filter(
+                pk=snapshot.gmail_connection_id
+            ).first()
+        if snapshot.mailbox_email and snapshot.gmail_thread_id:
+            list(
+                GmailInquiryImport.objects.select_for_update()
+                .filter(
+                    mailbox_email__iexact=snapshot.mailbox_email,
+                    gmail_thread_id=snapshot.gmail_thread_id,
+                )
+                .order_by("pk")
+                .values_list("pk", flat=True)
+            )
+        locked = _record_for_update(snapshot)
+
+        if locked.inquiry_id or locked.quotation_id:
+            inquiry, quotation = _linked_gmail_confirmation(locked)
+            if not inquiry or not quotation:
+                raise GmailInquiryImportError(
+                    "This Gmail inquiry has an incomplete saved quotation link."
+                )
+            marker = dict(
+                (locked.analysis or {}).get("unified_preparation") or {}
+            )
+            stored_fingerprint = str(marker.get("fingerprint") or "")
+            if stored_fingerprint:
+                if not hmac.compare_digest(
+                    stored_fingerprint,
+                    preparation_fingerprint,
+                ):
+                    raise GmailInquiryImportStale(
+                        "This Gmail inquiry was already prepared with different decisions. Open its existing quotation."
+                    )
+                return GmailUnifiedPreparation(
+                    locked,
+                    inquiry,
+                    quotation,
+                    False,
+                    False,
+                    True,
+                    "same_preparation",
+                )
+            return GmailUnifiedPreparation(
+                locked,
+                inquiry,
+                quotation,
+                False,
+                False,
+                True,
+                "existing_quotation",
+            )
+
+        if locked.gmail_thread_id:
+            confirmed = (
+                # Lock only the canonical import row. PostgreSQL's default
+                # FOR UPDATE would otherwise lock select_related inquiry and
+                # quotation rows under Gmail locks, inverting quote-first
+                # email/review workflows.
+                GmailInquiryImport.objects.select_for_update(of=("self",))
+                .filter(
+                    mailbox_email__iexact=locked.mailbox_email,
+                    gmail_thread_id=locked.gmail_thread_id,
+                    status=GmailInquiryImport.STATUS_CONFIRMED,
+                )
+                .exclude(pk=locked.pk)
+                .select_related("inquiry", "quotation")
+                .order_by("-confirmed_at", "-pk")
+                .first()
+            )
+            if confirmed:
+                inquiry, quotation = _linked_gmail_confirmation(confirmed)
+                if not inquiry or not quotation:
+                    raise GmailInquiryImportError(
+                        "This Gmail thread was already confirmed, but its saved quotation link is incomplete."
+                    )
+                return GmailUnifiedPreparation(
+                    confirmed,
+                    inquiry,
+                    quotation,
+                    False,
+                    False,
+                    True,
+                    "thread_already_confirmed",
+                )
+
+        _assert_claim_owner(locked, actor)
+        if locked.status not in {
+            GmailInquiryImport.STATUS_READY,
+            GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+        }:
+            raise GmailInquiryImportError(
+                "Analyze this Gmail inquiry before preparing a quotation."
+            )
+        if _gmail_identity_requires_reanalysis(
+            locked.candidates,
+            locked.analysis,
+        ):
+            raise GmailInquiryImportError(
+                "Customer identity matching rules changed. Reanalyze this Gmail inquiry before preparing the quotation."
+            )
+        _require_current_unified_preparation_binding(
+            locked,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_analysis_attempt=expected_analysis_attempt,
+            expected_analysis_generation=expected_analysis_generation,
+            expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+            identity_review_fingerprint=identity_review_fingerprint,
+        )
+
+        company = Company.objects.filter(
+            pk=locked.selected_company_id,
+            is_active=True,
+        ).first()
+        if not company:
+            raise GmailInquiryImportError(
+                "Select and explicitly approve an active customer company before preparing the quotation."
+            )
+        contact = None
+        if locked.selected_contact_id:
+            contact = CompanyContact.objects.filter(
+                pk=locked.selected_contact_id,
+                company=company,
+                is_active=True,
+            ).first()
+            if not contact:
+                raise GmailInquiryImportError(
+                    "The approved customer contact is no longer active for that company."
+                )
+
+        prepared_rows = _unified_prepared_rows(locked, rows, actor)
+        from .serializers import ImportedInquiryCreateSerializer
+
+        preview = dict((locked.analysis or {}).get("preview") or {})
+        line_payloads = []
+        for line in prepared_rows:
+            match_reason = str(line.get("match_reason") or "").strip()
+            explicit_reason = "Explicitly confirmed by staff in Gmail workspace."
+            match_reason = f"{explicit_reason} {match_reason}".strip()[:255]
+            line_payloads.append(
+                {
+                    "raw_name": line.get("raw_name") or "",
+                    "raw_line": line.get("raw_line") or "",
+                    "quantity": line.get("quantity"),
+                    "unit": line.get("unit") or "",
+                    # Never read preview/customer budget values here. This is
+                    # only the authenticated employee's nullable request value.
+                    "unit_price": line.get("employee_unit_price"),
+                    "vat_rate": line.get("employee_vat_rate") or Decimal("0.00"),
+                    "notes": line.get("notes") or "",
+                    # Validate the remaining imported-line schema without
+                    # replaying one relation lookup per row. The already
+                    # bulk-validated model objects are injected immediately
+                    # after serializer validation below.
+                    "matched_product": None,
+                    "matched_quote_item": None,
+                    "match_reason": match_reason,
+                    "match_status": "confirmed",
+                    "match_confirmed_by_user": True,
+                    "parse_status": "manual",
+                    "parse_confidence": line.get("parse_confidence") or 0,
+                }
+            )
+        payload = {
+            "company": company.pk,
+            "contact": contact.pk if contact else None,
+            "subject": _confirmation_subject(locked),
+            "original_text": str(preview.get("original_text") or "")[
+                :MAX_ORIGINAL_TEXT_CHARS
+            ],
+            "source_type": Inquiry.SOURCE_TYPE_GMAIL,
+            "source_filename": "",
+            "source_mime_type": "message/rfc822",
+            "source_sha256": locked.source_fingerprint,
+            "source_file_ref": "",
+            "source_file_size": None,
+            "parse_method": str(
+                preview.get("parse_method") or "gmail_native_ai_v2"
+            )[:80],
+            "parse_meta": {
+                **(preview.get("meta") or {}),
+                "gmail_import_id": locked.pk,
+                "mailbox_email": locked.mailbox_email,
+                "gmail_thread_id": locked.gmail_thread_id,
+                "anchor_message_id": locked.anchor_message_id,
+                "selected_message_ids": locked.selected_message_ids,
+                "warnings": preview.get("warnings") or [],
+                "unified_workspace_contract": GMAIL_UNIFIED_PREPARATION_VERSION,
+            },
+            "lines": line_payloads,
+        }
+        received_at = _confirmation_received_at(locked)
+        if received_at:
+            payload["received_at"] = received_at
+        serializer = ImportedInquiryCreateSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        validated_payload = dict(serializer.validated_data)
+        for validated_line, prepared_line in zip(
+            validated_payload["lines"],
+            prepared_rows,
+        ):
+            validated_line["matched_product"] = prepared_line.get(
+                "_matched_product_object"
+            )
+            validated_line["matched_quote_item"] = prepared_line.get(
+                "_matched_quote_item_object"
+            )
+        inquiry = create_imported_inquiry(
+            validated_payload,
+            actor,
+            learn_aliases=False,
+        )
+        quotation, created = create_quotation_from_inquiry(
+            inquiry,
+            actor,
+            learn_aliases=False,
+        )
+        if not created:
+            # The inquiry was created inside this transaction, so reuse here
+            # would indicate an invariant violation rather than an idempotent
+            # request. Fail closed without modifying an existing quotation.
+            raise GmailInquiryImportError(
+                "The draft quotation could not be prepared safely."
+            )
+
+        # This quote and all of its lines were created in this transaction and
+        # are not externally visible yet. Capture the exact prepared state so
+        # the later quote-first response lock can detect an intervening edit
+        # before allowing the frontend to request a preview.
+        from .quotation_email_delivery import quotation_review_fingerprint
+
+        prepared_review_fingerprint = quotation_review_fingerprint(quotation)
+
+        analysis = dict(locked.analysis or {})
+        analysis["unified_preparation"] = {
+            "version": GMAIL_UNIFIED_PREPARATION_VERSION,
+            "fingerprint": preparation_fingerprint,
+            "source_fingerprint": locked.source_fingerprint,
+            "analysis_attempt": locked.analysis_attempts,
+            "analysis_generation": gmail_analysis_generation(locked),
+            "review_rows_fingerprint": gmail_review_rows_fingerprint(locked),
+            "identity_review_fingerprint": gmail_identity_evidence_fingerprint(
+                locked
+            ),
+        }
+        locked.analysis = _json_safe(analysis)
+        locked.inquiry = inquiry
+        locked.quotation = quotation
+        locked.status = GmailInquiryImport.STATUS_CONFIRMED
+        locked.confirmed_at = timezone.now()
+        locked.save(
+            update_fields=[
+                "analysis",
+                "inquiry",
+                "quotation",
+                "status",
+                "confirmed_at",
+                "updated_at",
+            ]
+        )
+        return GmailUnifiedPreparation(
+            locked,
+            inquiry,
+            quotation,
+            True,
+            True,
+            False,
+            "",
+            prepared_review_fingerprint,
+        )

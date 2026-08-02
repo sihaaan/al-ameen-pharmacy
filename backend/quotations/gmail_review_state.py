@@ -13,6 +13,8 @@ GMAIL_IDENTITY_REVIEW_FINGERPRINT_SALT = (
 )
 GMAIL_REVIEW_ROWS_FINGERPRINT_CONTRACT = "gmail_review_rows_v1"
 GMAIL_REVIEW_ROWS_FINGERPRINT_SALT = "quotations.gmail_review_rows_fingerprint.v1"
+GMAIL_ANALYSIS_GENERATION_CONTRACT = "gmail_analysis_generation_v1"
+GMAIL_ANALYSIS_GENERATION_SALT = "quotations.gmail_analysis_generation.v1"
 TRUSTED_PHYSICAL_IDENTITY_SIGNALS = frozenset(
     {
         "exact_contact_email",
@@ -124,6 +126,43 @@ def gmail_review_rows_fingerprint(gmail_import):
     )
     return salted_hmac(
         GMAIL_REVIEW_ROWS_FINGERPRINT_SALT,
+        encoded,
+        algorithm="sha256",
+    ).hexdigest()
+
+
+def gmail_analysis_generation(gmail_import):
+    """Return a safe generation bound only to immutable analyzer output facts.
+
+    Identity approval, employee row edits, and unified preparation metadata
+    are deliberately excluded. They each have their own stale-state binding,
+    and excluding them keeps an identical double-click idempotent after the
+    first request records its preparation marker.
+    """
+
+    analysis = dict(gmail_import.analysis or {})
+    encoded = json.dumps(
+        {
+            "contract": GMAIL_ANALYSIS_GENERATION_CONTRACT,
+            "gmail_import_id": gmail_import.pk,
+            "source_fingerprint": gmail_import.source_fingerprint,
+            "analysis_attempt": gmail_import.analysis_attempts,
+            "progress_generation": gmail_import.analysis_progress_generation,
+            "analysis_version": analysis.get("version"),
+            "content_fingerprint": analysis.get("content_fingerprint"),
+            "analyzed_at": (
+                gmail_import.analyzed_at.isoformat()
+                if gmail_import.analyzed_at
+                else None
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return salted_hmac(
+        GMAIL_ANALYSIS_GENERATION_SALT,
         encoded,
         algorithm="sha256",
     ).hexdigest()

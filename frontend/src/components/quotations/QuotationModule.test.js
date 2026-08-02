@@ -14,7 +14,21 @@ jest.mock('./AuditLogPanel', () => () => <div>Audit view</div>);
 jest.mock('./QuotationSettings', () => () => <div>Settings view</div>);
 jest.mock('./HistoricalImportManager', () => () => <div>Historical imports view</div>);
 jest.mock('./ContractIntelligenceManager', () => () => <div>Contract intelligence view</div>);
-jest.mock('./QuotationEditor', () => ({ quoteId }) => <div>Quotation editor {quoteId}</div>);
+jest.mock('./QuotationEditor', () => ({
+  quoteId,
+  initialEmailReviewFingerprint,
+  onInitialEmailReviewHandled,
+}) => (
+  <div>
+    <span>Quotation editor {quoteId}</span>
+    <output aria-label="initial email review fingerprint">
+      {initialEmailReviewFingerprint || 'none'}
+    </output>
+    {initialEmailReviewFingerprint && (
+      <button type="button" onClick={onInitialEmailReviewHandled}>Consume email review</button>
+    )}
+  </div>
+));
 jest.mock('./GmailInquiryReview', () => ({
   __esModule: true,
   default: ({ token, importId, onClaimed, onOpenQuote }) => (
@@ -23,6 +37,15 @@ jest.mock('./GmailInquiryReview', () => ({
       <span>Gmail import {importId || 'none'}</span>
       <button type="button" onClick={() => onClaimed(45)}>Remember import</button>
       <button type="button" onClick={() => onOpenQuote(88)}>Open exact quote</button>
+      <button
+        type="button"
+        onClick={() => onOpenQuote(88, {
+          reviewEmail: true,
+          quotationReviewFingerprint: 'a'.repeat(64),
+        })}
+      >
+        Open prepared quote
+      </button>
     </div>
   ),
 }));
@@ -67,6 +90,22 @@ describe('QuotationModule Gmail deep links', () => {
 
     expect(screen.getByText('Quotation editor 73')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
+    expect(screen.getByLabelText('initial email review fingerprint')).toHaveTextContent('none');
+  });
+
+  test('passes a prepared review only in memory and consumes it once without putting it in the URL', async () => {
+    renderModule('/admin?gmail_import_id=31');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open prepared quote' }));
+    expect(await screen.findByText('Quotation editor 88')).toBeInTheDocument();
+    expect(screen.getByLabelText('initial email review fingerprint')).toHaveTextContent('a'.repeat(64));
+    expect(screen.getByLabelText('location').textContent).not.toContain('fingerprint');
+    expect(screen.getByLabelText('location').textContent).not.toContain('review_email');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Consume email review' }));
+    await waitFor(() => expect(
+      screen.getByLabelText('initial email review fingerprint')
+    ).toHaveTextContent('none'));
   });
 
   test('normalizes route precedence and rejects invalid IDs', () => {

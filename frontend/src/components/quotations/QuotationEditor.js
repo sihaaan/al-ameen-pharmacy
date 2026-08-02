@@ -300,7 +300,13 @@ export const retryTransientQuotationGet = async (request, delayMs = 150) => {
   }
 };
 
-const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
+const QuotationEditor = ({
+  quoteId,
+  onClose,
+  onReviewOutcome,
+  initialEmailReviewFingerprint = '',
+  onInitialEmailReviewHandled,
+}) => {
   const [quote, setQuote] = useState(null);
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -372,6 +378,8 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const emailReconcileGenerationRef = useRef(0);
   const reviewEmailGenerationRef = useRef(0);
   const reviewEmailInFlightRef = useRef(false);
+  const initialEmailReviewRequestRef = useRef('');
+  const loadEmailPreviewRef = useRef(null);
   const priceInputRefs = useRef(new Map());
   const initialPriceFocusQuoteRef = useRef('');
   const quoteRef = useRef(null);
@@ -1845,11 +1853,75 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     }
   };
 
-  const loadEmailPreview = async () => {
+  const loadEmailPreview = async (isStillCurrent = null) => {
     if (emailSending || emailReconciling || saving || actionInFlight) return;
     if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
-    await requestEmailPreview();
+    await requestEmailPreview(
+      null,
+      typeof isStillCurrent === 'function' ? isStillCurrent : null
+    );
   };
+  loadEmailPreviewRef.current = loadEmailPreview;
+
+  useEffect(() => {
+    const expectedFingerprint = String(initialEmailReviewFingerprint || '');
+    if (!/^[0-9a-f]{64}$/.test(expectedFingerprint) || loading) return;
+    const requestKey = `${String(quoteId)}:${expectedFingerprint}`;
+    if (initialEmailReviewRequestRef.current === requestKey) return;
+    initialEmailReviewRequestRef.current = requestKey;
+    onInitialEmailReviewHandled?.();
+
+    const loadedQuote = quoteRef.current;
+    if (!loadedQuote || String(loadedQuote.id) !== String(quoteId)) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'The prepared quotation could not be loaded. Open it again before reviewing the email.',
+      });
+      return;
+    }
+    if (String(loadedQuote.quotation_review_fingerprint || '') !== expectedFingerprint) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'The quotation changed before the email review opened. Review the current quotation, then click Review Email again.',
+      });
+      return;
+    }
+    if (editableStatuses.has(loadedQuote.status) && finalizeIssues.length > 0) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'The prepared quotation needs review before its email preview can be opened.',
+      });
+      return;
+    }
+
+    const localStateAtHandoff = JSON.stringify({
+      quote: quotationReviewDisplaySignature(loadedQuote),
+      party: quotePartyDraftRef.current,
+      terms: quoteTermsDraftRef.current,
+      lines: snapshotLineDrafts(loadedQuote, lineDraftsRef.current),
+    });
+    const isStillCurrent = () => {
+      const currentQuote = quoteRef.current;
+      return Boolean(
+        currentQuote
+        && String(currentQuote.id) === String(quoteId)
+        && String(currentQuote.quotation_review_fingerprint || '') === expectedFingerprint
+        && JSON.stringify({
+          quote: quotationReviewDisplaySignature(currentQuote),
+          party: quotePartyDraftRef.current,
+          terms: quoteTermsDraftRef.current,
+          lines: snapshotLineDrafts(currentQuote, lineDraftsRef.current),
+        }) === localStateAtHandoff
+      );
+    };
+    loadEmailPreviewRef.current?.(isStillCurrent);
+  }, [
+    finalizeIssues.length,
+    initialEmailReviewFingerprint,
+    loading,
+    onInitialEmailReviewHandled,
+    quoteId,
+  ]);
 
   const reviewEmail = async () => {
     if (!chainedActionsEnabled) {

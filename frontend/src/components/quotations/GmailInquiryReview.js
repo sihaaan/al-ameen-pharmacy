@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
+import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
@@ -76,6 +77,10 @@ const gmailChainedActionsEnabled = (record) => (
 
 const gmailAnalysisProgressEnabled = (record) => (
   record?.workflow_features?.gmail_analysis_progress === true
+);
+
+const gmailUnifiedWorkspaceEnabled = (record) => (
+  record?.workflow_features?.gmail_unified_workspace === true
 );
 
 const gmailAnalysisProgressUnavailableInRecord = (record) => (
@@ -510,6 +515,56 @@ const formatCommercialAmount = (value, currency = '') => {
   return currency ? `${currency} ${amount}` : `${amount} (currency not stated)`;
 };
 
+const unifiedSuggestionForLine = (line, selectedCompanyId = '') => {
+  const product = String(entityId(firstDefined(
+    line.matched_product,
+    line.matched_product_id,
+    ''
+  )) || '');
+  const quoteItem = String(entityId(firstDefined(
+    line.matched_quote_item,
+    line.matched_quote_item_id,
+    ''
+  )) || '');
+  const company = String(entityId(firstDefined(
+    line.match_company_id,
+    line.unified_suggestion_company,
+    ''
+  )) || '');
+  return {
+    product,
+    quoteItem: product ? '' : quoteItem,
+    company,
+    approvalAllowed: Boolean(
+      company
+      && selectedCompanyId
+      && company === String(selectedCompanyId)
+    ),
+    name: String(firstDefined(
+      line.matched_product_name,
+      line.matched_quote_item_name,
+      line.product_name,
+      ''
+    ) || ''),
+  };
+};
+
+const unifiedLineDecisionSnapshot = (lines = []) => JSON.stringify(lines.map((line) => ({
+  row_key: reviewRowKey(line),
+  raw_name: String(line.raw_name || ''),
+  quantity: String(firstDefined(line.quantity, '')),
+  unit: String(line.unit || ''),
+  included: Boolean(line.included),
+  product: String(line.unified_product || ''),
+  quote_item: String(line.unified_quote_item || ''),
+  product_decision: String(line.unified_product_decision || ''),
+  uncertainty_decision: firstDefined(line.unified_uncertainty_decision, null),
+  unit_price: String(line.unified_unit_price || ''),
+  vat_rate: String(line.unified_vat_rate || ''),
+})));
+
+const isSha256Fingerprint = (value) => /^[0-9a-f]{64}$/.test(String(value || ''));
+
 const reviewRowKey = (line) => String(firstDefined(
   line.row_key,
   line.review_key,
@@ -525,19 +580,70 @@ const reviewLineIncluded = (line) => (
   )
 );
 
-const normalizeReviewLines = (record) => importLines(record).map((line) => ({
-  ...line,
-  raw_name: firstDefined(line.raw_name, line.item_name, line.requested_item_name, ''),
-  quantity: firstDefined(line.quantity, ''),
-  unit: firstDefined(line.unit, ''),
-  included: reviewLineIncluded(line),
-  staff_reviewed: Boolean(firstDefined(
-    line.staff_reviewed,
-    line.reviewed_by_user,
-    line.reviewed,
-    false
-  )),
-}));
+const reviewLineRequiresUncertaintyDecision = (line) => {
+  const status = String(firstDefined(line.status, line.parse_status, '')).toLowerCase();
+  return (
+    lineOperation(line) === 'uncertain'
+    || String(line.original_operation || '').toLowerCase() === 'uncertain'
+    || ['needs_review', 'uncertain', 'unparsed', 'invalid'].includes(status)
+  );
+};
+
+const normalizeReviewLines = (record) => {
+  const unifiedWorkspace = gmailUnifiedWorkspaceEnabled(record);
+  const fallbackSuggestionCompany = String(entityId(firstDefined(
+    record.recommended_company_id,
+    record.candidates?.recommended_company_id,
+    ''
+  )) || '');
+  return importLines(record).map((line) => {
+    const included = reviewLineIncluded(line);
+    const staffReviewed = Boolean(firstDefined(
+      line.staff_reviewed,
+      line.reviewed_by_user,
+      line.reviewed,
+      false
+    ));
+    const requiresUncertainty = reviewLineRequiresUncertaintyDecision(line);
+    return {
+      ...line,
+      raw_name: firstDefined(line.raw_name, line.item_name, line.requested_item_name, ''),
+      quantity: firstDefined(line.quantity, ''),
+      unit: firstDefined(line.unit, ''),
+      included,
+      staff_reviewed: staffReviewed,
+      ...(unifiedWorkspace ? {
+        unified_product: '',
+        unified_quote_item: '',
+        unified_product_decision: included ? 'pending' : 'ignored',
+        unified_suggestion_company: String(entityId(firstDefined(
+          line.match_company_id,
+          fallbackSuggestionCompany,
+          ''
+        )) || ''),
+        unified_requires_uncertainty: requiresUncertainty,
+        unified_original_raw_name: String(firstDefined(
+          line.raw_name,
+          line.item_name,
+          line.requested_item_name,
+          ''
+        )),
+        unified_original_quantity: String(firstDefined(line.quantity, '')),
+        unified_original_unit: String(firstDefined(line.unit, '')),
+        unified_uncertainty_approved_explicitly: Boolean(
+          requiresUncertainty && included && staffReviewed
+        ),
+        unified_uncertainty_decision: requiresUncertainty
+          ? (!included ? 'exclude' : staffReviewed ? 'approve' : '')
+          : null,
+        // Never initialize our price from an imported row. Customer prices
+        // remain in the separate evidence projection above.
+        unified_unit_price: '',
+        unified_vat_rate: '0',
+      } : {}),
+    };
+  });
+};
 
 const reviewLineInvalid = (line) => {
   if (!line.included) return false;
@@ -552,12 +658,14 @@ const reviewLineInvalid = (line) => {
 
 const reviewLineUncertain = (line) => {
   if (!line.included || line.staff_reviewed) return false;
-  const status = String(firstDefined(line.status, line.parse_status, '')).toLowerCase();
-  return (
-    lineOperation(line) === 'uncertain'
-    || ['needs_review', 'uncertain', 'unparsed', 'invalid'].includes(status)
-  );
+  return reviewLineRequiresUncertaintyDecision(line);
 };
+
+const unifiedUncertaintyCorrectionMade = (line) => (
+  String(line.raw_name || '') !== String(line.unified_original_raw_name || '')
+  || String(firstDefined(line.quantity, '')) !== String(line.unified_original_quantity || '')
+  || String(line.unit || '') !== String(line.unified_original_unit || '')
+);
 
 const sourceKey = (source) => String(firstDefined(
   source.source_key,
@@ -695,6 +803,11 @@ const GmailInquiryReview = ({
   const [analysisProgress, setAnalysisProgress] = useState(null);
   const [analysisProgressTarget, setAnalysisProgressTarget] = useState(null);
   const [analysisProgressUnavailable, setAnalysisProgressUnavailable] = useState(false);
+  const [unifiedProducts, setUnifiedProducts] = useState([]);
+  const [unifiedProductState, setUnifiedProductState] = useState('idle');
+  const [unifiedProductError, setUnifiedProductError] = useState('');
+  const [unifiedProductRetry, setUnifiedProductRetry] = useState(0);
+  const [unifiedPriceHistory, setUnifiedPriceHistory] = useState({});
   const recordRef = useRef(null);
   const mountedRef = useRef(false);
   const requestGenerationRef = useRef(0);
@@ -704,6 +817,12 @@ const GmailInquiryReview = ({
   const analysisProgressBindingRef = useRef(null);
   const autoAnalyzeImportRef = useRef('');
   const chainedActionLockRef = useRef(false);
+  const unifiedProductGenerationRef = useRef(0);
+  const unifiedHistoryGenerationRef = useRef(0);
+  const unifiedHistoryLoadingRef = useRef(new Set());
+  const unifiedPreparedOpenRef = useRef('');
+  const reviewLinesRef = useRef(reviewLines);
+  reviewLinesRef.current = reviewLines;
 
   const applyPayload = useCallback((payload, { preserveSelection = false } = {}) => {
     const incoming = gmailImportRecordFromPayload(payload);
@@ -1189,6 +1308,7 @@ const GmailInquiryReview = ({
   const gmailReviewUiV2 = gmailReviewUiV2Enabled(record || {});
   const gmailChainedActions = gmailChainedActionsEnabled(record || {});
   const gmailAnalysisProgress = gmailAnalysisProgressEnabled(record || {});
+  const gmailUnifiedWorkspace = gmailUnifiedWorkspaceEnabled(record || {});
   const nestedAnalysisProgress = useMemo(
     () => normalizedAnalysisProgress(record?.analysis_progress),
     [record?.analysis_progress]
@@ -1307,6 +1427,51 @@ const GmailInquiryReview = ({
       )
     )
   );
+
+  useEffect(() => {
+    const generation = ++unifiedProductGenerationRef.current;
+    if (!gmailUnifiedWorkspace || !recordId) {
+      setUnifiedProducts([]);
+      setUnifiedProductState('idle');
+      setUnifiedProductError('');
+      return undefined;
+    }
+    setUnifiedProductState('loading');
+    setUnifiedProductError('');
+    quotationAPI.items.list({ active: 'true' })
+      .then((response) => {
+        if (
+          mountedRef.current
+          && unifiedProductGenerationRef.current === generation
+        ) {
+          setUnifiedProducts(asCollection(response.data));
+          setUnifiedProductState('ready');
+        }
+      })
+      .catch(() => {
+        if (
+          mountedRef.current
+          && unifiedProductGenerationRef.current === generation
+        ) {
+          setUnifiedProducts([]);
+          setUnifiedProductState('error');
+          setUnifiedProductError(
+            'The Product catalogue could not be loaded. Retry before choosing a different Product.'
+          );
+        }
+      });
+    return () => {
+      if (unifiedProductGenerationRef.current === generation) {
+        unifiedProductGenerationRef.current += 1;
+      }
+    };
+  }, [gmailUnifiedWorkspace, recordId, unifiedProductRetry]);
+
+  useEffect(() => {
+    unifiedHistoryGenerationRef.current += 1;
+    unifiedHistoryLoadingRef.current.clear();
+    setUnifiedPriceHistory({});
+  }, [companyId, gmailUnifiedWorkspace, recordId]);
 
   useEffect(() => {
     if (!recordId || !gmailAnalysisProgress) {
@@ -1612,8 +1777,32 @@ const GmailInquiryReview = ({
     }
   };
 
+  const resetUnifiedCommercialDecisionsForIdentityChange = () => {
+    if (!gmailUnifiedWorkspaceEnabled(recordRef.current || {})) return;
+    unifiedHistoryGenerationRef.current += 1;
+    unifiedHistoryLoadingRef.current.clear();
+    setUnifiedPriceHistory({});
+    setReviewLines((current) => current.map((line) => (
+      line.included
+        ? {
+          ...line,
+          unified_product: '',
+          unified_quote_item: '',
+          unified_product_decision: 'pending',
+          // A selling price belongs to the explicitly reviewed Product and
+          // customer identity context. Never carry it across an identity
+          // change for the employee implicitly.
+          unified_unit_price: '',
+        }
+        : line
+    )));
+  };
+
   const selectCompany = (value, company) => {
     const normalized = String(value || '');
+    if (normalized !== String(companyId || '')) {
+      resetUnifiedCommercialDecisionsForIdentityChange();
+    }
     setCompanyId(normalized);
     setContactId('');
     setIdentityConfirmed(false);
@@ -1624,6 +1813,9 @@ const GmailInquiryReview = ({
 
   const selectContact = (value) => {
     const normalized = String(value || '');
+    if (normalized !== String(contactId || '')) {
+      resetUnifiedCommercialDecisionsForIdentityChange();
+    }
     setContactId(normalized);
     setIdentityConfirmed(false);
     setIdentityReviewApproved(false);
@@ -1633,16 +1825,52 @@ const GmailInquiryReview = ({
   const updateReviewLine = (index, field, value) => {
     const rowKey = reviewRowKey(reviewLines[index] || {});
     const reviewUiV2 = gmailReviewUiV2Enabled(recordRef.current || {});
+    const unifiedWorkspace = gmailUnifiedWorkspaceEnabled(recordRef.current || {});
     setReviewLines((current) => current.map((line, candidateIndex) => (
       candidateIndex === index
-        ? {
-          ...line,
-          [field]: value,
-          // Correcting a substantive field is itself an explicit staff
-          // review. An unchanged uncertain row still needs the separate
-          // "Mark reviewed" action below.
-          staff_reviewed: field === 'included' ? line.staff_reviewed : true,
-        }
+        ? (() => {
+          const next = {
+            ...line,
+            [field]: value,
+            // Correcting a substantive field is itself an explicit staff
+            // review. An unchanged uncertain row still needs the separate
+            // "Mark reviewed" action below.
+            staff_reviewed: field === 'included' ? line.staff_reviewed : true,
+          };
+          if (!unifiedWorkspace) return next;
+          if (field === 'included') {
+            if (!value) {
+              return {
+                ...next,
+                staff_reviewed: true,
+                unified_product: '',
+                unified_quote_item: '',
+                unified_product_decision: 'ignored',
+                unified_uncertainty_approved_explicitly: false,
+                unified_uncertainty_decision: line.unified_requires_uncertainty
+                  ? 'exclude'
+                  : null,
+                unified_unit_price: '',
+              };
+            }
+            return {
+              ...next,
+              staff_reviewed: !line.unified_requires_uncertainty,
+              unified_product_decision: 'pending',
+              unified_uncertainty_approved_explicitly: false,
+              unified_uncertainty_decision: line.unified_requires_uncertainty ? '' : null,
+            };
+          }
+          if (
+            line.unified_requires_uncertainty
+            && ['raw_name', 'quantity', 'unit'].includes(field)
+          ) {
+            next.unified_uncertainty_decision = unifiedUncertaintyCorrectionMade(next)
+              ? 'correct'
+              : (line.unified_uncertainty_approved_explicitly ? 'approve' : '');
+          }
+          return next;
+        })()
         : line
     )));
     const dirtyKey = rowKey || `__missing-row-${index}`;
@@ -1657,11 +1885,132 @@ const GmailInquiryReview = ({
     if (!rowKey || reviewLineInvalid(line)) return;
     setReviewLines((current) => current.map((candidate, candidateIndex) => (
       candidateIndex === index
-        ? { ...candidate, staff_reviewed: true }
+        ? {
+          ...candidate,
+          staff_reviewed: true,
+          ...(gmailUnifiedWorkspaceEnabled(recordRef.current || {})
+            && candidate.unified_requires_uncertainty
+            ? {
+              unified_uncertainty_approved_explicitly: true,
+              unified_uncertainty_decision: 'approve',
+            }
+            : {}),
+        }
         : candidate
     )));
     setDirtyReviewRowKeys((current) => new Set([...current, rowKey]));
     setReviewDirty(true);
+  };
+
+  const updateUnifiedLineDecision = (index, patch) => {
+    const line = reviewLines[index] || {};
+    const rowKey = reviewRowKey(line);
+    setReviewLines((current) => current.map((candidate, candidateIndex) => (
+      candidateIndex === index ? { ...candidate, ...patch } : candidate
+    )));
+    setDirtyReviewRowKeys((current) => new Set([
+      ...current,
+      rowKey || `__missing-row-${index}`,
+    ]));
+    setReviewDirty(true);
+  };
+
+  const approveUnifiedProductSuggestion = (index) => {
+    const line = reviewLines[index] || {};
+    const suggestion = unifiedSuggestionForLine(line, companyId);
+    if (
+      !suggestion.approvalAllowed
+      || (!suggestion.product && !suggestion.quoteItem)
+    ) return;
+    const previousSelection = line.unified_product
+      ? `product:${line.unified_product}`
+      : line.unified_quote_item
+        ? `quote_item:${line.unified_quote_item}`
+        : '';
+    const nextSelection = suggestion.product
+      ? `product:${suggestion.product}`
+      : `quote_item:${suggestion.quoteItem}`;
+    updateUnifiedLineDecision(index, {
+      unified_product: suggestion.product,
+      unified_quote_item: suggestion.product ? '' : suggestion.quoteItem,
+      unified_product_decision: 'approved',
+      ...(previousSelection && previousSelection !== nextSelection
+        ? { unified_unit_price: '' }
+        : {}),
+    });
+  };
+
+  const selectUnifiedProduct = (index, productId) => {
+    const line = reviewLines[index] || {};
+    const suggestion = unifiedSuggestionForLine(line, companyId);
+    const selectedProduct = String(productId || '');
+    const previousSelection = line.unified_product
+      ? `product:${line.unified_product}`
+      : line.unified_quote_item
+        ? `quote_item:${line.unified_quote_item}`
+        : '';
+    const nextSelection = selectedProduct ? `product:${selectedProduct}` : '';
+    updateUnifiedLineDecision(index, {
+      unified_product: selectedProduct,
+      unified_quote_item: '',
+      unified_product_decision: selectedProduct
+        ? (
+          suggestion.approvalAllowed && suggestion.product === selectedProduct
+            ? 'approved'
+            : 'corrected'
+        )
+        : 'pending',
+      ...(previousSelection && previousSelection !== nextSelection
+        ? { unified_unit_price: '' }
+        : {}),
+    });
+  };
+
+  const loadUnifiedLineHistory = async (line) => {
+    const product = String(line.unified_product || '');
+    const quoteItem = product ? '' : String(line.unified_quote_item || '');
+    const key = product ? `product:${product}` : quoteItem ? `quote_item:${quoteItem}` : '';
+    if (
+      !gmailUnifiedWorkspaceEnabled(recordRef.current || {})
+      || !recordId
+      || !companyId
+      || !key
+      || unifiedHistoryLoadingRef.current.has(key)
+    ) return;
+    const generation = unifiedHistoryGenerationRef.current;
+    unifiedHistoryLoadingRef.current.add(key);
+    setUnifiedPriceHistory((current) => ({
+      ...current,
+      [key]: { state: 'loading', rows: [] },
+    }));
+    try {
+      const response = await quotationAPI.companies.priceHistory(companyId, product
+        ? { product }
+        : { quote_item: quoteItem });
+      if (
+        !mountedRef.current
+        || unifiedHistoryGenerationRef.current !== generation
+      ) return;
+      const rows = asCollection(response.data).slice().sort((left, right) => (
+        String(right.quoted_at || '').localeCompare(String(left.quoted_at || ''))
+      ));
+      setUnifiedPriceHistory((current) => ({
+        ...current,
+        [key]: { state: 'ready', rows },
+      }));
+    } catch {
+      if (
+        mountedRef.current
+        && unifiedHistoryGenerationRef.current === generation
+      ) {
+        setUnifiedPriceHistory((current) => ({
+          ...current,
+          [key]: { state: 'error', rows: [] },
+        }));
+      }
+    } finally {
+      unifiedHistoryLoadingRef.current.delete(key);
+    }
   };
 
   const workflowConcurrencyPayload = (sourceRecord) => ({
@@ -1790,6 +2139,12 @@ const GmailInquiryReview = ({
     setErrorInfo(null);
     setNotice(null);
     setIdentityReviewApproved(false);
+    if (
+      normalizedCompanyId !== String(companyId || '')
+      || normalizedContactId !== String(contactId || '')
+    ) {
+      resetUnifiedCommercialDecisionsForIdentityChange();
+    }
     setCompanyId(normalizedCompanyId);
     setContactId(normalizedContactId);
     if (company && typeof company === 'object') {
@@ -2033,6 +2388,225 @@ const GmailInquiryReview = ({
     }
   };
 
+  const unifiedBindingPayload = (sourceRecord) => ({
+    expected_source_fingerprint: String(sourceRecord?.source_fingerprint || ''),
+    expected_analysis_attempt: firstDefined(sourceRecord?.analysis_attempts, null),
+    expected_analysis_generation: String(sourceRecord?.analysis_generation || ''),
+    expected_review_rows_fingerprint: String(sourceRecord?.review_rows_fingerprint || ''),
+    identity_review_fingerprint: identityReviewState(sourceRecord || {}).fingerprint,
+  });
+
+  const completeUnifiedBindingPayload = (payload) => (
+    isSha256Fingerprint(payload.expected_source_fingerprint)
+    && payload.expected_analysis_attempt !== null
+    && payload.expected_analysis_attempt !== undefined
+    && /^\d+$/.test(String(payload.expected_analysis_attempt))
+    && Number.isSafeInteger(Number(payload.expected_analysis_attempt))
+    && Number(payload.expected_analysis_attempt) >= 0
+    && isSha256Fingerprint(payload.expected_analysis_generation)
+    && isSha256Fingerprint(payload.expected_review_rows_fingerprint)
+    && isSha256Fingerprint(payload.identity_review_fingerprint)
+  );
+
+  const unifiedReviewIssues = gmailUnifiedWorkspace
+    ? reviewLines.flatMap((line, index) => {
+      const label = String(line.raw_name || '').trim() || `Row ${index + 1}`;
+      const issues = [];
+      if (!reviewRowKey(line)) issues.push(`${label}: stable row identity is unavailable.`);
+      if (!line.included) return issues;
+      if (reviewLineInvalid(line)) issues.push(`${label}: item, quantity, and unit are required.`);
+      if (!sourceKeysForLine(line).length) issues.push(`${label}: source evidence is required.`);
+      const selectedProductCount = [line.unified_product, line.unified_quote_item]
+        .filter((value) => String(value || '')).length;
+      const suggestion = unifiedSuggestionForLine(line, companyId);
+      const selectionMatchesSuggestion = Boolean(
+        suggestion.approvalAllowed
+        && (
+          (line.unified_product && String(line.unified_product) === suggestion.product)
+          || (line.unified_quote_item && String(line.unified_quote_item) === suggestion.quoteItem)
+        )
+      );
+      if (
+        selectedProductCount !== 1
+        || !['approved', 'corrected'].includes(line.unified_product_decision)
+      ) {
+        issues.push(`${label}: explicitly approve or choose one Product.`);
+      }
+      if (line.unified_product_decision === 'approved' && !selectionMatchesSuggestion) {
+        issues.push(`${label}: the approved Product must be the exact server suggestion.`);
+      }
+      if (line.unified_product_decision === 'corrected' && selectionMatchesSuggestion) {
+        issues.push(`${label}: choose a different existing Product or approve the suggestion.`);
+      }
+      if (
+        line.unified_requires_uncertainty
+        && !['approve', 'correct'].includes(line.unified_uncertainty_decision)
+      ) {
+        issues.push(`${label}: approve, correct, or exclude the uncertain row.`);
+      }
+      if (
+        line.unified_uncertainty_decision === 'correct'
+        && !unifiedUncertaintyCorrectionMade(line)
+      ) {
+        issues.push(`${label}: change the item wording, quantity, or unit before marking it corrected.`);
+      }
+      const sellingPrice = Number(line.unified_unit_price);
+      if (!String(line.unified_unit_price || '').trim() || !Number.isFinite(sellingPrice) || sellingPrice < 0.01) {
+        issues.push(`${label}: enter a valid employee selling price.`);
+      }
+      if (!['0', '5'].includes(String(line.unified_vat_rate))) {
+        issues.push(`${label}: choose a valid quotation VAT rate.`);
+      }
+      return issues;
+    })
+    : [];
+
+  const prepareUnifiedQuotationAndReviewEmail = async () => {
+    if (
+      !gmailUnifiedWorkspace
+      || !recordId
+      || readOnlyImport
+      || busyAction
+      || analysisInteractionBlocked
+      || !messageSelectionValid
+      || chainedActionLockRef.current
+    ) return;
+    const sourceRecord = recordRef.current || {};
+    const binding = unifiedBindingPayload(sourceRecord);
+    if (
+      !companyId
+      || !identityReviewState(sourceRecord).approved
+      || !completeUnifiedBindingPayload(binding)
+      || unifiedReviewIssues.length
+      || !reviewLines.length
+      || !reviewLines.some((line) => line.included)
+    ) {
+      setNotice({
+        type: 'warning',
+        message: !completeUnifiedBindingPayload(binding)
+          ? 'This workspace is missing current safety fingerprints. Refresh the Gmail review before continuing.'
+          : 'Complete every highlighted company, Product, uncertainty, evidence, quantity, unit, price, and VAT decision before reviewing the email.',
+      });
+      return;
+    }
+
+    chainedActionLockRef.current = true;
+    const actionGeneration = ++actionGenerationRef.current;
+    const decisionsAtStart = unifiedLineDecisionSnapshot(reviewLines);
+    setBusyAction('prepare-email-review');
+    setErrorInfo(null);
+    setNotice(null);
+    try {
+      const response = await quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation(
+        recordId,
+        {
+          ...binding,
+          rows: reviewLines.map((line) => ({
+            row_key: reviewRowKey(line),
+            raw_name: String(line.raw_name || '').trim(),
+            quantity: !line.included || line.quantity === '' || line.quantity === null
+              ? null
+              : line.quantity,
+            unit: String(line.unit || '').trim(),
+            included: Boolean(line.included),
+            product_decision: line.included
+              ? (line.unified_product_decision === 'approved' ? 'approve' : 'correct')
+              : 'exclude',
+            uncertainty_decision: line.unified_requires_uncertainty
+              ? (line.unified_uncertainty_decision || null)
+              : null,
+            product: line.included && line.unified_product
+              ? line.unified_product
+              : null,
+            quote_item: line.included && !line.unified_product && line.unified_quote_item
+              ? line.unified_quote_item
+              : null,
+            match_status: line.included ? 'confirmed' : 'ignored',
+            unit_price: line.included && String(line.unified_unit_price || '').trim()
+              ? String(line.unified_unit_price).trim()
+              : null,
+            vat_rate: line.included
+              ? `${Number(line.unified_vat_rate || 0).toFixed(2)}`
+              : '0.00',
+          })),
+        }
+      );
+      if (!actionIsCurrent(actionGeneration)) return;
+      const responseData = response.data || {};
+      const authoritativeImport = responseData.gmail_import;
+      const authoritativeQuotation = responseData.quotation;
+      const canonicalImportId = entityId(authoritativeImport);
+      const exactQuoteId = entityId(authoritativeQuotation);
+      const topLevelFingerprint = String(responseData.quotation_review_fingerprint || '');
+      const quotationFingerprint = String(
+        authoritativeQuotation?.quotation_review_fingerprint || ''
+      );
+      const exactReviewFingerprint = topLevelFingerprint || quotationFingerprint;
+      const responseFingerprintsMatch = Boolean(
+        isSha256Fingerprint(topLevelFingerprint)
+        && isSha256Fingerprint(quotationFingerprint)
+        && topLevelFingerprint === quotationFingerprint
+      );
+      if (
+        !canonicalImportId
+        || !exactQuoteId
+        || !isSha256Fingerprint(exactReviewFingerprint)
+        || (
+          topLevelFingerprint
+          && quotationFingerprint
+          && topLevelFingerprint !== quotationFingerprint
+        )
+        || (
+          responseData.prepared === true
+          && String(canonicalImportId) !== String(recordId)
+        )
+      ) {
+        throw new Error(
+          'The quotation was prepared, but the server did not return one exact import, quotation, and review fingerprint.'
+        );
+      }
+      const localDecisionsStillMatch = (
+        decisionsAtStart === unifiedLineDecisionSnapshot(reviewLinesRef.current)
+      );
+      applyPayload({ gmail_import: authoritativeImport });
+      if (String(canonicalImportId) !== String(recordId)) onClaimed?.(canonicalImportId);
+
+      // A reused preparation may point at a quotation that staff edited after
+      // the original request completed. Only the backend's one-request grant
+      // may hand off directly to the hardened email preview controller.
+      const canOpenPreparedPreview = (
+        responseData.created === true
+        && responseData.prepared === true
+        && responseData.prepared_for_preview === true
+        && String(canonicalImportId) === String(recordId)
+        && responseFingerprintsMatch
+        && localDecisionsStillMatch
+      );
+      const openKey = `${canonicalImportId}:${exactQuoteId}:${exactReviewFingerprint}`;
+      if (unifiedPreparedOpenRef.current === openKey) return;
+      unifiedPreparedOpenRef.current = openKey;
+      if (canOpenPreparedPreview) {
+        onOpenQuote?.(exactQuoteId, {
+          reviewEmail: true,
+          quotationReviewFingerprint: exactReviewFingerprint,
+        });
+      } else {
+        onOpenQuote?.(exactQuoteId);
+      }
+    } catch (error) {
+      if (actionIsCurrent(actionGeneration)) {
+        await handleError(
+          error,
+          'Prepare Gmail quotation and review email',
+          `POST /quotations/gmail-inquiry-imports/${recordId}/confirm_and_prepare_quotation/`
+        );
+      }
+    } finally {
+      chainedActionLockRef.current = false;
+      if (actionIsCurrent(actionGeneration)) setBusyAction('');
+    }
+  };
+
   const usableLines = reviewLines.filter((line) => line.included);
   const invalidIncludedLines = reviewLines.filter(reviewLineInvalid);
   const uncertainIncludedLines = reviewLines.filter(reviewLineUncertain);
@@ -2114,6 +2688,30 @@ const GmailInquiryReview = ({
     || uncertainIncludedLines.length > 0
     || includedLinesWithoutEvidence.length > 0
     || usableLines.length === 0
+  );
+  const unifiedCurrentBinding = unifiedBindingPayload(record || {});
+  const unifiedConfirmDisabled = Boolean(
+    busyAction
+    || readOnlyImport
+    || analysisInteractionBlocked
+    || !companyId
+    || !identityReviewApproved
+    || !messageSelectionValid
+    || !completeUnifiedBindingPayload(unifiedCurrentBinding)
+    || unifiedReviewIssues.length > 0
+    || usableLines.length === 0
+  );
+  const unifiedDisabledReason = firstDefined(
+    readOnlyImport ? 'This Gmail import already has a quotation.' : null,
+    !companyId ? 'Select and approve the customer company first.' : null,
+    !identityReviewApproved ? 'Approve the customer identity first.' : null,
+    !messageSelectionValid ? 'Return to Gmail and import at least one usable source message.' : null,
+    !completeUnifiedBindingPayload(unifiedCurrentBinding)
+      ? 'Refresh this review to obtain current safety fingerprints.'
+      : null,
+    unifiedReviewIssues[0],
+    !usableLines.length ? 'Include at least one usable request row.' : null,
+    busyAction || analysisInteractionBlocked ? 'Wait for the current operation to finish.' : null
   );
   const currentAnalysisStageCopy = currentAnalysisProgress?.state === 'running'
     ? (ANALYSIS_STAGE_COPY[currentAnalysisProgress.stage] || ANALYSIS_STAGE_COPY[''])
@@ -2454,9 +3052,27 @@ const GmailInquiryReview = ({
       <div className="qm-panel qm-gmail-lines-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>2. Review extracted request lines</h3>
-            <p>Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.</p>
+            <h3>{gmailUnifiedWorkspace ? '2. Review request and price quotation' : '2. Review extracted request lines'}</h3>
+            <p>
+              {gmailUnifiedWorkspace
+                ? 'Approve or correct each Product suggestion, resolve uncertainty, and enter your selling price. Customer prices remain separate evidence and never fill your price.'
+                : 'Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.'}
+            </p>
           </div>
+          {gmailUnifiedWorkspace ? (
+            <div className="qm-gmail-lines-actions">
+              <span className="qm-heading-count">{usableLines.length} included row{usableLines.length === 1 ? '' : 's'}</span>
+              <span className={`qm-gmail-catalogue-state state-${unifiedProductState}`} role="status">
+                {unifiedProductState === 'loading'
+                  ? 'Loading Product catalogue...'
+                  : unifiedProductState === 'ready'
+                    ? `${unifiedProducts.length} Products available`
+                    : unifiedProductState === 'error'
+                      ? 'Product catalogue unavailable'
+                      : 'Product catalogue waiting'}
+              </span>
+            </div>
+          ) : (
           <div className={`qm-gmail-lines-actions${reviewDirty ? ' is-dirty' : ''}`}>
             <div className="qm-gmail-lines-save-state">
               <span className="qm-heading-count">{usableLines.length} included row{usableLines.length === 1 ? '' : 's'}</span>
@@ -2475,8 +3091,9 @@ const GmailInquiryReview = ({
               {busyAction === 'review-lines' ? 'Saving rows...' : 'Save reviewed rows'}
             </button>
           </div>
+          )}
         </div>
-        {(
+        {!gmailUnifiedWorkspace && (
           invalidIncludedLines.length > 0
           || uncertainIncludedLines.length > 0
           || includedLinesWithoutEvidence.length > 0
@@ -2489,8 +3106,355 @@ const GmailInquiryReview = ({
                 : `${includedLinesWithoutEvidence.length} included row(s) have no source evidence. Retry analysis above or exclude them.`}
           </div>
         )}
+        {gmailUnifiedWorkspace && unifiedProductError && (
+          <div className="qm-feedback error qm-gmail-catalogue-error" role="alert">
+            <span>{unifiedProductError}</span>
+            <button
+              type="button"
+              className="qm-secondary small"
+              disabled={unifiedProductState === 'loading'}
+              onClick={() => setUnifiedProductRetry((value) => value + 1)}
+            >
+              Retry catalogue
+            </button>
+          </div>
+        )}
+        {gmailUnifiedWorkspace && unifiedReviewIssues.length > 0 && (
+          <div className="qm-feedback warning qm-gmail-line-review-warning" role="status">
+            <strong>{unifiedReviewIssues.length} decision{unifiedReviewIssues.length === 1 ? '' : 's'} still required.</strong>
+            <span>{unifiedReviewIssues[0]}</span>
+          </div>
+        )}
         {attachmentError && <div className="qm-feedback error" role="alert">{attachmentError}</div>}
         <div className="qm-table-wrap">
+          {gmailUnifiedWorkspace && (
+            <table className="qm-table qm-gmail-unified-table">
+              <thead>
+                <tr>
+                  <th>Use</th>
+                  <th>#</th>
+                  <th>Customer Request &amp; Evidence</th>
+                  <th>Qty</th>
+                  <th>Unit</th>
+                  <th>Product Decision</th>
+                  <th>Uncertainty</th>
+                  <th>Our Unit Price</th>
+                  <th>VAT</th>
+                  <th>Status</th>
+                  <th>Price History</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reviewLines.map((line, index) => {
+                  const operation = lineOperation(line);
+                  const suggestion = unifiedSuggestionForLine(line, companyId);
+                  const commercial = lineCustomerCommercialEvidence(line);
+                  const evidence = evidenceForLine(line).map((source) => ({
+                    ...(evidenceBySourceKey.get(sourceKey(source)) || {}),
+                    ...source,
+                  }));
+                  const historyKey = line.unified_product
+                    ? `product:${line.unified_product}`
+                    : line.unified_quote_item
+                      ? `quote_item:${line.unified_quote_item}`
+                      : '';
+                  const historyState = historyKey ? unifiedPriceHistory[historyKey] : null;
+                  const latestHistory = historyState?.rows?.[0] || null;
+                  const selectedProductIsMissing = Boolean(
+                    line.unified_product
+                    && !unifiedProducts.some(
+                      (product) => String(entityId(product)) === String(line.unified_product)
+                    )
+                  );
+                  const rowReady = Boolean(
+                    line.included
+                    && !unifiedReviewIssues.some((issue) => issue.startsWith(`${String(line.raw_name || '').trim() || `Row ${index + 1}`}:`))
+                  );
+                  const controlsDisabled = Boolean(
+                    readOnlyImport || analysisInteractionBlocked || busyAction
+                  );
+                  return (
+                    <tr
+                      key={firstDefined(reviewRowKey(line), line.id, `${line.raw_name || 'line'}-${index}`)}
+                      className={`${line.included ? '' : 'is-excluded'} operation-${operation}`}
+                    >
+                      <td data-label="Use row">
+                        <label className="qm-gmail-row-include">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(line.included)}
+                            disabled={
+                              controlsDisabled
+                              || ['removed', 'duplicate'].includes(operation)
+                            }
+                            onChange={(event) => updateReviewLine(index, 'included', event.target.checked)}
+                          />
+                          <span>{line.included ? 'Use' : 'Excluded'}</span>
+                        </label>
+                      </td>
+                      <td data-label="Row">{index + 1}</td>
+                      <td data-label="Customer request and evidence">
+                        <input
+                          className="qm-input"
+                          value={line.raw_name}
+                          disabled={controlsDisabled || !line.included}
+                          aria-label={`Requested item row ${index + 1}`}
+                          onChange={(event) => updateReviewLine(index, 'raw_name', event.target.value)}
+                        />
+                        {firstDefined(line.raw_line, line.raw_source_line) && (
+                          <small className="qm-gmail-original-line">
+                            Original: {firstDefined(line.raw_line, line.raw_source_line)}
+                          </small>
+                        )}
+                        <div className="qm-gmail-customer-commercial compact">
+                          {commercial.unitPrice !== undefined && commercial.unitPrice !== null && commercial.unitPrice !== '' && (
+                            <span><small>Customer price/budget</small>{formatCommercialAmount(commercial.unitPrice, commercial.currency)}</span>
+                          )}
+                          {commercial.total !== undefined && commercial.total !== null && commercial.total !== '' && (
+                            <span><small>Customer total</small>{formatCommercialAmount(commercial.total, commercial.currency)}</span>
+                          )}
+                          {(commercial.unitPrice === undefined || commercial.unitPrice === null || commercial.unitPrice === '')
+                            && (commercial.total === undefined || commercial.total === null || commercial.total === '')
+                            && <em>Customer price not stated</em>}
+                          <small className="qm-gmail-not-our-price">Evidence only — never our selling price</small>
+                        </div>
+                        <div className="qm-gmail-row-evidence qm-gmail-unified-evidence">
+                          {evidence.map((source, evidenceIndex) => {
+                            const message = messagesById.get(String(source.gmail_message_id || ''));
+                            const enrichedSource = {
+                              ...source,
+                              subject: firstDefined(source.subject, message?.subject),
+                            };
+                            const key = sourceKey(enrichedSource);
+                            const label = evidenceLabel(enrichedSource);
+                            const isAttachment = (
+                              String(enrichedSource.kind || '').toLowerCase() === 'attachment'
+                              || key.startsWith('attachment:')
+                            );
+                            return isAttachment && key ? (
+                              <button
+                                type="button"
+                                className="qm-gmail-row-evidence-link"
+                                key={`${sourceIdentity(source, evidenceIndex)}-${evidenceIndex}`}
+                                aria-label={`Open source ${label}`}
+                                disabled={Boolean(busyAction)}
+                                onClick={() => viewAttachment(enrichedSource, enrichedSource)}
+                              >
+                                {busyAction === `attachment:${key}` ? 'Opening...' : label}
+                              </button>
+                            ) : (
+                              <span key={`${sourceIdentity(source, evidenceIndex)}-${evidenceIndex}`}>{label}</span>
+                            );
+                          })}
+                          {!evidence.length && <em>Evidence link unavailable</em>}
+                        </div>
+                      </td>
+                      <td data-label="Quantity">
+                        <input
+                          className="qm-input compact"
+                          type="text"
+                          inputMode="decimal"
+                          value={line.quantity}
+                          disabled={controlsDisabled || !line.included}
+                          aria-label={`Quantity row ${index + 1}`}
+                          onChange={(event) => updateReviewLine(index, 'quantity', event.target.value)}
+                        />
+                      </td>
+                      <td data-label="Unit">
+                        <input
+                          className="qm-input compact"
+                          value={line.unit}
+                          disabled={controlsDisabled || !line.included}
+                          aria-label={`Unit row ${index + 1}`}
+                          onChange={(event) => updateReviewLine(index, 'unit', event.target.value)}
+                        />
+                      </td>
+                      <td data-label="Product decision">
+                        <div className="qm-gmail-product-decision">
+                          {suggestion.name ? (
+                            <div className="qm-gmail-product-suggestion">
+                              <small>
+                                {suggestion.approvalAllowed
+                                  ? 'Suggested Product'
+                                  : 'Suggestion from a different company context'}
+                              </small>
+                              <strong>{suggestion.name}</strong>
+                              {line.match_reason && <span>{line.match_reason}</span>}
+                              {!suggestion.approvalAllowed && (
+                                <span>Choose an existing Product explicitly for the selected company.</span>
+                              )}
+                              {suggestion.approvalAllowed && line.unified_product_decision !== 'approved' && (
+                                <button
+                                  type="button"
+                                  className="qm-secondary small"
+                                  disabled={controlsDisabled || !line.included}
+                                  onClick={() => approveUnifiedProductSuggestion(index)}
+                                >
+                                  Approve suggestion
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <small>No Product suggestion — choose an existing Product.</small>
+                          )}
+                          <select
+                            className="qm-input"
+                            aria-label={`Product decision row ${index + 1}`}
+                            value={line.unified_product}
+                            disabled={
+                              controlsDisabled
+                              || !line.included
+                              || unifiedProductState !== 'ready'
+                            }
+                            onChange={(event) => selectUnifiedProduct(index, event.target.value)}
+                          >
+                            <option value="">Choose a Product...</option>
+                            {selectedProductIsMissing && (
+                              <option value={line.unified_product}>
+                                {suggestion.name || `Product #${line.unified_product}`}
+                              </option>
+                            )}
+                            {unifiedProducts.map((product) => (
+                              <option key={entityId(product)} value={entityId(product)}>
+                                {product.name || product.display_name || `Product #${entityId(product)}`}
+                              </option>
+                            ))}
+                          </select>
+                          <span className={`qm-gmail-decision-state state-${line.unified_product_decision}`}>
+                            {line.unified_product_decision === 'approved'
+                              ? 'Suggestion approved'
+                              : line.unified_product_decision === 'corrected'
+                                ? 'Existing Product selected'
+                                : line.unified_product_decision === 'ignored'
+                                  ? 'Excluded'
+                                  : 'Decision required'}
+                          </span>
+                        </div>
+                      </td>
+                      <td data-label="Uncertainty">
+                        {!line.unified_requires_uncertainty ? (
+                          <span className="qm-gmail-decision-state state-not-required">Not required</span>
+                        ) : line.unified_uncertainty_decision === 'approve' ? (
+                          <span className="qm-gmail-decision-state state-approved">Approved as extracted</span>
+                        ) : line.unified_uncertainty_decision === 'correct' ? (
+                          <span className="qm-gmail-decision-state state-corrected">Corrected by staff</span>
+                        ) : line.unified_uncertainty_decision === 'exclude' ? (
+                          <span className="qm-gmail-decision-state state-ignored">Excluded</span>
+                        ) : (
+                          <div className="qm-gmail-uncertainty-decision">
+                            <strong>Review required</strong>
+                            <small>Approve as extracted, edit the request fields, or exclude this row.</small>
+                            <button
+                              type="button"
+                              className="qm-secondary small"
+                              disabled={controlsDisabled || reviewLineInvalid(line)}
+                              onClick={() => markReviewLineReviewed(index)}
+                            >
+                              Approve as extracted
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                      <td data-label="Our unit price">
+                        <label className="qm-gmail-selling-price">
+                          <span>Employee selling price</span>
+                          <input
+                            className="qm-input compact"
+                            type="number"
+                            min="0.01"
+                            step="0.001"
+                            value={line.unified_unit_price}
+                            placeholder="Blank"
+                            disabled={controlsDisabled || !line.included}
+                            aria-label={`Our unit price row ${index + 1}`}
+                            onWheel={releaseNumberWheelFocus}
+                            onChange={(event) => updateUnifiedLineDecision(index, {
+                              unified_unit_price: event.target.value,
+                            })}
+                          />
+                        </label>
+                      </td>
+                      <td data-label="VAT">
+                        <select
+                          className="qm-input compact"
+                          value={line.unified_vat_rate}
+                          disabled={controlsDisabled || !line.included}
+                          aria-label={`VAT row ${index + 1}`}
+                          onChange={(event) => updateUnifiedLineDecision(index, {
+                            unified_vat_rate: event.target.value,
+                          })}
+                        >
+                          <option value="0">0%</option>
+                          <option value="5">5%</option>
+                        </select>
+                      </td>
+                      <td data-label="Status">
+                        <span className={`qm-gmail-line-status ${rowReady ? 'status-reviewed' : line.included ? 'status-needs_review' : 'status-excluded'}`}>
+                          {rowReady ? 'Ready locally' : line.included ? 'Needs decision' : 'Excluded'}
+                        </span>
+                      </td>
+                      <td data-label="Price history">
+                        {!historyKey ? (
+                          <small>Approve or choose a Product first.</small>
+                        ) : historyState?.state === 'loading' ? (
+                          <span role="status">Loading history...</span>
+                        ) : historyState?.state === 'error' ? (
+                          <button
+                            type="button"
+                            className="qm-secondary small"
+                            onClick={() => loadUnifiedLineHistory(line)}
+                          >
+                            Retry history
+                          </button>
+                        ) : historyState?.state === 'ready' ? (
+                          latestHistory ? (
+                            <div className="qm-gmail-history-summary">
+                              <strong>{formatCommercialAmount(
+                                firstDefined(latestHistory.unit_price, latestHistory.quoted_unit_price),
+                                firstDefined(latestHistory.currency, 'AED')
+                              )}</strong>
+                              <span>{latestHistory.quotation_number || 'Previous quotation'}</span>
+                              {latestHistory.quoted_at && <small>{formatDateTime(latestHistory.quoted_at)}</small>}
+                              <button
+                                type="button"
+                                className="qm-secondary small"
+                                onClick={() => loadUnifiedLineHistory(line)}
+                              >
+                                Refresh
+                              </button>
+                            </div>
+                          ) : <small>No earlier company price.</small>
+                        ) : (
+                          <button
+                            type="button"
+                            className="qm-secondary small"
+                            disabled={!companyId || controlsDisabled}
+                            aria-label={`View price history row ${index + 1}`}
+                            onClick={() => loadUnifiedLineHistory(line)}
+                          >
+                            View history
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {!reviewLines.length && (
+                  <tr>
+                    <td colSpan="11">
+                      <div className="qm-empty" role={analysisUiActive ? 'status' : undefined}>
+                        <strong>{analysisUiActive ? 'Analyzing the request...' : 'No inquiry rows were extracted.'}</strong>
+                        <span>{analysisUiActive
+                          ? 'Verified request rows will appear here automatically.'
+                          : 'Use the analysis action above or import the relevant Gmail message again.'}</span>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
+          {!gmailUnifiedWorkspace && (
           <table className="qm-table qm-gmail-lines-table">
             <thead>
               <tr>
@@ -2700,52 +3664,79 @@ const GmailInquiryReview = ({
               )}
             </tbody>
           </table>
+          )}
         </div>
       </div>
 
       {!quoteId && (
         <div className="qm-panel qm-gmail-confirm-panel">
-          <div>
-            <h3>Ready to create the draft quotation?</h3>
-            <p>The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.</p>
-            <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
-          </div>
-          <button
-            type="button"
-            className="qm-primary"
-            disabled={confirmDisabled}
-            onClick={gmailChainedActions ? saveReviewAndCreateQuotation : confirmImport}
-          >
-            {busyAction === 'save-create'
-              ? 'Saving review & creating quotation...'
-              : busyAction === 'confirm'
-                ? 'Creating quotation...'
-                : gmailChainedActions && reviewDirty
-                  ? 'Save Review & Create Quotation'
-                  : gmailChainedActions
-                    ? 'Create Quotation'
-                    : 'Confirm & Open Quotation'}
-          </button>
-          {confirmDisabled && (
-            <small>
-              {reviewDirty && !gmailChainedActions
-                ? 'Save the reviewed rows before confirming.'
-                  : invalidIncludedLines.length
-                    ? 'Correct or exclude every invalid row first.'
-                    : uncertainIncludedLines.length
-                      ? 'Correct or exclude every uncertain row first.'
-                      : includedLinesWithoutEvidence.length
-                        ? 'Retry analysis above or exclude every row without source evidence.'
-                        : !companyId
-                          ? 'Select the customer company first.'
-                          : !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
-                            ? 'Confirm the customer identity first.'
-                            : !messageSelectionValid
-                              ? 'This Gmail import has no usable source messages. Return to Gmail and import it again.'
-                              : !usableLines.length
-                                ? 'Analysis must return at least one usable row.'
-                                : 'Wait for the current operation to finish.'}
-            </small>
+          {gmailUnifiedWorkspace ? (
+            <>
+              <div>
+                <h3>Ready to review the quotation email?</h3>
+                <p>
+                  This atomically saves the approved request, creates the priced draft quotation,
+                  and opens the existing hardened email preview. Nothing is sent or finalized automatically.
+                </p>
+                <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
+              </div>
+              <button
+                type="button"
+                className="qm-primary qm-gmail-review-email-button"
+                disabled={unifiedConfirmDisabled}
+                onClick={prepareUnifiedQuotationAndReviewEmail}
+              >
+                {busyAction === 'prepare-email-review'
+                  ? 'Preparing quotation & email review...'
+                  : 'Review Email'}
+              </button>
+              {unifiedConfirmDisabled && <small>{unifiedDisabledReason}</small>}
+            </>
+          ) : (
+            <>
+              <div>
+                <h3>Ready to create the draft quotation?</h3>
+                <p>The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.</p>
+                <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
+              </div>
+              <button
+                type="button"
+                className="qm-primary"
+                disabled={confirmDisabled}
+                onClick={gmailChainedActions ? saveReviewAndCreateQuotation : confirmImport}
+              >
+                {busyAction === 'save-create'
+                  ? 'Saving review & creating quotation...'
+                  : busyAction === 'confirm'
+                    ? 'Creating quotation...'
+                    : gmailChainedActions && reviewDirty
+                      ? 'Save Review & Create Quotation'
+                      : gmailChainedActions
+                        ? 'Create Quotation'
+                        : 'Confirm & Open Quotation'}
+              </button>
+              {confirmDisabled && (
+                <small>
+                  {reviewDirty && !gmailChainedActions
+                    ? 'Save the reviewed rows before confirming.'
+                      : invalidIncludedLines.length
+                        ? 'Correct or exclude every invalid row first.'
+                        : uncertainIncludedLines.length
+                          ? 'Correct or exclude every uncertain row first.'
+                          : includedLinesWithoutEvidence.length
+                            ? 'Retry analysis above or exclude every row without source evidence.'
+                            : !companyId
+                              ? 'Select the customer company first.'
+                              : !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
+                                ? 'Confirm the customer identity first.'
+                                : !messageSelectionValid
+                                  ? 'This Gmail import has no usable source messages. Return to Gmail and import it again.'
+                                  : !usableLines.length
+                                    ? 'Analysis must return at least one usable row.'
+                                    : 'Wait for the current operation to finish.'}
+                </small>
+              )}
+            </>
           )}
         </div>
       )}

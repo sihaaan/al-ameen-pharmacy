@@ -112,6 +112,10 @@ const quotationAPI = {
       data
     ),
     confirm: (id, data) => axiosInstance.post(`/quotations/gmail-inquiry-imports/${id}/confirm/`, data),
+    confirmAndPrepareQuotation: (id, data) => axiosInstance.post(
+      `/quotations/gmail-inquiry-imports/${id}/confirm_and_prepare_quotation/`,
+      data
+    ),
     attachment: (id, sourceKey) => axiosInstance.get(
       `/quotations/gmail-inquiry-imports/${id}/attachment/`,
       {

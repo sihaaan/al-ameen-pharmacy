@@ -405,6 +405,13 @@ QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED = env_bool(
     "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
     False,
 )
+# Optional one-screen Gmail review and quotation preparation workflow. The
+# endpoint remains unavailable unless the persisted company-review workflow is
+# also enabled, so a partial rollout cannot bypass explicit identity approval.
+QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED = env_bool(
+    "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

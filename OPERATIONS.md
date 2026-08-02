@@ -129,6 +129,29 @@ worker service, provider,
 OAuth scope, AI model, prompt, email action, or infrastructure setting is added
 by this phase.
 
+### Unified Gmail quotation workspace (disabled by default)
+
+`QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` defaults to `0` and is exposed only
+when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is also strictly enabled. The
+unified endpoint combines the already-reviewed Gmail rows with explicit
+existing-Product, quantity, unit, VAT/status, and nullable employee-price
+decisions. It remains a draft-preparation action: it never finalizes, previews,
+or sends. Company approval, uncertainty review, server-owned row evidence,
+stale source/analysis/row/identity bindings, blank-price behavior, and the
+existing secure email-preview and delivery controls remain mandatory.
+
+Monitor 409 stale-review rates, preparation latency, created-versus-reused
+metrics, and pricing-saved counts. An exact retry never reapplies decisions and
+is not eligible to auto-preview. A different import for an already-confirmed
+thread opens the existing quotation unchanged. Disable the flag for immediate
+rollback; no migration or stored-data reversal is required, and staff return
+to the original Gmail review plus separate quotation editor.
+
+If an employee changes the company, old company-context Product approvals are
+cleared in the browser and rejected by the server. The employee must make an
+explicit Product correction; this remains suggestion-only and does not create
+or learn aliases.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

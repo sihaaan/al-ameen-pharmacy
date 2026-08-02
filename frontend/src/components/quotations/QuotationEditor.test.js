@@ -89,6 +89,12 @@ const readyQuote = {
   }],
 };
 
+const INITIAL_EMAIL_REVIEW_FINGERPRINT = 'f'.repeat(64);
+const preparedReadyQuote = {
+  ...readyQuote,
+  quotation_review_fingerprint: INITIAL_EMAIL_REVIEW_FINGERPRINT,
+};
+
 const withGmailChainedActions = (sourceQuote = readyQuote) => ({
   ...sourceQuote,
   workflow_features: {
@@ -212,6 +218,83 @@ describe('QuotationEditor Product price context', () => {
     expect(toggle.closest('.qm-terms-toggle-control')).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'Brand' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Brand for Imported gloves')).not.toBeInTheDocument();
+  });
+
+  test('consumes an exact one-shot Gmail handoff and opens only the existing hardened preview', async () => {
+    const onInitialEmailReviewHandled = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: preparedReadyQuote });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        initialEmailReviewFingerprint={INITIAL_EMAIL_REVIEW_FINGERPRINT}
+        onInitialEmailReviewHandled={onInitialEmailReviewHandled}
+      />
+    );
+
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(dialog).toBeInTheDocument();
+    expect(onInitialEmailReviewHandled).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: INITIAL_EMAIL_REVIEW_FINGERPRINT,
+    });
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('consumes but rejects a one-shot Gmail handoff when the loaded quotation fingerprint differs', async () => {
+    const onInitialEmailReviewHandled = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...preparedReadyQuote,
+        quotation_review_fingerprint: 'e'.repeat(64),
+      },
+    });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        initialEmailReviewFingerprint={INITIAL_EMAIL_REVIEW_FINGERPRINT}
+        onInitialEmailReviewHandled={onInitialEmailReviewHandled}
+      />
+    );
+
+    expect(await screen.findByText(/quotation changed before the email review opened/i)).toBeInTheDocument();
+    expect(onInitialEmailReviewHandled).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+  });
+
+  test('suppresses the one-shot preview when a local price changes during its authoritative refresh', async () => {
+    const refreshRequest = deferred();
+    quotationAPI.quotes.retrieve
+      .mockResolvedValueOnce({ data: preparedReadyQuote })
+      .mockReturnValueOnce(refreshRequest.promise);
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        initialEmailReviewFingerprint={INITIAL_EMAIL_REVIEW_FINGERPRINT}
+        onInitialEmailReviewHandled={jest.fn()}
+      />
+    );
+
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    await waitFor(() => expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2));
+    fireEvent.change(priceInput, { target: { value: '11.00' } });
+    await act(async () => {
+      refreshRequest.resolve({ data: preparedReadyQuote });
+      await refreshRequest.promise;
+    });
+
+    expect(await screen.findByText(/quotation lines changed while the email review was being prepared/i)).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
   });
 
   test('shows the saved Brand column and line snapshot when enabled', async () => {

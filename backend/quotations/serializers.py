@@ -12,6 +12,7 @@ from api.upload_validation import validate_image_upload
 from .company_matching import find_similar_companies
 from .gmail_analysis_progress import gmail_analysis_progress_projection
 from .gmail_review_state import (
+    gmail_analysis_generation,
     gmail_identity_review_projection,
     gmail_review_rows_fingerprint,
 )
@@ -24,6 +25,7 @@ from .workflow_features import (
     gmail_analysis_progress_enabled,
     gmail_chained_actions_enabled,
     gmail_review_ui_v2_enabled,
+    gmail_unified_workspace_enabled,
     quotation_workflow_features,
 )
 from .models import (
@@ -276,6 +278,7 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
     identity_review_approved = serializers.SerializerMethodField()
     review_rows_fingerprint = serializers.SerializerMethodField()
     analysis_progress = serializers.SerializerMethodField()
+    analysis_generation = serializers.SerializerMethodField()
 
     class Meta:
         model = GmailInquiryImport
@@ -324,6 +327,7 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
             "identity_review_approved",
             "review_rows_fingerprint",
             "analysis_progress",
+            "analysis_generation",
             "confirmed_at",
             "created_at",
             "updated_at",
@@ -417,6 +421,11 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
         if not gmail_analysis_progress_enabled():
             return None
         return gmail_analysis_progress_projection(obj)
+
+    def get_analysis_generation(self, obj):
+        if not gmail_unified_workspace_enabled():
+            return None
+        return gmail_analysis_generation(obj)
 
 
 class GmailInquiryClaimSerializer(serializers.Serializer):
@@ -555,6 +564,228 @@ class GmailInquiryConfirmSerializer(serializers.Serializer):
         attrs["company"] = company
         attrs["contact"] = contact
         return attrs
+
+
+class GmailUnifiedPreparationRowSerializer(serializers.Serializer):
+    """One explicit employee decision for a server-issued Gmail row."""
+
+    UNCERTAINTY_APPROVE = "approve"
+    UNCERTAINTY_CORRECT = "correct"
+    UNCERTAINTY_EXCLUDE = "exclude"
+    UNCERTAINTY_CHOICES = (
+        (UNCERTAINTY_APPROVE, "Approve"),
+        (UNCERTAINTY_CORRECT, "Correct"),
+        (UNCERTAINTY_EXCLUDE, "Exclude"),
+    )
+    PRODUCT_APPROVE = "approve"
+    PRODUCT_CORRECT = "correct"
+    PRODUCT_EXCLUDE = "exclude"
+    PRODUCT_DECISION_CHOICES = (
+        (PRODUCT_APPROVE, "Approve suggestion"),
+        (PRODUCT_CORRECT, "Choose another existing item"),
+        (PRODUCT_EXCLUDE, "Exclude"),
+    )
+
+    row_key = serializers.CharField(min_length=16, max_length=64)
+    raw_name = serializers.CharField(
+        max_length=255,
+        trim_whitespace=True,
+        allow_blank=True,
+    )
+    quantity = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        min_value=Decimal("0.001"),
+        required=False,
+        allow_null=True,
+    )
+    unit = serializers.CharField(
+        max_length=50,
+        trim_whitespace=True,
+        allow_blank=True,
+    )
+    included = serializers.BooleanField()
+    uncertainty_decision = serializers.ChoiceField(
+        choices=UNCERTAINTY_CHOICES,
+        required=False,
+        allow_null=True,
+    )
+    # Keep the public JSON shape as a nullable integer ID, but defer relation
+    # existence/active validation to the service's in-transaction bulk lookup.
+    # PrimaryKeyRelatedField would issue one SELECT per row before that bounded
+    # validation and materially slow large RFQs.
+    product = serializers.IntegerField(
+        min_value=1,
+        max_value=9223372036854775807,
+        required=False,
+        allow_null=True,
+    )
+    quote_item = serializers.IntegerField(
+        min_value=1,
+        max_value=9223372036854775807,
+        required=False,
+        allow_null=True,
+    )
+    product_decision = serializers.ChoiceField(
+        choices=PRODUCT_DECISION_CHOICES,
+    )
+    match_status = serializers.ChoiceField(
+        choices=(
+            (InquiryLine.MATCH_CONFIRMED, "Confirmed"),
+            (InquiryLine.MATCH_IGNORED, "Ignored"),
+        ),
+    )
+    unit_price = UnitPriceDecimalField(
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0.01"),
+    )
+    vat_rate = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+    )
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            allowed = {
+                "row_key",
+                "raw_name",
+                "quantity",
+                "unit",
+                "included",
+                "uncertainty_decision",
+                "product",
+                "quote_item",
+                "product_decision",
+                "match_status",
+                "unit_price",
+                "vat_rate",
+            }
+            unknown = set(data) - allowed
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        key: "This field is not accepted for quotation preparation."
+                        for key in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
+
+    def validate_vat_rate(self, value):
+        if value not in {Decimal("0.00"), Decimal("5.00")}:
+            raise serializers.ValidationError("VAT must be 0% or 5%.")
+        return value
+
+    def validate(self, attrs):
+        included = attrs["included"]
+        decision = attrs.get("uncertainty_decision")
+        product = attrs.get("product")
+        quote_item = attrs.get("quote_item")
+        match_status = attrs["match_status"]
+        product_decision = attrs["product_decision"]
+        if included:
+            if not attrs.get("raw_name"):
+                raise serializers.ValidationError(
+                    {"raw_name": "Every included row needs an item name."}
+                )
+            if attrs.get("quantity") is None:
+                raise serializers.ValidationError(
+                    {"quantity": "Every included row needs a quantity."}
+                )
+            if not attrs.get("unit"):
+                raise serializers.ValidationError(
+                    {"unit": "Every included row needs a unit."}
+                )
+            if match_status != InquiryLine.MATCH_CONFIRMED:
+                raise serializers.ValidationError(
+                    {"match_status": "Included rows require an explicit confirmed Product decision."}
+                )
+            if bool(product) == bool(quote_item):
+                raise serializers.ValidationError(
+                    {"product": "Choose exactly one existing Product or quotation item."}
+                )
+            if product_decision not in {
+                self.PRODUCT_APPROVE,
+                self.PRODUCT_CORRECT,
+            }:
+                raise serializers.ValidationError(
+                    {"product_decision": "Included rows require an explicit Product approval or correction."}
+                )
+            if decision == self.UNCERTAINTY_EXCLUDE:
+                raise serializers.ValidationError(
+                    {"uncertainty_decision": "An excluded decision cannot include the row."}
+                )
+        else:
+            if match_status != InquiryLine.MATCH_IGNORED:
+                raise serializers.ValidationError(
+                    {"match_status": "Excluded rows must be ignored."}
+                )
+            if product or quote_item:
+                raise serializers.ValidationError(
+                    {"product": "Excluded rows cannot save a Product decision."}
+                )
+            if product_decision != self.PRODUCT_EXCLUDE:
+                raise serializers.ValidationError(
+                    {"product_decision": "Excluded rows require the exclude Product decision."}
+                )
+            if attrs.get("unit_price") is not None:
+                raise serializers.ValidationError(
+                    {"unit_price": "Excluded rows cannot save a selling price."}
+                )
+            if decision not in {None, self.UNCERTAINTY_EXCLUDE}:
+                raise serializers.ValidationError(
+                    {"uncertainty_decision": "Excluded rows must use the exclude decision."}
+                )
+        return attrs
+
+
+class GmailInquiryConfirmAndPrepareSerializer(serializers.Serializer):
+    expected_source_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    expected_analysis_attempt = serializers.IntegerField(min_value=0)
+    expected_analysis_generation = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    expected_review_rows_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    rows = GmailUnifiedPreparationRowSerializer(
+        many=True,
+        allow_empty=False,
+        max_length=5000,
+    )
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            allowed = {
+                "expected_source_fingerprint",
+                "expected_analysis_attempt",
+                "expected_analysis_generation",
+                "expected_review_rows_fingerprint",
+                "identity_review_fingerprint",
+                "rows",
+            }
+            unknown = set(data) - allowed
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        key: "This field is not accepted for quotation preparation."
+                        for key in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
 
 
 class GmailInquiryApproveCompanySerializer(serializers.Serializer):

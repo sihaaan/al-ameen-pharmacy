@@ -17,6 +17,7 @@ jest.mock('../../api/quotations', () => ({
   default: {
     companies: {
       list: jest.fn(),
+      priceHistory: jest.fn(),
     },
     contacts: {
       list: jest.fn(),
@@ -29,7 +30,16 @@ jest.mock('../../api/quotations', () => ({
       analyze: jest.fn(),
       approveCompany: jest.fn(),
       confirm: jest.fn(),
+      confirmAndPrepareQuotation: jest.fn(),
       attachment: jest.fn(),
+    },
+    items: {
+      list: jest.fn(),
+    },
+    quotes: {
+      finalize: jest.fn(),
+      sendEmail: jest.fn(),
+      emailPreview: jest.fn(),
     },
   },
   describeQuotationError: jest.fn(async (error, action, endpoint) => ({
@@ -213,6 +223,39 @@ const chainedRecord = (source = reviewedRecord, overrides = {}) => ({
   ...overrides,
 });
 
+const UNIFIED_ANALYSIS_GENERATION = '1'.repeat(64);
+const UNIFIED_QUOTATION_FINGERPRINT = '2'.repeat(64);
+const unifiedRecord = (overrides = {}) => ({
+  ...baseRecord,
+  company: 7,
+  contact: 8,
+  source_fingerprint: CHAIN_SOURCE_BEFORE,
+  analysis_attempts: 2,
+  analysis_generation: UNIFIED_ANALYSIS_GENERATION,
+  review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+  identity_review_approved: true,
+  identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+  workflow_features: {
+    gmail_review_ui_v2: true,
+    gmail_chained_actions: true,
+    gmail_unified_workspace: true,
+  },
+  analysis: {
+    ...baseRecord.analysis,
+    preview: {
+      ...baseRecord.analysis.preview,
+      lines: [{
+        ...baseRecord.analysis.preview.lines[0],
+        matched_product: 11,
+        matched_product_id: 11,
+        matched_product_name: 'Bandage Roll',
+        matched_quote_item_name: '',
+      }],
+    },
+  },
+  ...overrides,
+});
+
 const analysisProgress = (state = 'running', overrides = {}) => ({
   version: 'gmail_analysis_progress_v1',
   state,
@@ -252,6 +295,13 @@ describe('GmailInquiryReview', () => {
     quotationAPI.companies.list.mockResolvedValue({
       data: [{ id: 7, name: 'Example Medical' }],
     });
+    quotationAPI.companies.priceHistory.mockResolvedValue({ data: [] });
+    quotationAPI.items.list.mockResolvedValue({
+      data: [
+        { id: 11, name: 'Bandage Roll', unit: 'Pcs' },
+        { id: 12, name: 'Sterile Bandage Product', unit: 'Pcs' },
+      ],
+    });
     quotationAPI.contacts.list.mockResolvedValue({
       data: [{ id: 8, name: 'Celine', email: 'buyer@example.com', company: 7 }],
     });
@@ -288,6 +338,25 @@ describe('GmailInquiryReview', () => {
         quotation_id: 99,
       },
     });
+    quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation.mockResolvedValue({
+      data: {
+        gmail_import: {
+          ...unifiedRecord(),
+          status: 'confirmed',
+          quotation: 99,
+        },
+        quotation: {
+          id: 99,
+          quotation_review_fingerprint: UNIFIED_QUOTATION_FINGERPRINT,
+        },
+        quotation_review_fingerprint: UNIFIED_QUOTATION_FINGERPRINT,
+        created: true,
+        prepared: true,
+        prepared_for_preview: true,
+        preparation_reused: false,
+        reused_reason: '',
+      },
+    });
     quotationAPI.gmailInquiryImports.attachment.mockResolvedValue({
       data: new Blob(['pdf'], { type: 'application/pdf' }),
       headers: { 'content-type': 'application/pdf' },
@@ -297,6 +366,270 @@ describe('GmailInquiryReview', () => {
   test('adapts wrapped records and scalar quotation IDs', () => {
     expect(gmailImportRecordFromPayload({ data: { gmail_import: baseRecord } })).toBe(baseRecord);
     expect(quotationIdFromGmailImportPayload({ data: { ...baseRecord, quotation: 99 } })).toBe(99);
+  });
+
+  test('keeps customer budget evidence separate from the blank employee selling price and loads history only on request', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    quotationAPI.companies.priceHistory.mockResolvedValueOnce({
+      data: [{
+        id: 5,
+        unit_price: '4.75',
+        currency: 'AED',
+        quotation_number: 'QT-OLD',
+        quoted_at: '2026-01-01T00:00:00Z',
+      }],
+    });
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={jest.fn()} />);
+
+    expect(await screen.findByRole('heading', { name: '2. Review request and price quotation' })).toBeInTheDocument();
+    expect(screen.getByText('5.50 (currency not stated)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Our unit price row 1')).toHaveValue(null);
+    expect(quotationAPI.companies.priceHistory).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve suggestion' }));
+    expect(screen.getByLabelText('Our unit price row 1')).toHaveValue(null);
+    fireEvent.click(screen.getByRole('button', { name: 'View price history row 1' }));
+
+    await waitFor(() => expect(quotationAPI.companies.priceHistory).toHaveBeenCalledWith('7', {
+      product: '11',
+    }));
+    expect(await screen.findByText('AED 4.75')).toBeInTheDocument();
+    expect(screen.getByLabelText('Our unit price row 1')).toHaveValue(null);
+  });
+
+  test('fails closed before preparation when the analysis-attempt binding is absent', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: unifiedRecord({ analysis_attempts: null }),
+    });
+    render(<GmailInquiryReview importId="31" onOpenQuote={jest.fn()} />);
+
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    expect(screen.getByRole('button', { name: 'Review Email' })).toBeDisabled();
+    expect(screen.getByText(/refresh this review to obtain current safety fingerprints/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).not.toHaveBeenCalled();
+  });
+
+  test('clears Product approval and employee price when customer identity context changes', async () => {
+    quotationAPI.companies.list.mockResolvedValueOnce({
+      data: [
+        { id: 7, name: 'Example Medical' },
+        { id: 9, name: 'Different Customer' },
+      ],
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({
+      data: unifiedRecord({
+        company: 9,
+        contact: null,
+        identity_review_approved: false,
+      }),
+    });
+    render(<GmailInquiryReview importId="31" onOpenQuote={jest.fn()} />);
+
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve suggestion' }));
+    fireEvent.change(screen.getByLabelText('Our unit price row 1'), {
+      target: { value: '6.25' },
+    });
+    expect(screen.getByLabelText('Product decision row 1')).toHaveValue('11');
+    expect(screen.getByLabelText('Our unit price row 1')).toHaveValue(6.25);
+
+    fireEvent.change(screen.getByLabelText('Company'), { target: { value: '9' } });
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      company: '9',
+      contact: null,
+    }));
+    expect(screen.getByLabelText('Product decision row 1')).toHaveValue('');
+    expect(screen.getByLabelText('Our unit price row 1')).toHaveValue(null);
+    expect(screen.getByText('Suggestion from a different company context')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve suggestion' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Product decision row 1'), {
+      target: { value: '11' },
+    });
+    expect(screen.getByText('Existing Product selected')).toBeInTheDocument();
+    expect(screen.getByLabelText('Our unit price row 1')).toHaveValue(null);
+    expect(screen.getByRole('button', { name: 'Review Email' })).toBeDisabled();
+  });
+
+  test('atomically prepares approved suggestions and hands one exact fingerprint to the existing editor without sending', async () => {
+    const onOpenQuote = jest.fn();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve suggestion' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve as extracted' }));
+    fireEvent.change(screen.getByLabelText('Our unit price row 1'), {
+      target: { value: '6.250' },
+    });
+    fireEvent.change(screen.getByLabelText('VAT row 1'), { target: { value: '5' } });
+
+    const reviewEmailButton = screen.getByRole('button', { name: 'Review Email' });
+    await waitFor(() => expect(reviewEmailButton).toBeEnabled());
+    fireEvent.click(reviewEmailButton);
+
+    await waitFor(() => expect(
+      quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation
+    ).toHaveBeenCalledWith(31, {
+      expected_source_fingerprint: CHAIN_SOURCE_BEFORE,
+      expected_analysis_attempt: 2,
+      expected_analysis_generation: UNIFIED_ANALYSIS_GENERATION,
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+      rows: [{
+        row_key: 'row-key-000000000001',
+        raw_name: 'Bandage',
+        quantity: '10.000',
+        unit: 'Pcs',
+        included: true,
+        product_decision: 'approve',
+        uncertainty_decision: 'approve',
+        product: '11',
+        quote_item: null,
+        match_status: 'confirmed',
+        unit_price: '6.250',
+        vat_rate: '5.00',
+      }],
+    }));
+    const sentPayload = quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation.mock.calls[0][1];
+    expect(JSON.stringify(sentPayload)).not.toMatch(/customer_(unit_)?price|budget/i);
+    expect(onOpenQuote).toHaveBeenCalledWith(99, {
+      reviewEmail: true,
+      quotationReviewFingerprint: UNIFIED_QUOTATION_FINGERPRINT,
+    });
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+  });
+
+  test('requires an explicit different existing Product and substantive uncertainty correction', async () => {
+    const onOpenQuote = jest.fn();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    await waitFor(() => expect(screen.getByLabelText('Product decision row 1')).toBeEnabled());
+    fireEvent.change(screen.getByLabelText('Product decision row 1'), { target: { value: '12' } });
+    fireEvent.change(screen.getByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    fireEvent.change(screen.getByLabelText('Our unit price row 1'), {
+      target: { value: '7.00' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Review Email' }));
+
+    await waitFor(() => expect(
+      quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation
+    ).toHaveBeenCalled());
+    const row = quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation.mock.calls[0][1].rows[0];
+    expect(row).toEqual(expect.objectContaining({
+      raw_name: 'Sterile Bandage',
+      product: '12',
+      quote_item: null,
+      product_decision: 'correct',
+      uncertainty_decision: 'correct',
+      unit_price: '7.00',
+    }));
+  });
+
+  test('requires a fresh explicit uncertainty approval after an edit is reverted', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    render(<GmailInquiryReview importId="31" onOpenQuote={jest.fn()} />);
+
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve suggestion' }));
+    fireEvent.change(screen.getByLabelText('Our unit price row 1'), {
+      target: { value: '7.00' },
+    });
+    fireEvent.change(screen.getByLabelText('Requested item row 1'), {
+      target: { value: 'Sterile Bandage' },
+    });
+    expect(screen.getByText('Corrected by staff')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Requested item row 1'), {
+      target: { value: 'Bandage' },
+    });
+    expect(screen.getByRole('button', { name: 'Approve as extracted' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review Email' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve as extracted' }));
+    await waitFor(() => expect(
+      screen.getByRole('button', { name: 'Review Email' })
+    ).toBeEnabled());
+  });
+
+  test('locks synchronous double clicks and never auto-previews an inconsistent reused response', async () => {
+    const onOpenQuote = jest.fn();
+    const preparation = deferred();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation.mockReturnValueOnce(preparation.promise);
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve suggestion' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve as extracted' }));
+    fireEvent.change(screen.getByLabelText('Our unit price row 1'), { target: { value: '6.25' } });
+    const reviewEmailButton = screen.getByRole('button', { name: 'Review Email' });
+    fireEvent.click(reviewEmailButton);
+    fireEvent.click(reviewEmailButton);
+    expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).toHaveBeenCalledTimes(1);
+
+    preparation.resolve({
+      data: {
+        gmail_import: { ...unifiedRecord(), status: 'confirmed', quotation: 99 },
+        quotation: { id: 99, quotation_review_fingerprint: UNIFIED_QUOTATION_FINGERPRINT },
+        quotation_review_fingerprint: UNIFIED_QUOTATION_FINGERPRINT,
+        created: false,
+        prepared: false,
+        // Even a contradictory preview hint cannot bypass the complete
+        // one-request grant required by the frontend.
+        prepared_for_preview: true,
+        preparation_reused: true,
+        reused_reason: 'same_preparation',
+      },
+    });
+
+    await waitFor(() => expect(onOpenQuote).toHaveBeenCalledWith(99));
+    expect(onOpenQuote.mock.calls[0]).toHaveLength(1);
+  });
+
+  test('fails closed on a stale unified preparation and preserves the old workflow unless the flag is boolean true', async () => {
+    const onOpenQuote = jest.fn();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: unifiedRecord() });
+    quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation.mockRejectedValueOnce(Object.assign(
+      new Error('The Gmail review changed. Refresh and try again.'),
+      { response: { status: 409 } }
+    ));
+    const { unmount } = render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+    await screen.findByRole('heading', { name: '2. Review request and price quotation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve suggestion' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve as extracted' }));
+    fireEvent.change(screen.getByLabelText('Our unit price row 1'), { target: { value: '6.25' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Review Email' }));
+    await waitFor(() => expect(describeQuotationError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Prepare Gmail quotation and review email',
+      'POST /quotations/gmail-inquiry-imports/31/confirm_and_prepare_quotation/'
+    ));
+    expect(onOpenQuote).not.toHaveBeenCalled();
+    unmount();
+
+    jest.clearAllMocks();
+    quotationAPI.companies.list.mockResolvedValue({ data: [{ id: 7, name: 'Example Medical' }] });
+    quotationAPI.contacts.list.mockResolvedValue({ data: [] });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: {
+        ...reviewedRecord,
+        workflow_features: { gmail_unified_workspace: 'true' },
+      },
+    });
+    render(<GmailInquiryReview importId="31" onOpenQuote={jest.fn()} />);
+    expect(await screen.findByRole('heading', { name: '2. Review extracted request lines' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm & Open Quotation' })).toBeInTheDocument();
+    expect(quotationAPI.items.list).not.toHaveBeenCalled();
+    expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).not.toHaveBeenCalled();
   });
 
   test('reviews evidence, saves exact row edits, then confirms and opens the returned quotation', async () => {

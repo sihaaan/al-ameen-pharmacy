@@ -10,6 +10,7 @@ WORKFLOW_FEATURE_SETTINGS = {
         "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED"
     ),
     "gmail_analysis_progress": "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
+    "gmail_unified_workspace": "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
 }
 
 
@@ -27,6 +28,13 @@ def quotation_workflow_features():
         features["gmail_chained_actions"]
         and features["gmail_review_ui_v2"]
     )
+    # Unified preparation depends on the persisted, evidence-bound company
+    # approval introduced by review UI V2. Never expose a partially enabled
+    # endpoint that could fall back to browser-only identity state.
+    features["gmail_unified_workspace"] = bool(
+        features["gmail_unified_workspace"]
+        and features["gmail_review_ui_v2"]
+    )
     return features
 
 
@@ -40,3 +48,7 @@ def gmail_chained_actions_enabled():
 
 def gmail_analysis_progress_enabled():
     return quotation_workflow_features()["gmail_analysis_progress"]
+
+
+def gmail_unified_workspace_enabled():
+    return quotation_workflow_features()["gmail_unified_workspace"]

@@ -97,6 +97,7 @@ ALLOWED_COUNT_KEYS = frozenset(
         "attachment_count",
         "included_row_count",
         "message_count",
+        "priced_row_count",
         "reviewed_row_count",
         "selected_message_count",
         "send_attempt_count",

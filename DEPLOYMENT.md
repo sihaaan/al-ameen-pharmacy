@@ -348,6 +348,44 @@ Prefer a schema-compatible application rollback that retains `0040`. Reversing
 newer application instance can query the fields and after active analyses have
 finished.
 
+### Unified Gmail quotation workspace (disabled by default)
+
+`QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED=0` preserves the existing Gmail
+review followed by the separate quotation editor. The server projects the
+feature as enabled only when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is also
+strictly enabled. With both flags enabled, staff may call
+`POST /gmail-inquiry-imports/{id}/confirm_and_prepare_quotation/` with the
+complete current source, analysis-attempt/generation, reviewed-row, and
+identity-approval bindings plus an explicit decision for every row.
+
+The action accepts only existing Product/quotation-item decisions and nullable
+employee-entered selling prices. Customer budget/source prices are never read
+as selling prices; historical prices are not inserted; Product and alias rows
+are never created. Every included row needs current server-owned evidence,
+every uncertain row needs approve/correct/exclude, and every Product
+suggestion needs a separate approve/correct decision. It creates the inquiry
+and draft quotation atomically under the existing Gmail lock order, never
+finalizes, previews, or sends email, and returns a separately locked coherent
+quotation plus its current review fingerprint. Only a newly created response
+is eligible for the frontend to request the existing secure preview. Exact
+double clicks and already-confirmed sibling imports reuse the quotation without
+reapplying prices or Product decisions.
+
+Product suggestions are bound to the company context that produced them. If
+staff correct the company, the server will not accept an approval of the old
+company-specific suggestion; the employee must explicitly correct the Product
+decision, and the saved rationale records that correction without learning an
+alias.
+
+No migration, OAuth scope, provider, worker, or infrastructure change is
+required. Deploy with the flag at `0`, verify the legacy route, then enable it
+only after review UI V2 in a controlled staging or canary environment. This is
+an instance-wide boolean and affects all quotation staff on that instance; it
+does not provide per-user or per-mailbox cohort targeting. Roll back
+immediately by setting the unified-workspace flag to `0`; the old Gmail review
+and quotation editor remain available, and already-created drafts require no
+data reversal.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current
