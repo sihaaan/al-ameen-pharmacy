@@ -10,6 +10,7 @@ from api.serializers import ProductListSerializer
 from api.upload_validation import validate_image_upload
 
 from .company_matching import find_similar_companies
+from .gmail_analysis_progress import gmail_analysis_progress_projection
 from .gmail_review_state import (
     gmail_identity_review_projection,
     gmail_review_rows_fingerprint,
@@ -20,6 +21,7 @@ from .private_storage import is_valid_private_ref
 from .quotation_email_delivery import quotation_review_fingerprint
 from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
 from .workflow_features import (
+    gmail_analysis_progress_enabled,
     gmail_chained_actions_enabled,
     gmail_review_ui_v2_enabled,
     quotation_workflow_features,
@@ -273,6 +275,7 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
     identity_review_fingerprint = serializers.SerializerMethodField()
     identity_review_approved = serializers.SerializerMethodField()
     review_rows_fingerprint = serializers.SerializerMethodField()
+    analysis_progress = serializers.SerializerMethodField()
 
     class Meta:
         model = GmailInquiryImport
@@ -320,6 +323,7 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
             "identity_review_fingerprint",
             "identity_review_approved",
             "review_rows_fingerprint",
+            "analysis_progress",
             "confirmed_at",
             "created_at",
             "updated_at",
@@ -408,6 +412,11 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
 
     def get_review_rows_fingerprint(self, obj):
         return gmail_review_rows_fingerprint(obj)
+
+    def get_analysis_progress(self, obj):
+        if not gmail_analysis_progress_enabled():
+            return None
+        return gmail_analysis_progress_projection(obj)
 
 
 class GmailInquiryClaimSerializer(serializers.Serializer):

@@ -104,6 +104,31 @@ Monitor editor load/render errors and time-to-interactive during rollout. Set
 the flag to `0` for immediate rollback. No migration or stored-data reversal is
 required.
 
+### Content-free Gmail analysis progress
+
+`QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED` is disabled by default. After
+additive migration `0040`, enabling it records monotonic stages for the current
+attempt and opaque source generation while the existing synchronous analyzer
+runs. Reloaded review pages can read the safe state from
+`GET /gmail-inquiry-imports/{id}/analysis_progress/`; the response is private,
+no-store, contains no content or source counts, and follows the existing import
+access policy.
+
+Monitor time spent in each bounded stage, terminal safe failure categories,
+and imports that remain running beyond the existing stale-analysis window.
+Never infer customer or document details from progress telemetry. A stale
+attempt, source fingerprint, or opaque generation cannot update a newer
+analysis. Source-selection changes clear progress, and completed/failed
+progress is persisted in the same transaction as the final import state.
+
+Rollback by setting the flag to `0`; do not reverse `0040` during an active
+analysis or while the new application is running. The endpoint becomes
+unavailable immediately, while an analysis that already owns an opaque
+generation is still allowed to persist its terminal success/failure state. No
+worker service, provider,
+OAuth scope, AI model, prompt, email action, or infrastructure setting is added
+by this phase.
+
 ## 2. Roles and access
 
 | Operation | Required identity/control |

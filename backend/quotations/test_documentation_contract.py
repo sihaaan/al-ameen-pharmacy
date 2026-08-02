@@ -204,6 +204,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
             "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
             "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
+            "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -263,6 +264,20 @@ class DocumentationContractTests(SimpleTestCase):
             self.assertIn("no migration", content.lower())
         self.assertIn("change quotation data", deployment)
         self.assertIn("independently", operations)
+
+    def test_gmail_analysis_progress_contract_is_private_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED", content)
+            self.assertIn("0040", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no-store", content.lower())
+            self.assertIn("synchronous", content.lower())
+        self.assertIn("gmail_analysis_progress_v1", deployment)
+        self.assertIn("/analysis_progress/", deployment)
+        self.assertIn("never contains Gmail identifiers", deployment)
+        self.assertIn("Source-selection changes clear progress", operations)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

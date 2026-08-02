@@ -6209,6 +6209,23 @@
   font-weight: 700;
 }
 
+.qm-gmail-analysis-live-stage {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.qm-gmail-live-status-label {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  white-space: nowrap;
+}
+
+.qm-gmail-analysis-safe-failure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .qm-gmail-progress-track {
   overflow: hidden;
   height: 8px;

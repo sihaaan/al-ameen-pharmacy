@@ -9,6 +9,7 @@ WORKFLOW_FEATURE_SETTINGS = {
     "quotation_editor_progressive_load": (
         "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED"
     ),
+    "gmail_analysis_progress": "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
 }
 
 
@@ -35,3 +36,7 @@ def gmail_review_ui_v2_enabled():
 
 def gmail_chained_actions_enabled():
     return quotation_workflow_features()["gmail_chained_actions"]
+
+
+def gmail_analysis_progress_enabled():
+    return quotation_workflow_features()["gmail_analysis_progress"]

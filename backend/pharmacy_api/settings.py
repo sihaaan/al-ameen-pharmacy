@@ -400,6 +400,11 @@ QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED = env_bool(
     "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
     False,
 )
+# Optional content-free progress projection for synchronous Gmail analysis.
+QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

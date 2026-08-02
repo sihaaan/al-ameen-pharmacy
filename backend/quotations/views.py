@@ -80,6 +80,7 @@ from .gmail_inquiry_import import (
     confirm_gmail_inquiry_import,
     refresh_gmail_inquiry_identity_candidates,
 )
+from .gmail_analysis_progress import gmail_analysis_progress_projection
 from .gmail_workflow_metrics import (
     EVENT_COMPANY_APPROVED,
     EVENT_EMAIL_PREVIEW_OPENED,
@@ -97,6 +98,7 @@ from .gmail_workflow_metrics import (
 )
 from .import_parsers import parse_file_preview, parse_text_preview
 from .workflow_features import (
+    gmail_analysis_progress_enabled,
     gmail_chained_actions_enabled,
     gmail_review_ui_v2_enabled,
 )
@@ -1934,6 +1936,17 @@ class GmailInquiryImportViewSet(
         return Response(
             self.get_serializer(gmail_import).data
         )
+
+    @action(detail=True, methods=["get"], url_path="analysis_progress")
+    def analysis_progress(self, request, pk=None):
+        if not gmail_analysis_progress_enabled():
+            raise Http404
+        gmail_import = self.get_object()
+        response = Response(gmail_analysis_progress_projection(gmail_import))
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        response["Pragma"] = "no-cache"
+        response["Expires"] = "0"
+        return response
 
     @action(detail=False, methods=["post"])
     def claim(self, request):

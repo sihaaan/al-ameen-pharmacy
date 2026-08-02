@@ -102,6 +102,9 @@ const quotationAPI = {
   gmailInquiryImports: {
     claim: (token) => axiosInstance.post('/quotations/gmail-inquiry-imports/claim/', { handoff_token: token }),
     retrieve: (id) => axiosInstance.get(`/quotations/gmail-inquiry-imports/${id}/`),
+    analysisProgress: (id) => axiosInstance.get(
+      `/quotations/gmail-inquiry-imports/${id}/analysis_progress/`
+    ),
     update: (id, data) => axiosInstance.patch(`/quotations/gmail-inquiry-imports/${id}/`, data),
     analyze: (id, data = {}) => axiosInstance.post(`/quotations/gmail-inquiry-imports/${id}/analyze/`, data),
     approveCompany: (id, data) => axiosInstance.post(

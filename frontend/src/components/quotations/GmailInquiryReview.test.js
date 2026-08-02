@@ -24,6 +24,7 @@ jest.mock('../../api/quotations', () => ({
     gmailInquiryImports: {
       claim: jest.fn(),
       retrieve: jest.fn(),
+      analysisProgress: jest.fn(),
       update: jest.fn(),
       analyze: jest.fn(),
       approveCompany: jest.fn(),
@@ -212,6 +213,39 @@ const chainedRecord = (source = reviewedRecord, overrides = {}) => ({
   ...overrides,
 });
 
+const analysisProgress = (state = 'running', overrides = {}) => ({
+  version: 'gmail_analysis_progress_v1',
+  state,
+  stage: state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : 'preparing',
+  attempt: 1,
+  source_generation: 'progress-generation-1',
+  safe_error_category: '',
+  started_at: null,
+  updated_at: null,
+  completed_at: null,
+  retryable: false,
+  ...overrides,
+});
+
+const withAnalysisProgress = (source = baseRecord, progress = analysisProgress()) => ({
+  ...source,
+  workflow_features: {
+    ...(source.workflow_features || {}),
+    gmail_analysis_progress: true,
+  },
+  analysis_progress: progress,
+});
+
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+};
+
 describe('GmailInquiryReview', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -222,6 +256,20 @@ describe('GmailInquiryReview', () => {
       data: [{ id: 8, name: 'Celine', email: 'buyer@example.com', company: 7 }],
     });
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValue({ data: baseRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockResolvedValue({
+      data: {
+        version: 'gmail_analysis_progress_v1',
+        state: 'running',
+        stage: 'preparing',
+        attempt: 1,
+        source_generation: 'default-progress-generation',
+        safe_error_category: '',
+        started_at: null,
+        updated_at: null,
+        completed_at: null,
+        retryable: false,
+      },
+    });
     quotationAPI.gmailInquiryImports.update.mockResolvedValue({ data: reviewedRecord });
     quotationAPI.gmailInquiryImports.analyze.mockResolvedValue({ data: reviewedRecord });
     quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValue({
@@ -1654,5 +1702,662 @@ describe('GmailInquiryReview', () => {
     });
 
     expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+  });
+
+  test('polls a first strict analysis immediately and binds the first new attempt and generation atomically', async () => {
+    jest.useFakeTimers();
+    const analysisRequest = deferred();
+    const claimedRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('idle', {
+      stage: '',
+      attempt: 0,
+      source_generation: '',
+    }));
+    const completedRecord = withAnalysisProgress(reviewedRecord, analysisProgress('completed', {
+      attempt: 1,
+      source_generation: 'first-live-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: claimedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: claimedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(analysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress
+      .mockResolvedValueOnce({
+        data: analysisProgress('completed', {
+          attempt: 0,
+          source_generation: 'old-generation',
+        }),
+      })
+      .mockResolvedValueOnce({
+        data: analysisProgress('running', {
+          stage: 'fetching_messages',
+          attempt: 1,
+          source_generation: 'first-live-generation',
+        }),
+      });
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledTimes(1);
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledWith('31');
+      expect(screen.getByText('Waiting for live analysis status')).toBeInTheDocument();
+      expect(screen.queryByText('Analysis ready')).not.toBeInTheDocument();
+      expect(screen.queryByText(/usually takes 15.*30 seconds/i)).not.toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText('Reading selected messages')).toBeInTheDocument();
+
+      await act(async () => analysisRequest.resolve({ data: completedRecord }));
+      expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+      expect(screen.queryByText('Old generation result')).not.toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('ignores the preceding generation during strict reanalysis and binds only the next attempt', async () => {
+    jest.useFakeTimers();
+    const analysisRequest = deferred();
+    const failedRecord = withAnalysisProgress(baseRecord, analysisProgress('failed', {
+      attempt: 2,
+      source_generation: 'previous-generation',
+      safe_error_category: 'ai_analysis_failed',
+      retryable: true,
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(analysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress
+      .mockResolvedValueOnce({
+        data: analysisProgress('completed', {
+          attempt: 2,
+          source_generation: 'previous-generation',
+        }),
+      })
+      .mockResolvedValueOnce({
+        data: analysisProgress('running', {
+          stage: 'analyzing_with_ai',
+          attempt: 3,
+          source_generation: 'next-generation',
+        }),
+      });
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Retry analysis' }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText('Analysis ready')).not.toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText('Analyzing request')).toBeInTheDocument();
+
+      await act(async () => analysisRequest.resolve({
+        data: withAnalysisProgress(reviewedRecord, analysisProgress('completed', {
+          attempt: 3,
+          source_generation: 'next-generation',
+        })),
+      }));
+      expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('ignores an older analyze response after import replacement without stopping the newer poll', async () => {
+    const oldAnalysisRequest = deferred();
+    const oldProgressRequest = deferred();
+    const newProgressRequest = deferred();
+    const oldClaimedRecord = withAnalysisProgress({
+      ...baseRecord,
+      id: 31,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('idle', {
+      stage: '',
+      attempt: 0,
+      source_generation: '',
+    }));
+    const newRunningRecord = withAnalysisProgress({
+      ...baseRecord,
+      id: 32,
+      status: 'analyzing',
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('running', {
+      stage: 'fetching_messages',
+      attempt: 4,
+      source_generation: 'new-import-generation',
+    }));
+    const oldCompletedRecord = withAnalysisProgress({
+      ...reviewedRecord,
+      id: 31,
+      analysis: {
+        ...reviewedRecord.analysis,
+        preview: {
+          ...reviewedRecord.analysis.preview,
+          lines: [{
+            ...reviewedRecord.analysis.preview.lines[0],
+            raw_name: 'OLD IMPORT RESULT',
+          }],
+        },
+      },
+    }, analysisProgress('completed', {
+      attempt: 1,
+      source_generation: 'old-import-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: oldClaimedRecord })
+      .mockResolvedValueOnce({ data: newRunningRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: oldClaimedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(oldAnalysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress
+      .mockReturnValueOnce(oldProgressRequest.promise)
+      .mockReturnValueOnce(newProgressRequest.promise);
+
+    const { rerender } = render(<GmailInquiryReview importId="31" />);
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analyze).toHaveBeenCalledWith(31, {
+      force: false,
+    }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledWith('31'));
+
+    rerender(<GmailInquiryReview importId="32" />);
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledWith('32'));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledWith('32'));
+
+    await act(async () => {
+      oldAnalysisRequest.resolve({ data: oldCompletedRecord });
+      oldProgressRequest.resolve({ data: oldCompletedRecord.analysis_progress });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByDisplayValue('OLD IMPORT RESULT')).not.toBeInTheDocument();
+
+    await act(async () => {
+      newProgressRequest.resolve({
+        data: analysisProgress('running', {
+          stage: 'fetching_attachments',
+          attempt: 4,
+          source_generation: 'new-import-generation',
+        }),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Retrieving attachments')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue('OLD IMPORT RESULT')).not.toBeInTheDocument();
+  });
+
+  test('resumes strict progress after reload and retrieves the full record once on completion', async () => {
+    const runningRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'analyzing',
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('running', {
+      stage: 'validating_evidence',
+      attempt: 4,
+      source_generation: 'reload-generation',
+    }));
+    const completedRecord = withAnalysisProgress(reviewedRecord, analysisProgress('completed', {
+      attempt: 4,
+      source_generation: 'reload-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: runningRecord })
+      .mockResolvedValueOnce({ data: completedRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockResolvedValueOnce({
+      data: completedRecord.analysis_progress,
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledWith('31');
+    expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.gmailInquiryImports.analyze).not.toHaveBeenCalled();
+  });
+
+  test('keeps polling when a completed strict status is followed by a mismatched full record', async () => {
+    jest.useFakeTimers();
+    const runningRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'analyzing',
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('running', {
+      attempt: 5,
+      source_generation: 'bound-generation',
+    }));
+    const mismatchedRecord = withAnalysisProgress(reviewedRecord, analysisProgress('completed', {
+      attempt: 5,
+      source_generation: 'other-generation',
+    }));
+    const matchingRecord = withAnalysisProgress(reviewedRecord, analysisProgress('completed', {
+      attempt: 5,
+      source_generation: 'bound-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: runningRecord })
+      .mockResolvedValueOnce({ data: mismatchedRecord })
+      .mockResolvedValueOnce({ data: matchingRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockResolvedValue({
+      data: matchingRecord.analysis_progress,
+    });
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.queryByDisplayValue('Sterile Bandage')).not.toBeInTheDocument();
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('maps strict failure categories without exposing backend content and preserves existing rows', async () => {
+    const runningRecord = withAnalysisProgress({
+      ...reviewedRecord,
+      status: 'analyzing',
+    }, analysisProgress('running', {
+      attempt: 6,
+      source_generation: 'failure-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: runningRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockResolvedValueOnce({
+      data: analysisProgress('failed', {
+        attempt: 6,
+        source_generation: 'failure-generation',
+        safe_error_category: 'gmail_fetch_failed',
+        retryable: true,
+        detail: 'buyer@example.com secret subject raw backend trace',
+      }),
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByText(/selected Gmail messages could not be retrieved/i)).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Sterile Bandage')).toBeDisabled();
+    expect(screen.queryByText(/buyer@example.com secret subject raw backend trace/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry analysis' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm & Open Quotation' })).toBeDisabled();
+  });
+
+  test('retries transient strict progress polls without clearing current review content', async () => {
+    jest.useFakeTimers();
+    const runningRecord = withAnalysisProgress({
+      ...reviewedRecord,
+      status: 'analyzing',
+    }, analysisProgress('running', {
+      attempt: 7,
+      source_generation: 'transient-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: runningRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress
+      .mockRejectedValueOnce(new Error('buyer@example.com network detail'))
+      .mockRejectedValueOnce(Object.assign(new Error('Rate limited'), {
+        response: { status: 429 },
+      }))
+      .mockRejectedValueOnce(Object.assign(new Error('Temporary server error'), {
+        response: { status: 503 },
+      }))
+      .mockResolvedValueOnce({
+        data: analysisProgress('running', {
+          stage: 'inspecting_documents',
+          attempt: 7,
+          source_generation: 'transient-generation',
+        }),
+      });
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+      expect(screen.queryByText(/buyer@example.com network detail/i)).not.toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(2);
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(3);
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(700);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(4);
+      expect(screen.getByText('Inspecting documents')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('stops strict polling and surfaces a nonrecoverable analyze request error', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const analysisRequest = deferred();
+    const progressRequest = deferred();
+    const failedRecord = withAnalysisProgress(baseRecord, analysisProgress('failed', {
+      attempt: 9,
+      source_generation: 'request-error-generation',
+      safe_error_category: 'ai_analysis_failed',
+      retryable: true,
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: failedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(analysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(progressRequest.promise);
+
+    render(<GmailInquiryReview importId="31" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry analysis' }));
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1));
+    await act(async () => analysisRequest.reject(
+      Object.assign(new Error('The selected source is no longer valid.'), {
+        response: { status: 403 },
+      })
+    ));
+
+    await waitFor(() => expect(describeQuotationError).toHaveBeenCalledWith(
+      expect.objectContaining({ response: { status: 403 } }),
+      'Reanalyze Gmail inquiry',
+      'POST /quotations/gmail-inquiry-imports/31/analyze/'
+    ));
+    expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+    await act(async () => progressRequest.resolve({
+      data: analysisProgress('running', {
+        stage: 'saving_results',
+        attempt: 10,
+        source_generation: 'request-error-generation-next',
+      }),
+    }));
+    expect(screen.queryByText('Saving review results')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry analysis' })).toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
+  test('stops a nonretryable strict progress authorization failure without clearing rows', async () => {
+    jest.useFakeTimers();
+    const runningRecord = withAnalysisProgress({
+      ...reviewedRecord,
+      status: 'analyzing',
+    }, analysisProgress('running', {
+      attempt: 10,
+      source_generation: 'authorization-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: runningRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockRejectedValueOnce(
+      Object.assign(new Error('buyer@example.com must never be rendered'), {
+        response: { status: 403 },
+      })
+    );
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText(/live analysis status could not be verified/i)).toBeInTheDocument();
+      expect(screen.queryByText(/buyer@example.com must never be rendered/i)).not.toBeInTheDocument();
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeDisabled();
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        jest.advanceTimersByTime(2100);
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: 'Retry analysis' })).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('falls back to legacy full-record polling when the progress endpoint is disabled mid-flight', async () => {
+    jest.useFakeTimers();
+    const strictRunningRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'analyzing',
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('running', {
+      attempt: 11,
+      source_generation: 'rollback-generation',
+    }));
+    const flagOffRunningRecord = {
+      ...strictRunningRecord,
+      workflow_features: { gmail_analysis_progress: false },
+      analysis_progress: null,
+    };
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: strictRunningRecord })
+      .mockResolvedValueOnce({ data: flagOffRunningRecord })
+      .mockResolvedValueOnce({ data: reviewedRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockRejectedValueOnce(
+      Object.assign(new Error('Not found'), { response: { status: 404 } })
+    );
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1);
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(/standard status checks will continue safely/i)).toBeInTheDocument();
+      expect(screen.getByText(/usually takes 15.*30 seconds/i)).toBeInTheDocument();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1799);
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(3);
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('accepts an old worker full analyze response when the progress flag is omitted mid-request', async () => {
+    const progressRequest = deferred();
+    const strictClaimedRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('idle', {
+      stage: '',
+      attempt: 0,
+      source_generation: '',
+    }));
+    const flagOffCompletedRecord = {
+      ...reviewedRecord,
+      workflow_features: {},
+      analysis_progress: null,
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: strictClaimedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: strictClaimedRecord });
+    const analysisRequest = deferred();
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(analysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(progressRequest.promise);
+
+    render(<GmailInquiryReview importId="31" />);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1));
+    await act(async () => analysisRequest.resolve({ data: flagOffCompletedRecord }));
+    expect(await screen.findByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for live analysis status')).not.toBeInTheDocument();
+    await act(async () => progressRequest.resolve({
+      data: analysisProgress('running', {
+        stage: 'saving_results',
+        attempt: 1,
+        source_generation: 'obsolete-progress-generation',
+      }),
+    }));
+    expect(screen.queryByText('Saving review results')).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+  });
+
+  test('rejects an unbound flag-off analyze response without an exact import ID', async () => {
+    const analysisRequest = deferred();
+    const progressRequest = deferred();
+    const strictClaimedRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'claimed',
+      mode: 'ai_thread',
+      selected_message_ids: [],
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    }, analysisProgress('idle', {
+      stage: '',
+      attempt: 0,
+      source_generation: '',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: strictClaimedRecord });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: strictClaimedRecord });
+    quotationAPI.gmailInquiryImports.analyze.mockReturnValueOnce(analysisRequest.promise);
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(progressRequest.promise);
+
+    render(<GmailInquiryReview importId="31" />);
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledWith('31'));
+    await act(async () => analysisRequest.resolve({
+      data: {
+        workflow_features: { gmail_analysis_progress: false },
+        analysis: { preview: { lines: [{ raw_name: 'UNBOUND RESULT' }] } },
+      },
+    }));
+    expect(screen.queryByDisplayValue('UNBOUND RESULT')).not.toBeInTheDocument();
+
+    await act(async () => progressRequest.resolve({
+      data: analysisProgress('running', {
+        stage: 'fetching_messages',
+        attempt: 1,
+        source_generation: 'bound-after-untrusted-response',
+      }),
+    }));
+    expect(screen.getByText('Reading selected messages')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue('UNBOUND RESULT')).not.toBeInTheDocument();
+  });
+
+  test('ignores a late strict poll after unmount', async () => {
+    const progressRequest = deferred();
+    const runningRecord = withAnalysisProgress({
+      ...baseRecord,
+      status: 'analyzing',
+    }, analysisProgress('running', {
+      attempt: 8,
+      source_generation: 'unmount-generation',
+    }));
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: runningRecord });
+    quotationAPI.gmailInquiryImports.analysisProgress.mockReturnValueOnce(progressRequest.promise);
+
+    const { unmount } = render(<GmailInquiryReview importId="31" />);
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.analysisProgress).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => progressRequest.resolve({
+      data: analysisProgress('completed', {
+        attempt: 8,
+        source_generation: 'unmount-generation',
+      }),
+    }));
+
+    expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(1);
+  });
+
+  test('uses the exact legacy 1800ms full-record poll unless the progress flag is boolean true', async () => {
+    jest.useFakeTimers();
+    const legacyRecord = {
+      ...baseRecord,
+      status: 'analyzing',
+      workflow_features: { gmail_analysis_progress: 'true' },
+      analysis: { preview: { warnings: [], meta: {}, lines: [] } },
+    };
+    quotationAPI.gmailInquiryImports.retrieve
+      .mockResolvedValueOnce({ data: legacyRecord })
+      .mockResolvedValueOnce({ data: reviewedRecord });
+
+    try {
+      render(<GmailInquiryReview importId="31" />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByText(/usually takes 15.*30 seconds/i)).toBeInTheDocument();
+      expect(quotationAPI.gmailInquiryImports.analysisProgress).not.toHaveBeenCalled();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1799);
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        jest.advanceTimersByTime(1);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(quotationAPI.gmailInquiryImports.retrieve).toHaveBeenCalledTimes(2);
+      expect(screen.getByDisplayValue('Sterile Bandage')).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

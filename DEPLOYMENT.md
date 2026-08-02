@@ -321,6 +321,33 @@ This flag is independent of both Gmail review feature flags. No migration is
 required. Roll back immediately by setting it to `0`; there is no stored data
 or schema change to reverse.
 
+### Content-free Gmail analysis progress (disabled by default)
+
+`QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED=0` preserves the synchronous Gmail
+analysis response and existing review workflow without progress polling. When
+strictly enabled, import retrieval adds the allow-listed
+`gmail_analysis_progress_v1` projection and the existing import API exposes
+`GET /gmail-inquiry-imports/{id}/analysis_progress/`. The detail action uses
+the import's existing staff access policy and sends `private, no-store` cache
+control. It contains only state, a bounded stage, attempt number, opaque random
+source generation, safe failure category, timestamps, and retryability. It
+never contains Gmail identifiers, sender/recipient addresses, subjects,
+filenames, customer/item text, document content, prices, tokens, or counts.
+
+Migration `quotations.0040_gmailinquiryimport_analysis_progress` adds five
+dedicated progress fields with empty/zero/null defaults and performs no
+customer-content backfill. Apply `0040` before promoting the new application;
+old application code can run after the additive migration, while new model
+queries are not safe before the columns exist. Deploy with the flag still at
+`0`, verify synchronous analysis, then enable it for a controlled cohort.
+
+Rollback the feature first by setting the flag to `0`; synchronous analysis
+remains the fallback and no background worker is introduced by this phase.
+Prefer a schema-compatible application rollback that retains `0040`. Reversing
+`0040` removes only progress metadata but should be considered only before a
+newer application instance can query the fields and after active analyses have
+finished.
+
 PostgreSQL lock interruption (`55P03`), deadlock (`40P01`), and query
 cancellation/statement timeout (`57014`) are normalized only when Django wraps
 the exact driver SQLSTATE. The API returns a generic 503 stating that current
