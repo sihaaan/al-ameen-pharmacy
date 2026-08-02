@@ -473,7 +473,9 @@ class GmailParallelFlagAndRetryTests(SimpleTestCase):
                     dimensions["feature_flags"],
                     {
                         "background_analysis": False,
+                        "compact_schema_shadow": False,
                         "gmail_parallel_fetch": enabled,
+                        "xlsx_preextract_shadow": False,
                     },
                 )
 
