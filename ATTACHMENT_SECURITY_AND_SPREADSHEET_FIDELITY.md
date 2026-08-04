@@ -125,6 +125,9 @@ the application does not execute or open them. Form values or visual layout
 may still be absent from extracted text. Locally supported unfiltered,
 ASCII85/ASCIIHex plus Flate, and Flate stream chains receive decoded-size
 bounds. Standard compressed image streams are bounded using declared geometry.
+Common ASCII or Flate wrappers around those native image streams are decoded
+with the same per-stream ceiling before the native image codec is allowed to
+run.
 If another non-image stream filter cannot be decoded within this bounded
 preflight, the file is marked unsafe for local page traversal: manual and
 historical local extraction/rendering/OCR skip it and report the warning. Every

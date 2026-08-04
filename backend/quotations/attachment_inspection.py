@@ -22,7 +22,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
-from pypdf.generic import IndirectObject, StreamObject
+from pypdf.generic import DictionaryObject, IndirectObject, NullObject, StreamObject
 
 
 PDF_MIME = "application/pdf"
@@ -1775,6 +1775,14 @@ def _bounded_flate_decode(data, limit):
                 )
             if not decoder.eof:
                 raise zlib.error("incomplete Flate stream")
+            if decoder.unused_data:
+                # A completed zlib member with trailing bytes is invalid even
+                # if the same byte sequence could also be interpreted as one
+                # raw-Deflate stream. Do not fall through to the alternate
+                # window mode after a decoder has reached EOF.
+                raise PDFResourceLimitError(
+                    "PDF contains malformed or trailing Flate stream data."
+                )
             return output
         except PDFResourceLimitError:
             raise
@@ -1815,7 +1823,12 @@ def _bounded_filter_chain_data(data, filters, *, limit):
     if not filters:
         return data
     if filters == ["/FlateDecode"]:
-        return _bounded_flate_decode(data, limit)
+        try:
+            return _bounded_flate_decode(data, limit)
+        except zlib.error as exc:
+            raise PDFResourceLimitError(
+                "PDF contains malformed or trailing Flate stream data."
+            ) from exc
     return None
 
 
@@ -1834,7 +1847,40 @@ def _bounded_pdf_stream_data(stream):
     )
 
 
-def _pdf_image_filter_chain_is_native_safe(filters):
+def _pdf_filter_decode_parameters(stream, filter_count):
+    value = _resolve_pdf_value(stream.get("/DecodeParms"))
+    if value is None or isinstance(value, NullObject):
+        return [None] * filter_count
+    if isinstance(value, (list, tuple)):
+        if len(value) != filter_count:
+            return None
+        parameters = []
+        for item in value:
+            resolved = _resolve_pdf_value(item)
+            parameters.append(
+                None
+                if resolved is None or isinstance(resolved, NullObject)
+                else resolved
+            )
+        return parameters
+    if filter_count == 1:
+        return [_resolve_pdf_value(value)]
+    return None
+
+
+def _pdf_image_filter_chain_native_prefix_bytes(stream):
+    """Return bounded wrapper bytes for a geometry-bounded native image.
+
+    The final image codec is bounded separately through the declared image
+    geometry. Some ordinary JPEG-to-PDF converters first wrap the JPEG bytes
+    in ASCII or Flate compression, so decode that prefix here with the same
+    decoded-stream ceiling before allowing the native image decoder to run.
+
+    ``None`` means the chain or its decode parameters are not in the narrow
+    local allowlist. A non-negative integer is the wrapper output that must be
+    included in the aggregate decoded-stream budget.
+    """
+
     aliases = {
         "/A85": "/ASCII85Decode",
         "/AHx": "/ASCIIHexDecode",
@@ -1843,15 +1889,54 @@ def _pdf_image_filter_chain_is_native_safe(filters):
         "/Fl": "/FlateDecode",
         "/JPX": "/JPXDecode",
     }
-    canonical = [aliases.get(value, value) for value in filters]
-    if canonical and canonical[0] in {"/ASCII85Decode", "/ASCIIHexDecode"}:
-        canonical = canonical[1:]
-    return tuple(canonical) in {
-        ("/CCITTFaxDecode",),
-        ("/DCTDecode",),
-        ("/JBIG2Decode",),
-        ("/JPXDecode",),
-    }
+    canonical = [
+        aliases.get(value, value) for value in _pdf_filter_names(stream)
+    ]
+    if not canonical or canonical[-1] not in {
+        "/CCITTFaxDecode",
+        "/DCTDecode",
+        "/JBIG2Decode",
+        "/JPXDecode",
+    }:
+        return None
+    prefix = canonical[:-1]
+    decode_parameters = _pdf_filter_decode_parameters(stream, len(canonical))
+    if decode_parameters is None:
+        return None
+    for filter_name, parameters in zip(prefix, decode_parameters[:-1]):
+        if filter_name in {"/ASCII85Decode", "/ASCIIHexDecode"}:
+            if parameters is not None:
+                return None
+            continue
+        if filter_name == "/FlateDecode":
+            if parameters is None:
+                continue
+            if not isinstance(parameters, DictionaryObject):
+                return None
+            if any(str(key) != "/Predictor" for key in parameters):
+                return None
+            predictor = _resolve_pdf_value(parameters.get("/Predictor", 1))
+            if (
+                isinstance(predictor, bool)
+                or not isinstance(predictor, int)
+                or predictor != 1
+            ):
+                return None
+            continue
+        return None
+    terminal_parameters = decode_parameters[-1]
+    if terminal_parameters is not None and not isinstance(
+        terminal_parameters, DictionaryObject
+    ):
+        return None
+    bounded_prefix = _bounded_filter_chain_data(
+        getattr(stream, "_data", b"") or b"",
+        prefix,
+        limit=max_pdf_decoded_stream_bytes(),
+    )
+    if bounded_prefix is None:
+        return None
+    return len(bounded_prefix) if prefix else 0
 
 
 def _decoded_pdf_content_has_inline_image(data):
@@ -2049,6 +2134,8 @@ def _inspect_pdf_objects(reader):
     decoded_stream_bytes_checked = 0
     bounded_decoded_stream_count = 0
     unbounded_decoded_stream_count = 0
+    bounded_image_prefix_count = 0
+    bounded_image_prefix_bytes = 0
     image_object_count = 0
     unsafe_image_filter_count = 0
     estimated_image_bytes = 0
@@ -2083,9 +2170,23 @@ def _inspect_pdf_objects(reader):
             # inspection limitation and are not decoded speculatively.
             if not image_dimensions:
                 unbounded_decoded_stream_count += 1
-            elif not _pdf_image_filter_chain_is_native_safe(
-                _pdf_filter_names(value)
-            ):
+            else:
+                native_prefix_bytes = _pdf_image_filter_chain_native_prefix_bytes(
+                    value
+                )
+                if native_prefix_bytes is not None:
+                    if native_prefix_bytes:
+                        bounded_image_prefix_count += 1
+                        bounded_image_prefix_bytes += native_prefix_bytes
+                    decoded_stream_bytes_checked += native_prefix_bytes
+                    if (
+                        decoded_stream_bytes_checked
+                        > max_pdf_total_decoded_stream_bytes()
+                    ):
+                        raise PDFResourceLimitError(
+                            "PDF decoded streams exceed the safe aggregate processing limit."
+                        )
+                    continue
                 unsafe_image_filter_count += 1
                 unbounded_decoded_stream_count += 1
             continue
@@ -2118,6 +2219,8 @@ def _inspect_pdf_objects(reader):
         "unbounded_decoded_stream_count": unbounded_decoded_stream_count,
         "decoded_stream_bytes_checked": decoded_stream_bytes_checked,
         "decoded_stream_checks_complete": unbounded_decoded_stream_count == 0,
+        "bounded_image_prefix_count": bounded_image_prefix_count,
+        "bounded_image_prefix_bytes": bounded_image_prefix_bytes,
         "image_object_count": image_object_count,
         "unsafe_image_filter_count": unsafe_image_filter_count,
         "estimated_image_bytes": estimated_image_bytes,
@@ -2400,6 +2503,12 @@ def inspect_pdf_attachment(data, *, declared_mime_type="", max_pages=None):
             ],
             "decoded_stream_checks_complete": object_inspection[
                 "decoded_stream_checks_complete"
+            ],
+            "bounded_image_prefix_count": object_inspection[
+                "bounded_image_prefix_count"
+            ],
+            "bounded_image_prefix_bytes": object_inspection[
+                "bounded_image_prefix_bytes"
             ],
             "local_traversal_safe": (
                 object_inspection["decoded_stream_checks_complete"]
