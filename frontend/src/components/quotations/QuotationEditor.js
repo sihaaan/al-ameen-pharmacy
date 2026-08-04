@@ -8,6 +8,24 @@ import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
+const UNSAVED_LINES_FINALIZE_ISSUE = 'Save all line changes before finalizing.';
+
+const gmailChainedActionsEnabled = (quote = {}) => (
+  quote?.workflow_features?.gmail_chained_actions === true
+);
+
+const quotationEditorProgressiveLoadEnabled = (quote = {}) => (
+  quote?.workflow_features?.quotation_editor_progressive_load === true
+);
+
+const supportingDatasetLabels = {
+  items: 'Product catalogue and images',
+  companyItems: 'Customer Product history',
+  companies: 'Company directory',
+  contacts: 'Company contacts',
+  lpos: 'LPO records',
+  priceHistory: 'Price history',
+};
 const statusSteps = [
   { id: 'draft', label: 'Draft' },
   { id: 'pending_review', label: 'Pending Review' },
@@ -118,6 +136,14 @@ const normalizeDraft = (draft = {}) => ({
 });
 
 const draftsMatch = (left, right) => JSON.stringify(normalizeDraft(left)) === JSON.stringify(normalizeDraft(right));
+
+const snapshotLineDrafts = (sourceQuote = {}, drafts = {}) => Object.fromEntries(
+  (sourceQuote.lines || []).map((line) => [line.id, normalizeDraft(drafts[line.id])])
+);
+
+const lineDraftSnapshotMatches = (snapshot = {}, drafts = {}) => (
+  Object.entries(snapshot).every(([lineId, expected]) => draftsMatch(drafts[lineId], expected))
+);
 
 const draftFromLine = (line) => ({
   product: line.product || '',
@@ -274,7 +300,13 @@ export const retryTransientQuotationGet = async (request, delayMs = 150) => {
   }
 };
 
-const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
+const QuotationEditor = ({
+  quoteId,
+  onClose,
+  onReviewOutcome,
+  initialEmailReviewFingerprint = '',
+  onInitialEmailReviewHandled,
+}) => {
   const [quote, setQuote] = useState(null);
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -301,6 +333,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const [priceHistoryDialog, setPriceHistoryDialog] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
   const [referenceLoadFailures, setReferenceLoadFailures] = useState([]);
+  const [supportingDatasetStates, setSupportingDatasetStates] = useState({});
   const [referenceRetrying, setReferenceRetrying] = useState(false);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [lineFilter, setLineFilter] = useState('active');
@@ -338,10 +371,17 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const priceContextGenerationRef = useRef(0);
   const loadGenerationRef = useRef(0);
   const referenceLoadGenerationRef = useRef(0);
+  const supportingDatasetGenerationRef = useRef({});
   const contactLoadGenerationRef = useRef(0);
   const emailPreviewGenerationRef = useRef(0);
   const emailThreadSearchGenerationRef = useRef(0);
   const emailReconcileGenerationRef = useRef(0);
+  const reviewEmailGenerationRef = useRef(0);
+  const reviewEmailInFlightRef = useRef(false);
+  const initialEmailReviewRequestRef = useRef('');
+  const loadEmailPreviewRef = useRef(null);
+  const priceInputRefs = useRef(new Map());
+  const initialPriceFocusQuoteRef = useRef('');
   const quoteRef = useRef(null);
   const quotePartyDraftRef = useRef(quotePartyDraft);
   const quoteTermsDraftRef = useRef(quoteTermsDraft);
@@ -458,6 +498,118 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       const productIds = Array.from(new Set(
         (quoteData.lines || []).map((line) => line.product).filter(Boolean).map(String)
       ));
+      const progressiveLoad = quotationEditorProgressiveLoadEnabled(quoteData);
+      const setReferenceDatasetState = (key, status, details = null) => {
+        if (!progressiveLoad || !quoteLoadIsCurrent()) return;
+        setSupportingDatasetStates((current) => ({
+          ...current,
+          [key]: { status, details },
+        }));
+      };
+      const setPriceHistoryDatasetState = (status, details = null) => {
+        if (
+          !progressiveLoad
+          || !quoteLoadIsCurrent()
+          || priceContextGenerationRef.current !== priceHistoryRequestGeneration
+        ) return;
+        setSupportingDatasetStates((current) => ({
+          ...current,
+          priceHistory: { status, details },
+        }));
+      };
+      const priceHistoryRequestGeneration = priceContextGenerationRef.current;
+      const startPriceHistoryPreviewLoad = () => {
+        if (!refreshQuote) return;
+        if (!productIds.length) {
+          setPriceHistoryDatasetState('ready');
+          return;
+        }
+        setPriceHistoryDatasetState('loading');
+        const requestedLinePriceStates = Object.fromEntries(
+          (quoteData.lines || []).map((line) => [line.id, {
+            product: String(line.product || ''),
+            version: linePriceVersionRef.current[line.id] || 0,
+          }])
+        );
+        void (async () => {
+          const contextRequests = [];
+          for (let index = 0; index < productIds.length; index += 100) {
+            contextRequests.push(quotationAPI.quotes.productPrices(quoteId, {
+              products: productIds.slice(index, index + 100).join(','),
+              history_limit: 10,
+            }));
+          }
+          const results = await Promise.allSettled(contextRequests);
+          if (
+            priceContextGenerationRef.current !== priceHistoryRequestGeneration
+            || !quoteLoadIsCurrent()
+          ) return;
+
+          const successfulResponses = results
+            .filter((result) => result.status === 'fulfilled')
+            .map((result) => result.value);
+          const nextPriceContexts = Object.assign(
+            {},
+            ...successfulResponses.map((response) => response.data?.results || {})
+          );
+          if (progressiveLoad) {
+            // Per-Product lookups triggered by an employee are newer than this
+            // initial batch. Preserve them, and add a line hint only while the
+            // line still has the exact Product/version captured for the batch.
+            setPriceContexts((current) => ({ ...nextPriceContexts, ...current }));
+            setLinePriceHints((current) => {
+              const next = { ...current };
+              (quoteData.lines || []).forEach((line) => {
+                const requestedState = requestedLinePriceStates[line.id];
+                const context = nextPriceContexts[String(line.product)];
+                if (
+                  !line.product
+                  || !context
+                  || !requestedState
+                  || lineSelectedProductRef.current[line.id] !== requestedState.product
+                  || (linePriceVersionRef.current[line.id] || 0) !== requestedState.version
+                ) return;
+                next[line.id] = {
+                  ...context,
+                  mode: context.latest_quoted ? 'history_found' : 'no_history',
+                };
+              });
+              return next;
+            });
+          } else {
+            setPriceContexts(nextPriceContexts);
+            setLinePriceHints(Object.fromEntries(
+              (quoteData.lines || [])
+                .filter((line) => line.product && nextPriceContexts[String(line.product)])
+                .map((line) => {
+                  const context = nextPriceContexts[String(line.product)];
+                  return [line.id, { ...context, mode: context.latest_quoted ? 'history_found' : 'no_history' }];
+                })
+            ));
+          }
+
+          const failedResult = results.find((result) => result.status === 'rejected');
+          if (failedResult) {
+            const details = await describeQuotationError(
+              failedResult.reason,
+              'Load price history previews',
+              `GET /quotations/quotes/${quoteId}/product_prices/`
+            );
+            if (
+              priceContextGenerationRef.current !== priceHistoryRequestGeneration
+              || !quoteLoadIsCurrent()
+            ) return;
+            setPriceContextError(details);
+            setPriceHistoryDatasetState('error', details);
+            console.error(formatQuotationError(details), failedResult.reason);
+          } else {
+            setPriceHistoryDatasetState('ready');
+          }
+        })();
+      };
+
+      if (refreshQuote && !progressiveLoad) setSupportingDatasetStates({});
+      if (progressiveLoad) startPriceHistoryPreviewLoad();
       if (refreshReferences) {
         const referenceCompany = refreshQuote
           ? quoteData.company
@@ -521,83 +673,74 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         const selectedReferenceRequests = requestedReferenceKeys
           ? referenceRequests.filter((request) => requestedReferenceKeys.has(request.key))
           : referenceRequests;
-        const referenceResults = await Promise.all(selectedReferenceRequests.map(async (referenceRequest) => {
-          try {
-            const response = await retryTransientQuotationGet(referenceRequest.request);
-            return { ...referenceRequest, response };
-          } catch (error) {
-            return { ...referenceRequest, error };
-          }
-        }));
-        if (!referenceLoadIsCurrent()) return;
+        if (progressiveLoad) {
+          const datasetRequestVersions = {};
+          selectedReferenceRequests.forEach((request) => {
+            const nextVersion = (supportingDatasetGenerationRef.current[request.key] || 0) + 1;
+            supportingDatasetGenerationRef.current[request.key] = nextVersion;
+            datasetRequestVersions[request.key] = nextVersion;
+            setReferenceDatasetState(request.key, 'loading');
+          });
+          const datasetRequestIsCurrent = (key) => (
+            quoteLoadIsCurrent()
+            && supportingDatasetGenerationRef.current[key] === datasetRequestVersions[key]
+          );
+          if (refreshQuote) setLoading(false);
+          await Promise.all(selectedReferenceRequests.map(async (referenceRequest) => {
+            try {
+              const response = await retryTransientQuotationGet(referenceRequest.request);
+              if (!datasetRequestIsCurrent(referenceRequest.key)) return;
+              referenceRequest.apply(response);
+              setReferenceDatasetState(referenceRequest.key, 'ready');
+              setReferenceLoadFailures((current) => (
+                current.filter((failure) => failure.key !== referenceRequest.key)
+              ));
+            } catch (error) {
+              const details = await describeQuotationError(
+                error,
+                referenceRequest.action,
+                referenceRequest.endpoint
+              );
+              if (!datasetRequestIsCurrent(referenceRequest.key)) return;
+              setReferenceDatasetState(referenceRequest.key, 'error', details);
+              setReferenceLoadFailures((current) => [
+                ...current.filter((failure) => failure.key !== referenceRequest.key),
+                { key: referenceRequest.key, details },
+              ]);
+            }
+          }));
+        } else {
+          const referenceResults = await Promise.all(selectedReferenceRequests.map(async (referenceRequest) => {
+            try {
+              const response = await retryTransientQuotationGet(referenceRequest.request);
+              return { ...referenceRequest, response };
+            } catch (error) {
+              return { ...referenceRequest, error };
+            }
+          }));
+          if (!referenceLoadIsCurrent()) return;
 
-        referenceResults
-          .filter((result) => result.response)
-          .forEach((result) => result.apply(result.response));
-        const failedReferences = await Promise.all(
           referenceResults
-            .filter((result) => result.error)
-            .map(async (result) => ({
-              key: result.key,
-              details: await describeQuotationError(result.error, result.action, result.endpoint),
-            }))
-        );
-        if (!referenceLoadIsCurrent()) return;
-        setReferenceLoadFailures(failedReferences);
+            .filter((result) => result.response)
+            .forEach((result) => result.apply(result.response));
+          const failedReferences = await Promise.all(
+            referenceResults
+              .filter((result) => result.error)
+              .map(async (result) => ({
+                key: result.key,
+                details: await describeQuotationError(result.error, result.action, result.endpoint),
+              }))
+          );
+          if (!referenceLoadIsCurrent()) return;
+          setReferenceLoadFailures(failedReferences);
+        }
       }
 
       // Price history is useful context, but it is not required to edit a quote.
       // Load it after the core editor data so a transient batch failure cannot
       // turn an otherwise healthy quotation into a blank/error screen.
-      const requestGeneration = priceContextGenerationRef.current;
-      if (refreshQuote && productIds.length) {
-        void (async () => {
-          const contextRequests = [];
-          for (let index = 0; index < productIds.length; index += 100) {
-            contextRequests.push(quotationAPI.quotes.productPrices(quoteId, {
-              products: productIds.slice(index, index + 100).join(','),
-              history_limit: 10,
-            }));
-          }
-          const results = await Promise.allSettled(contextRequests);
-          if (
-            priceContextGenerationRef.current !== requestGeneration
-            || !quoteLoadIsCurrent()
-          ) return;
-
-          const successfulResponses = results
-            .filter((result) => result.status === 'fulfilled')
-            .map((result) => result.value);
-          const nextPriceContexts = Object.assign(
-            {},
-            ...successfulResponses.map((response) => response.data?.results || {})
-          );
-          setPriceContexts(nextPriceContexts);
-          setLinePriceHints(Object.fromEntries(
-            (quoteData.lines || [])
-              .filter((line) => line.product && nextPriceContexts[String(line.product)])
-              .map((line) => {
-                const context = nextPriceContexts[String(line.product)];
-                return [line.id, { ...context, mode: context.latest_quoted ? 'history_found' : 'no_history' }];
-              })
-          ));
-
-          const failedResult = results.find((result) => result.status === 'rejected');
-          if (failedResult) {
-            const details = await describeQuotationError(
-              failedResult.reason,
-              'Load price history previews',
-              `GET /quotations/quotes/${quoteId}/product_prices/`
-            );
-            if (
-              priceContextGenerationRef.current !== requestGeneration
-              || !quoteLoadIsCurrent()
-            ) return;
-            setPriceContextError(details);
-            console.error(formatQuotationError(details), failedResult.reason);
-          }
-        })();
-      }
+      if (!progressiveLoad) startPriceHistoryPreviewLoad();
+      if (progressiveLoad && refreshQuote && !refreshReferences) setLoading(false);
     } catch (error) {
       if (refreshQuote ? !quoteLoadIsCurrent() : !referenceLoadIsCurrent()) return;
       const details = await describeQuotationError(
@@ -622,6 +765,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   }, [quoteId, setLoadedQuote, syncLpos]);
 
   useEffect(() => {
+    const mountedPriceInputs = priceInputRefs.current;
     setEmailPreviewOpen(false);
     setEmailPreviewLoading(false);
     setEmailPreview(null);
@@ -647,10 +791,16 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       emailPreviewGenerationRef.current += 1;
       emailThreadSearchGenerationRef.current += 1;
       emailReconcileGenerationRef.current += 1;
+      reviewEmailGenerationRef.current += 1;
+      reviewEmailInFlightRef.current = false;
+      supportingDatasetGenerationRef.current = {};
+      mountedPriceInputs.clear();
     };
   }, [load]);
 
   const isEditable = quote && editableStatuses.has(quote.status);
+  const chainedActionsEnabled = gmailChainedActionsEnabled(quote);
+  const progressiveLoadEnabled = quotationEditorProgressiveLoadEnabled(quote);
   const emailPreviewRefreshRequired = emailSendError?.refreshPreview === true || [
     'stale_email_preview',
     'email_preview_required',
@@ -663,36 +813,123 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   const hasUnsavedQuoteParty = !partyDraftsMatch(quotePartyDraft, savedQuotePartyDraft);
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
   const hasUnsavedCustomerDocument = hasUnsavedLines || hasUnsavedQuoteParty || hasUnsavedQuoteTerms;
-  const contactsForQuoteCompany = contacts;
+  const datasetStatus = (key) => supportingDatasetStates[key]?.status || 'idle';
+  const productCatalogueLoading = progressiveLoadEnabled && datasetStatus('items') === 'loading';
+  const companyDirectoryLoading = progressiveLoadEnabled && datasetStatus('companies') === 'loading';
+  const companyContactsLoading = progressiveLoadEnabled && datasetStatus('contacts') === 'loading';
+  const lpoRecordsLoading = progressiveLoadEnabled && datasetStatus('lpos') === 'loading';
+  const priceHistoryLoading = progressiveLoadEnabled && datasetStatus('priceHistory') === 'loading';
+  const currentCompanyFallback = quote?.company ? {
+    id: quote.company,
+    name: quote.company_name || `Company ${quote.company}`,
+  } : null;
+  const companiesForQuotePicker = progressiveLoadEnabled
+    && currentCompanyFallback
+    && !companies.some((company) => String(company.id) === String(currentCompanyFallback.id))
+    ? [currentCompanyFallback, ...companies]
+    : companies;
+  const currentContactFallback = quote?.contact
+    && String(quotePartyDraft.company || '') === String(quote.company || '')
+    && String(quotePartyDraft.contact || '') === String(quote.contact || '')
+    ? {
+      id: quote.contact,
+      company: quote.company,
+      name: quote.contact_name || `Contact ${quote.contact}`,
+      role: quote.contact_role || '',
+      department: quote.contact_department || '',
+    }
+    : null;
+  const contactsForQuoteCompany = progressiveLoadEnabled
+    && currentContactFallback
+    && !contacts.some((contact) => String(contact.id) === String(currentContactFallback.id))
+    ? [currentContactFallback, ...contacts]
+    : contacts;
   const referenceFailureKeys = new Set(referenceLoadFailures.map((failure) => failure.key));
   const productCatalogueUnavailable = referenceFailureKeys.has('items');
   const companyDirectoryUnavailable = referenceFailureKeys.has('companies');
   const companyContactsUnavailable = referenceFailureKeys.has('contacts');
-  const partyDataUnavailable = companyDirectoryUnavailable || companyContactsUnavailable;
+  const partyDataUnavailable = companyDirectoryUnavailable
+    || companyContactsUnavailable
+    || (progressiveLoadEnabled && (companyDirectoryLoading || companyContactsLoading || loadingContacts));
   const lpoRecordsUnavailable = referenceFailureKeys.has('lpos');
+  const productCatalogueBlocked = productCatalogueUnavailable || productCatalogueLoading;
+  const companyDirectoryBlocked = companyDirectoryUnavailable || companyDirectoryLoading;
+  const companyContactsBlocked = companyContactsUnavailable
+    || companyContactsLoading
+    || (progressiveLoadEnabled && loadingContacts);
+  const companyControlBlocked = progressiveLoadEnabled
+    ? companyDirectoryBlocked
+    : (referenceRetrying || companyDirectoryUnavailable);
+  const contactControlBlocked = progressiveLoadEnabled
+    ? companyContactsBlocked
+    : (referenceRetrying || companyContactsUnavailable);
+  const partyControlsBlocked = progressiveLoadEnabled
+    ? partyDataUnavailable
+    : (referenceRetrying || partyDataUnavailable);
 
   const loadContactsForCompany = async (companyId) => {
     const requestGeneration = ++contactLoadGenerationRef.current;
+    const datasetGeneration = progressiveLoadEnabled
+      ? (supportingDatasetGenerationRef.current.contacts || 0) + 1
+      : null;
+    if (progressiveLoadEnabled) {
+      supportingDatasetGenerationRef.current.contacts = datasetGeneration;
+    }
+    const datasetRequestIsCurrent = () => (
+      !progressiveLoadEnabled
+      || supportingDatasetGenerationRef.current.contacts === datasetGeneration
+    );
     const normalizedCompanyId = String(companyId || '');
     if (!companyId) {
       setContacts([]);
       setLoadingContacts(false);
+      if (progressiveLoadEnabled) {
+        setSupportingDatasetStates((current) => ({
+          ...current,
+          contacts: { status: 'ready', details: null },
+        }));
+        setReferenceLoadFailures((current) => current.filter((failure) => failure.key !== 'contacts'));
+      }
       return;
     }
     setLoadingContacts(true);
+    if (progressiveLoadEnabled) {
+      setSupportingDatasetStates((current) => ({
+        ...current,
+        contacts: { status: 'loading', details: null },
+      }));
+      setReferenceLoadFailures((current) => current.filter((failure) => failure.key !== 'contacts'));
+    }
     setErrorInfo(null);
     try {
       const response = await quotationAPI.contacts.list({ company: companyId, active: 'true' });
       if (
         contactLoadGenerationRef.current !== requestGeneration
+        || !datasetRequestIsCurrent()
         || String(quotePartyDraftRef.current.company || '') !== normalizedCompanyId
       ) return;
       setContacts(response.data);
+      if (progressiveLoadEnabled) {
+        setSupportingDatasetStates((current) => ({
+          ...current,
+          contacts: { status: 'ready', details: null },
+        }));
+      }
     } catch (error) {
-      if (contactLoadGenerationRef.current !== requestGeneration) return;
+      if (contactLoadGenerationRef.current !== requestGeneration || !datasetRequestIsCurrent()) return;
       const details = await describeQuotationError(error, 'Load company contacts', `GET /quotations/contacts/?company=${companyId}`);
-      if (contactLoadGenerationRef.current !== requestGeneration) return;
-      setErrorInfo(details);
+      if (contactLoadGenerationRef.current !== requestGeneration || !datasetRequestIsCurrent()) return;
+      if (progressiveLoadEnabled) {
+        setSupportingDatasetStates((current) => ({
+          ...current,
+          contacts: { status: 'error', details },
+        }));
+        setReferenceLoadFailures((current) => [
+          ...current.filter((failure) => failure.key !== 'contacts'),
+          { key: 'contacts', details },
+        ]);
+      }
+      if (!progressiveLoadEnabled) setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
       if (contactLoadGenerationRef.current === requestGeneration) {
@@ -703,12 +940,25 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
 
-  const productOptionsForDraft = (draft = {}) => {
+  const productOptionsForDraft = (draft = {}, fallbackProduct = null) => {
     const companyProductIds = new Set(companyItems.map((item) => String(item.id)));
     const byId = new Map(items.map((item) => [String(item.id), item]));
-    if (draft.product && !byId.has(String(draft.product))) {
-      const selected = items.find((item) => String(item.id) === String(draft.product));
-      if (selected) byId.set(String(selected.id), selected);
+    if (
+      progressiveLoadEnabled
+      && draft.product
+      && fallbackProduct
+      && !byId.has(String(draft.product))
+    ) {
+      byId.set(String(draft.product), {
+        id: draft.product,
+        name: fallbackProduct.product_name
+          || fallbackProduct.matched_product_name
+          || draft.item_name_snapshot
+          || `Product ${draft.product}`,
+        brand_name: draft.brand_name_snapshot || '',
+        unit: draft.unit || '',
+        primary_image_url: draft.product_image_url || '',
+      });
     }
     return Array.from(byId.values()).sort((a, b) => {
       const aUsed = companyProductIds.has(String(a.id));
@@ -718,9 +968,9 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     });
   };
 
-  const renderProductOptions = (draft = {}) => {
+  const renderProductOptions = (draft = {}, fallbackProduct = null) => {
     const companyProductIds = new Set(companyItems.map((item) => String(item.id)));
-    const options = productOptionsForDraft(draft);
+    const options = productOptionsForDraft(draft, fallbackProduct);
     const previouslyUsed = options.filter((item) => companyProductIds.has(String(item.id)));
     const remaining = options.filter((item) => !companyProductIds.has(String(item.id)));
     return (
@@ -767,6 +1017,42 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     return status === lineFilter;
   });
 
+  const visiblePriceLineIds = filteredLines.map((line) => String(line.id));
+  const visiblePriceLineOrder = visiblePriceLineIds.join('|');
+  const priceFocusQuoteId = quote?.id || '';
+
+  const assignPriceInputRef = (lineId, node) => {
+    const key = String(lineId);
+    if (node) priceInputRefs.current.set(key, node);
+    else priceInputRefs.current.delete(key);
+  };
+
+  const moveToNextBlankPrice = (event, lineId) => {
+    if (!progressiveLoadEnabled || event.shiftKey || !['Enter', 'Tab'].includes(event.key)) return;
+    const currentIndex = visiblePriceLineIds.indexOf(String(lineId));
+    if (currentIndex < 0) return;
+    const nextInput = visiblePriceLineIds
+      .slice(currentIndex + 1)
+      .map((id) => priceInputRefs.current.get(id))
+      .find((input) => input && !input.disabled && String(input.value || '').trim() === '');
+    if (!nextInput) return;
+    event.preventDefault();
+    nextInput.focus();
+  };
+
+  useEffect(() => {
+    if (!progressiveLoadEnabled || !isEditable || !priceFocusQuoteId) return;
+    const quoteKey = String(priceFocusQuoteId);
+    if (initialPriceFocusQuoteRef.current === quoteKey) return;
+    const firstBlankInput = (visiblePriceLineOrder ? visiblePriceLineOrder.split('|') : [])
+      .map((id) => priceInputRefs.current.get(id))
+      .find((input) => input && !input.disabled && String(input.value || '').trim() === '');
+    if (firstBlankInput) {
+      firstBlankInput.focus();
+      initialPriceFocusQuoteRef.current = quoteKey;
+    }
+  }, [isEditable, priceFocusQuoteId, progressiveLoadEnabled, visiblePriceLineOrder]);
+
   const selectedLines = activeLines.filter((line) => selectedLineIds.includes(line.id));
   const selectedUnmatchedLines = selectedLines.filter((line) => derivedLineStatus(line).id === 'unmatched');
 
@@ -776,7 +1062,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     if (!quote.lines?.length) issues.push('Add at least one quotation line.');
     if (hasUnsavedQuoteParty) issues.push('Save customer/contact before finalizing.');
     if (hasUnsavedQuoteTerms) issues.push('Save quotation terms and layout before finalizing.');
-    if (hasUnsavedLines) issues.push('Save all line changes before finalizing.');
+    if (hasUnsavedLines) issues.push(UNSAVED_LINES_FINALIZE_ISSUE);
     (quote.lines || []).forEach((line, index) => {
       const draft = lineDrafts[line.id] || {};
       const name = draft.item_name_snapshot || `Line ${index + 1}`;
@@ -788,6 +1074,12 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     });
     return issues;
   })();
+  const reviewEmailIssues = chainedActionsEnabled
+    ? finalizeIssues.filter((issue) => issue !== UNSAVED_LINES_FINALIZE_ISSUE)
+    : finalizeIssues;
+  const primaryEmailActionIssues = chainedActionsEnabled
+    ? reviewEmailIssues
+    : finalizeIssues;
 
   const updateLineDraft = (lineId, patch) => {
     setLineFeedback(null);
@@ -868,14 +1160,23 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
   const maybeFetchProductPrice = async (productId) => {
     if (!quote?.id || !productId) return null;
+    const expectedQuoteId = String(quote.id);
+    const expectedContextGeneration = priceContextGenerationRef.current;
+    const requestIsCurrent = () => (
+      String(quoteRef.current?.id || '') === expectedQuoteId
+      && priceContextGenerationRef.current === expectedContextGeneration
+    );
     const cached = priceContexts[String(productId)];
     if (cached) return cached;
     try {
       const response = await quotationAPI.quotes.productPrice(quote.id, { product: productId });
+      if (!requestIsCurrent()) return null;
       setPriceContexts((current) => ({ ...current, [String(productId)]: response.data }));
       return response.data;
     } catch (error) {
+      if (!requestIsCurrent()) return null;
       const details = await describeQuotationError(error, 'Load company Product price', `GET /quotations/quotes/${quote.id}/product_price/?product=${productId}`);
+      if (!requestIsCurrent()) return null;
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
       return null;
@@ -910,6 +1211,14 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     const suggestion = await maybeFetchProductPrice(productId);
     if (!suggestion) return;
     if (priceContextGenerationRef.current !== requestGeneration || lineSelectedProductRef.current[line.id] !== String(productId)) return;
+    if (progressiveLoadEnabled) {
+      setPriceHintForLine(
+        line.id,
+        suggestion,
+        suggestion.source === 'company_price_history' ? 'history_found' : 'no_history'
+      );
+      return;
+    }
     setPriceHistoryDialog({
       productId,
       productName: suggestion.product_name || items.find((item) => String(item.id) === String(productId))?.name || '',
@@ -940,6 +1249,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     lineFormSelectedProductRef.current = String(productId || '');
     setLineForm((current) => ({ ...current, ...patch }));
     if (!productId) return;
+    if (progressiveLoadEnabled) return;
     const suggestion = await maybeFetchProductPrice(productId);
     if (!suggestion || priceContextGenerationRef.current !== requestGeneration || lineFormSelectedProductRef.current !== String(productId)) return;
     setPriceHistoryDialog({
@@ -965,23 +1275,34 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     match_status: draft.product && draft.match_status === 'unresolved' ? 'confirmed' : draft.match_status,
   });
 
-  const mergeSavedQuote = (quoteData, savedIds = []) => {
+  const mergeSavedQuote = (quoteData, savedIds = [], preserveCurrentDrafts = false) => {
     const savedSet = new Set(savedIds);
+    const currentDrafts = lineDraftsRef.current || {};
+    const currentSavedDrafts = savedLineDraftsRef.current || {};
+    const nextDrafts = {};
+    const nextSavedDrafts = {};
+    (quoteData.lines || []).forEach((line) => {
+      const savedDraft = draftFromLine(line);
+      if (preserveCurrentDrafts) {
+        nextDrafts[line.id] = currentDrafts[line.id] || savedDraft;
+      } else if (savedSet.has(line.id)) {
+        nextDrafts[line.id] = savedDraft;
+      } else {
+        nextDrafts[line.id] = currentDrafts[line.id] || savedDraft;
+      }
+      nextSavedDrafts[line.id] = savedSet.has(line.id)
+        ? savedDraft
+        : (currentSavedDrafts[line.id] || savedDraft);
+    });
+    // A chained preview must use the exact authoritative quote returned by
+    // the successful save, not the pre-save render captured by React.
+    quoteRef.current = quoteData;
+    lineDraftsRef.current = nextDrafts;
+    savedLineDraftsRef.current = nextSavedDrafts;
     setQuote(quoteData);
-    setLineDrafts((current) => {
-      const next = {};
-      (quoteData.lines || []).forEach((line) => {
-        next[line.id] = savedSet.has(line.id) ? draftFromLine(line) : (current[line.id] || draftFromLine(line));
-      });
-      return next;
-    });
-    setSavedLineDrafts((current) => {
-      const next = {};
-      (quoteData.lines || []).forEach((line) => {
-        next[line.id] = savedSet.has(line.id) ? draftFromLine(line) : (current[line.id] || draftFromLine(line));
-      });
-      return next;
-    });
+    setLineDrafts(nextDrafts);
+    setSavedLineDrafts(nextSavedDrafts);
+    return quoteData;
   };
 
   const saveLine = async (lineId) => {
@@ -1448,7 +1769,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
       setLineFeedback({
         type: 'warning',
         message: latestFingerprint
-          ? 'The quotation changed since this editor loaded. Review the refreshed quotation, then click Finalize or Email Quotation again.'
+          ? `The quotation changed since this editor loaded. Review the refreshed quotation, then click ${gmailChainedActionsEnabled(latestQuote) ? 'Review Email' : 'Finalize or Email Quotation'} again.`
           : 'The current quotation review token is unavailable. Reload the editor before preparing an email.',
       });
       return null;
@@ -1473,16 +1794,15 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     return true;
   };
 
-  const loadEmailPreview = async () => {
-    if (emailSending || emailReconciling || saving || actionInFlight) return;
-    if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
+  const requestEmailPreview = async (authoritativeQuote = null, isStillCurrent = null) => {
     const requestGeneration = ++emailPreviewGenerationRef.current;
+    const sourceQuote = authoritativeQuote || quoteRef.current || quote;
     setEmailPreviewOpen(true);
     setEmailPreviewLoading(true);
     setEmailPreview(null);
     setEmailPreviewError('');
     setEmailSendError(null);
-    setEmailQuoteFinalized(['finalized', 'sent'].includes(quote.status));
+    setEmailQuoteFinalized(['finalized', 'sent'].includes(sourceQuote?.status));
     setEmailThreadCandidates([]);
     setEmailThreadCandidatesError('');
     setEmailThreadSearchCompleted(false);
@@ -1490,14 +1810,30 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     setEmailReconcileFeedback(null);
     emailThreadSearchGenerationRef.current += 1;
     emailReconcileGenerationRef.current += 1;
+    const stopForNewLocalEdits = () => {
+      if (!isStillCurrent || isStillCurrent()) return false;
+      setEmailPreviewOpen(false);
+      setEmailPreviewLoading(false);
+      setEmailPreview(null);
+      setEmailPreviewError('');
+      setEmailSendError(null);
+      setLineFeedback({
+        type: 'warning',
+        message: 'Quotation lines changed while the email review was being prepared. Review the changes, then click Review Email again.',
+      });
+      return true;
+    };
     try {
-      const latestQuote = await currentQuoteForEmailReview(requestGeneration);
+      const latestQuote = authoritativeQuote
+        || await currentQuoteForEmailReview(requestGeneration);
       if (!latestQuote) return;
+      if (stopForNewLocalEdits()) return;
       const response = await quotationAPI.quotes.emailPreview(
         quote.id,
         emailPreviewParams(latestQuote),
       );
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
+      if (stopForNewLocalEdits()) return;
       setEmailPreview(response.data || {});
     } catch (error) {
       if (emailPreviewGenerationRef.current !== requestGeneration) return;
@@ -1513,6 +1849,179 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
     } finally {
       if (emailPreviewGenerationRef.current === requestGeneration) {
         setEmailPreviewLoading(false);
+      }
+    }
+  };
+
+  const loadEmailPreview = async (isStillCurrent = null) => {
+    if (emailSending || emailReconciling || saving || actionInFlight) return;
+    if (editableStatuses.has(quote.status) && finalizeIssues.length > 0) return;
+    await requestEmailPreview(
+      null,
+      typeof isStillCurrent === 'function' ? isStillCurrent : null
+    );
+  };
+  loadEmailPreviewRef.current = loadEmailPreview;
+
+  useEffect(() => {
+    const expectedFingerprint = String(initialEmailReviewFingerprint || '');
+    if (!/^[0-9a-f]{64}$/.test(expectedFingerprint) || loading) return;
+    const requestKey = `${String(quoteId)}:${expectedFingerprint}`;
+    if (initialEmailReviewRequestRef.current === requestKey) return;
+    initialEmailReviewRequestRef.current = requestKey;
+    onInitialEmailReviewHandled?.();
+
+    const loadedQuote = quoteRef.current;
+    if (!loadedQuote || String(loadedQuote.id) !== String(quoteId)) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'The prepared quotation could not be loaded. Open it again before reviewing the email.',
+      });
+      return;
+    }
+    if (String(loadedQuote.quotation_review_fingerprint || '') !== expectedFingerprint) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'The quotation changed before the email review opened. Review the current quotation, then click Review Email again.',
+      });
+      return;
+    }
+    if (editableStatuses.has(loadedQuote.status) && finalizeIssues.length > 0) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'The prepared quotation needs review before its email preview can be opened.',
+      });
+      return;
+    }
+
+    const localStateAtHandoff = JSON.stringify({
+      quote: quotationReviewDisplaySignature(loadedQuote),
+      party: quotePartyDraftRef.current,
+      terms: quoteTermsDraftRef.current,
+      lines: snapshotLineDrafts(loadedQuote, lineDraftsRef.current),
+    });
+    const isStillCurrent = () => {
+      const currentQuote = quoteRef.current;
+      return Boolean(
+        currentQuote
+        && String(currentQuote.id) === String(quoteId)
+        && String(currentQuote.quotation_review_fingerprint || '') === expectedFingerprint
+        && JSON.stringify({
+          quote: quotationReviewDisplaySignature(currentQuote),
+          party: quotePartyDraftRef.current,
+          terms: quoteTermsDraftRef.current,
+          lines: snapshotLineDrafts(currentQuote, lineDraftsRef.current),
+        }) === localStateAtHandoff
+      );
+    };
+    loadEmailPreviewRef.current?.(isStillCurrent);
+  }, [
+    finalizeIssues.length,
+    initialEmailReviewFingerprint,
+    loading,
+    onInitialEmailReviewHandled,
+    quoteId,
+  ]);
+
+  const reviewEmail = async () => {
+    if (!chainedActionsEnabled) {
+      await loadEmailPreview();
+      return;
+    }
+    if (
+      reviewEmailInFlightRef.current
+      || emailSending
+      || emailReconciling
+      || saving
+      || actionInFlight
+      || reviewEmailIssues.length > 0
+    ) return;
+
+    const currentQuote = quoteRef.current || quote;
+    const currentFingerprint = String(
+      currentQuote?.quotation_review_fingerprint || ''
+    );
+    const lineIdsToSave = [...changedLineIds];
+    const draftsAtActionStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
+    if (lineIdsToSave.length && !currentFingerprint) {
+      setLineFeedback({
+        type: 'warning',
+        message: 'Reload the quotation before saving and reviewing its email.',
+      });
+      return;
+    }
+
+    reviewEmailInFlightRef.current = true;
+    const actionGeneration = ++reviewEmailGenerationRef.current;
+    setActionInFlight('Review Email');
+    if (lineIdsToSave.length) setSaving(true);
+    setLineFeedback(null);
+    setErrorInfo(null);
+
+    try {
+      let savedQuote = currentQuote;
+      if (lineIdsToSave.length) {
+        const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
+          quotation_review_fingerprint: currentFingerprint,
+          lines: lineIdsToSave.map((lineId) => ({
+            id: lineId,
+            ...payloadForLine(lineDraftsRef.current[lineId] || {}),
+          })),
+        });
+        if (reviewEmailGenerationRef.current !== actionGeneration) return;
+        savedQuote = response.data?.quotation;
+        if (
+          !savedQuote?.id
+          || String(savedQuote.id) !== String(quote.id)
+          || !savedQuote.quotation_review_fingerprint
+        ) {
+          throw new Error(
+            'The quotation was saved, but the server did not return a current review fingerprint.'
+          );
+        }
+        if (!lineDraftSnapshotMatches(draftsAtActionStart, lineDraftsRef.current)) {
+          mergeSavedQuote(savedQuote, lineIdsToSave, true);
+          setLineFeedback({
+            type: 'warning',
+            message: 'Quotation lines changed while saving. The saved response was applied without discarding your newer edits; click Review Email again after checking them.',
+          });
+          return;
+        }
+        mergeSavedQuote(savedQuote, lineIdsToSave);
+        setLineFeedback({
+          type: 'success',
+          message: `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}. Opening the email review...`,
+        });
+      }
+
+      if (reviewEmailGenerationRef.current !== actionGeneration) return;
+      // A save response is an authoritative locked server snapshot. With no
+      // changes, retain the existing retrieve-and-compare gate before preview.
+      const draftsBeforePreview = snapshotLineDrafts(savedQuote, lineDraftsRef.current);
+      await requestEmailPreview(
+        lineIdsToSave.length ? savedQuote : null,
+        () => lineDraftSnapshotMatches(draftsBeforePreview, lineDraftsRef.current),
+      );
+    } catch (error) {
+      if (reviewEmailGenerationRef.current !== actionGeneration) return;
+      if (replaceStaleQuotationReview(error)) return;
+      const details = await describeQuotationError(
+        error,
+        'Save quotation and review email',
+        `POST /quotations/quotes/${quote.id}/bulk_update_lines/`
+      );
+      if (reviewEmailGenerationRef.current !== actionGeneration) return;
+      setErrorInfo(details);
+      setLineFeedback({
+        type: 'error',
+        message: details.detail || 'The quotation could not be saved. The email preview was not opened.',
+      });
+      console.error(formatQuotationError(details), error);
+    } finally {
+      if (reviewEmailGenerationRef.current === actionGeneration) {
+        reviewEmailInFlightRef.current = false;
+        setSaving(false);
+        setActionInFlight('');
       }
     }
   };
@@ -2037,10 +2546,17 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   }
 
   const latestLpo = lpos[0] || null;
+  const lpoWorkflowEligible = ['approved', 'finalized', 'sent'].includes(quote.status);
   const canUseLpoWorkflow = (
-    ['approved', 'finalized', 'sent'].includes(quote.status)
+    lpoWorkflowEligible
     && !lpoRecordsUnavailable
+    && !lpoRecordsLoading
   );
+  const visibleSupportingDatasetStates = progressiveLoadEnabled
+    ? Object.entries(supportingDatasetLabels)
+      .map(([key, label]) => ({ key, label, ...(supportingDatasetStates[key] || {}) }))
+      .filter((dataset) => ['loading', 'error'].includes(dataset.status))
+    : [];
   const productCreationWarnings = productCreateModal ? Object.values(productCreateModal.confirmations || {}) : [];
   const hasProductCreationWarnings = productCreationWarnings.length > 0;
   const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked);
@@ -2048,6 +2564,23 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
   return (
     <div className="qm-editor">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
+      {visibleSupportingDatasetStates.length > 0 && (
+        <div
+          className="qm-supporting-data-status"
+          role="status"
+          aria-live="polite"
+          aria-label="Supporting quotation data status"
+        >
+          <strong>Supporting data</strong>
+          <div>
+            {visibleSupportingDatasetStates.map((dataset) => (
+              <span key={dataset.key} className={`qm-supporting-data-item ${dataset.status}`}>
+                {dataset.label}: {dataset.status === 'loading' ? 'Loading' : 'Unavailable'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       {referenceLoadFailures.length > 0 && (
         <div className="qm-feedback warning qm-reference-load-warning" role="alert">
           <div>
@@ -2090,7 +2623,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           )}
         </div>
         <div className="qm-action-row">
-          {['draft', 'pending_review', 'approved'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={loadEmailPreview}>Finalize</button>}
+          {['draft', 'pending_review', 'approved'].includes(quote.status) && (
+            <button
+              type="button"
+              className="qm-primary"
+              disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
+              onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
+            >
+              {chainedActionsEnabled
+                ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
+                : 'Finalize'}
+            </button>
+          )}
           {quote.status === 'finalized' && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
           {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
@@ -2145,6 +2689,12 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             </p>
           </div>
           <button type="button" className="qm-secondary small" onClick={() => setPriceContextError(null)}>Dismiss</button>
+        </div>
+      )}
+      {progressiveLoadEnabled && lpoWorkflowEligible && lpoRecordsLoading && (
+        <div className="qm-panel qm-lpo-workflow qm-supporting-panel-loading" role="status">
+          <strong>Loading LPO records...</strong>
+          <p>The quotation and pricing controls are ready while purchase-order history loads.</p>
         </div>
       )}
       {canUseLpoWorkflow && (
@@ -2263,17 +2813,18 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
             <p>Select the customer company and the purchaser/contact shown on this quotation.</p>
           </div>
           {isEditable && (
-            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || referenceRetrying || partyDataUnavailable || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || partyControlsBlocked || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
               {saving && hasUnsavedQuoteParty ? 'Saving...' : hasUnsavedQuoteParty ? 'Save Customer & Contact' : 'Saved'}
             </button>
           )}
         </div>
         <div className="qm-party-grid">
           <CompanySelectWithCreate
-            companies={companies}
+            companies={companiesForQuotePicker}
             value={quotePartyDraft.company}
             required
-            disabled={!isEditable || saving || Boolean(actionInFlight) || referenceRetrying || companyDirectoryUnavailable}
+            disabled={!isEditable || saving || Boolean(actionInFlight) || companyControlBlocked}
+            loading={companyDirectoryLoading}
             onChange={(companyId) => {
               updateQuotePartyDraft({ company: companyId, contact: '' });
               setContactForm(emptyContactForm);
@@ -2289,19 +2840,19 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
           <div className="qm-contact-control">
             <label>
               <span className="qm-label-text">Contact / Purchaser</span>
-              <select disabled={!isEditable || saving || Boolean(actionInFlight) || referenceRetrying || companyContactsUnavailable || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })}>
-                <option value="">{loadingContacts ? 'Loading contacts...' : 'No contact'}</option>
+              <select disabled={!isEditable || saving || Boolean(actionInFlight) || contactControlBlocked || !quotePartyDraft.company} value={quotePartyDraft.contact || ''} onChange={(event) => updateQuotePartyDraft({ contact: event.target.value })} aria-busy={companyContactsLoading || loadingContacts}>
+                <option value="">{companyContactsLoading || loadingContacts ? 'Loading contacts...' : 'No contact'}</option>
                 {contactsForQuoteCompany.map((contact) => <option key={contact.id} value={contact.id}>{contactOptionLabel(contact)}</option>)}
               </select>
             </label>
             {isEditable && (
-              <button type="button" className="qm-secondary small" disabled={!quotePartyDraft.company || saving || Boolean(actionInFlight) || referenceRetrying || companyContactsUnavailable} onClick={() => setShowContactForm((value) => !value)}>
+              <button type="button" className="qm-secondary small" disabled={!quotePartyDraft.company || saving || Boolean(actionInFlight) || contactControlBlocked} onClick={() => setShowContactForm((value) => !value)}>
                 {showContactForm ? 'Cancel new contact' : '+ Create contact'}
               </button>
             )}
           </div>
         </div>
-        {showContactForm && isEditable && !referenceRetrying && !companyContactsUnavailable && (
+        {showContactForm && isEditable && !contactControlBlocked && (
           <div className="qm-inline-card qm-contact-card">
             <label>Name<input required value={contactForm.name} onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })} /></label>
             <label>Phone<input value={contactForm.phone} onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })} /></label>
@@ -2357,12 +2908,12 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
         </div>
       </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
-      {finalizeIssues.length > 0 && (
+      {primaryEmailActionIssues.length > 0 && (
         <div className="qm-notice">
-          <strong>Finalize is blocked until:</strong>
+          <strong>{chainedActionsEnabled ? 'Review Email is blocked until:' : 'Finalize is blocked until:'}</strong>
           <ul>
-            {finalizeIssues.slice(0, 5).map((issue) => <li key={issue}><button type="button" className="qm-link-button" onClick={() => setLineFilter('active')}>{issue}</button></li>)}
-            {finalizeIssues.length > 5 && <li>{finalizeIssues.length - 5} more issue(s).</li>}
+            {primaryEmailActionIssues.slice(0, 5).map((issue) => <li key={issue}><button type="button" className="qm-link-button" onClick={() => setLineFilter('active')}>{issue}</button></li>)}
+            {primaryEmailActionIssues.length > 5 && <li>{primaryEmailActionIssues.length - 5} more issue(s).</li>}
           </ul>
         </div>
       )}
@@ -2392,14 +2943,23 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
               <option value="skipped">Skipped</option>
               <option value="all">All lines</option>
             </select>
-            <button type="button" className="qm-secondary small" disabled={productCatalogueUnavailable} onClick={selectVisibleUnmatched}>Select visible unmatched</button>
-            <button type="button" className="qm-secondary small" disabled={productCatalogueUnavailable || !selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
+            <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked} onClick={selectVisibleUnmatched}>Select visible unmatched</button>
+            <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked || !selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLines} onClick={saveAllLines}>
               {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
             </button>
             <span className="qm-sticky-action-divider" aria-hidden="true" />
             {['draft', 'pending_review', 'approved'].includes(quote.status) && (
-              <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || finalizeIssues.length > 0} onClick={loadEmailPreview}>Finalize</button>
+              <button
+                type="button"
+                className="qm-primary"
+                disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
+                onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
+              >
+                {chainedActionsEnabled
+                  ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
+                  : 'Finalize'}
+              </button>
             )}
             {!['revised', 'cancelled'].includes(quote.status) && (
               <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>
@@ -2438,16 +2998,25 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                 const draft = lineDrafts[line.id] || {};
                 const isDirty = !draftsMatch(draft, savedLineDrafts[line.id]);
                 const statusInfo = derivedLineStatus(line);
-                const priceHint = linePriceHints[line.id];
+                const candidatePriceHint = linePriceHints[line.id];
+                const priceHint = candidatePriceHint
+                  && String(candidatePriceHint.product || '') === String(draft.product || '')
+                  ? candidatePriceHint
+                  : null;
+                const cachedPriceContext = priceContexts[String(draft.product)];
+                const priceHistoryContext = cachedPriceContext
+                  && String(cachedPriceContext.product || '') === String(draft.product || '')
+                  ? cachedPriceContext
+                  : priceHint;
                 return (
                   <tr key={line.id}>
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
                     <td className="qm-serial-cell">{lineIndex + 1}</td>
                     <td className="qm-line-product-cell">
-                      <select aria-label={`Product for ${lineLabel(line, draft)}`} disabled={!isEditable || productCatalogueUnavailable} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
+                      <select aria-label={`Product for ${lineLabel(line, draft)}`} aria-busy={productCatalogueLoading} disabled={!isEditable || productCatalogueBlocked} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
                         <option value="">Unmatched</option>
                         {isEditable && <option value="__create__">+ Create a new Product…</option>}
-                        {renderProductOptions(draft)}
+                        {renderProductOptions(draft, line)}
                       </select>
                     </td>
                     <td className="qm-line-snapshot-cell"><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
@@ -2477,14 +3046,25 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
                       />
                     </td>
                     <td className="qm-price-cell">
-                      <input aria-label={`Unit price for ${lineLabel(line, draft)}`} disabled={!isEditable} type="number" min="0" step="0.001" value={draft.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })} />
+                      <input
+                        ref={(node) => assignPriceInputRef(line.id, node)}
+                        aria-label={`Unit price for ${lineLabel(line, draft)}`}
+                        disabled={!isEditable}
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={draft.unit_price || ''}
+                        onWheel={releaseNumberWheelFocus}
+                        onKeyDown={(event) => moveToNextBlankPrice(event, line.id)}
+                        onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })}
+                      />
                       {draft.product && (
                         <span className={`qm-price-hint ${priceHint?.mode || 'on-demand'}`}>
-                          {priceHint ? priceHintText(priceHint) : 'Price history available on demand'}
+                          {priceHint ? priceHintText(priceHint) : priceHistoryLoading ? 'Loading price history...' : 'Price history available on demand'}
                           <button type="button" onClick={() => setPriceHistoryDialog({
                             productId: draft.product,
                             productName: priceHint?.product_name || items.find((item) => String(item.id) === String(draft.product))?.name || '',
-                            context: priceContexts[String(draft.product)] || priceHint,
+                            context: priceHistoryContext,
                           })}>View price history</button>
                         </span>
                       )}
@@ -2535,7 +3115,7 @@ const QuotationEditor = ({ quoteId, onClose, onReviewOutcome }) => {
 
         {isEditable && (
           <form onSubmit={addLine} className={`qm-add-line${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
-            <select disabled={productCatalogueUnavailable} value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
+            <select disabled={productCatalogueBlocked} aria-busy={productCatalogueLoading} value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
               <option value="">Select item</option>
               {renderProductOptions(lineForm)}
             </select>

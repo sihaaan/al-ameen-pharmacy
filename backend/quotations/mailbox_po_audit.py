@@ -650,6 +650,8 @@ def fetch_mailbox_message(
     message_id,
     *,
     preserve_forwarded=False,
+    access_token=None,
+    request_json=None,
 ):
     """Fetch one full Gmail message, including every header and newest body.
 
@@ -658,8 +660,9 @@ def fetch_mailbox_message(
     candidate hydration step and are never persisted directly.
     """
 
-    token = get_valid_access_token(connection)
-    payload = _json_request(
+    token = access_token or get_valid_access_token(connection)
+    json_request = request_json or _json_request
+    payload = json_request(
         f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(str(message_id))}?format=full",
         token=token,
     )
@@ -678,7 +681,7 @@ def fetch_mailbox_message(
             and detached_body_id
             and not body.get("data")
         ):
-            detached = _json_request(
+            detached = json_request(
                 f"{GMAIL_API_BASE}/messages/{urllib.parse.quote(str(message_id))}/attachments/"
                 f"{urllib.parse.quote(str(detached_body_id))}",
                 token=token,

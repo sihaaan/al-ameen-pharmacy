@@ -13,6 +13,20 @@ from quotations.gmail_inquiry_import import (
     GMAIL_AI_SCHEMA_NAME,
     GMAIL_IDENTITY_MATCH_VERSION,
 )
+from quotations.gmail_compact_shadow import (
+    GMAIL_COMPACT_CACHE_NAMESPACE,
+    GMAIL_COMPACT_PIPELINE_VERSION,
+    GMAIL_COMPACT_SCHEMA_NAME,
+)
+from quotations.gmail_xlsx_preextract_runner import (
+    GMAIL_XLSX_SHADOW_CACHE_NAMESPACE,
+    GMAIL_XLSX_SHADOW_PIPELINE_VERSION,
+    GMAIL_XLSX_SHADOW_PROMPT_VERSION,
+    GMAIL_XLSX_SHADOW_SCHEMA_NAME,
+)
+from quotations.gmail_xlsx_preextract_shadow import (
+    SCHEMA_VERSION as XLSX_PREEXTRACT_SCHEMA_VERSION,
+)
 from quotations.models import (
     QuotationEmailDeliveryAttemptEvent,
     QuotationEmailOutboundSnapshot,
@@ -200,6 +214,17 @@ class DocumentationContractTests(SimpleTestCase):
             "SENTRY_TRACES_SAMPLE_RATE",
             "DJANGO_LOG_LEVEL",
             "DJANGO_REQUEST_LOG_LEVEL",
+            "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
+            "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
+            "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
+            "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
+            "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
+            "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
+            "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+            "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
+            "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
+            "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+            "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
         )
         for name in required_names:
             with self.subTest(name=name):
@@ -237,6 +262,146 @@ class DocumentationContractTests(SimpleTestCase):
                     content,
                     rf"(?m)^# {re.escape(name)}={re.escape(value)}$",
                 )
+
+    def test_gmail_chained_actions_are_documented_as_fail_closed_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            with self.subTest(document="deployment" if content is deployment else "operations"):
+                self.assertIn("QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED", content)
+                self.assertIn("QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED", content)
+                self.assertIn("409", content)
+                self.assertIn("no migration", content.lower())
+        self.assertIn("Neither path\nfinalizes a quotation", deployment)
+        self.assertIn("or sends email", deployment)
+
+    def test_quotation_editor_progressive_load_is_documented_as_optional(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no migration", content.lower())
+        self.assertIn("change quotation data", deployment)
+        self.assertIn("independently", operations)
+
+    def test_gmail_analysis_progress_contract_is_private_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED", content)
+            self.assertIn("0040", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no-store", content.lower())
+            self.assertIn("synchronous", content.lower())
+        self.assertIn("gmail_analysis_progress_v1", deployment)
+        self.assertIn("/analysis_progress/", deployment)
+        self.assertIn("never contains Gmail identifiers", deployment)
+        self.assertIn("Source-selection changes clear progress", operations)
+
+    def test_unified_gmail_workspace_is_documented_as_safe_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED", content)
+            self.assertIn("QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("finalizes", content.lower())
+            self.assertIn("or sends", content.lower())
+        self.assertIn("confirm_and_prepare_quotation", deployment)
+        self.assertIn("Customer budget/source prices are never read", deployment)
+        self.assertIn("Exact\ndouble clicks", deployment)
+        self.assertIn("not eligible to auto-preview", operations)
+
+    def test_background_gmail_analysis_is_migration_first_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            with self.subTest(
+                document="deployment" if content is deployment else "operations"
+            ):
+                self.assertIn(
+                    "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
+                    content,
+                )
+                self.assertIn("0041", content)
+                self.assertIn(
+                    "python manage.py run_gmail_inquiry_worker",
+                    content,
+                )
+                self.assertIn("HTTP 202", content)
+                self.assertIn("synchronous", content.lower())
+                self.assertIn("stop the worker", content.lower())
+                self.assertIn("no Railway worker service", content)
+        self.assertIn("page\nreload resumes", deployment)
+        self.assertIn("heartbeat", operations.lower())
+        self.assertIn("crash", operations.lower())
+        self.assertIn("cannot\noverwrite", operations)
+
+    def test_parallel_gmail_reads_are_bounded_default_off_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn("QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED", content)
+            self.assertIn("QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT", content)
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("sequential", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("401", content)
+            self.assertIn("429", content)
+            self.assertIn("Gmail send", content)
+        self.assertIn("sliding in-flight window", deployment)
+        self.assertIn("original source order", deployment)
+        self.assertIn("1-8", operations)
+
+    def test_compact_gmail_shadow_is_default_off_discarded_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn(
+                "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+                content,
+            )
+            self.assertIn("shadow", content.lower())
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("raw", content.lower())
+            self.assertIn("provider", content.lower())
+            self.assertIn("rollback", content.lower())
+        for version in (
+            GMAIL_COMPACT_PIPELINE_VERSION,
+            GMAIL_COMPACT_SCHEMA_NAME,
+            GMAIL_COMPACT_CACHE_NAMESPACE,
+        ):
+            self.assertIn(version, deployment)
+        self.assertIn("discarded", deployment)
+        self.assertIn("test key", operations)
+
+    def test_xlsx_preextract_shadow_is_default_off_discarded_and_reversible(self):
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+        for content in (deployment, operations):
+            self.assertIn(
+                "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
+                content,
+            )
+            self.assertIn("disabled by default", content.lower())
+            self.assertIn("native", content.lower())
+            self.assertIn("provider", content.lower())
+            self.assertIn("discard", content.lower())
+            self.assertIn("no migration", content.lower())
+            self.assertIn("rollback", content.lower())
+        for version in (
+            GMAIL_XLSX_SHADOW_PIPELINE_VERSION,
+            GMAIL_XLSX_SHADOW_SCHEMA_NAME,
+            GMAIL_XLSX_SHADOW_PROMPT_VERSION,
+            GMAIL_XLSX_SHADOW_CACHE_NAMESPACE,
+            XLSX_PREEXTRACT_SCHEMA_VERSION,
+        ):
+            self.assertIn(version, deployment)
+        self.assertIn("macro-free", deployment)
+        self.assertIn("synthetic evaluation key", deployment)
 
     def test_attachment_security_and_fidelity_contract_is_documented(self):
         relative_path = "ATTACHMENT_SECURITY_AND_SPREADSHEET_FIDELITY.md"

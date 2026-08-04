@@ -7,18 +7,23 @@ history, quotations, or revisions. Confirmation creates at most one Inquiry
 and its first draft Quotation.
 """
 
+import copy
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
+import threading
 import time
+import urllib.error
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 
 from django.conf import settings
@@ -26,6 +31,8 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from python_calamine import load_workbook as load_calamine_workbook
+
+from api.models import Product
 
 from .attachment_inspection import (
     inspect_pdf_attachment,
@@ -79,10 +86,59 @@ from .models import (
     GmailInquiryImport,
     GmailOAuthConnection,
     Inquiry,
+    QuoteItem,
     QuotationSettings,
     normalize_label,
 )
+from .gmail_workflow_metrics import (
+    EVENT_ANALYSIS_COMPLETED,
+    EVENT_ANALYSIS_FAILED,
+    EVENT_ANALYSIS_REQUESTED,
+    EVENT_ANALYSIS_STARTED,
+    EVENT_COMPANY_APPROVED,
+    EVENT_HANDOFF_CLAIMED,
+    EVENT_HANDOFF_CREATED,
+    EVENT_REVIEWED_ROWS_SAVED,
+    record_gmail_workflow_metric,
+)
+from .gmail_review_state import (
+    GMAIL_IDENTITY_MATCH_VERSION,
+    build_gmail_identity_approval,
+    clear_gmail_identity_approval,
+    gmail_analysis_generation,
+    gmail_identity_approval_is_current,
+    gmail_identity_evidence_fingerprint,
+    gmail_review_rows_fingerprint,
+    gmail_suggested_company_is_approvable,
+)
+from .gmail_compact_shadow import run_compact_shadow, sanitize_shadow_report
+from .gmail_xlsx_preextract_runner import (
+    run_xlsx_preextract_shadow,
+    sanitize_xlsx_shadow_report,
+)
+from .gmail_analysis_progress import (
+    STAGE_ANALYZING_WITH_AI,
+    STAGE_FETCHING_ATTACHMENTS,
+    STAGE_FETCHING_MESSAGES,
+    STAGE_INSPECTING_DOCUMENTS,
+    STAGE_MATCHING_COMPANY_PRODUCTS,
+    STAGE_PREPARING,
+    STAGE_SAVING_RESULTS,
+    STAGE_VALIDATING_EVIDENCE,
+    GmailAnalysisProgressBinding,
+    advance_gmail_analysis_progress,
+    clear_gmail_analysis_progress,
+    finish_gmail_analysis_progress,
+    initialize_gmail_analysis_progress,
+    progress_failure_category_for_stage,
+)
 from .services import create_imported_inquiry, create_quotation_from_inquiry
+from .workflow_features import (
+    gmail_background_analysis_enabled,
+    gmail_chained_actions_enabled,
+    gmail_review_ui_v2_enabled,
+    gmail_unified_workspace_enabled,
+)
 
 
 HANDOFF_TOKEN_BYTES = 32
@@ -110,6 +166,282 @@ NATIVE_AI_FILE_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 GMAIL_AI_PIPELINE_VERSION = "gmail_inquiry_v2"
 GMAIL_AI_SCHEMA_NAME = "gmail_inquiry_native_v2"
 GMAIL_SEMANTIC_CACHE_VERSION = "gmail_semantic_cache_v1"
+DEFAULT_GMAIL_PARALLEL_FETCH_LIMIT = 4
+MIN_GMAIL_PARALLEL_FETCH_LIMIT = 1
+MAX_GMAIL_PARALLEL_FETCH_LIMIT = 8
+GMAIL_INTAKE_GET_MAX_ATTEMPTS = 3
+GMAIL_INTAKE_GET_BACKOFF_SECONDS = (0.2, 0.5)
+GMAIL_INTAKE_GET_MAX_RETRY_AFTER_SECONDS = 2.0
+_GMAIL_INTAKE_RETRY_LOCK = threading.Lock()
+
+
+def _gmail_parallel_fetch_enabled():
+    """Enable parallel reads only for the strict Boolean rollout value."""
+
+    return (
+        getattr(settings, "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED", False)
+        is True
+    )
+
+
+def _gmail_compact_schema_shadow_enabled():
+    """Enable the non-authoritative compact call only for strict true."""
+
+    return (
+        getattr(
+            settings,
+            "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+            False,
+        )
+        is True
+    )
+
+
+def _gmail_xlsx_preextract_shadow_enabled():
+    """Enable the non-authoritative clean-XLSX call only for strict true."""
+
+    return (
+        getattr(
+            settings,
+            "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
+            False,
+        )
+        is True
+    )
+
+
+def _gmail_parallel_fetch_limit():
+    try:
+        configured = int(
+            getattr(
+                settings,
+                "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
+                DEFAULT_GMAIL_PARALLEL_FETCH_LIMIT,
+            )
+        )
+    except (TypeError, ValueError):
+        configured = DEFAULT_GMAIL_PARALLEL_FETCH_LIMIT
+    return min(
+        MAX_GMAIL_PARALLEL_FETCH_LIMIT,
+        max(MIN_GMAIL_PARALLEL_FETCH_LIMIT, configured),
+    )
+
+
+def _gmail_intake_http_error(exc):
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, urllib.error.HTTPError):
+            return current
+        current = getattr(current, "__cause__", None) or getattr(
+            current,
+            "__context__",
+            None,
+        )
+    return None
+
+
+def _gmail_intake_http_status(exc):
+    http_error = _gmail_intake_http_error(exc)
+    if http_error is not None:
+        return int(http_error.code or 0)
+    message = str(exc or "")
+    status_match = re.search(r"\bHTTP\s+(\d{3})\b", message, re.IGNORECASE)
+    return int(status_match.group(1)) if status_match else 0
+
+
+def _gmail_intake_retryable_get_error(exc):
+    """Classify only transient failures from read-only Gmail intake GETs."""
+
+    status = _gmail_intake_http_status(exc)
+    if status:
+        return status == 429 or 500 <= status <= 599
+    return isinstance(
+        exc,
+        (TimeoutError, ConnectionError, urllib.error.URLError),
+    )
+
+
+def _gmail_intake_retry_delay(exc, attempt):
+    delay = GMAIL_INTAKE_GET_BACKOFF_SECONDS[attempt]
+    http_error = _gmail_intake_http_error(exc)
+    if http_error is not None and (
+        int(http_error.code or 0) == 429
+        or 500 <= int(http_error.code or 0) <= 599
+    ):
+        retry_after = str(
+            (getattr(http_error, "headers", None) or {}).get(
+                "Retry-After",
+                "",
+            )
+        ).strip()
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                delay = (retry_at - timezone.now()).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return min(
+        GMAIL_INTAKE_GET_MAX_RETRY_AFTER_SECONDS,
+        max(GMAIL_INTAKE_GET_BACKOFF_SECONDS[attempt], float(delay)),
+    )
+
+
+def _gmail_intake_safe_error(exc):
+    status = _gmail_intake_http_status(exc)
+    if status in {401, 403}:
+        return GmailInquiryImportError(
+            "Gmail access is no longer authorized. Reconnect the shared "
+            "mailbox and retry analysis."
+        )
+    if status == 404:
+        return GmailInquiryImportError(
+            "A selected Gmail message or attachment is no longer available. "
+            "Open the thread again and retry."
+        )
+    if status == 429 or 500 <= status <= 599 or _gmail_intake_retryable_get_error(exc):
+        return GmailInquiryImportError(
+            "Gmail temporarily could not read the selected inquiry. Retry "
+            "analysis shortly."
+        )
+    return GmailInquiryImportError(
+        "Gmail could not read the selected inquiry. Open the thread again "
+        "and retry."
+    )
+
+
+def _gmail_intake_json_get(url, *, token, timeout=60):
+    """Retry bounded transient failures for Gmail intake GET requests only."""
+
+    for attempt in range(GMAIL_INTAKE_GET_MAX_ATTEMPTS):
+        try:
+            return _json_request(url, token=token, timeout=timeout)
+        except Exception as exc:
+            if (
+                not _gmail_intake_retryable_get_error(exc)
+                or attempt + 1 >= GMAIL_INTAKE_GET_MAX_ATTEMPTS
+            ):
+                raise _gmail_intake_safe_error(exc) from exc
+            # Serialize retry delays across workers so a Gmail throttle does
+            # not cause the bounded pool to amplify a retry burst.
+            with _GMAIL_INTAKE_RETRY_LOCK:
+                time.sleep(_gmail_intake_retry_delay(exc, attempt))
+    raise AssertionError("unreachable Gmail intake GET retry state")
+
+
+def _bounded_ordered_parallel_results(tasks, worker, *, limit):
+    """Yield worker results in input order with only ``limit`` in flight."""
+
+    tasks = list(tasks)
+    if not tasks:
+        return
+    executor = ThreadPoolExecutor(
+        max_workers=limit,
+        thread_name_prefix="gmail-intake-read",
+    )
+    futures = {}
+    next_to_submit = 0
+
+    def submit_one(index):
+        task = tasks[index]
+
+        def captured():
+            try:
+                return worker(task), None
+            except Exception as exc:  # reduced deterministically on caller thread
+                return None, exc
+
+        futures[index] = executor.submit(captured)
+
+    try:
+        while next_to_submit < min(limit, len(tasks)):
+            submit_one(next_to_submit)
+            next_to_submit += 1
+        for index, task in enumerate(tasks):
+            value, error = futures.pop(index).result()
+            yield task, value, error
+            if next_to_submit < len(tasks):
+                submit_one(next_to_submit)
+                next_to_submit += 1
+    finally:
+        for future in futures.values():
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _workflow_duration_ms(started_at, ended_at=None):
+    if not started_at:
+        return None
+    ended_at = ended_at or timezone.now()
+    try:
+        return max(0, round((ended_at - started_at).total_seconds() * 1000))
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _workflow_analysis_dimensions(
+    gmail_import,
+    result=None,
+    *,
+    background_analysis=False,
+):
+    result = result if isinstance(result, dict) else {}
+    preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+    rows = preview.get("lines") if isinstance(preview.get("lines"), list) else []
+    usage = (
+        (result.get("thread_analysis") or {}).get("ai_usage")
+        if isinstance(result.get("thread_analysis"), dict)
+        else {}
+    ) or {}
+    observation = usage.get("observability") if isinstance(usage, dict) else {}
+    observation = observation if isinstance(observation, dict) else {}
+    contract = observation.get("contract") if isinstance(observation.get("contract"), dict) else {}
+    if observation.get("application_cache_hit") is True:
+        cache_state = "hit"
+    elif observation.get("provider_call_attempted") is True:
+        cache_state = "miss"
+    else:
+        cache_state = "unknown"
+    return {
+        "counts": {
+            "analysis_attempt_count": gmail_import.analysis_attempts,
+            "message_count": len(gmail_import.message_manifest or []),
+            "selected_message_count": len(gmail_import.selected_message_ids or []),
+            "attachment_count": len(gmail_import.attachment_manifest or []),
+            "included_row_count": sum(
+                1
+                for row in rows
+                if isinstance(row, dict) and row.get("included") is not False
+            ),
+            "uncertain_row_count": sum(
+                1
+                for row in rows
+                if isinstance(row, dict)
+                and row.get("included") is not False
+                and (
+                    str(row.get("operation") or "") == "uncertain"
+                    or str(row.get("parse_status") or "") in {"needs_review", "unparsed"}
+                )
+            ),
+        },
+        "cache_state": cache_state,
+        "feature_flags": {
+            "background_analysis": bool(background_analysis),
+            "compact_schema_shadow": _gmail_compact_schema_shadow_enabled(),
+            "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            "xlsx_preextract_shadow": _gmail_xlsx_preextract_shadow_enabled(),
+        },
+        "contract_versions": {
+            "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+            "ai_schema": GMAIL_AI_SCHEMA_NAME,
+            "ai_prompt": contract.get("prompt_sha256") or "",
+            "ai_observability": observation.get("version") or "",
+            "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+        },
+    }
 ANALYSIS_TIMING_KEYS = (
     "gmail_thread_fetch",
     "source_preparation",
@@ -219,12 +551,28 @@ class GmailInquiryImportBusy(GmailInquiryImportError):
     """The same intake is already being analyzed by another request."""
 
 
+class GmailInquiryImportStale(GmailInquiryImportError):
+    """The employee acted on an older analysis or identity projection."""
+
+
 @dataclass(frozen=True)
 class GmailInquiryConfirmation:
     gmail_import: GmailInquiryImport
     inquiry: Inquiry
     quotation: object
     created: bool
+
+
+@dataclass(frozen=True)
+class GmailUnifiedPreparation:
+    gmail_import: GmailInquiryImport
+    inquiry: Inquiry
+    quotation: object
+    created: bool
+    prepared: bool
+    preparation_reused: bool
+    reused_reason: str
+    prepared_review_fingerprint: str = ""
 
 
 def _require_staff(actor):
@@ -445,6 +793,14 @@ def issue_gmail_inquiry_handoff(
                 ]
             )
             _store_handoff_token(confirmed, token_hash, expires_at)
+            record_gmail_workflow_metric(
+                confirmed,
+                EVENT_HANDOFF_CREATED,
+                counts={
+                    "selected_message_count": len(selected),
+                },
+                outcome_code="reused",
+            )
             return confirmed, raw_token
 
         gmail_import, _created = GmailInquiryImport.objects.get_or_create(
@@ -502,6 +858,7 @@ def issue_gmail_inquiry_handoff(
                 gmail_import.errors = []
                 gmail_import.analysis_started_at = None
                 gmail_import.analyzed_at = None
+                clear_gmail_analysis_progress(gmail_import)
                 gmail_import.status = GmailInquiryImport.STATUS_PENDING
         gmail_import.gmail_connection = connection
         gmail_import.source_fingerprint = source_fingerprint
@@ -510,6 +867,14 @@ def issue_gmail_inquiry_handoff(
         gmail_import.handoff_used_at = None
         gmail_import.save()
         _store_handoff_token(gmail_import, token_hash, expires_at)
+        record_gmail_workflow_metric(
+            gmail_import,
+            EVENT_HANDOFF_CREATED,
+            counts={
+                "selected_message_count": len(selected),
+            },
+            outcome_code="created" if _created else "reused",
+        )
     return gmail_import, raw_token
 
 
@@ -530,6 +895,7 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
     if token_record:
         gmail_import = _record_for_update(token_record.gmail_import_id)
         token_expires_at = token_record.expires_at
+        handoff_created_at = token_record.created_at
     else:
         try:
             gmail_import = GmailInquiryImport.objects.select_for_update().get(
@@ -540,6 +906,10 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
                 "Gmail inquiry handoff token is invalid."
             ) from exc
         token_expires_at = gmail_import.handoff_expires_at
+        # Legacy one-slot handoffs predate the token ledger, so their exact
+        # issue time is unknowable. Omit duration rather than report the
+        # import's potentially months-old creation time.
+        handoff_created_at = None
 
     now = timezone.now()
     if not token_expires_at or token_expires_at < now:
@@ -555,6 +925,11 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
             "Another staff member has already claimed this Gmail inquiry."
         )
 
+    handoff_was_unused = (
+        not token_record.used_at
+        if token_record is not None
+        else not gmail_import.handoff_used_at
+    )
     update_fields = ["updated_at"]
     if (
         gmail_import.status != GmailInquiryImport.STATUS_CONFIRMED
@@ -573,6 +948,20 @@ def claim_gmail_inquiry_handoff(raw_token, actor):
         gmail_import.status = GmailInquiryImport.STATUS_CLAIMED
         update_fields.append("status")
     gmail_import.save(update_fields=update_fields)
+    if handoff_was_unused:
+        record_gmail_workflow_metric(
+            gmail_import,
+            EVENT_HANDOFF_CLAIMED,
+            duration_ms=_workflow_duration_ms(handoff_created_at, now),
+            counts={
+                "selected_message_count": len(gmail_import.selected_message_ids or []),
+            },
+            outcome_code=(
+                "reused"
+                if gmail_import.status == GmailInquiryImport.STATUS_CONFIRMED
+                else "success"
+            ),
+        )
     return gmail_import
 
 
@@ -620,8 +1009,15 @@ def _max_thread_messages():
     return min(max(configured, 1), 100)
 
 
-def _thread_message_metadata(connection, thread_id):
-    token = get_valid_access_token(connection)
+def _thread_message_metadata(
+    connection,
+    thread_id,
+    *,
+    access_token=None,
+    request_json=None,
+):
+    token = access_token or get_valid_access_token(connection)
+    json_request = request_json or _json_request
     query = urllib.parse.urlencode(
         [
             ("format", "metadata"),
@@ -632,7 +1028,7 @@ def _thread_message_metadata(connection, thread_id):
             ("metadataHeaders", "Reply-To"),
         ]
     )
-    payload = _json_request(
+    payload = json_request(
         f"{GMAIL_API_BASE}/threads/{urllib.parse.quote(str(thread_id))}?{query}",
         token=token,
     )
@@ -701,10 +1097,17 @@ def _thread_message_metadata(connection, thread_id):
     }
 
 
-def _message_metadata(connection, message_id):
+def _message_metadata(
+    connection,
+    message_id,
+    *,
+    access_token=None,
+    request_json=None,
+):
     """Resolve one Gmail message without retrieving its body or MIME parts."""
 
-    token = get_valid_access_token(connection)
+    token = access_token or get_valid_access_token(connection)
+    json_request = request_json or _json_request
     query = urllib.parse.urlencode(
         [
             ("format", "metadata"),
@@ -715,7 +1118,7 @@ def _message_metadata(connection, message_id):
             ("metadataHeaders", "Reply-To"),
         ]
     )
-    payload = _json_request(
+    payload = json_request(
         f"{GMAIL_API_BASE}/messages/"
         f"{urllib.parse.quote(str(message_id))}?{query}",
         token=token,
@@ -1011,7 +1414,12 @@ def _public_attachment_manifest(message):
     return public
 
 
-def _fetch_analysis_messages(gmail_import, connection):
+def _fetch_analysis_messages_sequential(
+    gmail_import,
+    connection,
+    *,
+    coordinator_heartbeat=None,
+):
     selected_ids = _normalize_message_ids(
         gmail_import.selected_message_ids,
         fallback=gmail_import.anchor_message_id,
@@ -1032,6 +1440,8 @@ def _fetch_analysis_messages(gmail_import, connection):
             gmail_import.anchor_message_id,
         )
     )
+    if coordinator_heartbeat is not None:
+        coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
     canonical_anchor_id = _normalize_gmail_id(
         anchor.get("gmail_message_id") or gmail_import.anchor_message_id
     )
@@ -1043,6 +1453,8 @@ def _fetch_analysis_messages(gmail_import, connection):
             connection,
             lookup_thread_id,
         )
+        if coordinator_heartbeat is not None:
+            coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
         canonical_thread_id = str(
             timeline_result.get("gmail_thread_id") or ""
         ).strip()
@@ -1128,6 +1540,8 @@ def _fetch_analysis_messages(gmail_import, connection):
                 preserve_forwarded=True,
             )
         )
+        if coordinator_heartbeat is not None:
+            coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
         canonical_message_id = _normalize_gmail_id(
             message.get("gmail_message_id") or requested_message_id
         )
@@ -1176,6 +1590,251 @@ def _fetch_analysis_messages(gmail_import, connection):
     return thread_id, messages, merged_timeline, timeline_result
 
 
+def _fetch_analysis_messages_parallel(
+    gmail_import,
+    *,
+    access_token,
+    coordinator_heartbeat=None,
+):
+    """Verify canonical membership first, then fetch selected bodies in parallel."""
+
+    selected_ids = _normalize_message_ids(
+        gmail_import.selected_message_ids,
+        fallback=gmail_import.anchor_message_id,
+    )
+    anchor_metadata = _message_metadata(
+        None,
+        gmail_import.anchor_message_id,
+        access_token=access_token,
+        request_json=_gmail_intake_json_get,
+    )
+    if coordinator_heartbeat is not None:
+        coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
+    canonical_anchor_id = _normalize_gmail_id(
+        anchor_metadata.get("gmail_message_id")
+        or gmail_import.anchor_message_id
+    )
+    anchor_thread_id = str(
+        anchor_metadata.get("gmail_thread_id") or ""
+    ).strip()
+    configured_thread_id = str(gmail_import.gmail_thread_id or "").strip()
+    lookup_thread_id = configured_thread_id or anchor_thread_id
+    if lookup_thread_id:
+        timeline_result = _thread_message_metadata(
+            None,
+            lookup_thread_id,
+            access_token=access_token,
+            request_json=_gmail_intake_json_get,
+        )
+        if coordinator_heartbeat is not None:
+            coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
+        canonical_thread_id = str(
+            timeline_result.get("gmail_thread_id") or ""
+        ).strip()
+        all_thread_message_ids = {
+            str(message_id or "")
+            for message_id in timeline_result.get("message_ids") or []
+        }
+        if (
+            canonical_anchor_id not in all_thread_message_ids
+            or (
+                anchor_thread_id
+                and canonical_thread_id
+                and anchor_thread_id != canonical_thread_id
+            )
+        ):
+            raise GmailInquiryImportError(
+                "The Gmail handoff thread does not match the selected message."
+            )
+        thread_id = anchor_thread_id or canonical_thread_id
+    else:
+        thread_id = ""
+        all_thread_message_ids = {canonical_anchor_id}
+        timeline_result = {
+            "messages": [],
+            "total_count": 1,
+            "returned_count": 1,
+            "limit": _max_thread_messages(),
+            "truncated": False,
+            "gmail_thread_id": "",
+            "message_ids": [canonical_anchor_id],
+        }
+
+    timeline_messages = list(timeline_result["messages"])
+    timeline_ids = {
+        str(message.get("gmail_message_id") or "")
+        for message in timeline_messages
+    }
+    if canonical_anchor_id not in timeline_ids:
+        limit = max(1, int(timeline_result.get("limit") or 1))
+        timeline_messages = (
+            [anchor_metadata]
+            if limit == 1
+            else [anchor_metadata, *timeline_messages[-(limit - 1) :]]
+        )
+
+    if gmail_import.mode == GmailInquiryImport.MODE_CURRENT_MESSAGE:
+        requested_message_ids = [canonical_anchor_id]
+    elif gmail_import.mode == GmailInquiryImport.MODE_SELECTED_MESSAGES:
+        requested_message_ids = []
+        for selected_id in selected_ids:
+            if selected_id in {
+                gmail_import.anchor_message_id,
+                canonical_anchor_id,
+            }:
+                canonical_selected_id = canonical_anchor_id
+                selected_metadata = anchor_metadata
+            elif selected_id in all_thread_message_ids:
+                canonical_selected_id = selected_id
+                selected_metadata = None
+            else:
+                selected_metadata = _message_metadata(
+                    None,
+                    selected_id,
+                    access_token=access_token,
+                    request_json=_gmail_intake_json_get,
+                )
+                if coordinator_heartbeat is not None:
+                    coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
+                canonical_selected_id = _normalize_gmail_id(
+                    selected_metadata.get("gmail_message_id") or selected_id
+                )
+            selected_thread_id = str(
+                (selected_metadata or {}).get("gmail_thread_id") or thread_id
+            ).strip()
+            if (
+                canonical_selected_id not in all_thread_message_ids
+                or not thread_id
+                or selected_thread_id != thread_id
+            ):
+                raise GmailInquiryImportError(
+                    "Every selected Gmail message must belong to the same thread."
+                )
+            if canonical_selected_id not in requested_message_ids:
+                requested_message_ids.append(canonical_selected_id)
+    else:
+        if not thread_id:
+            raise GmailInquiryImportError(
+                "Gmail did not provide a thread for AI-assisted analysis."
+            )
+        requested_message_ids = [
+            str(message.get("gmail_message_id") or "")
+            for message in timeline_messages
+            if message.get("gmail_message_id")
+        ]
+        if canonical_anchor_id not in requested_message_ids:
+            requested_message_ids.append(canonical_anchor_id)
+
+    def fetch_body(message_id):
+        return fetch_mailbox_message(
+            None,
+            message_id,
+            preserve_forwarded=True,
+            access_token=access_token,
+            request_json=_gmail_intake_json_get,
+        )
+
+    messages = []
+    seen_message_ids = set()
+    tasks = list(enumerate(requested_message_ids))
+    ordered_results = _bounded_ordered_parallel_results(
+        tasks,
+        lambda task: fetch_body(task[1]),
+        limit=_gmail_parallel_fetch_limit(),
+    )
+    try:
+        for (_index, requested_message_id), message, error in ordered_results:
+            # Futures only fetch bytes/JSON. Lease renewal and authorization
+            # checks stay on this coordinator thread after each bounded read.
+            if coordinator_heartbeat is not None:
+                coordinator_heartbeat(STAGE_FETCHING_MESSAGES)
+            if error is not None:
+                raise error
+            canonical_message_id = _normalize_gmail_id(
+                message.get("gmail_message_id") or requested_message_id
+            )
+            message_thread_id = str(
+                message.get("gmail_thread_id") or ""
+            ).strip()
+            if (
+                canonical_message_id != requested_message_id
+                or canonical_message_id not in all_thread_message_ids
+                or (thread_id and message_thread_id != thread_id)
+            ):
+                raise GmailInquiryImportError(
+                    "Every selected Gmail message must belong to the same thread."
+                )
+            if canonical_message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(canonical_message_id)
+            messages.append(message)
+    finally:
+        ordered_results.close()
+
+    messages.sort(
+        key=lambda message: (
+            str(_json_safe(message.get("sent_at")) or ""),
+            str(message.get("gmail_message_id") or ""),
+        )
+    )
+    full_by_id = {
+        str(message.get("gmail_message_id") or ""): message
+        for message in messages
+    }
+    merged_timeline = []
+    seen = set()
+    for message in timeline_messages:
+        message_id = str(message.get("gmail_message_id") or "")
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        merged_timeline.append(full_by_id.get(message_id, message))
+    for message in messages:
+        message_id = str(message.get("gmail_message_id") or "")
+        if message_id and message_id not in seen:
+            seen.add(message_id)
+            merged_timeline.append(message)
+    merged_timeline.sort(
+        key=lambda message: (
+            str(_json_safe(message.get("sent_at")) or ""),
+            str(message.get("gmail_message_id") or ""),
+        )
+    )
+    timeline_result["returned_count"] = len(merged_timeline)
+    timeline_result["canonical_anchor_message_id"] = canonical_anchor_id
+    return thread_id, messages, merged_timeline, timeline_result
+
+
+def _fetch_analysis_messages(
+    gmail_import,
+    connection,
+    *,
+    coordinator_heartbeat=None,
+):
+    if not _gmail_parallel_fetch_enabled():
+        if coordinator_heartbeat is None:
+            return _fetch_analysis_messages_sequential(
+                gmail_import,
+                connection,
+            )
+        return _fetch_analysis_messages_sequential(
+            gmail_import,
+            connection,
+            coordinator_heartbeat=coordinator_heartbeat,
+        )
+    token = get_valid_access_token(connection)
+    if coordinator_heartbeat is None:
+        return _fetch_analysis_messages_parallel(
+            gmail_import,
+            access_token=token,
+        )
+    return _fetch_analysis_messages_parallel(
+        gmail_import,
+        access_token=token,
+        coordinator_heartbeat=coordinator_heartbeat,
+    )
+
+
 COMPANY_INFERENCE_MIN_CONFIDENCE = 0.85
 COMPANY_INFERENCE_MIN_MARGIN = 0.08
 AI_COMPANY_NAME_CANDIDATE_SCORE = 84
@@ -1183,7 +1842,6 @@ AI_COMPANY_NAME_STRONG_SCORE = 88
 AI_COMPANY_NAME_MIN_MARGIN = 8
 AI_IDENTITY_MIN_CONFIDENCE = 0.65
 AI_IDENTITY_STRONG_CONFIDENCE = 0.85
-GMAIL_IDENTITY_MATCH_VERSION = "gmail_identity_v4"
 COMPANY_IDENTITY_LEGAL_SUFFIXES = {
     "co",
     "company",
@@ -2038,6 +2696,142 @@ def _looks_like_signature_image_bundle_member(
     return bool(has_supported_document and generic_image_count >= 3)
 
 
+def _native_attachment_parallel_tasks(
+    messages,
+    *,
+    mailbox_email,
+    max_bytes,
+    max_native_files,
+):
+    """Plan only source-selected PDF/Excel reads in deterministic order."""
+
+    tasks = []
+    statically_blocked = False
+    for message_sequence, message in enumerate(messages, start=1):
+        outbound = _is_outbound_message(message, mailbox_email)
+        all_attachments = message.get("attachment_manifest") or []
+        message_attachments = all_attachments[
+            :MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ]
+        if (
+            not _is_verified_mailbox_sent_message(message, mailbox_email)
+            and len(all_attachments) > MAX_ATTACHMENT_METADATA_PER_MESSAGE
+        ):
+            statically_blocked = True
+            continue
+        body_text = str(message.get("newest_body_text") or "")
+        for attachment_index, attachment in enumerate(message_attachments):
+            if not isinstance(attachment, dict):
+                continue
+            extension = _attachment_extension(attachment)
+            if outbound or extension not in NATIVE_AI_FILE_EXTENSIONS:
+                continue
+            if statically_blocked:
+                continue
+            if int(attachment.get("size") or 0) > int(max_bytes):
+                statically_blocked = True
+                continue
+            if len(tasks) >= int(max_native_files):
+                continue
+            private_attachment = next(
+                (
+                    candidate
+                    for candidate in message.get("_attachment_refs") or []
+                    if (
+                        attachment.get("attachment_id")
+                        and str(candidate.get("attachment_id") or "")
+                        == str(attachment.get("attachment_id") or "")
+                    )
+                    or (
+                        attachment.get("part_id")
+                        and str(candidate.get("part_id") or "")
+                        == str(attachment.get("part_id") or "")
+                    )
+                ),
+                attachment,
+            )
+            tasks.append(
+                {
+                    "key": (message_sequence, attachment_index),
+                    "message_id": str(message.get("gmail_message_id") or ""),
+                    "attachment": dict(private_attachment),
+                }
+            )
+    return tasks
+
+
+def _prefetch_native_ai_attachments(
+    messages,
+    *,
+    mailbox_email,
+    access_token,
+    max_bytes,
+    max_total_bytes,
+    max_native_files,
+    coordinator_heartbeat=None,
+):
+    """Fetch bytes concurrently, then inspect each file in source order."""
+
+    tasks = _native_attachment_parallel_tasks(
+        messages,
+        mailbox_email=mailbox_email,
+        max_bytes=max_bytes,
+        max_native_files=max_native_files,
+    )
+    outcomes = {}
+    accepted_bytes = 0
+
+    def worker(task):
+        return _fetch_native_attachment_bytes(
+            None,
+            task["message_id"],
+            task["attachment"],
+            max_bytes=max_bytes,
+            access_token=access_token,
+            request_json=_gmail_intake_json_get,
+        )
+
+    ordered_results = _bounded_ordered_parallel_results(
+        tasks,
+        worker,
+        limit=_gmail_parallel_fetch_limit(),
+    )
+    try:
+        for task, value, error in ordered_results:
+            # Worker threads never touch Django. Renew the durable lease only
+            # while reducing completed reads on the coordinator thread.
+            if coordinator_heartbeat is not None:
+                coordinator_heartbeat(STAGE_INSPECTING_DOCUMENTS)
+            if error is None:
+                try:
+                    value = _inspect_native_ai_attachment(
+                        task["attachment"],
+                        value,
+                        max_bytes=max_bytes,
+                    )
+                except Exception as exc:
+                    error = exc
+            outcomes[task["key"]] = {
+                "value": value,
+                "error": error,
+            }
+            if error is not None:
+                break
+            native_input, skipped_reason = value
+            if skipped_reason:
+                break
+            if accepted_bytes + int(native_input.get("size") or 0) > int(
+                max_total_bytes
+            ):
+                # The normal source-order reducer records the same required
+                # failure; stopping here merely avoids fetching later files.
+                break
+            accepted_bytes += int(native_input.get("size") or 0)
+    finally:
+        ordered_results.close()
+    return outcomes
+
+
 def _attachment_extension(attachment):
     extension = os.path.splitext(
         str((attachment or {}).get("filename") or "")
@@ -2117,20 +2911,15 @@ def _validation_error_text(exc):
     )[:500]
 
 
-def _fetch_native_ai_attachment(
+def _fetch_native_attachment_bytes(
     connection,
     message_id,
     attachment,
     *,
     max_bytes,
+    access_token=None,
+    request_json=None,
 ):
-    """Fetch one original Gmail attachment for a single native AI request.
-
-    This deliberately does not parse, normalize, render, or rewrite the file.
-    The model receives the original customer bytes; only provenance metadata
-    and a digest are retained by the application.
-    """
-
     extension = _attachment_extension(attachment)
     if extension not in NATIVE_AI_FILE_EXTENSIONS:
         if extension == ".xlsb":
@@ -2153,8 +2942,9 @@ def _fetch_native_ai_attachment(
             raise GmailInquiryImportError(
                 "Gmail did not provide content for this attachment."
             )
-        token = get_valid_access_token(connection)
-        attachment_payload = _json_request(
+        token = access_token or get_valid_access_token(connection)
+        json_request = request_json or _json_request
+        attachment_payload = json_request(
             f"{GMAIL_API_BASE}/messages/"
             f"{urllib.parse.quote(str(message_id))}/attachments/"
             f"{urllib.parse.quote(attachment_id)}",
@@ -2169,6 +2959,19 @@ def _fetch_native_ai_attachment(
         raise GmailInquiryImportError(
             f"{attachment.get('filename') or 'Gmail attachment'} is too large."
         )
+    return bytes(content)
+
+
+def _inspect_native_ai_attachment(
+    attachment,
+    content,
+    *,
+    max_bytes,
+    progress_callback=None,
+):
+    """Inspect already-fetched bytes on the coordinator thread."""
+
+    extension = _attachment_extension(attachment)
     content = bytes(content)
     source_sha256 = hashlib.sha256(content).hexdigest()
     page_count = 0
@@ -2177,6 +2980,9 @@ def _fetch_native_ai_attachment(
     spreadsheet_total_rows = 0
     spreadsheet_total_cells = 0
     inspection = {}
+
+    if progress_callback is not None:
+        progress_callback(STAGE_INSPECTING_DOCUMENTS)
 
     def inspected_rejection(reason, *, hard_validation_failed=False):
         return {
@@ -2396,6 +3202,41 @@ def _fetch_native_ai_attachment(
         "spreadsheet_total_cells": spreadsheet_total_cells,
         **public_inspection,
     }, ""
+
+
+def _fetch_native_ai_attachment(
+    connection,
+    message_id,
+    attachment,
+    *,
+    max_bytes,
+    progress_callback=None,
+    access_token=None,
+    request_json=None,
+):
+    """Fetch and inspect one original Gmail attachment for native AI.
+
+    The sequential compatibility path composes the same byte retrieval and
+    inspection stages. Parallel intake workers call only the byte stage; the
+    coordinator retains serialized parsing of untrusted documents.
+    """
+
+    content = _fetch_native_attachment_bytes(
+        connection,
+        message_id,
+        attachment,
+        max_bytes=max_bytes,
+        access_token=access_token,
+        request_json=request_json,
+    )
+    if isinstance(content, tuple):
+        return content
+    return _inspect_native_ai_attachment(
+        attachment,
+        content,
+        max_bytes=max_bytes,
+        progress_callback=progress_callback,
+    )
 
 
 def _source_key(message_id, kind, identifier):
@@ -2889,6 +3730,7 @@ def _run_native_thread_analysis(
     *,
     analysis_timings=None,
     allow_semantic_cache_read=True,
+    progress_callback=None,
 ):
     analysis_timings = (
         analysis_timings if isinstance(analysis_timings, dict) else {}
@@ -3067,6 +3909,8 @@ def _run_native_thread_analysis(
                 # successful result will replace this entry.
                 audit_usage["semantic_cache_invalid_fallback"] = True
             else:
+                if progress_callback is not None:
+                    progress_callback(STAGE_VALIDATING_EVIDENCE)
                 analysis_timings["ai_provider"] = 0.0
                 analysis_timings["ai_validation"] = _elapsed_ms(
                     cache_validation_started
@@ -3097,6 +3941,40 @@ def _run_native_thread_analysis(
                     ),
                     success=True,
                 )
+                if (
+                    _gmail_compact_schema_shadow_enabled()
+                    and progress_callback is not None
+                ):
+                    progress_callback(STAGE_ANALYZING_WITH_AI)
+                _maybe_run_compact_schema_shadow(
+                    messages=messages,
+                    sources=sources,
+                    file_inputs=file_inputs,
+                    gmail_import=gmail_import,
+                    actor=actor,
+                    baseline_result=validated_result,
+                    provider_name=provider_name,
+                    model=model,
+                )
+                _maybe_run_xlsx_preextract_shadow(
+                    messages=messages,
+                    sources=sources,
+                    file_inputs=file_inputs,
+                    gmail_import=gmail_import,
+                    actor=actor,
+                    baseline_result=validated_result,
+                    provider_name=provider_name,
+                    model=model,
+                    baseline_instructions=instructions,
+                    baseline_text_context=text_context,
+                    native_schema=native_schema,
+                    progress_callback=progress_callback,
+                )
+                if (
+                    _gmail_compact_schema_shadow_enabled()
+                    and progress_callback is not None
+                ):
+                    progress_callback(STAGE_ANALYZING_WITH_AI)
                 validated_result["_timings_ms"] = (
                     _analysis_timing_snapshot(analysis_timings)
                 )
@@ -3121,6 +3999,8 @@ def _run_native_thread_analysis(
         analysis_timings["ai_provider"] = _elapsed_ms(provider_started)
         failure_stage = "validation"
         validation_started = time.perf_counter()
+        if progress_callback is not None:
+            progress_callback(STAGE_VALIDATING_EVIDENCE)
         if not isinstance(result, dict):
             raise AIParseError("Gmail AI analysis returned an invalid object.")
         result["_usage"] = usage or {}
@@ -3198,6 +4078,42 @@ def _run_native_thread_analysis(
         ),
         success=True,
     )
+    if (
+        _gmail_compact_schema_shadow_enabled()
+        and progress_callback is not None
+    ):
+        progress_callback(STAGE_ANALYZING_WITH_AI)
+    _maybe_run_compact_schema_shadow(
+        messages=messages,
+        sources=sources,
+        file_inputs=file_inputs,
+        gmail_import=gmail_import,
+        actor=actor,
+        baseline_result=validated_result,
+        provider_name=provider_name,
+        model=model,
+        provider_runner=provider.clean_rows,
+    )
+    _maybe_run_xlsx_preextract_shadow(
+        messages=messages,
+        sources=sources,
+        file_inputs=file_inputs,
+        gmail_import=gmail_import,
+        actor=actor,
+        baseline_result=validated_result,
+        provider_name=provider_name,
+        model=model,
+        baseline_instructions=instructions,
+        baseline_text_context=text_context,
+        native_schema=native_schema,
+        provider_runner=provider.clean_rows,
+        progress_callback=progress_callback,
+    )
+    if (
+        _gmail_compact_schema_shadow_enabled()
+        and progress_callback is not None
+    ):
+        progress_callback(STAGE_ANALYZING_WITH_AI)
     validated_result["_timings_ms"] = _analysis_timing_snapshot(
         analysis_timings
     )
@@ -3541,6 +4457,306 @@ def _validate_native_thread_result(raw_result, messages, evidence):
             "reason": str(identity.get("reason") or "")[:1000],
         },
     }
+
+
+def _persist_compact_shadow_metric(
+    report,
+    *,
+    actor,
+    provider_name,
+    model,
+    has_native_files,
+    binding_sha256,
+):
+    """Persist only the compact module's bounded content-free report."""
+
+    if (
+        getattr(settings, "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED", False)
+        is not True
+    ):
+        return
+    report = sanitize_shadow_report(report)
+    contract = report.get("contract") if isinstance(report.get("contract"), dict) else {}
+    context_hash = str(contract.get("contract_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", context_hash):
+        context_hash = ""
+    binding_sha256 = str(binding_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", binding_sha256):
+        binding_sha256 = ""
+    failure_category = str(report.get("failure_category") or "")
+    if failure_category not in {
+        "",
+        "contract",
+        "cache",
+        "provider",
+        "validation",
+        "comparison",
+    }:
+        failure_category = "validation"
+    try:
+        # A savepoint prevents optional experiment telemetry from breaking an
+        # authoritative analysis transaction if its write ever fails.
+        with transaction.atomic():
+            AIParseLog.objects.create(
+                actor=(
+                    actor
+                    if getattr(actor, "is_authenticated", False)
+                    else None
+                ),
+                provider=str(provider_name or "")[:40],
+                model=str(model or "")[:120],
+                mode=(
+                    AIParseLog.MODE_VISION
+                    if has_native_files
+                    else AIParseLog.MODE_TEXT
+                ),
+                source_type="gmail_compact_shadow",
+                source_sha256=binding_sha256,
+                context_hash=context_hash,
+                cache_hit=report.get("cache_state") == "hit",
+                text_length=0,
+                page_count=0,
+                image_count=0,
+                usage={"shadow_experiment": copy.deepcopy(report)},
+                success=report.get("status") == "success",
+                error=(
+                    ""
+                    if report.get("status") == "success"
+                    else f"compact_shadow_{failure_category or 'validation'}"
+                ),
+            )
+    except Exception:
+        # Do not log exception text: database/provider errors can contain
+        # customer identifiers. Shadow observability is always expendable.
+        return
+
+
+def _maybe_run_compact_schema_shadow(
+    *,
+    messages,
+    sources,
+    file_inputs,
+    gmail_import,
+    actor,
+    baseline_result,
+    provider_name,
+    model,
+    provider_runner=None,
+):
+    """Compare the compact contract without changing the baseline result."""
+
+    if not _gmail_compact_schema_shadow_enabled():
+        return None
+    try:
+        runner = provider_runner or get_ai_parse_provider(
+            provider_name
+        ).clean_rows
+        binding_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "cache_key_hint": "compact_shadow_v1",
+                    "gmail_import_id": getattr(gmail_import, "pk", None),
+                    "source_fingerprint": str(
+                        getattr(gmail_import, "source_fingerprint", "") or ""
+                    ),
+                    "analysis_attempt": int(
+                        getattr(gmail_import, "analysis_attempts", 0) or 0
+                    ),
+                    "analysis_generation": str(
+                        getattr(
+                            gmail_import,
+                            "analysis_progress_generation",
+                            "",
+                        )
+                        or ""
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        def validate_expanded(expanded):
+            return _validate_native_thread_result(
+                expanded,
+                copy.deepcopy(messages),
+                copy.deepcopy(sources),
+            )
+
+        return run_compact_shadow(
+            messages=copy.deepcopy(messages),
+            sources=copy.deepcopy(sources),
+            file_inputs=copy.deepcopy(file_inputs),
+            mode=gmail_import.mode,
+            baseline_result=copy.deepcopy(baseline_result),
+            provider_runner=runner,
+            provider_name=provider_name,
+            model=model,
+            expanded_validator=validate_expanded,
+            metrics_sink=lambda report: _persist_compact_shadow_metric(
+                report,
+                actor=actor,
+                provider_name=provider_name,
+                model=model,
+                has_native_files=bool(file_inputs),
+                binding_sha256=binding_sha256,
+            ),
+        )
+    except Exception:
+        # The experiment can never affect baseline analysis availability.
+        return None
+
+
+def _persist_xlsx_preextract_shadow_metric(
+    report,
+    *,
+    actor,
+    provider_name,
+    model,
+    binding_sha256,
+):
+    """Persist only the XLSX runner's bounded, content-free report."""
+
+    if (
+        getattr(settings, "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED", False)
+        is not True
+    ):
+        return
+    report = sanitize_xlsx_shadow_report(report)
+    contract = report.get("contract") if isinstance(report.get("contract"), dict) else {}
+    context_hash = str(contract.get("contract_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", context_hash):
+        context_hash = ""
+    binding_sha256 = str(binding_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", binding_sha256):
+        binding_sha256 = ""
+    failure_category = str(report.get("failure_category") or "")
+    if failure_category not in {
+        "",
+        "input",
+        "preextract",
+        "heartbeat",
+        "provider",
+        "validation",
+        "comparison",
+    }:
+        failure_category = "validation"
+    failed = report.get("status") == "failure"
+    try:
+        # A savepoint isolates optional experiment telemetry from the
+        # authoritative Gmail analysis transaction.
+        with transaction.atomic():
+            AIParseLog.objects.create(
+                actor=(
+                    actor
+                    if getattr(actor, "is_authenticated", False)
+                    else None
+                ),
+                provider=str(provider_name or "")[:40],
+                model=str(model or "")[:120],
+                mode=AIParseLog.MODE_VISION,
+                source_type="gmail_xlsx_preextract_shadow",
+                source_sha256=binding_sha256,
+                context_hash=context_hash,
+                cache_hit=False,
+                text_length=0,
+                page_count=0,
+                image_count=0,
+                usage={"shadow_experiment": copy.deepcopy(report)},
+                success=not failed,
+                error=(
+                    f"xlsx_preextract_shadow_{failure_category or 'validation'}"
+                    if failed
+                    else ""
+                ),
+            )
+    except Exception:
+        # Never log exception text: provider/database errors can contain
+        # customer data. Optional shadow telemetry is always expendable.
+        return
+
+
+def _maybe_run_xlsx_preextract_shadow(
+    *,
+    messages,
+    sources,
+    file_inputs,
+    gmail_import,
+    actor,
+    baseline_result,
+    provider_name,
+    model,
+    baseline_instructions,
+    baseline_text_context,
+    native_schema,
+    provider_runner=None,
+    progress_callback=None,
+):
+    """Compare clean-XLSX pre-extraction without changing the baseline."""
+
+    if not _gmail_xlsx_preextract_shadow_enabled():
+        return None
+    try:
+        runner = provider_runner or get_ai_parse_provider(
+            provider_name
+        ).clean_rows
+        binding_sha256 = hashlib.sha256(
+            json.dumps(
+                {
+                    "cache_key_hint": "xlsx_preextract_shadow_v1",
+                    "gmail_import_id": getattr(gmail_import, "pk", None),
+                    "source_fingerprint": str(
+                        getattr(gmail_import, "source_fingerprint", "") or ""
+                    ),
+                    "analysis_attempt": int(
+                        getattr(gmail_import, "analysis_attempts", 0) or 0
+                    ),
+                    "analysis_generation": str(
+                        getattr(
+                            gmail_import,
+                            "analysis_progress_generation",
+                            "",
+                        )
+                        or ""
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+        def validate_native(raw_result):
+            return _validate_native_thread_result(
+                raw_result,
+                copy.deepcopy(messages),
+                copy.deepcopy(sources),
+            )
+
+        heartbeat = None
+        if progress_callback is not None:
+            heartbeat = lambda: progress_callback(STAGE_ANALYZING_WITH_AI)
+        return run_xlsx_preextract_shadow(
+            file_inputs=copy.deepcopy(file_inputs),
+            baseline_result=copy.deepcopy(baseline_result),
+            provider_runner=runner,
+            provider_name=provider_name,
+            model=model,
+            baseline_instructions=baseline_instructions,
+            baseline_text_context=baseline_text_context,
+            native_schema=copy.deepcopy(native_schema),
+            native_validator=validate_native,
+            metrics_sink=lambda report: _persist_xlsx_preextract_shadow_metric(
+                report,
+                actor=actor,
+                provider_name=provider_name,
+                model=model,
+                binding_sha256=binding_sha256,
+            ),
+            heartbeat=heartbeat,
+        )
+    except Exception:
+        # The experiment can never affect baseline analysis availability.
+        return None
 
 
 def _apply_ai_identity_candidates(
@@ -3916,7 +5132,7 @@ def _gmail_identity_requires_reanalysis(candidates, analysis):
 
 def _quarantine_stale_gmail_identity(candidates, analysis):
     candidates = dict(candidates or {})
-    analysis = dict(analysis or {})
+    analysis = clear_gmail_identity_approval(analysis)
     candidates["companies"] = []
     candidates["contacts"] = []
     candidates["recommended_company_id"] = None
@@ -3990,6 +5206,9 @@ def _build_source_analysis(
     timeline_meta=None,
     analysis_timings=None,
     allow_semantic_cache_read=True,
+    progress_callback=None,
+    gmail_access_token=None,
+    coordinator_heartbeat=None,
 ):
     """Analyze complete selected bodies and original attachments in one AI pass."""
 
@@ -4285,6 +5504,32 @@ def _build_source_analysis(
             "attachment could not be included completely."
         )
 
+    if progress_callback is not None and attachment_manifest:
+        progress_callback(STAGE_FETCHING_ATTACHMENTS)
+
+    parallel_attachment_outcomes = {}
+    if (
+        _gmail_parallel_fetch_enabled()
+        and native_files_allowed
+        and attachment_manifest
+    ):
+        gmail_access_token = gmail_access_token or get_valid_access_token(
+            connection
+        )
+        if progress_callback is not None:
+            # Retrieval and inspection share one coarse stage in parallel
+            # mode, but this ORM-backed callback remains on the coordinator.
+            progress_callback(STAGE_INSPECTING_DOCUMENTS)
+        parallel_attachment_outcomes = _prefetch_native_ai_attachments(
+            messages,
+            mailbox_email=mailbox_email,
+            access_token=gmail_access_token,
+            max_bytes=max_bytes,
+            max_total_bytes=max_total_bytes,
+            max_native_files=max_native_files,
+            coordinator_heartbeat=coordinator_heartbeat,
+        )
+
     for message_sequence, original_message in enumerate(messages, start=1):
         message = {**original_message}
         message_id = str(message.get("gmail_message_id") or "")
@@ -4425,7 +5670,7 @@ def _build_source_analysis(
             # whose metadata set is incomplete. The bounded marker above is
             # enough for staff review without widening the metadata cap.
             continue
-        for attachment in message_attachments:
+        for attachment_index, attachment in enumerate(message_attachments):
             if not isinstance(attachment, dict):
                 continue
             filename = os.path.basename(
@@ -4564,12 +5809,30 @@ def _build_source_analysis(
                 attachment,
             )
             try:
-                native_input, skipped_reason = _fetch_native_ai_attachment(
-                    connection,
-                    message_id,
-                    private_attachment,
-                    max_bytes=max_bytes,
-                )
+                if _gmail_parallel_fetch_enabled():
+                    prefetched = parallel_attachment_outcomes.get(
+                        (message_sequence, attachment_index)
+                    )
+                    if prefetched is None:
+                        raise GmailInquiryImportError(
+                            "A selected Gmail attachment could not be prepared "
+                            "within the bounded analysis plan."
+                        )
+                    if prefetched["error"] is not None:
+                        raise prefetched["error"]
+                    native_input, skipped_reason = prefetched["value"]
+                else:
+                    native_attachment_options = {"max_bytes": max_bytes}
+                    if progress_callback is not None:
+                        native_attachment_options["progress_callback"] = (
+                            progress_callback
+                        )
+                    native_input, skipped_reason = _fetch_native_ai_attachment(
+                        connection,
+                        message_id,
+                        private_attachment,
+                        **native_attachment_options,
+                    )
             except Exception as exc:
                 record_required_attachment_failure(
                     manifest=manifest,
@@ -4748,9 +6011,13 @@ def _build_source_analysis(
             },
         }
     else:
+        if progress_callback is not None:
+            progress_callback(STAGE_ANALYZING_WITH_AI)
         native_analysis_options = {
             "analysis_timings": analysis_timings,
         }
+        if progress_callback is not None:
+            native_analysis_options["progress_callback"] = progress_callback
         if not allow_semantic_cache_read:
             native_analysis_options["allow_semantic_cache_read"] = False
         semantic_result = _run_native_thread_analysis(
@@ -4799,6 +6066,8 @@ def _build_source_analysis(
             }
         )
 
+    if progress_callback is not None:
+        progress_callback(STAGE_MATCHING_COMPANY_PRODUCTS)
     active_companies, active_contacts = _active_customer_identity_records()
     candidates = _apply_ai_identity_candidates(
         _company_contact_candidates(
@@ -4829,6 +6098,15 @@ def _build_source_analysis(
             matched,
             recommended_company,
             history_context=history_context,
+        )
+        # Bind this suggestion to the customer context that produced it. A
+        # later manual company correction must not be able to approve a match
+        # derived from another customer's aliases/history as if it were still
+        # the current server suggestion.
+        matched["match_company_id"] = getattr(
+            recommended_company,
+            "pk",
+            None,
         )
         if matched.get("matched_product") or matched.get("matched_quote_item"):
             suggested_reason = str(matched.get("match_reason") or "").strip()
@@ -5003,9 +6281,27 @@ def _mark_analysis_failed(
     expected_attempt=None,
     expected_fingerprint=None,
     timings_ms=None,
+    progress_binding=None,
+    progress_error_category="",
+    background_job_id=None,
+    background_lease_token="",
+    background_generation="",
 ):
     with transaction.atomic():
         gmail_import = _record_for_update(import_id)
+        if background_job_id is not None:
+            from .gmail_analysis_jobs import (
+                background_job_matches_locked_import,
+            )
+
+            if not background_job_matches_locked_import(
+                gmail_import,
+                job_id=background_job_id,
+                lease_token=background_lease_token,
+                expected_attempt=expected_attempt,
+                expected_generation=background_generation,
+            ):
+                return False
         if (
             gmail_import.status == GmailInquiryImport.STATUS_CONFIRMED
             or (
@@ -5029,15 +6325,32 @@ def _mark_analysis_failed(
             error_entry["timings_ms"] = safe_timings
         errors.append(error_entry)
         gmail_import.errors = errors[-20:]
+        finished_at = timezone.now()
+        progress_finished = finish_gmail_analysis_progress(
+            gmail_import,
+            progress_binding,
+            succeeded=False,
+            error_category=progress_error_category,
+            at=finished_at,
+        )
         gmail_import.status = GmailInquiryImport.STATUS_FAILED
-        gmail_import.analyzed_at = timezone.now()
+        gmail_import.analyzed_at = finished_at
+        update_fields = [
+            "errors",
+            "status",
+            "analyzed_at",
+            "updated_at",
+        ]
+        if progress_finished:
+            update_fields.extend(
+                [
+                    "analysis_progress_stage",
+                    "analysis_progress_error_category",
+                    "analysis_progress_updated_at",
+                ]
+            )
         gmail_import.save(
-            update_fields=[
-                "errors",
-                "status",
-                "analyzed_at",
-                "updated_at",
-            ]
+            update_fields=update_fields
         )
         return True
 
@@ -5065,10 +6378,6 @@ def update_gmail_inquiry_selection(
                 "A confirmed Gmail inquiry cannot be changed or revised."
             )
         _assert_claim_owner(locked, actor)
-        if locked.status == GmailInquiryImport.STATUS_ANALYZING:
-            raise GmailInquiryImportBusy(
-                "Wait for the current Gmail analysis before changing its messages."
-            )
         selected = _normalize_message_ids(
             selected_message_ids,
             fallback=(
@@ -5092,6 +6401,32 @@ def update_gmail_inquiry_selection(
             mode=mode,
             selected_message_ids=selected,
         )
+        background_job_superseded = False
+        if locked.status == GmailInquiryImport.STATUS_ANALYZING:
+            same_selection = bool(
+                hmac.compare_digest(
+                    str(locked.source_fingerprint or ""),
+                    fingerprint,
+                )
+                and locked.mode == mode
+                and list(locked.selected_message_ids or []) == selected
+            )
+            if gmail_background_analysis_enabled() and same_selection:
+                return locked
+            if gmail_background_analysis_enabled():
+                # Source-selection mutation owns the import lock first, then
+                # supersedes the active job. A worker with the old lease is
+                # consequently blocked by both generation and lease checks.
+                from .gmail_analysis_jobs import (
+                    supersede_active_gmail_analysis_jobs_locked,
+                )
+
+                supersede_active_gmail_analysis_jobs_locked(locked)
+                background_job_superseded = True
+            else:
+                raise GmailInquiryImportBusy(
+                    "Wait for the current Gmail analysis before changing its messages."
+                )
         existing = (
             GmailInquiryImport.objects.select_for_update()
             .filter(source_fingerprint=fingerprint)
@@ -5099,6 +6434,27 @@ def update_gmail_inquiry_selection(
             .first()
         )
         if existing:
+            if background_job_superseded:
+                # The employee moved to a deduplicated durable selection.
+                # Leave the abandoned source in a non-running state so its
+                # superseded worker cannot strand a phantom analysis.
+                locked.status = GmailInquiryImport.STATUS_CLAIMED
+                locked.analysis_started_at = None
+                locked.analyzed_at = None
+                clear_gmail_analysis_progress(locked)
+                locked.save(
+                    update_fields=[
+                        "status",
+                        "analysis_started_at",
+                        "analyzed_at",
+                        "analysis_progress_stage",
+                        "analysis_progress_attempt",
+                        "analysis_progress_generation",
+                        "analysis_progress_error_category",
+                        "analysis_progress_updated_at",
+                        "updated_at",
+                    ]
+                )
             if existing.claimed_by_id and existing.claimed_by_id != actor.id:
                 raise GmailInquiryImportError(
                     "Another staff member already prepared that Gmail message selection."
@@ -5122,6 +6478,7 @@ def update_gmail_inquiry_selection(
         locked.errors = []
         locked.analysis_started_at = None
         locked.analyzed_at = None
+        clear_gmail_analysis_progress(locked)
         locked.status = GmailInquiryImport.STATUS_CLAIMED
         locked.save()
         return locked
@@ -5144,13 +6501,23 @@ def update_gmail_inquiry_identity(
                 "A confirmed Gmail inquiry cannot be changed or revised."
             )
         _assert_claim_owner(locked, actor)
-        if company is not None and not isinstance(company, Company):
-            company = Company.objects.filter(pk=company, is_active=True).first()
+        if company is not None and (
+            gmail_review_ui_v2_enabled() or not isinstance(company, Company)
+        ):
+            company_id = getattr(company, "pk", company)
+            company = Company.objects.filter(
+                pk=company_id,
+                is_active=True,
+            ).first()
             if not company:
                 raise GmailInquiryImportError("Select an active customer company.")
-        if contact is not None and not isinstance(contact, CompanyContact):
+        if contact is not None and (
+            gmail_review_ui_v2_enabled()
+            or not isinstance(contact, CompanyContact)
+        ):
+            contact_id = getattr(contact, "pk", contact)
             contact = CompanyContact.objects.filter(
-                pk=contact,
+                pk=contact_id,
                 is_active=True,
             ).first()
             if not contact:
@@ -5159,19 +6526,222 @@ def update_gmail_inquiry_identity(
             raise GmailInquiryImportError(
                 "The selected contact does not belong to that company."
             )
+        identity_changed = bool(
+            locked.selected_company_id != getattr(company, "pk", None)
+            or locked.selected_contact_id != getattr(contact, "pk", None)
+        )
         locked.selected_company = company
         locked.selected_contact = contact
+        update_fields = [
+            "selected_company",
+            "selected_contact",
+            "updated_at",
+        ]
+        if gmail_review_ui_v2_enabled() and identity_changed:
+            locked.analysis = clear_gmail_identity_approval(locked.analysis)
+            update_fields.append("analysis")
+        locked.save(update_fields=update_fields)
+        return locked
+
+
+def approve_gmail_inquiry_company(
+    gmail_import,
+    actor,
+    *,
+    company,
+    contact=None,
+    suggested=False,
+    identity_review_fingerprint,
+):
+    """Persist one explicit, evidence-bound company acknowledgement."""
+
+    _require_staff(actor)
+    if not gmail_review_ui_v2_enabled():
+        raise GmailInquiryImportError(
+            "The persisted Gmail company approval workflow is not enabled."
+        )
+    with transaction.atomic():
+        locked = _record_for_update(gmail_import)
+        if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
+            raise GmailInquiryImportError(
+                "A confirmed Gmail inquiry cannot be changed or revised."
+            )
+        _assert_claim_owner(locked, actor)
+        if locked.status not in {
+            GmailInquiryImport.STATUS_READY,
+            GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+        }:
+            raise GmailInquiryImportError(
+                "Analyze this Gmail inquiry before approving its company."
+            )
+        if _gmail_identity_requires_reanalysis(locked.candidates, locked.analysis):
+            raise GmailInquiryImportError(
+                "Customer identity matching rules changed. Reanalyze this Gmail inquiry."
+            )
+        current_fingerprint = gmail_identity_evidence_fingerprint(locked)
+        company_id = getattr(company, "pk", company)
+        company = Company.objects.filter(pk=company_id, is_active=True).first()
+        if not company:
+            raise GmailInquiryImportError("Select an active customer company.")
+        if contact is not None:
+            contact_id = getattr(contact, "pk", contact)
+            contact = CompanyContact.objects.filter(
+                pk=contact_id,
+                is_active=True,
+            ).first()
+            if not contact:
+                raise GmailInquiryImportError("Select an active customer contact.")
+        if contact and contact.company_id != company.id:
+            raise GmailInquiryImportError(
+                "The selected contact does not belong to that company."
+            )
+        approval = dict((locked.analysis or {}).get("identity_approval") or {})
+        submitted_fingerprint = str(identity_review_fingerprint or "")
+        if (
+            gmail_identity_approval_is_current(locked)
+            and locked.selected_company_id == company.id
+            and locked.selected_contact_id == getattr(contact, "pk", None)
+            and any(
+                hmac.compare_digest(submitted_fingerprint, candidate)
+                for candidate in {
+                    current_fingerprint,
+                    str(approval.get("request_fingerprint") or ""),
+                }
+                if candidate
+            )
+        ):
+            return locked
+        if not hmac.compare_digest(
+            submitted_fingerprint,
+            current_fingerprint,
+        ):
+            raise GmailInquiryImportStale(
+                "The customer identity evidence changed. Review it again."
+            )
+        if suggested:
+            if (
+                (locked.candidates or {}).get("recommended_company_id")
+                != company.id
+                or not gmail_suggested_company_is_approvable(locked)
+            ):
+                raise GmailInquiryImportError(
+                    "The suggested company is missing, conflicting, or needs manual review."
+                )
+            # A one-click recommendation never chooses a purchaser.
+            contact = None
+        if (
+            locked.selected_company_id == company.id
+            and locked.selected_contact_id == getattr(contact, "pk", None)
+            and gmail_identity_approval_is_current(locked)
+        ):
+            return locked
+
+        locked.selected_company = company
+        locked.selected_contact = contact
+        analysis = clear_gmail_identity_approval(locked.analysis)
+        locked.analysis = analysis
+        analysis["identity_approval"] = build_gmail_identity_approval(
+            locked,
+            actor,
+            suggested=suggested,
+            request_fingerprint=submitted_fingerprint,
+        )
+        locked.analysis = _json_safe(analysis)
         locked.save(
             update_fields=[
                 "selected_company",
                 "selected_contact",
+                "analysis",
                 "updated_at",
             ]
+        )
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_COMPANY_APPROVED,
+            outcome_code="success",
+            feature_flags={"gmail_review_ui_v2": True},
         )
         return locked
 
 
-def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
+def _require_current_gmail_chained_review_binding(
+    gmail_import,
+    *,
+    expected_source_fingerprint=None,
+    expected_analysis_attempt=None,
+    expected_review_rows_fingerprint=None,
+    identity_review_fingerprint=None,
+    require_company_approval=False,
+):
+    """Fail closed on a complete chained-action browser snapshot.
+
+    The caller must hold the Gmail import row lock. Legacy Save/Confirm calls
+    omit the tuple and retain their existing behavior, including while the
+    feature is enabled. A partially supplied tuple is rejected defensively in
+    case a service caller bypasses the API serializer.
+    """
+
+    if not gmail_chained_actions_enabled():
+        return
+    supplied = (
+        expected_source_fingerprint not in (None, ""),
+        expected_analysis_attempt is not None,
+        expected_review_rows_fingerprint not in (None, ""),
+        identity_review_fingerprint not in (None, ""),
+    )
+    # The identity fingerprint predates chained confirm requests. Any new
+    # expected-state field opts a service call into this stricter tuple.
+    if not any(supplied[:3]):
+        return
+    if not all(supplied):
+        raise GmailInquiryImportError(
+            "Reload the Gmail review before using the chained action."
+        )
+    try:
+        expected_attempt = int(expected_analysis_attempt)
+    except (TypeError, ValueError) as exc:
+        raise GmailInquiryImportError(
+            "Reload the Gmail review before using the chained action."
+        ) from exc
+    source_matches = hmac.compare_digest(
+        str(expected_source_fingerprint),
+        str(gmail_import.source_fingerprint or ""),
+    )
+    identity_matches = hmac.compare_digest(
+        str(identity_review_fingerprint),
+        gmail_identity_evidence_fingerprint(gmail_import),
+    )
+    rows_match = hmac.compare_digest(
+        str(expected_review_rows_fingerprint),
+        gmail_review_rows_fingerprint(gmail_import),
+    )
+    if (
+        not source_matches
+        or expected_attempt != gmail_import.analysis_attempts
+        or not rows_match
+        or not identity_matches
+    ):
+        raise GmailInquiryImportStale(
+            "The Gmail review changed in another session. Reload it before continuing."
+        )
+    if require_company_approval and not gmail_identity_approval_is_current(
+        gmail_import
+    ):
+        raise GmailInquiryImportError(
+            "Approve the current customer company before using the chained action."
+        )
+
+
+def update_gmail_inquiry_review_lines(
+    gmail_import,
+    actor,
+    *,
+    review_lines,
+    expected_source_fingerprint=None,
+    expected_analysis_attempt=None,
+    expected_review_rows_fingerprint=None,
+    identity_review_fingerprint=None,
+):
     """Merge a bounded set of explicit staff edits into analyzed rows.
 
     Only customer-facing item wording, quantity, unit and inclusion may
@@ -5196,6 +6766,13 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
             raise GmailInquiryImportError(
                 "Analyze this Gmail inquiry before reviewing its rows."
             )
+        _require_current_gmail_chained_review_binding(
+            locked,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_analysis_attempt=expected_analysis_attempt,
+            expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+            identity_review_fingerprint=identity_review_fingerprint,
+        )
         analysis = dict(locked.analysis or {})
         preview = dict(analysis.get("preview") or {})
         rows = [dict(row) for row in (preview.get("lines") or [])]
@@ -5225,6 +6802,8 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
                 "One or more reviewed Gmail rows are stale. Reopen the analysis."
             )
 
+        reviewed_count = 0
+        review_ui_v2 = gmail_review_ui_v2_enabled()
         for submitted in review_lines:
             target = by_key[str(submitted.get("row_key") or "").strip()]
             raw_name = str(submitted.get("raw_name") or "").strip()
@@ -5264,21 +6843,52 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
                 raise GmailInquiryImportError(
                     "A reviewed Gmail unit exceeds 50 characters."
                 )
+            try:
+                previous_quantity = Decimal(str(target.get("quantity") or ""))
+            except Exception:
+                previous_quantity = None
+            substantive_change = bool(
+                raw_name != str(target.get("raw_name") or "").strip()
+                or quantity != previous_quantity
+                or unit != str(target.get("unit") or "").strip()
+                or included != bool(target.get("included", True))
+            )
+            mark_reviewed = bool(
+                not review_ui_v2
+                or submitted.get("reviewed") is True
+                or substantive_change
+            )
             target["raw_name"] = raw_name
             target["quantity"] = str(quantity) if quantity is not None else None
             target["unit"] = unit
             target["included"] = included
-            target["reviewed_by_user"] = True
-            target["reviewed_by_user_id"] = actor.pk
-            target["reviewed_at"] = timezone.now().isoformat()
-            target["review_status"] = "manual"
-            if included and str(target.get("operation") or "") == "uncertain":
+            if mark_reviewed:
+                target["reviewed_by_user"] = True
+                target["reviewed_by_user_id"] = actor.pk
+                target["reviewed_at"] = timezone.now().isoformat()
+                target["review_status"] = "manual"
+                reviewed_count += 1
+            if (
+                mark_reviewed
+                and included
+                and str(target.get("operation") or "") == "uncertain"
+            ):
                 target["original_operation"] = "uncertain"
                 target["operation"] = "changed"
                 target["parse_status"] = "parsed"
                 target["semantic_reason"] = (
                     f"{target.get('semantic_reason') or ''} Explicitly reviewed by staff."
                 ).strip()
+            elif (
+                review_ui_v2
+                and mark_reviewed
+                and included
+                and str(target.get("parse_status") or "") == "ignored"
+            ):
+                # Re-including a previously excluded row is an explicit staff
+                # decision. Do not leave the row in the server-side ignored
+                # state where confirmation would silently omit it.
+                target["parse_status"] = "parsed"
             if not included:
                 target["parse_status"] = "ignored"
 
@@ -5288,6 +6898,19 @@ def update_gmail_inquiry_review_lines(gmail_import, actor, *, review_lines):
         analysis["reviewed_by_user_id"] = actor.pk
         locked.analysis = _json_safe(analysis)
         locked.save(update_fields=["analysis", "updated_at"])
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_REVIEWED_ROWS_SAVED,
+            counts={
+                "reviewed_row_count": reviewed_count,
+                "included_row_count": sum(
+                    1
+                    for row in rows
+                    if isinstance(row, dict) and row.get("included") is not False
+                ),
+            },
+            outcome_code="success",
+        )
         return locked
 
 
@@ -5299,11 +6922,25 @@ def analyze_gmail_inquiry_import(
     mode=None,
     force=False,
     reanalyze=False,
+    _background_job_id=None,
+    _background_lease_token="",
+    _background_attempt=None,
+    _background_generation="",
+    _background_heartbeat=None,
 ):
     """Fetch, parse, and cache one claimed Gmail intake without creating data."""
 
     total_started = time.perf_counter()
     analysis_timings = {}
+    progress_binding = None
+    progress_stage = ""
+    background_analysis = _background_job_id is not None
+    if background_analysis and (
+        selected_message_ids is not None or mode is not None
+    ):
+        raise GmailInquiryImportError(
+            "A durable Gmail job cannot change its source selection."
+        )
     if selected_message_ids is not None or mode is not None:
         gmail_import = update_gmail_inquiry_selection(
             gmail_import,
@@ -5321,52 +6958,165 @@ def analyze_gmail_inquiry_import(
         locked = _record_for_update(gmail_import)
         if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
             return _record(locked)
-        if (
-            not force
-            and locked.status
-            in {
-                GmailInquiryImport.STATUS_READY,
-                GmailInquiryImport.STATUS_REVIEW_REQUIRED,
-            }
-            and (locked.analysis or {}).get("reviewed_at")
-        ):
-            # Staff-reviewed rows are user-authored workflow data, not an AI
-            # cache entry. A duplicate/non-force request must never replace
-            # those edits. The explicit Reanalyze action remains the only path
-            # that may intentionally rebuild them from source evidence.
-            return _record(locked)
-        # A pipeline version alone cannot prove semantic equivalence. Fetch
-        # the immutable Gmail sources and let the content/contract-bound cache
-        # decide reuse after it has verified provider, model, prompt, schema,
-        # pipeline, selected messages, source ownership, and attachment bytes.
-        if (
-            locked.status == GmailInquiryImport.STATUS_ANALYZING
-            and locked.analysis_started_at
-            and locked.analysis_started_at > timezone.now() - ANALYSIS_STALE_AFTER
-        ):
-            raise GmailInquiryImportBusy(
-                "This Gmail inquiry is already being analyzed. Retry shortly."
+        analysis_contracts = {
+            "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+            "ai_schema": GMAIL_AI_SCHEMA_NAME,
+            "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+        }
+        if background_analysis:
+            from .gmail_analysis_jobs import (
+                background_job_matches_locked_import,
             )
-        locked.status = GmailInquiryImport.STATUS_ANALYZING
-        locked.analysis_started_at = timezone.now()
-        locked.analysis_attempts += 1
-        locked.errors = []
-        locked.save(
-            update_fields=[
+
+            try:
+                expected_attempt = int(_background_attempt)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise GmailInquiryImportStale(
+                    "The durable Gmail analysis generation is invalid."
+                ) from exc
+            if not background_job_matches_locked_import(
+                locked,
+                job_id=_background_job_id,
+                lease_token=_background_lease_token,
+                expected_attempt=expected_attempt,
+                expected_generation=_background_generation,
+            ):
+                raise GmailInquiryImportStale(
+                    "The durable Gmail analysis generation is no longer current."
+                )
+            analysis_attempt = expected_attempt
+            analysis_fingerprint = str(locked.source_fingerprint or "")
+            progress_binding = GmailAnalysisProgressBinding(
+                import_id=locked.pk,
+                attempt=analysis_attempt,
+                source_fingerprint=analysis_fingerprint,
+                generation=str(_background_generation or ""),
+            )
+            progress_stage = str(locked.analysis_progress_stage or "")
+        else:
+            if (
+                not force
+                and locked.status
+                in {
+                    GmailInquiryImport.STATUS_READY,
+                    GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+                }
+                and (locked.analysis or {}).get("reviewed_at")
+            ):
+                # Staff-reviewed rows are user-authored workflow data, not an
+                # AI cache entry. Only explicit Reanalyze may rebuild them.
+                return _record(locked)
+            # Fetch immutable Gmail sources before deciding semantic-cache
+            # reuse; a pipeline version alone cannot prove equivalence.
+            if (
+                locked.status == GmailInquiryImport.STATUS_ANALYZING
+                and locked.analysis_started_at
+                and locked.analysis_started_at
+                > timezone.now() - ANALYSIS_STALE_AFTER
+            ):
+                raise GmailInquiryImportBusy(
+                    "This Gmail inquiry is already being analyzed. Retry shortly."
+                )
+            locked.status = GmailInquiryImport.STATUS_ANALYZING
+            locked.analysis_started_at = timezone.now()
+            locked.analysis_attempts += 1
+            locked.errors = []
+            analysis_update_fields = [
                 "status",
                 "analysis_started_at",
                 "analysis_attempts",
                 "errors",
                 "updated_at",
             ]
+            progress_binding = initialize_gmail_analysis_progress(locked)
+            if progress_binding is not None:
+                progress_stage = locked.analysis_progress_stage
+                analysis_update_fields.extend(
+                    [
+                        "analysis_progress_stage",
+                        "analysis_progress_attempt",
+                        "analysis_progress_generation",
+                        "analysis_progress_error_category",
+                        "analysis_progress_updated_at",
+                    ]
+                )
+            if (
+                gmail_review_ui_v2_enabled()
+                and "identity_approval" in (locked.analysis or {})
+            ):
+                locked.analysis = clear_gmail_identity_approval(
+                    locked.analysis
+                )
+                analysis_update_fields.append("analysis")
+            locked.save(update_fields=analysis_update_fields)
+            analysis_attempt = locked.analysis_attempts
+            analysis_fingerprint = locked.source_fingerprint
+            record_gmail_workflow_metric(
+                locked,
+                EVENT_ANALYSIS_REQUESTED,
+                counts={
+                    "analysis_attempt_count": analysis_attempt,
+                    "selected_message_count": len(
+                        locked.selected_message_ids or []
+                    ),
+                },
+                outcome_code="success",
+                feature_flags={
+                    "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+                },
+                contract_versions=analysis_contracts,
+            )
+        record_gmail_workflow_metric(
+            locked,
+            EVENT_ANALYSIS_STARTED,
+            duration_ms=_elapsed_ms(total_started),
+            counts={
+                "analysis_attempt_count": analysis_attempt,
+                "selected_message_count": len(locked.selected_message_ids or []),
+            },
+            outcome_code="success",
+            feature_flags={
+                "background_analysis": background_analysis,
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
+            contract_versions=analysis_contracts,
         )
-        analysis_attempt = locked.analysis_attempts
-        analysis_fingerprint = locked.source_fingerprint
 
+    def report_progress(stage):
+        nonlocal progress_stage
+        if background_analysis and _background_heartbeat is not None:
+            _background_heartbeat(stage)
+        if advance_gmail_analysis_progress(progress_binding, stage):
+            progress_stage = stage
+
+    fetch_started = time.perf_counter()
     try:
-        fetch_started = time.perf_counter()
+        report_progress(STAGE_PREPARING)
         connection = _connected_mailbox_for_import(locked, actor)
-        fetched = _fetch_analysis_messages(locked, connection)
+        gmail_access_token = (
+            get_valid_access_token(connection)
+            if _gmail_parallel_fetch_enabled()
+            else None
+        )
+        report_progress(STAGE_FETCHING_MESSAGES)
+        message_fetch_options = {}
+        if background_analysis and _background_heartbeat is not None:
+            message_fetch_options["coordinator_heartbeat"] = (
+                _background_heartbeat
+            )
+        fetched = (
+            _fetch_analysis_messages_parallel(
+                locked,
+                access_token=gmail_access_token,
+                **message_fetch_options,
+            )
+            if gmail_access_token
+            else _fetch_analysis_messages(
+                locked,
+                connection,
+                **message_fetch_options,
+            )
+        )
         analysis_timings["gmail_thread_fetch"] = _elapsed_ms(fetch_started)
         if len(fetched) == 3:
             thread_id, messages, timeline_messages = fetched
@@ -5395,15 +7145,28 @@ def analyze_gmail_inquiry_import(
         locked.anchor_message_id = canonical_anchor_message_id
         locked.gmail_thread_id = thread_id
         locked.selected_message_ids = message_ids
+        source_analysis_options = {
+            "timeline_messages": timeline_messages,
+            "timeline_meta": timeline_meta,
+            "analysis_timings": analysis_timings,
+            "allow_semantic_cache_read": not force,
+        }
+        if gmail_access_token:
+            source_analysis_options["gmail_access_token"] = (
+                gmail_access_token
+            )
+        if progress_binding is not None:
+            source_analysis_options["progress_callback"] = report_progress
+        if background_analysis and _background_heartbeat is not None:
+            source_analysis_options["coordinator_heartbeat"] = (
+                _background_heartbeat
+            )
         result = _build_source_analysis(
             messages,
             connection,
             locked,
             actor,
-            timeline_messages=timeline_messages,
-            timeline_meta=timeline_meta,
-            analysis_timings=analysis_timings,
-            allow_semantic_cache_read=not force,
+            **source_analysis_options,
         )
         content_fingerprint = _content_fingerprint(
             connection.email,
@@ -5432,9 +7195,39 @@ def analyze_gmail_inquiry_import(
             expected_attempt=analysis_attempt,
             expected_fingerprint=analysis_fingerprint,
             timings_ms=analysis_timings,
+            progress_binding=progress_binding,
+            progress_error_category=progress_failure_category_for_stage(
+                progress_stage
+            ),
+            background_job_id=_background_job_id,
+            background_lease_token=_background_lease_token,
+            background_generation=_background_generation,
         )
         if not marked_failed:
             return _record(locked)
+        failed_import = _record(locked)
+        record_gmail_workflow_metric(
+            failed_import,
+            EVENT_ANALYSIS_FAILED,
+            duration_ms=analysis_timings.get("total"),
+            counts={
+                "analysis_attempt_count": analysis_attempt,
+                "message_count": len(failed_import.message_manifest or []),
+                "selected_message_count": len(failed_import.selected_message_ids or []),
+                "attachment_count": len(failed_import.attachment_manifest or []),
+            },
+            cache_state="unknown",
+            outcome_code="failure",
+            feature_flags={
+                "background_analysis": background_analysis,
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
+            contract_versions={
+                "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+                "ai_schema": GMAIL_AI_SCHEMA_NAME,
+                "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+            },
+        )
         if isinstance(exc, GmailInquiryImportError):
             raise
         raise GmailInquiryImportError(
@@ -5442,73 +7235,177 @@ def analyze_gmail_inquiry_import(
         ) from exc
 
     persistence_started = time.perf_counter()
-    with transaction.atomic():
-        locked = _record_for_update(locked)
-        if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
-            return _record(locked)
-        if (
-            locked.analysis_attempts != analysis_attempt
-            or locked.source_fingerprint != analysis_fingerprint
-            or locked.status != GmailInquiryImport.STATUS_ANALYZING
-        ):
-            return _record(locked)
-        locked.gmail_connection = connection
-        locked.gmail_thread_id = thread_id
-        locked.anchor_message_id = canonical_anchor_message_id
-        locked.selected_message_ids = message_ids
-        locked.message_manifest = _json_safe(result["message_manifest"])
-        locked.attachment_manifest = _json_safe(result["attachment_manifest"])
-        locked.analysis = _json_safe(
-            {
-                "version": "gmail_inquiry_v2",
-                "content_fingerprint": content_fingerprint,
-                "preview": result["preview"],
-                "ready_for_direct_quote": result["ready_for_direct_quote"],
-                "warnings": result["warnings"],
-                "mode": locked.mode,
-                "selected_message_ids": message_ids,
-                "recommended_source_keys": result["recommended_source_keys"],
-                "thread_analysis": result["thread_analysis"],
+    try:
+        report_progress(STAGE_SAVING_RESULTS)
+        with transaction.atomic():
+            locked = _record_for_update(locked)
+            if locked.status == GmailInquiryImport.STATUS_CONFIRMED:
+                return _record(locked)
+            if background_analysis:
+                from .gmail_analysis_jobs import (
+                    bind_background_job_result_source_locked_import,
+                )
+
+                if not bind_background_job_result_source_locked_import(
+                    locked,
+                    job_id=_background_job_id,
+                    lease_token=_background_lease_token,
+                    expected_attempt=analysis_attempt,
+                    expected_generation=_background_generation,
+                    result_source_fingerprint=canonical_selection_fingerprint,
+                ):
+                    return _record(locked)
+            if (
+                locked.analysis_attempts != analysis_attempt
+                or locked.source_fingerprint != analysis_fingerprint
+                or locked.status != GmailInquiryImport.STATUS_ANALYZING
+            ):
+                return _record(locked)
+            locked.gmail_connection = connection
+            locked.gmail_thread_id = thread_id
+            locked.anchor_message_id = canonical_anchor_message_id
+            locked.selected_message_ids = message_ids
+            locked.message_manifest = _json_safe(result["message_manifest"])
+            locked.attachment_manifest = _json_safe(
+                result["attachment_manifest"]
+            )
+            locked.analysis = _json_safe(
+                {
+                    "version": "gmail_inquiry_v2",
+                    "content_fingerprint": content_fingerprint,
+                    "preview": result["preview"],
+                    "ready_for_direct_quote": result["ready_for_direct_quote"],
+                    "warnings": result["warnings"],
+                    "mode": locked.mode,
+                    "selected_message_ids": message_ids,
+                    "recommended_source_keys": result[
+                        "recommended_source_keys"
+                    ],
+                    "thread_analysis": result["thread_analysis"],
+                    "timings_ms": _analysis_timing_snapshot(analysis_timings),
+                }
+            )
+            locked.evidence = _json_safe(result["evidence"])
+            locked.candidates = _json_safe(result["candidates"])
+            locked.errors = []
+            finished_at = timezone.now()
+            progress_finished = finish_gmail_analysis_progress(
+                locked,
+                progress_binding,
+                succeeded=True,
+                at=finished_at,
+            )
+            if progress_binding is not None and not progress_finished:
+                return _record(locked)
+            locked.status = (
+                GmailInquiryImport.STATUS_READY
+                if result["ready_for_direct_quote"]
+                else GmailInquiryImport.STATUS_REVIEW_REQUIRED
+            )
+            locked.analyzed_at = finished_at
+            locked.save()
+            if canonical_selection_fingerprint != locked.source_fingerprint:
+                previous_fingerprint = locked.source_fingerprint
+                try:
+                    # A savepoint keeps a concurrent canonical handoff from
+                    # rolling back the completed analysis. In that rare race
+                    # the older alias fingerprint remains valid and
+                    # confirmation's per-thread uniqueness still prevents
+                    # duplicate quotations.
+                    with transaction.atomic():
+                        updated = GmailInquiryImport.objects.filter(
+                            pk=locked.pk,
+                            source_fingerprint=previous_fingerprint,
+                        ).update(
+                            source_fingerprint=canonical_selection_fingerprint,
+                        )
+                except IntegrityError:
+                    updated = 0
+                if updated:
+                    locked.source_fingerprint = canonical_selection_fingerprint
+            analysis_timings["result_persistence"] = _elapsed_ms(
+                persistence_started
+            )
+            analysis_timings["total"] = _elapsed_ms(total_started)
+            locked.analysis = {
+                **(locked.analysis or {}),
                 "timings_ms": _analysis_timing_snapshot(analysis_timings),
             }
-        )
-        locked.evidence = _json_safe(result["evidence"])
-        locked.candidates = _json_safe(result["candidates"])
-        locked.errors = []
-        locked.status = (
-            GmailInquiryImport.STATUS_READY
-            if result["ready_for_direct_quote"]
-            else GmailInquiryImport.STATUS_REVIEW_REQUIRED
-        )
-        locked.analyzed_at = timezone.now()
-        locked.save()
-        if canonical_selection_fingerprint != locked.source_fingerprint:
-            previous_fingerprint = locked.source_fingerprint
-            try:
-                # A savepoint keeps a concurrent canonical handoff from
-                # rolling back the completed analysis. In that rare race the
-                # older alias fingerprint remains valid and confirmation's
-                # per-thread uniqueness still prevents duplicate quotations.
-                with transaction.atomic():
-                    updated = GmailInquiryImport.objects.filter(
-                        pk=locked.pk,
-                        source_fingerprint=previous_fingerprint,
-                    ).update(
-                        source_fingerprint=canonical_selection_fingerprint,
-                    )
-            except IntegrityError:
-                updated = 0
-            if updated:
-                locked.source_fingerprint = canonical_selection_fingerprint
+            locked.save(update_fields=["analysis", "updated_at"])
+    except Exception as exc:
+        # The progress feature is an optional projection. With it disabled,
+        # preserve the pre-feature persistence exception and state exactly;
+        # callers must not observe a new failure conversion or metric path.
+        if progress_binding is None:
+            raise
         analysis_timings["result_persistence"] = _elapsed_ms(
             persistence_started
         )
         analysis_timings["total"] = _elapsed_ms(total_started)
-        locked.analysis = {
-            **(locked.analysis or {}),
-            "timings_ms": _analysis_timing_snapshot(analysis_timings),
-        }
-        locked.save(update_fields=["analysis", "updated_at"])
+        marked_failed = _mark_analysis_failed(
+            locked.pk,
+            exc,
+            expected_attempt=analysis_attempt,
+            expected_fingerprint=analysis_fingerprint,
+            timings_ms=analysis_timings,
+            progress_binding=progress_binding,
+            progress_error_category=progress_failure_category_for_stage(
+                STAGE_SAVING_RESULTS
+            ),
+            background_job_id=_background_job_id,
+            background_lease_token=_background_lease_token,
+            background_generation=_background_generation,
+        )
+        if not marked_failed:
+            return _record(locked)
+        failed_import = _record(locked)
+        record_gmail_workflow_metric(
+            failed_import,
+            EVENT_ANALYSIS_FAILED,
+            duration_ms=analysis_timings.get("total"),
+            counts={
+                "analysis_attempt_count": analysis_attempt,
+                "message_count": len(failed_import.message_manifest or []),
+                "selected_message_count": len(
+                    failed_import.selected_message_ids or []
+                ),
+                "attachment_count": len(
+                    failed_import.attachment_manifest or []
+                ),
+            },
+            cache_state="unknown",
+            outcome_code="failure",
+            feature_flags={
+                "background_analysis": background_analysis,
+                "gmail_parallel_fetch": _gmail_parallel_fetch_enabled(),
+            },
+            contract_versions={
+                "ai_pipeline": GMAIL_AI_PIPELINE_VERSION,
+                "ai_schema": GMAIL_AI_SCHEMA_NAME,
+                "semantic_cache": GMAIL_SEMANTIC_CACHE_VERSION,
+            },
+        )
+        if isinstance(exc, GmailInquiryImportError):
+            raise
+        raise GmailInquiryImportError(
+            f"Gmail inquiry analysis failed. {str(exc)[:300]}"
+        ) from exc
+    metric_dimensions = _workflow_analysis_dimensions(
+        locked,
+        result,
+        background_analysis=background_analysis,
+    )
+    record_gmail_workflow_metric(
+        locked,
+        EVENT_ANALYSIS_COMPLETED,
+        duration_ms=analysis_timings.get("total"),
+        outcome_code=(
+            "ready"
+            if locked.status == GmailInquiryImport.STATUS_READY
+            else "review_required"
+        ),
+        **metric_dimensions,
+    )
     return _record(locked)
 
 
@@ -5624,6 +7521,7 @@ def _rows_for_company(rows, company):
                 "match_method",
                 "match_reason",
                 "match_status",
+                "match_company_id",
             }
         }
         apply_match_to_preview_line(
@@ -5631,6 +7529,7 @@ def _rows_for_company(rows, company):
             company,
             history_context=history_context,
         )
+        cleaned["match_company_id"] = getattr(company, "pk", None)
         if cleaned.get("matched_product") or cleaned.get("matched_quote_item"):
             suggested_reason = str(cleaned.get("match_reason") or "").strip()
             cleaned["match_reason"] = (
@@ -5672,6 +7571,422 @@ def _confirmation_received_at(gmail_import):
     return (anchor or {}).get("sent_at") or None
 
 
+GMAIL_UNIFIED_PREPARATION_VERSION = "gmail_unified_preparation_v1"
+
+
+def _normalized_unified_preparation_rows(rows):
+    """Normalize the bounded employee payload used only for keyed idempotency."""
+
+    normalized = []
+    seen = set()
+    for row in rows or []:
+        row_key = str(row.get("row_key") or "").strip()
+        if not row_key or row_key in seen:
+            raise GmailInquiryImportError(
+                "Every Gmail row must be submitted exactly once."
+            )
+        seen.add(row_key)
+
+        def decimal_text(value):
+            if value in (None, ""):
+                return None
+            return format(Decimal(str(value)), "f")
+
+        normalized.append(
+            {
+                "row_key": row_key,
+                "raw_name": str(row.get("raw_name") or "").strip(),
+                "quantity": decimal_text(row.get("quantity")),
+                "unit": str(row.get("unit") or "").strip(),
+                "included": bool(row.get("included")),
+                "uncertainty_decision": str(
+                    row.get("uncertainty_decision") or ""
+                ),
+                "product_id": getattr(
+                    row.get("product"),
+                    "pk",
+                    row.get("product"),
+                ),
+                "quote_item_id": getattr(
+                    row.get("quote_item"),
+                    "pk",
+                    row.get("quote_item"),
+                ),
+                "product_decision": str(row.get("product_decision") or ""),
+                "match_status": str(row.get("match_status") or ""),
+                "unit_price": decimal_text(row.get("unit_price")),
+                "vat_rate": decimal_text(row.get("vat_rate")),
+            }
+        )
+    return sorted(normalized, key=lambda row: row["row_key"])
+
+
+def _gmail_unified_preparation_fingerprint(
+    gmail_import,
+    rows,
+    *,
+    expected_source_fingerprint,
+    expected_analysis_attempt,
+    expected_analysis_generation,
+    expected_review_rows_fingerprint,
+    identity_review_fingerprint,
+):
+    """Key an exact decision set without persisting raw rows or prices."""
+
+    encoded = json.dumps(
+        {
+            "contract": GMAIL_UNIFIED_PREPARATION_VERSION,
+            "gmail_import_id": gmail_import.pk,
+            "source_fingerprint": str(expected_source_fingerprint or ""),
+            "analysis_attempt": int(expected_analysis_attempt),
+            "analysis_generation": str(expected_analysis_generation or ""),
+            "review_rows_fingerprint": str(
+                expected_review_rows_fingerprint or ""
+            ),
+            "identity_review_fingerprint": str(
+                identity_review_fingerprint or ""
+            ),
+            "rows": _normalized_unified_preparation_rows(rows),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hmac.new(
+        str(settings.SECRET_KEY).encode("utf-8"),
+        encoded.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _require_current_unified_preparation_binding(
+    gmail_import,
+    *,
+    expected_source_fingerprint,
+    expected_analysis_attempt,
+    expected_analysis_generation,
+    expected_review_rows_fingerprint,
+    identity_review_fingerprint,
+):
+    """Validate the complete browser snapshot while the import row is locked."""
+
+    try:
+        expected_attempt = int(expected_analysis_attempt)
+    except (TypeError, ValueError) as exc:
+        raise GmailInquiryImportStale(
+            "The Gmail analysis changed. Reload the unified workspace."
+        ) from exc
+    current_identity = gmail_identity_evidence_fingerprint(gmail_import)
+    checks = (
+        hmac.compare_digest(
+            str(expected_source_fingerprint or ""),
+            str(gmail_import.source_fingerprint or ""),
+        ),
+        expected_attempt == gmail_import.analysis_attempts,
+        hmac.compare_digest(
+            str(expected_analysis_generation or ""),
+            gmail_analysis_generation(gmail_import),
+        ),
+        hmac.compare_digest(
+            str(expected_review_rows_fingerprint or ""),
+            gmail_review_rows_fingerprint(gmail_import),
+        ),
+        hmac.compare_digest(
+            str(identity_review_fingerprint or ""),
+            current_identity,
+        ),
+    )
+    if not all(checks):
+        raise GmailInquiryImportStale(
+            "The Gmail review changed in another session. Reload it before preparing the quotation."
+        )
+    if not gmail_identity_approval_is_current(gmail_import):
+        raise GmailInquiryImportError(
+            "Review and explicitly approve the current customer company before preparing the quotation."
+        )
+
+
+def _unified_prepared_rows(gmail_import, submitted_rows, actor):
+    """Merge explicit review decisions and return included quotation rows.
+
+    The import row must already be locked. Customer/source prices remain in
+    evidence and are never read here. The only selling price is the nullable
+    value submitted by the authenticated employee in this request.
+    """
+
+    analysis = dict(gmail_import.analysis or {})
+    preview = dict(analysis.get("preview") or {})
+    server_rows = [dict(row) for row in (preview.get("lines") or [])]
+    if not server_rows or any(not row.get("row_key") for row in server_rows):
+        raise GmailInquiryImportError(
+            "Reanalyze this Gmail inquiry before using the unified workspace."
+        )
+    server_by_key = {str(row["row_key"]): row for row in server_rows}
+    if len(server_by_key) != len(server_rows):
+        raise GmailInquiryImportError(
+            "The Gmail analysis contains duplicate row identifiers. Reanalyze this inquiry."
+        )
+    available_source_keys = {
+        str(source.get("source_key") or "")
+        for source in (gmail_import.evidence or [])
+        if isinstance(source, dict) and source.get("source_key")
+    }
+    normalized_submitted = _normalized_unified_preparation_rows(submitted_rows)
+    submitted_by_key = {row["row_key"]: row for row in normalized_submitted}
+    if set(submitted_by_key) != set(server_by_key):
+        raise GmailInquiryImportStale(
+            "The Gmail rows changed. Reload the unified workspace."
+        )
+
+    # Resolve catalogue availability in two bounded queries rather than once
+    # per included row. This validation intentionally stays inside the
+    # new-preparation branch: an exact lost-response retry must still reach
+    # its idempotency marker if a selected catalogue record was archived after
+    # the original transaction committed.
+    submitted_product_ids = {
+        row["product_id"]
+        for row in normalized_submitted
+        if row["included"] and row["product_id"]
+    }
+    submitted_quote_item_ids = {
+        row["quote_item_id"]
+        for row in normalized_submitted
+        if row["included"] and row["quote_item_id"]
+    }
+    active_products_by_id = Product.objects.exclude(status="archived").in_bulk(
+        submitted_product_ids
+    )
+    active_quote_items_by_id = QuoteItem.objects.filter(
+        is_active=True,
+    ).in_bulk(submitted_quote_item_ids)
+    active_product_ids = set(active_products_by_id)
+    active_quote_item_ids = set(active_quote_items_by_id)
+
+    prepared = []
+    reviewed_at = timezone.now().isoformat()
+    fallback_match_company_id = (gmail_import.candidates or {}).get(
+        "recommended_company_id"
+    )
+    for target in server_rows:
+        row_key = str(target["row_key"])
+        submitted = submitted_by_key[row_key]
+        operation = str(target.get("operation") or "")
+        parse_status = str(target.get("parse_status") or "")
+        # Capture the immutable analyzer suggestion before applying any
+        # employee selection. Product approval is meaningful only against
+        # this server-owned pair.
+        suggested_product_id = target.get("matched_product")
+        suggested_quote_item_id = target.get("matched_quote_item")
+        uncertain = bool(
+            operation == "uncertain"
+            or str(target.get("original_operation") or "") == "uncertain"
+            or parse_status in {"needs_review", "unparsed"}
+        )
+        decision = submitted["uncertainty_decision"]
+        included = submitted["included"]
+        if uncertain and decision not in {"approve", "correct", "exclude"}:
+            raise GmailInquiryImportError(
+                "Every uncertain Gmail row needs an approve, correct, or exclude decision."
+            )
+        if decision == "exclude" and included:
+            raise GmailInquiryImportError(
+                "An excluded uncertainty decision cannot include the row."
+            )
+        if decision in {"approve", "correct"} and not included:
+            raise GmailInquiryImportError(
+                "An approved or corrected uncertainty decision must include the row."
+            )
+        if not included and (
+            submitted["product_decision"] != "exclude"
+            or submitted["match_status"] != "ignored"
+            or submitted["product_id"]
+            or submitted["quote_item_id"]
+            or submitted["unit_price"] is not None
+        ):
+            raise GmailInquiryImportError(
+                "Excluded Gmail rows require an ignored Product decision and no selling price."
+            )
+        if operation in {"removed", "duplicate"} or parse_status == "ignored":
+            if included:
+                raise GmailInquiryImportError(
+                    "Removed, duplicate, or ignored Gmail rows must remain excluded."
+                )
+
+        try:
+            original_quantity = Decimal(str(target.get("quantity") or ""))
+        except Exception:
+            original_quantity = None
+        submitted_quantity = (
+            Decimal(submitted["quantity"])
+            if submitted["quantity"] is not None
+            else None
+        )
+        substantive_change = bool(
+            submitted["raw_name"] != str(target.get("raw_name") or "").strip()
+            or submitted_quantity != original_quantity
+            or submitted["unit"] != str(target.get("unit") or "").strip()
+            or included != bool(target.get("included", True))
+        )
+        if decision == "approve" and substantive_change:
+            raise GmailInquiryImportError(
+                "Use the correct decision when changing an uncertain Gmail row."
+            )
+        if decision == "correct" and not substantive_change:
+            raise GmailInquiryImportError(
+                "Use approve when an uncertain Gmail row does not need changes."
+            )
+
+        target["included"] = included
+        target["reviewed_by_user"] = True
+        target["reviewed_by_user_id"] = actor.pk
+        target["reviewed_at"] = reviewed_at
+        target["review_status"] = "manual"
+        if not included:
+            # Exclusion is a workflow decision, not an edit to the immutable
+            # extracted evidence. Keep the analyzer-issued wording, quantity,
+            # unit, VAT and source keys available for later audit/review.
+            target["parse_status"] = "ignored"
+            target["matched_product"] = None
+            target["matched_quote_item"] = None
+            target["match_status"] = "ignored"
+            continue
+
+        target["raw_name"] = submitted["raw_name"]
+        target["quantity"] = submitted["quantity"]
+        target["unit"] = submitted["unit"]
+        target["vat_rate"] = submitted["vat_rate"] or "0.00"
+
+        if not target["raw_name"] or submitted_quantity is None:
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs a valid item name, unit, and positive quantity."
+            )
+        if not target["unit"]:
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs a valid item name, unit, and positive quantity."
+            )
+        if submitted["match_status"] != "confirmed" or bool(
+            submitted["product_id"]
+        ) == bool(submitted["quote_item_id"]):
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs one explicitly confirmed existing Product or quotation item."
+            )
+        if (
+            submitted["product_id"]
+            and submitted["product_id"] not in active_product_ids
+        ):
+            raise GmailInquiryImportError(
+                "The selected Product is archived or unavailable. Choose an active existing Product."
+            )
+        if (
+            submitted["quote_item_id"]
+            and submitted["quote_item_id"] not in active_quote_item_ids
+        ):
+            raise GmailInquiryImportError(
+                "The selected quotation item is inactive or unavailable."
+            )
+        selected_pair = (
+            str(submitted["product_id"] or ""),
+            str(submitted["quote_item_id"] or ""),
+        )
+        suggested_pair = (
+            str(suggested_product_id or ""),
+            str(suggested_quote_item_id or ""),
+        )
+        suggestion_company_id = (
+            target.get("match_company_id")
+            if "match_company_id" in target
+            else fallback_match_company_id
+        )
+        suggestion_company_is_current = str(
+            suggestion_company_id or ""
+        ) == str(gmail_import.selected_company_id or "")
+        if submitted["product_decision"] == "approve":
+            if (
+                not suggestion_company_is_current
+                or bool(suggested_product_id) == bool(suggested_quote_item_id)
+                or selected_pair != suggested_pair
+            ):
+                raise GmailInquiryImportError(
+                    "Approve can only confirm the current server Product suggestion for the selected company. Choose the Product explicitly after changing company."
+                )
+        elif submitted["product_decision"] == "correct":
+            if (
+                suggestion_company_is_current
+                and selected_pair == suggested_pair
+                and any(suggested_pair)
+            ):
+                raise GmailInquiryImportError(
+                    "Use approve when keeping the current Product suggestion."
+                )
+            # Do not carry the analyzer's old candidate rationale onto a
+            # different employee-selected catalogue record. Preserve the
+            # source evidence, but make the saved match audit explicitly
+            # describe the staff correction.
+            target["match_candidates"] = []
+            target["match_confidence"] = None
+            target["match_method"] = "staff_corrected_existing_item"
+            target["match_reason"] = (
+                "Staff corrected the Product suggestion to an existing catalogue item."
+            )
+        else:
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs an explicit Product approval or correction."
+            )
+        target["matched_product"] = submitted["product_id"]
+        target["matched_quote_item"] = submitted["quote_item_id"]
+        target["match_status"] = submitted["match_status"]
+        target["match_company_id"] = gmail_import.selected_company_id
+        row_source_keys = {
+            str(value or "").strip()
+            for value in (target.get("_source_keys") or [])
+            if str(value or "").strip()
+        }
+        if not row_source_keys or not row_source_keys.issubset(
+            available_source_keys
+        ):
+            raise GmailInquiryImportError(
+                "Every included Gmail row needs current bounded source evidence. Reanalyze this inquiry."
+            )
+        if uncertain:
+            target["original_operation"] = target.get("original_operation") or operation
+            target["operation"] = "changed" if decision == "correct" else "added"
+            target["parse_status"] = "parsed"
+        prepared.append(
+            {
+                **target,
+                "quantity": submitted_quantity,
+                "matched_product": submitted["product_id"],
+                "matched_quote_item": submitted["quote_item_id"],
+                "_matched_product_object": active_products_by_id.get(
+                    submitted["product_id"]
+                ),
+                "_matched_quote_item_object": active_quote_items_by_id.get(
+                    submitted["quote_item_id"]
+                ),
+                "match_status": "confirmed",
+                "match_confirmed_by_user": True,
+                "employee_unit_price": (
+                    Decimal(submitted["unit_price"])
+                    if submitted["unit_price"] is not None
+                    else None
+                ),
+                "employee_vat_rate": Decimal(submitted["vat_rate"] or "0.00"),
+            }
+        )
+
+    if not prepared:
+        raise GmailInquiryImportError(
+            "At least one reviewed Product row is required to prepare a quotation."
+        )
+    preview["lines"] = server_rows
+    analysis["preview"] = preview
+    analysis["reviewed_at"] = reviewed_at
+    analysis["reviewed_by_user_id"] = actor.pk
+    gmail_import.analysis = _json_safe(analysis)
+    return prepared
+
+
 def confirm_gmail_inquiry_import(
     gmail_import,
     actor,
@@ -5679,6 +7994,10 @@ def confirm_gmail_inquiry_import(
     company=None,
     contact=None,
     selected_source_keys=None,
+    identity_review_fingerprint=None,
+    expected_source_fingerprint=None,
+    expected_analysis_attempt=None,
+    expected_review_rows_fingerprint=None,
 ):
     """Create one inquiry and its first quotation, or return the existing pair."""
 
@@ -5788,6 +8107,14 @@ def confirm_gmail_inquiry_import(
                 "Customer identity matching rules changed. Reanalyze this "
                 "Gmail inquiry before creating the quotation."
             )
+        _require_current_gmail_chained_review_binding(
+            locked,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_analysis_attempt=expected_analysis_attempt,
+            expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+            identity_review_fingerprint=identity_review_fingerprint,
+            require_company_approval=True,
+        )
 
         if company is None:
             raise GmailInquiryImportError(
@@ -5814,6 +8141,25 @@ def confirm_gmail_inquiry_import(
             raise GmailInquiryImportError(
                 "The selected contact does not belong to that company."
             )
+        if gmail_review_ui_v2_enabled():
+            if identity_review_fingerprint and not hmac.compare_digest(
+                str(identity_review_fingerprint),
+                gmail_identity_evidence_fingerprint(locked),
+            ):
+                raise GmailInquiryImportStale(
+                    "The customer identity approval changed. Review it again."
+                )
+            if not gmail_identity_approval_is_current(locked):
+                raise GmailInquiryImportError(
+                    "Review and explicitly approve the customer company before creating the quotation."
+                )
+            if (
+                locked.selected_company_id != company.id
+                or locked.selected_contact_id != getattr(contact, "pk", None)
+            ):
+                raise GmailInquiryImportError(
+                    "The confirmed company or contact changed. Approve it again."
+                )
 
         rows = _selected_analysis_rows(locked, selected_source_keys)
         rows = _rows_for_company(rows, company)
@@ -5903,3 +8249,327 @@ def confirm_gmail_inquiry_import(
             ]
         )
         return GmailInquiryConfirmation(locked, inquiry, quotation, created)
+
+
+def _linked_gmail_confirmation(gmail_import):
+    inquiry = gmail_import.inquiry
+    quotation = gmail_import.quotation
+    if not inquiry and quotation:
+        inquiry = quotation.inquiry
+    if inquiry and not quotation:
+        quotation = inquiry.quotations.order_by(
+            "-version",
+            "-created_at",
+            "-pk",
+        ).first()
+    return inquiry, quotation
+
+
+def confirm_and_prepare_gmail_quotation(
+    gmail_import,
+    actor,
+    *,
+    rows,
+    expected_source_fingerprint,
+    expected_analysis_attempt,
+    expected_analysis_generation,
+    expected_review_rows_fingerprint,
+    identity_review_fingerprint,
+):
+    """Atomically create and prepare one draft from explicit staff decisions.
+
+    Existing confirmed quotations are never edited by this action. An exact
+    same-import retry reuses the keyed preparation marker without replaying
+    writes; an already-confirmed sibling import returns the canonical thread
+    quotation unchanged so the client cannot treat it as newly prepared.
+    """
+
+    _require_staff(actor)
+    if not gmail_unified_workspace_enabled():
+        raise GmailInquiryImportError(
+            "The unified Gmail quotation workspace is not enabled."
+        )
+    snapshot = _record(gmail_import)
+    preparation_fingerprint = _gmail_unified_preparation_fingerprint(
+        snapshot,
+        rows,
+        expected_source_fingerprint=expected_source_fingerprint,
+        expected_analysis_attempt=expected_analysis_attempt,
+        expected_analysis_generation=expected_analysis_generation,
+        expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+        identity_review_fingerprint=identity_review_fingerprint,
+    )
+    with transaction.atomic():
+        # This is intentionally identical to the hardened confirmation order:
+        # mailbox connection first, then every import in the thread by PK,
+        # followed by the requested import and newly-created inquiry/quote.
+        if snapshot.gmail_connection_id:
+            GmailOAuthConnection.objects.select_for_update().filter(
+                pk=snapshot.gmail_connection_id
+            ).first()
+        if snapshot.mailbox_email and snapshot.gmail_thread_id:
+            list(
+                GmailInquiryImport.objects.select_for_update()
+                .filter(
+                    mailbox_email__iexact=snapshot.mailbox_email,
+                    gmail_thread_id=snapshot.gmail_thread_id,
+                )
+                .order_by("pk")
+                .values_list("pk", flat=True)
+            )
+        locked = _record_for_update(snapshot)
+
+        if locked.inquiry_id or locked.quotation_id:
+            inquiry, quotation = _linked_gmail_confirmation(locked)
+            if not inquiry or not quotation:
+                raise GmailInquiryImportError(
+                    "This Gmail inquiry has an incomplete saved quotation link."
+                )
+            marker = dict(
+                (locked.analysis or {}).get("unified_preparation") or {}
+            )
+            stored_fingerprint = str(marker.get("fingerprint") or "")
+            if stored_fingerprint:
+                if not hmac.compare_digest(
+                    stored_fingerprint,
+                    preparation_fingerprint,
+                ):
+                    raise GmailInquiryImportStale(
+                        "This Gmail inquiry was already prepared with different decisions. Open its existing quotation."
+                    )
+                return GmailUnifiedPreparation(
+                    locked,
+                    inquiry,
+                    quotation,
+                    False,
+                    False,
+                    True,
+                    "same_preparation",
+                )
+            return GmailUnifiedPreparation(
+                locked,
+                inquiry,
+                quotation,
+                False,
+                False,
+                True,
+                "existing_quotation",
+            )
+
+        if locked.gmail_thread_id:
+            confirmed = (
+                # Lock only the canonical import row. PostgreSQL's default
+                # FOR UPDATE would otherwise lock select_related inquiry and
+                # quotation rows under Gmail locks, inverting quote-first
+                # email/review workflows.
+                GmailInquiryImport.objects.select_for_update(of=("self",))
+                .filter(
+                    mailbox_email__iexact=locked.mailbox_email,
+                    gmail_thread_id=locked.gmail_thread_id,
+                    status=GmailInquiryImport.STATUS_CONFIRMED,
+                )
+                .exclude(pk=locked.pk)
+                .select_related("inquiry", "quotation")
+                .order_by("-confirmed_at", "-pk")
+                .first()
+            )
+            if confirmed:
+                inquiry, quotation = _linked_gmail_confirmation(confirmed)
+                if not inquiry or not quotation:
+                    raise GmailInquiryImportError(
+                        "This Gmail thread was already confirmed, but its saved quotation link is incomplete."
+                    )
+                return GmailUnifiedPreparation(
+                    confirmed,
+                    inquiry,
+                    quotation,
+                    False,
+                    False,
+                    True,
+                    "thread_already_confirmed",
+                )
+
+        _assert_claim_owner(locked, actor)
+        if locked.status not in {
+            GmailInquiryImport.STATUS_READY,
+            GmailInquiryImport.STATUS_REVIEW_REQUIRED,
+        }:
+            raise GmailInquiryImportError(
+                "Analyze this Gmail inquiry before preparing a quotation."
+            )
+        if _gmail_identity_requires_reanalysis(
+            locked.candidates,
+            locked.analysis,
+        ):
+            raise GmailInquiryImportError(
+                "Customer identity matching rules changed. Reanalyze this Gmail inquiry before preparing the quotation."
+            )
+        _require_current_unified_preparation_binding(
+            locked,
+            expected_source_fingerprint=expected_source_fingerprint,
+            expected_analysis_attempt=expected_analysis_attempt,
+            expected_analysis_generation=expected_analysis_generation,
+            expected_review_rows_fingerprint=expected_review_rows_fingerprint,
+            identity_review_fingerprint=identity_review_fingerprint,
+        )
+
+        company = Company.objects.filter(
+            pk=locked.selected_company_id,
+            is_active=True,
+        ).first()
+        if not company:
+            raise GmailInquiryImportError(
+                "Select and explicitly approve an active customer company before preparing the quotation."
+            )
+        contact = None
+        if locked.selected_contact_id:
+            contact = CompanyContact.objects.filter(
+                pk=locked.selected_contact_id,
+                company=company,
+                is_active=True,
+            ).first()
+            if not contact:
+                raise GmailInquiryImportError(
+                    "The approved customer contact is no longer active for that company."
+                )
+
+        prepared_rows = _unified_prepared_rows(locked, rows, actor)
+        from .serializers import ImportedInquiryCreateSerializer
+
+        preview = dict((locked.analysis or {}).get("preview") or {})
+        line_payloads = []
+        for line in prepared_rows:
+            match_reason = str(line.get("match_reason") or "").strip()
+            explicit_reason = "Explicitly confirmed by staff in Gmail workspace."
+            match_reason = f"{explicit_reason} {match_reason}".strip()[:255]
+            line_payloads.append(
+                {
+                    "raw_name": line.get("raw_name") or "",
+                    "raw_line": line.get("raw_line") or "",
+                    "quantity": line.get("quantity"),
+                    "unit": line.get("unit") or "",
+                    # Never read preview/customer budget values here. This is
+                    # only the authenticated employee's nullable request value.
+                    "unit_price": line.get("employee_unit_price"),
+                    "vat_rate": line.get("employee_vat_rate") or Decimal("0.00"),
+                    "notes": line.get("notes") or "",
+                    # Validate the remaining imported-line schema without
+                    # replaying one relation lookup per row. The already
+                    # bulk-validated model objects are injected immediately
+                    # after serializer validation below.
+                    "matched_product": None,
+                    "matched_quote_item": None,
+                    "match_reason": match_reason,
+                    "match_status": "confirmed",
+                    "match_confirmed_by_user": True,
+                    "parse_status": "manual",
+                    "parse_confidence": line.get("parse_confidence") or 0,
+                }
+            )
+        payload = {
+            "company": company.pk,
+            "contact": contact.pk if contact else None,
+            "subject": _confirmation_subject(locked),
+            "original_text": str(preview.get("original_text") or "")[
+                :MAX_ORIGINAL_TEXT_CHARS
+            ],
+            "source_type": Inquiry.SOURCE_TYPE_GMAIL,
+            "source_filename": "",
+            "source_mime_type": "message/rfc822",
+            "source_sha256": locked.source_fingerprint,
+            "source_file_ref": "",
+            "source_file_size": None,
+            "parse_method": str(
+                preview.get("parse_method") or "gmail_native_ai_v2"
+            )[:80],
+            "parse_meta": {
+                **(preview.get("meta") or {}),
+                "gmail_import_id": locked.pk,
+                "mailbox_email": locked.mailbox_email,
+                "gmail_thread_id": locked.gmail_thread_id,
+                "anchor_message_id": locked.anchor_message_id,
+                "selected_message_ids": locked.selected_message_ids,
+                "warnings": preview.get("warnings") or [],
+                "unified_workspace_contract": GMAIL_UNIFIED_PREPARATION_VERSION,
+            },
+            "lines": line_payloads,
+        }
+        received_at = _confirmation_received_at(locked)
+        if received_at:
+            payload["received_at"] = received_at
+        serializer = ImportedInquiryCreateSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        validated_payload = dict(serializer.validated_data)
+        for validated_line, prepared_line in zip(
+            validated_payload["lines"],
+            prepared_rows,
+        ):
+            validated_line["matched_product"] = prepared_line.get(
+                "_matched_product_object"
+            )
+            validated_line["matched_quote_item"] = prepared_line.get(
+                "_matched_quote_item_object"
+            )
+        inquiry = create_imported_inquiry(
+            validated_payload,
+            actor,
+            learn_aliases=False,
+        )
+        quotation, created = create_quotation_from_inquiry(
+            inquiry,
+            actor,
+            learn_aliases=False,
+        )
+        if not created:
+            # The inquiry was created inside this transaction, so reuse here
+            # would indicate an invariant violation rather than an idempotent
+            # request. Fail closed without modifying an existing quotation.
+            raise GmailInquiryImportError(
+                "The draft quotation could not be prepared safely."
+            )
+
+        # This quote and all of its lines were created in this transaction and
+        # are not externally visible yet. Capture the exact prepared state so
+        # the later quote-first response lock can detect an intervening edit
+        # before allowing the frontend to request a preview.
+        from .quotation_email_delivery import quotation_review_fingerprint
+
+        prepared_review_fingerprint = quotation_review_fingerprint(quotation)
+
+        analysis = dict(locked.analysis or {})
+        analysis["unified_preparation"] = {
+            "version": GMAIL_UNIFIED_PREPARATION_VERSION,
+            "fingerprint": preparation_fingerprint,
+            "source_fingerprint": locked.source_fingerprint,
+            "analysis_attempt": locked.analysis_attempts,
+            "analysis_generation": gmail_analysis_generation(locked),
+            "review_rows_fingerprint": gmail_review_rows_fingerprint(locked),
+            "identity_review_fingerprint": gmail_identity_evidence_fingerprint(
+                locked
+            ),
+        }
+        locked.analysis = _json_safe(analysis)
+        locked.inquiry = inquiry
+        locked.quotation = quotation
+        locked.status = GmailInquiryImport.STATUS_CONFIRMED
+        locked.confirmed_at = timezone.now()
+        locked.save(
+            update_fields=[
+                "analysis",
+                "inquiry",
+                "quotation",
+                "status",
+                "confirmed_at",
+                "updated_at",
+            ]
+        )
+        return GmailUnifiedPreparation(
+            locked,
+            inquiry,
+            quotation,
+            True,
+            True,
+            False,
+            "",
+            prepared_review_fingerprint,
+        )

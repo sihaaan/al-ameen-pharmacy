@@ -10,11 +10,25 @@ from api.serializers import ProductListSerializer
 from api.upload_validation import validate_image_upload
 
 from .company_matching import find_similar_companies
+from .gmail_analysis_progress import gmail_analysis_progress_projection
+from .gmail_analysis_jobs import gmail_analysis_job_projection
+from .gmail_review_state import (
+    gmail_analysis_generation,
+    gmail_identity_review_projection,
+    gmail_review_rows_fingerprint,
+)
 from .matching import normalize_item_text
 from .po_evidence_comparison import safe_build_po_evidence_commercial_comparison
 from .private_storage import is_valid_private_ref
 from .quotation_email_delivery import quotation_review_fingerprint
 from .services import learn_confirmed_inquiry_line_alias, quotation_brand_name_for_selection
+from .workflow_features import (
+    gmail_analysis_progress_enabled,
+    gmail_chained_actions_enabled,
+    gmail_review_ui_v2_enabled,
+    gmail_unified_workspace_enabled,
+    quotation_workflow_features,
+)
 from .models import (
     Company,
     CompanyContact,
@@ -259,6 +273,14 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
     lines = serializers.SerializerMethodField()
     inquiry_id = serializers.IntegerField(read_only=True)
     quotation_id = serializers.IntegerField(read_only=True)
+    workflow_features = serializers.SerializerMethodField()
+    identity_review = serializers.SerializerMethodField()
+    identity_review_fingerprint = serializers.SerializerMethodField()
+    identity_review_approved = serializers.SerializerMethodField()
+    review_rows_fingerprint = serializers.SerializerMethodField()
+    analysis_progress = serializers.SerializerMethodField()
+    analysis_generation = serializers.SerializerMethodField()
+    analysis_job = serializers.SerializerMethodField()
 
     class Meta:
         model = GmailInquiryImport
@@ -301,6 +323,14 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
             "subject",
             "preview",
             "lines",
+            "workflow_features",
+            "identity_review",
+            "identity_review_fingerprint",
+            "identity_review_approved",
+            "review_rows_fingerprint",
+            "analysis_progress",
+            "analysis_generation",
+            "analysis_job",
             "confirmed_at",
             "created_at",
             "updated_at",
@@ -364,6 +394,44 @@ class GmailInquiryImportSerializer(serializers.ModelSerializer):
 
     def get_lines(self, obj):
         return ((obj.analysis or {}).get("preview") or {}).get("lines") or []
+
+    def get_workflow_features(self, _obj):
+        return quotation_workflow_features()
+
+    def _identity_review_projection(self, obj):
+        cache = getattr(self, "_gmail_identity_review_cache", {})
+        key = (obj.pk, obj.updated_at)
+        if key not in cache:
+            cache[key] = gmail_identity_review_projection(obj)
+            self._gmail_identity_review_cache = cache
+        return cache[key]
+
+    def get_identity_review(self, obj):
+        return self._identity_review_projection(obj)
+
+    def get_identity_review_fingerprint(self, obj):
+        return self._identity_review_projection(obj)[
+            "identity_review_fingerprint"
+        ]
+
+    def get_identity_review_approved(self, obj):
+        return self._identity_review_projection(obj)["approved"]
+
+    def get_review_rows_fingerprint(self, obj):
+        return gmail_review_rows_fingerprint(obj)
+
+    def get_analysis_progress(self, obj):
+        if not gmail_analysis_progress_enabled():
+            return None
+        return gmail_analysis_progress_projection(obj)
+
+    def get_analysis_generation(self, obj):
+        if not gmail_unified_workspace_enabled():
+            return None
+        return gmail_analysis_generation(obj)
+
+    def get_analysis_job(self, obj):
+        return gmail_analysis_job_projection(obj)
 
 
 class GmailInquiryClaimSerializer(serializers.Serializer):
@@ -448,8 +516,34 @@ class GmailInquiryConfirmSerializer(serializers.Serializer):
         required=False,
         allow_empty=False,
     )
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
+    expected_source_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
+    expected_analysis_attempt = serializers.IntegerField(
+        min_value=0,
+        required=False,
+    )
+    expected_review_rows_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
 
     def validate(self, attrs):
+        _validate_optional_gmail_chained_binding(
+            attrs,
+            identity_only_is_legacy=True,
+        )
         company = attrs.get("company")
         company_alias = attrs.pop("company_id", None)
         if company and company_alias and company.pk != company_alias.pk:
@@ -478,6 +572,258 @@ class GmailInquiryConfirmSerializer(serializers.Serializer):
         return attrs
 
 
+class GmailUnifiedPreparationRowSerializer(serializers.Serializer):
+    """One explicit employee decision for a server-issued Gmail row."""
+
+    UNCERTAINTY_APPROVE = "approve"
+    UNCERTAINTY_CORRECT = "correct"
+    UNCERTAINTY_EXCLUDE = "exclude"
+    UNCERTAINTY_CHOICES = (
+        (UNCERTAINTY_APPROVE, "Approve"),
+        (UNCERTAINTY_CORRECT, "Correct"),
+        (UNCERTAINTY_EXCLUDE, "Exclude"),
+    )
+    PRODUCT_APPROVE = "approve"
+    PRODUCT_CORRECT = "correct"
+    PRODUCT_EXCLUDE = "exclude"
+    PRODUCT_DECISION_CHOICES = (
+        (PRODUCT_APPROVE, "Approve suggestion"),
+        (PRODUCT_CORRECT, "Choose another existing item"),
+        (PRODUCT_EXCLUDE, "Exclude"),
+    )
+
+    row_key = serializers.CharField(min_length=16, max_length=64)
+    raw_name = serializers.CharField(
+        max_length=255,
+        trim_whitespace=True,
+        allow_blank=True,
+    )
+    quantity = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        min_value=Decimal("0.001"),
+        required=False,
+        allow_null=True,
+    )
+    unit = serializers.CharField(
+        max_length=50,
+        trim_whitespace=True,
+        allow_blank=True,
+    )
+    included = serializers.BooleanField()
+    uncertainty_decision = serializers.ChoiceField(
+        choices=UNCERTAINTY_CHOICES,
+        required=False,
+        allow_null=True,
+    )
+    # Keep the public JSON shape as a nullable integer ID, but defer relation
+    # existence/active validation to the service's in-transaction bulk lookup.
+    # PrimaryKeyRelatedField would issue one SELECT per row before that bounded
+    # validation and materially slow large RFQs.
+    product = serializers.IntegerField(
+        min_value=1,
+        max_value=9223372036854775807,
+        required=False,
+        allow_null=True,
+    )
+    quote_item = serializers.IntegerField(
+        min_value=1,
+        max_value=9223372036854775807,
+        required=False,
+        allow_null=True,
+    )
+    product_decision = serializers.ChoiceField(
+        choices=PRODUCT_DECISION_CHOICES,
+    )
+    match_status = serializers.ChoiceField(
+        choices=(
+            (InquiryLine.MATCH_CONFIRMED, "Confirmed"),
+            (InquiryLine.MATCH_IGNORED, "Ignored"),
+        ),
+    )
+    unit_price = UnitPriceDecimalField(
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0.01"),
+    )
+    vat_rate = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+    )
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            allowed = {
+                "row_key",
+                "raw_name",
+                "quantity",
+                "unit",
+                "included",
+                "uncertainty_decision",
+                "product",
+                "quote_item",
+                "product_decision",
+                "match_status",
+                "unit_price",
+                "vat_rate",
+            }
+            unknown = set(data) - allowed
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        key: "This field is not accepted for quotation preparation."
+                        for key in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
+
+    def validate_vat_rate(self, value):
+        if value not in {Decimal("0.00"), Decimal("5.00")}:
+            raise serializers.ValidationError("VAT must be 0% or 5%.")
+        return value
+
+    def validate(self, attrs):
+        included = attrs["included"]
+        decision = attrs.get("uncertainty_decision")
+        product = attrs.get("product")
+        quote_item = attrs.get("quote_item")
+        match_status = attrs["match_status"]
+        product_decision = attrs["product_decision"]
+        if included:
+            if not attrs.get("raw_name"):
+                raise serializers.ValidationError(
+                    {"raw_name": "Every included row needs an item name."}
+                )
+            if attrs.get("quantity") is None:
+                raise serializers.ValidationError(
+                    {"quantity": "Every included row needs a quantity."}
+                )
+            if not attrs.get("unit"):
+                raise serializers.ValidationError(
+                    {"unit": "Every included row needs a unit."}
+                )
+            if match_status != InquiryLine.MATCH_CONFIRMED:
+                raise serializers.ValidationError(
+                    {"match_status": "Included rows require an explicit confirmed Product decision."}
+                )
+            if bool(product) == bool(quote_item):
+                raise serializers.ValidationError(
+                    {"product": "Choose exactly one existing Product or quotation item."}
+                )
+            if product_decision not in {
+                self.PRODUCT_APPROVE,
+                self.PRODUCT_CORRECT,
+            }:
+                raise serializers.ValidationError(
+                    {"product_decision": "Included rows require an explicit Product approval or correction."}
+                )
+            if decision == self.UNCERTAINTY_EXCLUDE:
+                raise serializers.ValidationError(
+                    {"uncertainty_decision": "An excluded decision cannot include the row."}
+                )
+        else:
+            if match_status != InquiryLine.MATCH_IGNORED:
+                raise serializers.ValidationError(
+                    {"match_status": "Excluded rows must be ignored."}
+                )
+            if product or quote_item:
+                raise serializers.ValidationError(
+                    {"product": "Excluded rows cannot save a Product decision."}
+                )
+            if product_decision != self.PRODUCT_EXCLUDE:
+                raise serializers.ValidationError(
+                    {"product_decision": "Excluded rows require the exclude Product decision."}
+                )
+            if attrs.get("unit_price") is not None:
+                raise serializers.ValidationError(
+                    {"unit_price": "Excluded rows cannot save a selling price."}
+                )
+            if decision not in {None, self.UNCERTAINTY_EXCLUDE}:
+                raise serializers.ValidationError(
+                    {"uncertainty_decision": "Excluded rows must use the exclude decision."}
+                )
+        return attrs
+
+
+class GmailInquiryConfirmAndPrepareSerializer(serializers.Serializer):
+    expected_source_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    expected_analysis_attempt = serializers.IntegerField(min_value=0)
+    expected_analysis_generation = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    expected_review_rows_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        min_length=64,
+        max_length=64,
+    )
+    rows = GmailUnifiedPreparationRowSerializer(
+        many=True,
+        allow_empty=False,
+        max_length=5000,
+    )
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            allowed = {
+                "expected_source_fingerprint",
+                "expected_analysis_attempt",
+                "expected_analysis_generation",
+                "expected_review_rows_fingerprint",
+                "identity_review_fingerprint",
+                "rows",
+            }
+            unknown = set(data) - allowed
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        key: "This field is not accepted for quotation preparation."
+                        for key in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
+
+
+class GmailInquiryApproveCompanySerializer(serializers.Serializer):
+    company = serializers.PrimaryKeyRelatedField(
+        queryset=Company.objects.filter(is_active=True),
+    )
+    contact = serializers.PrimaryKeyRelatedField(
+        queryset=CompanyContact.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    suggested = serializers.BooleanField()
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+    )
+
+    def validate(self, attrs):
+        company = attrs["company"]
+        contact = attrs.get("contact")
+        if contact and contact.company_id != company.id:
+            raise serializers.ValidationError(
+                {"contact": "Contact must belong to the selected company."}
+            )
+        if attrs.get("suggested") and contact:
+            raise serializers.ValidationError(
+                {"contact": "A suggested company approval cannot select a purchaser."}
+            )
+        return attrs
+
+
 class GmailInquiryReviewLineUpdateSerializer(serializers.Serializer):
     row_key = serializers.CharField(min_length=16, max_length=64)
     raw_name = serializers.CharField(
@@ -496,16 +842,20 @@ class GmailInquiryReviewLineUpdateSerializer(serializers.Serializer):
         trim_whitespace=True,
     )
     included = serializers.BooleanField()
+    reviewed = serializers.BooleanField(required=False)
 
     def to_internal_value(self, data):
         if isinstance(data, dict):
-            unknown = set(data) - {
+            allowed = {
                 "row_key",
                 "raw_name",
                 "quantity",
                 "unit",
                 "included",
             }
+            if gmail_review_ui_v2_enabled():
+                allowed.add("reviewed")
+            unknown = set(data) - allowed
             if unknown:
                 raise serializers.ValidationError(
                     {
@@ -516,6 +866,43 @@ class GmailInquiryReviewLineUpdateSerializer(serializers.Serializer):
                     }
                 )
         return super().to_internal_value(data)
+
+
+GMAIL_CHAINED_BINDING_FIELDS = frozenset(
+    {
+        "expected_source_fingerprint",
+        "expected_analysis_attempt",
+        "expected_review_rows_fingerprint",
+        "identity_review_fingerprint",
+    }
+)
+
+
+def _validate_optional_gmail_chained_binding(
+    attrs,
+    *,
+    identity_only_is_legacy=False,
+):
+    """Require the complete browser snapshot tuple when chained writes opt in.
+
+    ``identity_review_fingerprint`` predates chained actions on the confirm
+    endpoint, so that field may continue to be supplied alone there. Any new
+    ``expected_*`` field opts the request into the complete tuple.
+    """
+
+    if not gmail_chained_actions_enabled():
+        return
+    present = GMAIL_CHAINED_BINDING_FIELDS.intersection(attrs)
+    if identity_only_is_legacy and present == {"identity_review_fingerprint"}:
+        return
+    if present and present != GMAIL_CHAINED_BINDING_FIELDS:
+        missing = sorted(GMAIL_CHAINED_BINDING_FIELDS - present)
+        raise serializers.ValidationError(
+            {
+                field: "This field is required for a stale-bound chained action."
+                for field in missing
+            }
+        )
 
 
 class GmailInquiryImportUpdateSerializer(serializers.Serializer):
@@ -546,8 +933,43 @@ class GmailInquiryImportUpdateSerializer(serializers.Serializer):
         required=False,
         allow_empty=False,
     )
+    expected_source_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
+    expected_analysis_attempt = serializers.IntegerField(
+        min_value=0,
+        required=False,
+    )
+    identity_review_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
+    expected_review_rows_fingerprint = serializers.RegexField(
+        regex=r"^[0-9a-f]{64}$",
+        max_length=64,
+        min_length=64,
+        required=False,
+    )
 
     def validate(self, attrs):
+        _validate_optional_gmail_chained_binding(attrs)
+        if (
+            gmail_chained_actions_enabled()
+            and GMAIL_CHAINED_BINDING_FIELDS.intersection(attrs)
+            and "review_lines" not in attrs
+        ):
+            raise serializers.ValidationError(
+                {
+                    "review_lines": (
+                        "A stale-bound chained action must save reviewed rows."
+                    )
+                }
+            )
         instance = self.instance
         mode = attrs.get("mode", getattr(instance, "mode", None))
         selected = attrs.get(
@@ -600,6 +1022,10 @@ class GmailInquiryImportUpdateSerializer(serializers.Serializer):
 
         request = self.context.get("request")
         actor = self.context.get("actor") or getattr(request, "user", None)
+        chained_binding = {
+            field: validated_data.pop(field, None)
+            for field in GMAIL_CHAINED_BINDING_FIELDS
+        }
         has_message_change = bool(
             {"mode", "selected_message_ids"}.intersection(validated_data)
         )
@@ -631,6 +1057,7 @@ class GmailInquiryImportUpdateSerializer(serializers.Serializer):
                 instance,
                 actor,
                 review_lines=validated_data["review_lines"],
+                **chained_binding,
             )
         return instance
 
@@ -2211,6 +2638,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     lpo_count = serializers.SerializerMethodField()
     lines = QuotationLineSerializer(many=True, read_only=True)
     quotation_review_fingerprint = serializers.SerializerMethodField()
+    workflow_features = serializers.SerializerMethodField()
 
     class Meta:
         model = Quotation
@@ -2270,6 +2698,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "is_historical_import",
             "lines",
             "quotation_review_fingerprint",
+            "workflow_features",
             "created_at",
             "updated_at",
         ]
@@ -2316,6 +2745,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "is_historical_import",
             "lines",
             "quotation_review_fingerprint",
+            "workflow_features",
             "created_at",
             "updated_at",
         ]
@@ -2344,6 +2774,9 @@ class QuotationSerializer(serializers.ModelSerializer):
 
     def get_quotation_review_fingerprint(self, obj):
         return quotation_review_fingerprint(obj)
+
+    def get_workflow_features(self, _obj):
+        return quotation_workflow_features()
 
 
 class QuotationListSerializer(serializers.ModelSerializer):

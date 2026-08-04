@@ -376,6 +376,77 @@ QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED = env_bool(
     "QUOTATION_GMAIL_DESIGNATED_MAILBOX_ENFORCEMENT_ENABLED",
     False,
 )
+# Content-free employee-funnel metrics are opt-in. Enabling this flag requires
+# migration 0039; it never changes Gmail, quotation, pricing, or send behavior.
+QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_WORKFLOW_METRICS_ENABLED",
+    False,
+)
+# Persisted company acknowledgement and explicit per-row review controls.
+QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED = env_bool(
+    "QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED",
+    False,
+)
+# Optional chained review/save actions. The API remains backward compatible;
+# stale-state bindings are enforced only when this rollout flag is explicitly
+# enabled and a complete binding tuple is supplied.
+QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED",
+    False,
+)
+# Optional quotation-editor progressive rendering. This controls presentation
+# only; no quotation write, validation, or delivery behavior depends on it.
+QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED = env_bool(
+    "QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED",
+    False,
+)
+# Optional content-free progress projection for synchronous Gmail analysis.
+QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
+    False,
+)
+# Optional one-screen Gmail review and quotation preparation workflow. The
+# endpoint remains unavailable unless the persisted company-review workflow is
+# also enabled, so a partial rollout cannot bypass explicit identity approval.
+QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED = env_bool(
+    "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+    False,
+)
+# Optional bounded concurrency for read-only Gmail inquiry retrieval. The
+# disabled path retains the established sequential fetch behavior exactly.
+QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED = env_bool(
+    "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
+    False,
+)
+try:
+    QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = int(
+        os.environ.get("QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT", "4")
+    )
+except (TypeError, ValueError):
+    QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = 4
+QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT = min(
+    8,
+    max(1, QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT),
+)
+# Optional durable PostgreSQL-backed Gmail analysis. The web request only
+# enqueues when this is the strict Boolean true; otherwise the established
+# synchronous analyzer remains authoritative.
+QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED = env_bool(
+    "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
+    False,
+)
+# Internal comparison only. The compact contract is never authoritative and
+# cannot change any employee-visible Gmail analysis result.
+QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED = env_bool(
+    "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
+    False,
+)
+# Internal clean-XLSX pre-extraction comparison only. Native Gmail analysis
+# remains authoritative and this experiment is strictly disabled by default.
+QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED = env_bool(
+    "QUOTATION_GMAIL_XLSX_PREEXTRACT_SHADOW_ENABLED",
+    False,
+)
 GMAIL_ADDON_OAUTH_CLIENT_ID = os.environ.get(
     "GMAIL_ADDON_OAUTH_CLIENT_ID",
     "",

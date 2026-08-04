@@ -6654,6 +6654,19 @@ class GmailInquiryImportAPIAuthorizationTests(TestCase):
                 {"company": self.company.pk},
             ),
             (
+                "post",
+                reverse(
+                    "quotation-gmail-inquiry-import-approve-company",
+                    args=[self.gmail_import.pk],
+                ),
+                {
+                    "company": self.company.pk,
+                    "contact": None,
+                    "suggested": False,
+                    "identity_review_fingerprint": "a" * 64,
+                },
+            ),
+            (
                 "get",
                 reverse("quotation-gmail-inquiry-import-attachment", args=[self.gmail_import.pk])
                 + "?source_key=attachment:unknown",

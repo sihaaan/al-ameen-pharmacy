@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -72,12 +73,39 @@ from .attachment_inspection import inspect_pdf_attachment, validate_pdf_page_geo
 from .gmail_inquiry_import import (
     GmailInquiryImportBusy,
     GmailInquiryImportError,
+    GmailInquiryImportStale,
     analyze_gmail_inquiry_import,
+    approve_gmail_inquiry_company,
     claim_gmail_inquiry_handoff,
+    confirm_and_prepare_gmail_quotation,
     confirm_gmail_inquiry_import,
     refresh_gmail_inquiry_identity_candidates,
 )
+from .gmail_analysis_progress import gmail_analysis_progress_projection
+from .gmail_analysis_jobs import enqueue_gmail_inquiry_analysis
+from .gmail_workflow_metrics import (
+    EVENT_COMPANY_APPROVED,
+    EVENT_EMAIL_PREVIEW_OPENED,
+    EVENT_PRICING_SAVED,
+    EVENT_QUOTATION_CREATED_OR_REUSED,
+    EVENT_RECONCILIATION_COMPLETED,
+    EVENT_SEND_CONFIRMED,
+    EVENT_SEND_FAILED,
+    EVENT_SEND_INITIATED,
+    gmail_import_for_quotation,
+    record_gmail_workflow_metric,
+    record_quotation_gmail_workflow_metric,
+    send_error_metric_classification,
+    workflow_elapsed_ms,
+)
 from .import_parsers import parse_file_preview, parse_text_preview
+from .workflow_features import (
+    gmail_background_analysis_enabled,
+    gmail_analysis_progress_enabled,
+    gmail_chained_actions_enabled,
+    gmail_review_ui_v2_enabled,
+    gmail_unified_workspace_enabled,
+)
 from .mailbox_po_audit import (
     assert_mailbox_po_audit_repairable,
     mailbox_po_audit_repair_remaining,
@@ -107,6 +135,7 @@ from .models import (
     ContractIntelligenceRun,
     ContractIntelligenceSource,
     GmailInquiryImport,
+    GmailInquiryAnalysisJob,
     GmailOAuthConnection,
     HistoricalImportAISuggestion,
     HistoricalImportBatch,
@@ -160,7 +189,9 @@ from .serializers import (
     ContractIntelligenceRunSerializer,
     ContractIntelligenceSourceSerializer,
     GmailInquiryAnalyzeSerializer,
+    GmailInquiryApproveCompanySerializer,
     GmailInquiryClaimSerializer,
+    GmailInquiryConfirmAndPrepareSerializer,
     GmailInquiryConfirmSerializer,
     GmailInquiryImportSerializer,
     GmailInquiryImportUpdateSerializer,
@@ -1896,7 +1927,7 @@ class GmailInquiryImportViewSet(
     def _workflow_error(self, exc):
         response_status = (
             status.HTTP_409_CONFLICT
-            if isinstance(exc, GmailInquiryImportBusy)
+            if isinstance(exc, (GmailInquiryImportBusy, GmailInquiryImportStale))
             else status.HTTP_400_BAD_REQUEST
         )
         return Response(
@@ -1908,9 +1939,30 @@ class GmailInquiryImportViewSet(
         gmail_import = refresh_gmail_inquiry_identity_candidates(
             self.get_object()
         )
+        if gmail_background_analysis_enabled():
+            # All terminal job transitions lock import -> job. Holding the
+            # import lock while serializing therefore yields one coherent
+            # progress/import/job snapshot under READ COMMITTED.
+            with transaction.atomic():
+                gmail_import = self.get_queryset().select_for_update().get(
+                    pk=gmail_import.pk
+                )
+                payload = self.get_serializer(gmail_import).data
+            return Response(payload)
         return Response(
             self.get_serializer(gmail_import).data
         )
+
+    @action(detail=True, methods=["get"], url_path="analysis_progress")
+    def analysis_progress(self, request, pk=None):
+        if not gmail_analysis_progress_enabled():
+            raise Http404
+        gmail_import = self.get_object()
+        response = Response(gmail_analysis_progress_projection(gmail_import))
+        response["Cache-Control"] = "private, no-store, max-age=0"
+        response["Pragma"] = "no-cache"
+        response["Expires"] = "0"
+        return response
 
     @action(detail=False, methods=["post"])
     def claim(self, request):
@@ -1957,19 +2009,75 @@ class GmailInquiryImportViewSet(
         serializer.is_valid(raise_exception=True)
         payload = dict(serializer.validated_data)
         try:
-            analyzed = analyze_gmail_inquiry_import(
+            if gmail_background_analysis_enabled():
+                enqueue_result = enqueue_gmail_inquiry_analysis(
+                    gmail_import,
+                    request.user,
+                    selected_message_ids=payload.get(
+                        "selected_message_ids"
+                    ),
+                    mode=payload.get("mode"),
+                    force=payload.get("force", False),
+                    reanalyze=payload.get("reanalyze", False),
+                )
+                analyzed = enqueue_result.gmail_import
+            else:
+                enqueue_result = None
+                analyzed = analyze_gmail_inquiry_import(
+                    gmail_import,
+                    request.user,
+                    selected_message_ids=payload.get("selected_message_ids"),
+                    mode=payload.get("mode"),
+                    force=payload.get("force", False),
+                    reanalyze=payload.get("reanalyze", False),
+                )
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+        if enqueue_result is not None:
+            with transaction.atomic():
+                analyzed = self.get_queryset().select_for_update().get(
+                    pk=analyzed.pk
+                )
+                response_payload = GmailInquiryImportSerializer(
+                    analyzed,
+                    context={"request": request},
+                ).data
+        else:
+            response_payload = GmailInquiryImportSerializer(
+                analyzed,
+                context={"request": request},
+            ).data
+        projected_job_state = str(
+            (response_payload.get("analysis_job") or {}).get("state") or ""
+        )
+        return Response(
+            response_payload,
+            status=(
+                status.HTTP_202_ACCEPTED
+                if enqueue_result is not None
+                and not enqueue_result.cache_hit
+                and projected_job_state
+                in GmailInquiryAnalysisJob.ACTIVE_STATUSES
+                else status.HTTP_200_OK
+            ),
+        )
+
+    @action(detail=True, methods=["post"])
+    def approve_company(self, request, pk=None):
+        gmail_import = self.get_object()
+        serializer = GmailInquiryApproveCompanySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            approved = approve_gmail_inquiry_company(
                 gmail_import,
                 request.user,
-                selected_message_ids=payload.get("selected_message_ids"),
-                mode=payload.get("mode"),
-                force=payload.get("force", False),
-                reanalyze=payload.get("reanalyze", False),
+                **serializer.validated_data,
             )
         except GmailInquiryImportError as exc:
             return self._workflow_error(exc)
         return Response(
             GmailInquiryImportSerializer(
-                analyzed,
+                approved,
                 context={"request": request},
             ).data
         )
@@ -1977,6 +2085,7 @@ class GmailInquiryImportViewSet(
     @action(detail=True, methods=["post"])
     def confirm(self, request, pk=None):
         gmail_import = self.get_object()
+        metric_started = time.perf_counter()
         serializer = GmailInquiryConfirmSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -1987,12 +2096,159 @@ class GmailInquiryImportViewSet(
             )
         except GmailInquiryImportError as exc:
             return self._workflow_error(exc)
+        try:
+            preview_lines = (
+                ((gmail_import.analysis or {}).get("preview") or {}).get("lines")
+                or []
+            )
+            metric_counts = {
+                "included_row_count": sum(
+                    1
+                    for row in preview_lines
+                    if isinstance(row, dict) and row.get("included") is not False
+                ),
+            }
+            metric_duration = workflow_elapsed_ms(metric_started)
+            # Attribute the terminal action to the handoff that the employee
+            # acted on, even when thread idempotency reuses a canonical import.
+            if not gmail_review_ui_v2_enabled():
+                record_gmail_workflow_metric(
+                    gmail_import,
+                    EVENT_COMPANY_APPROVED,
+                    duration_ms=metric_duration,
+                    counts=metric_counts,
+                    outcome_code="confirmed",
+                )
+            record_gmail_workflow_metric(
+                gmail_import,
+                EVENT_QUOTATION_CREATED_OR_REUSED,
+                duration_ms=metric_duration,
+                counts=metric_counts,
+                outcome_code="created" if result.created else "reused",
+            )
+        except Exception:
+            logger.warning("Gmail confirmation workflow metric was not recorded.")
         return Response(
             GmailInquiryImportSerializer(
                 result.gmail_import,
                 context={"request": request},
             ).data,
             status=status.HTTP_201_CREATED if result.created else status.HTTP_200_OK,
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="confirm_and_prepare_quotation",
+    )
+    def confirm_and_prepare_quotation(self, request, pk=None):
+        if not gmail_unified_workspace_enabled():
+            raise Http404
+        gmail_import = self.get_object()
+        metric_started = time.perf_counter()
+        serializer = GmailInquiryConfirmAndPrepareSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = confirm_and_prepare_gmail_quotation(
+                gmail_import,
+                request.user,
+                **serializer.validated_data,
+            )
+        except GmailInquiryImportStale as exc:
+            payload = serializer_error_from_django_validation(exc)
+            if not isinstance(payload, dict):
+                payload = {"detail": str(exc)}
+            payload["code"] = "stale_gmail_review"
+            return Response(payload, status=status.HTTP_409_CONFLICT)
+        except GmailInquiryImportError as exc:
+            return self._workflow_error(exc)
+
+        # The Gmail transaction is complete before this separate quote-first
+        # read boundary. This preserves global lock order while ensuring the
+        # returned lines and their review fingerprint are one coherent state.
+        with transaction.atomic():
+            try:
+                authoritative_quote = _quotations_for_update().get(
+                    pk=result.quotation.pk
+                )
+            except Quotation.DoesNotExist as exc:
+                raise Http404 from exc
+            lock_quotation_review_dependencies(authoritative_quote)
+            quote_payload = QuotationSerializer(
+                authoritative_quote,
+                context={"request": request},
+            ).data
+        try:
+            included_count = sum(
+                1 for row in serializer.validated_data["rows"] if row["included"]
+            )
+            priced_count = sum(
+                1
+                for row in serializer.validated_data["rows"]
+                if row["included"] and row.get("unit_price") is not None
+            )
+            quote_metric_dimensions = {
+                "duration_ms": workflow_elapsed_ms(metric_started),
+                "counts": {
+                    "included_row_count": included_count,
+                    "updated_row_count": (
+                        included_count if result.created else 0
+                    ),
+                },
+                "outcome_code": "created" if result.created else "reused",
+                "feature_flags": {"gmail_unified_workspace": True},
+            }
+            record_gmail_workflow_metric(
+                gmail_import,
+                EVENT_QUOTATION_CREATED_OR_REUSED,
+                **quote_metric_dimensions,
+            )
+            if result.created and priced_count:
+                record_gmail_workflow_metric(
+                    gmail_import,
+                    EVENT_PRICING_SAVED,
+                    duration_ms=workflow_elapsed_ms(metric_started),
+                    counts={
+                        "included_row_count": included_count,
+                        "priced_row_count": priced_count,
+                        "updated_row_count": priced_count,
+                    },
+                    outcome_code="success",
+                    feature_flags={"gmail_unified_workspace": True},
+                )
+        except Exception:
+            logger.warning("Unified Gmail workflow metrics were not recorded.")
+        prepared_for_preview = bool(
+            result.created
+            and result.prepared
+            and result.prepared_review_fingerprint
+            and result.prepared_review_fingerprint
+            == quote_payload["quotation_review_fingerprint"]
+        )
+        return Response(
+            {
+                "gmail_import": GmailInquiryImportSerializer(
+                    result.gmail_import,
+                    context={"request": request},
+                ).data,
+                "quotation": quote_payload,
+                "quotation_review_fingerprint": quote_payload[
+                    "quotation_review_fingerprint"
+                ],
+                "created": result.created,
+                "prepared": result.prepared,
+                "prepared_for_preview": prepared_for_preview,
+                "preparation_reused": result.preparation_reused,
+                "reused_reason": result.reused_reason,
+                "reused_existing_thread": (
+                    result.reused_reason == "thread_already_confirmed"
+                ),
+            },
+            status=(
+                status.HTTP_201_CREATED
+                if result.created
+                else status.HTTP_200_OK
+            ),
         )
 
     @action(detail=True, methods=["get"])
@@ -3211,6 +3467,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def email_preview(self, request, pk=None):
         quotation = self.get_object()
+        metric_started = time.perf_counter()
         try:
             review_fingerprint = request.query_params.get(
                 "quotation_review_fingerprint",
@@ -3244,6 +3501,25 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         except QuotationEmailError as exc:
             return self._quotation_email_error_response(exc)
+        record_quotation_gmail_workflow_metric(
+            quotation,
+            EVENT_EMAIL_PREVIEW_OPENED,
+            duration_ms=workflow_elapsed_ms(metric_started),
+            outcome_code="success",
+            dimensions_factory=lambda _gmail_import: {
+                "counts": {
+                    "included_row_count": quotation.lines.exclude(
+                        match_status=QuotationLine.MATCH_IGNORED
+                    ).count(),
+                },
+                "contract_versions": {
+                    "email_preview": payload.get("email_preview_contract")
+                    or "quotation_email_preview_v1",
+                    "quotation_review": payload.get("quotation_review_contract")
+                    or "quotation_editor_review_v1",
+                },
+            },
+        )
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -3269,6 +3545,21 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def _send_quotation_email_action(self, request, *, finalize_first):
         quotation = self.get_object()
+        metric_started = time.perf_counter()
+        record_quotation_gmail_workflow_metric(
+            quotation,
+            EVENT_SEND_INITIATED,
+            outcome_code="success",
+            dimensions_factory=lambda _gmail_import: {
+                "counts": {
+                    "send_attempt_count": (
+                        quotation.email_delivery.attempt_count
+                        if hasattr(quotation, "email_delivery")
+                        else 0
+                    ),
+                },
+            },
+        )
         try:
             sent_quote, delivery, idempotent = send_quotation_email(
                 quotation,
@@ -3280,8 +3571,27 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 ),
             )
         except QuotationEmailError as exc:
+            delivery_status = getattr(exc.delivery, "status", "")
+            metric_event, metric_outcome = send_error_metric_classification(
+                delivery_status
+            )
+            record_quotation_gmail_workflow_metric(
+                quotation,
+                metric_event,
+                duration_ms=workflow_elapsed_ms(metric_started),
+                counts={
+                    "send_attempt_count": getattr(exc.delivery, "attempt_count", 0),
+                },
+                outcome_code=metric_outcome,
+            )
             return self._quotation_email_error_response(exc)
         except DjangoValidationError as exc:
+            record_quotation_gmail_workflow_metric(
+                quotation,
+                EVENT_SEND_FAILED,
+                duration_ms=workflow_elapsed_ms(metric_started),
+                outcome_code="blocked",
+            )
             messages = getattr(exc, "messages", None) or [str(exc)]
             return self._quotation_email_error_response(
                 QuotationEmailError(
@@ -3290,6 +3600,16 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     quote_finalized=False,
                 )
             )
+        record_quotation_gmail_workflow_metric(
+            quotation,
+            EVENT_SEND_CONFIRMED,
+            duration_ms=workflow_elapsed_ms(metric_started),
+            counts={"send_attempt_count": delivery.attempt_count},
+            outcome_code="reused" if idempotent else "confirmed",
+            contract_versions={
+                "outbound_snapshot": "quotation_email_outbound_v1",
+            },
+        )
         return Response(
             {
                 "quote": self.get_serializer(sent_quote).data,
@@ -3309,6 +3629,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def reconcile_email(self, request, pk=None):
         quotation = self.get_object()
+        metric_started = time.perf_counter()
         try:
             quote, delivery, reconciled = reconcile_quotation_email(
                 quotation,
@@ -3316,6 +3637,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
         except QuotationEmailError as exc:
             return self._quotation_email_error_response(exc)
+        record_quotation_gmail_workflow_metric(
+            quote,
+            EVENT_RECONCILIATION_COMPLETED,
+            duration_ms=workflow_elapsed_ms(metric_started),
+            counts={"send_attempt_count": delivery.attempt_count},
+            outcome_code="reconciled_sent" if reconciled else "not_found",
+        )
         return Response(
             {
                 "quote": self.get_serializer(quote).data,
@@ -3919,19 +4247,108 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def bulk_update_lines(self, request, pk=None):
         quotation = self.get_object()
-        try:
-            quotation, updated_lines = bulk_update_quotation_lines(
-                quotation,
-                request.data.get("lines") or [],
-                request.user,
-            )
-        except DjangoValidationError as exc:
-            return self.handle_workflow_error(exc)
-        quotation.refresh_from_db()
-        serializer = self.get_serializer(quotation)
+        metric_started = time.perf_counter()
+        submitted_rows = request.data.get("lines") or []
+        gmail_import = gmail_import_for_quotation(quotation)
+
+        def pricing_snapshot(current):
+            if not gmail_import:
+                return None
+            try:
+                price_line_ids = {
+                    int(row.get("id"))
+                    for row in submitted_rows
+                    if isinstance(row, dict)
+                    and "unit_price" in row
+                    and row.get("id") not in (None, "")
+                }
+                return dict(
+                    current.lines.filter(pk__in=price_line_ids).values_list(
+                        "pk",
+                        "unit_price",
+                    )
+                )
+            except (TypeError, ValueError):
+                return {}
+            except Exception:
+                logger.warning("Gmail pricing workflow metric was not prepared.")
+                return None
+
+        price_before = None
+        serialized_quotation = None
+        review_fingerprint = request.data.get("quotation_review_fingerprint")
+        stale_bound_save = bool(
+            gmail_chained_actions_enabled()
+            and review_fingerprint not in (None, "")
+        )
+        if stale_bound_save:
+            try:
+                with transaction.atomic():
+                    try:
+                        quotation = _quotations_for_update().get(pk=quotation.pk)
+                    except Quotation.DoesNotExist as exc:
+                        raise Http404 from exc
+                    # Quote-first dependency locking makes the supplied review
+                    # fingerprint and the complete returned quotation one
+                    # atomic snapshot. No stale save can mutate a line before
+                    # this check, and the new fingerprint is materialized
+                    # before the locks are released.
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
+                    price_before = pricing_snapshot(quotation)
+                    quotation, updated_lines = bulk_update_quotation_lines(
+                        quotation,
+                        submitted_rows,
+                        request.user,
+                    )
+                    quotation.refresh_from_db()
+                    lock_quotation_review_dependencies(quotation)
+                    serialized_quotation = self.get_serializer(quotation).data
+            except QuotationEmailError as exc:
+                return self._quotation_email_error_response(exc)
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
+        else:
+            price_before = pricing_snapshot(quotation)
+            try:
+                quotation, updated_lines = bulk_update_quotation_lines(
+                    quotation,
+                    submitted_rows,
+                    request.user,
+                )
+            except DjangoValidationError as exc:
+                return self.handle_workflow_error(exc)
+            quotation.refresh_from_db()
+            serialized_quotation = self.get_serializer(quotation).data
+        if gmail_import and price_before is not None:
+            try:
+                changed_price_count = sum(
+                    1
+                    for line in updated_lines
+                    if line.pk in price_before
+                    and price_before[line.pk] != line.unit_price
+                )
+                if changed_price_count:
+                    record_gmail_workflow_metric(
+                        gmail_import,
+                        EVENT_PRICING_SAVED,
+                        duration_ms=workflow_elapsed_ms(metric_started),
+                        counts={
+                            "updated_row_count": changed_price_count,
+                            "included_row_count": quotation.lines.exclude(
+                                match_status=QuotationLine.MATCH_IGNORED
+                            ).count(),
+                        },
+                        outcome_code="success",
+                    )
+            except Exception:
+                logger.warning("Gmail pricing workflow metric was not recorded.")
         return Response(
             {
-                "quotation": serializer.data,
+                "quotation": serialized_quotation,
                 "updated_line_ids": [line.id for line in updated_lines],
                 "message": f"Saved {len(updated_lines)} line(s).",
             }
