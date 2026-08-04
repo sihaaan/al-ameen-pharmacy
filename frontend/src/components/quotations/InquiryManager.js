@@ -54,6 +54,119 @@ const normalizeVatRate = (value) => {
   return numeric === 5 ? '5' : '0';
 };
 
+const normalizedDetectedMoney = (value) => {
+  const normalized = String(value ?? '').trim().replace(/,/g, '');
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return '';
+  const numeric = Number(normalized);
+  return Number.isFinite(numeric) && numeric > 0 ? normalized : '';
+};
+
+const detectedVatRate = (line) => {
+  const structured = String(line?.customer_vat_rate ?? '').trim();
+  const structuredMatch = structured.match(/^(0(?:\.0+)?|5(?:\.0+)?)\s*%?$/);
+  if (structuredMatch) {
+    return Number(structuredMatch[1]) === 5 ? '5' : '0';
+  }
+  const evidenceMatch = String(line?.customer_vat || '').match(/VAT\s*rate\s*(0(?:\.0+)?|5(?:\.0+)?)\s*%/i);
+  if (!evidenceMatch) return '';
+  return Number(evidenceMatch[1]) === 5 ? '5' : '0';
+};
+
+export const detectedSourcePricingForLine = (line) => ({
+  unitPrice: normalizedDetectedMoney(line?.customer_unit_price),
+  vatRate: detectedVatRate(line),
+});
+
+const detectedSourcePricingAdoptionPlan = (line) => {
+  const detected = detectedSourcePricingForLine(line);
+  const hasPriceReference = line?.price_reference_status === 'matched';
+  return {
+    detected,
+    applyPrice: Boolean(
+      detected.unitPrice
+      && String(line?.unit_price ?? '').trim() === ''
+      && !hasPriceReference
+    ),
+    applyVat: Boolean(
+      detected.vatRate !== ''
+      && !line?._vat_reviewed_by_user
+      && !line?._vat_applied_from_source
+      && !hasPriceReference
+    ),
+  };
+};
+
+export const summarizeDetectedSourcePricing = (lines) => (lines || []).reduce((summary, line) => {
+  const detected = detectedSourcePricingForLine(line);
+  const hasEvidence = Boolean(detected.unitPrice || detected.vatRate !== '');
+  const adoptionPlan = detectedSourcePricingAdoptionPlan(line);
+  if (detected.unitPrice) summary.priceRows += 1;
+  if (detected.vatRate !== '') summary.vatRows += 1;
+  if (hasEvidence) summary.evidenceRows += 1;
+  if (hasEvidence && (adoptionPlan.applyPrice || adoptionPlan.applyVat)) summary.adoptableRows += 1;
+  return summary;
+}, {
+  priceRows: 0,
+  vatRows: 0,
+  evidenceRows: 0,
+  adoptableRows: 0,
+});
+
+export const applyDetectedSourcePricing = (lines) => {
+  let priceCount = 0;
+  let vatCount = 0;
+  let skippedReviewedCount = 0;
+  const changes = [];
+  const updatedLines = (lines || []).map((line) => {
+    const { detected, applyPrice, applyVat } = detectedSourcePricingAdoptionPlan(line);
+    if (!detected.unitPrice && detected.vatRate === '') return line;
+    if (!applyPrice && !applyVat) {
+      skippedReviewedCount += 1;
+      return line;
+    }
+    const patch = {};
+    const before = {};
+    const applied = {};
+    if (applyPrice) {
+      before.unit_price = line.unit_price;
+      patch.unit_price = detected.unitPrice;
+      applied.unit_price = detected.unitPrice;
+      priceCount += 1;
+    }
+    if (applyVat) {
+      before.vat_rate = line.vat_rate;
+      before._vat_applied_from_source = line._vat_applied_from_source;
+      patch.vat_rate = detected.vatRate;
+      patch._vat_applied_from_source = true;
+      applied.vat_rate = detected.vatRate;
+      applied._vat_applied_from_source = true;
+      vatCount += 1;
+    }
+    changes.push({
+      rowId: line._client_row_id || '',
+      before,
+      applied,
+    });
+    return { ...line, ...patch };
+  });
+  return { lines: updatedLines, changes, priceCount, vatCount, skippedReviewedCount };
+};
+
+export const undoAppliedSourcePricing = (lines, changes) => {
+  const byRowId = new Map((changes || []).filter((change) => change.rowId).map((change) => [change.rowId, change]));
+  return (lines || []).map((line) => {
+    const change = byRowId.get(line._client_row_id);
+    if (!change) return line;
+    const patch = {};
+    Object.entries(change.applied || {}).forEach(([field, appliedValue]) => {
+      if (String(line[field] ?? '') === String(appliedValue ?? '')) {
+        patch[field] = change.before?.[field] ?? '';
+      }
+    });
+    return Object.keys(patch).length ? { ...line, ...patch } : line;
+  });
+};
+
 export const inquiryUploadModeForFile = (file) => {
   const filename = String(file?.name || '').toLowerCase();
   const mimeType = String(file?.type || '').toLowerCase();
@@ -153,6 +266,7 @@ export const inquiryPreviewHasReviewedPricing = (preview) => (
   (preview?.lines || []).some((line) => (
     String(line?.unit_price ?? '').trim() !== ''
     || normalizeVatRate(line?.vat_rate) === '5'
+    || Boolean(line?._vat_reviewed_by_user)
     || line?.price_reference_status === 'matched'
   ))
 );
@@ -257,6 +371,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [draggedImportRowId, setDraggedImportRowId] = useState(null);
   const [aiCleaning, setAiCleaning] = useState(false);
   const [aiUndoPreview, setAiUndoPreview] = useState(null);
+  const [sourcePricingUndo, setSourcePricingUndo] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
   const [showImportContactForm, setShowImportContactForm] = useState(false);
   const [importContactForm, setImportContactForm] = useState(emptyContactForm);
@@ -311,6 +426,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     setSavedImportedInquiry(null);
     setQuoteSuccess(null);
     setAiUndoPreview(null);
+    setSourcePricingUndo(null);
     setImportNotice(null);
     setImportActionNotice(null);
     setSelectedImportRowIds([]);
@@ -624,6 +740,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     }
     importRevisionRef.current += 1;
     setAiUndoPreview(currentPreview);
+    setSourcePricingUndo(null);
     setSavedImportedInquiry(null);
     setExpandedRawRowIds({});
     setSelectedImportRowIds([]);
@@ -648,6 +765,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     setExpandedRawRowIds({});
     setSelectedImportRowIds([]);
     setAiUndoPreview(null);
+    setSourcePricingUndo(null);
     const candidate = preview.ai_candidate || null;
     const deterministicPreview = editablePreview(preview);
     setImportPreview(deterministicPreview);
@@ -697,6 +815,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     importRevisionRef.current += 1;
     setImportPreview(aiUndoPreview);
     setAiUndoPreview(null);
+    setSourcePricingUndo(null);
     setExpandedRawRowIds({});
     setSelectedImportRowIds([]);
     setImportNotice({ type: 'success', message: 'Restored the rows from before AI cleanup.' });
@@ -845,6 +964,9 @@ const InquiryManager = ({ onOpenQuote }) => {
     importRevisionRef.current += 1;
     setSavedImportedInquiry(null);
     setImportActionNotice(null);
+    if (Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'vat_rate')) {
+      setSourcePricingUndo(null);
+    }
     setImportPreview((current) => ({
       ...current,
       lines: current.lines.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line),
@@ -954,6 +1076,43 @@ const InquiryManager = ({ onOpenQuote }) => {
     setExpandedRawRowIds((current) => ({ ...current, [rowId]: !current[rowId] }));
   };
 
+  const useDetectedSourcePricing = () => {
+    if (importOperationIsLocked() || !importPreview?.lines?.length) return;
+    const adopted = applyDetectedSourcePricing(importPreview.lines);
+    if (!adopted.priceCount && !adopted.vatCount) {
+      setImportNotice({
+        type: 'warning',
+        message: adopted.skippedReviewedCount
+          ? 'Detected prices were not applied because those rows already have reviewed pricing.'
+          : 'No safe detected source prices or VAT values are available to apply.',
+      });
+      return;
+    }
+    importRevisionRef.current += 1;
+    setSavedImportedInquiry(null);
+    setImportActionNotice(null);
+    setAiUndoPreview(null);
+    setSourcePricingUndo({ changes: adopted.changes });
+    setImportPreview({ ...importPreview, lines: adopted.lines });
+    setImportNotice({
+      type: 'success',
+      message: `Applied ${adopted.priceCount} detected prices and ${adopted.vatCount} VAT values as our reviewed quotation pricing. Review the rows before saving.`,
+    });
+  };
+
+  const undoDetectedSourcePricing = () => {
+    if (importOperationIsLocked() || !sourcePricingUndo) return;
+    importRevisionRef.current += 1;
+    setSavedImportedInquiry(null);
+    setImportActionNotice(null);
+    setImportPreview((current) => ({
+      ...current,
+      lines: undoAppliedSourcePricing(current?.lines || [], sourcePricingUndo.changes),
+    }));
+    setSourcePricingUndo(null);
+    setImportNotice({ type: 'success', message: 'Restored the prices and VAT from before source pricing was applied.' });
+  };
+
   const saveImportedInquiry = async () => {
     if (importWorkflowBusy) return;
     const requestContext = captureImportCompanyRequest();
@@ -1031,6 +1190,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const savedQuoteForCurrentImport = savedImportedInquiry && quoteSuccess?.inquiryId === savedImportedInquiry.id
     ? quoteSuccess
     : null;
+  const detectedPricingSummary = summarizeDetectedSourcePricing(importPreview?.lines || []);
 
   const goToImportCompany = () => {
     setImportValidationDialog(null);
@@ -1085,6 +1245,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                     : current
                 ));
                 setAiUndoPreview(null);
+                setSourcePricingUndo(null);
                 setSavedImportedInquiry(null);
                 setQuoteSuccess(null);
                 setImportNotice(null);
@@ -1321,6 +1482,35 @@ const InquiryManager = ({ onOpenQuote }) => {
               ))}
               {importPreview.source_file_ref && <span>Private source saved</span>}
             </div>
+            {detectedPricingSummary.evidenceRows > 0 && (
+              <div className="qm-source-pricing-review">
+                <div>
+                  <strong>Detected source pricing is available</strong>
+                  <p>
+                    {detectedPricingSummary.priceRows} prices and {detectedPricingSummary.vatRows} VAT values were read from the source.{' '}
+                    They remain separate from our quotation until you approve them.
+                  </p>
+                </div>
+                <div className="qm-source-pricing-actions">
+                  <button
+                    type="button"
+                    className="qm-primary"
+                    disabled={importWorkflowBusy || detectedPricingSummary.adoptableRows === 0}
+                    onClick={useDetectedSourcePricing}
+                  >
+                    Use detected prices &amp; VAT for all eligible rows
+                  </button>
+                  {sourcePricingUndo && (
+                    <button type="button" className="qm-secondary" onClick={undoDetectedSourcePricing}>
+                      Undo detected prices &amp; VAT
+                    </button>
+                  )}
+                  {detectedPricingSummary.adoptableRows === 0 && (
+                    <small>All detected rows already have reviewed pricing.</small>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="qm-bulk-toolbar compact">
               <strong>{selectedImportRowIds.length} rows selected</strong>
               <button type="button" className="qm-secondary small" disabled={aiCleaning || (!importPreview.lines.length && !importPreview.source_file_ref)} onClick={runAiCleanParse}>
@@ -1350,8 +1540,8 @@ const InquiryManager = ({ onOpenQuote }) => {
                     <th>Matched Product</th>
                     <th>Qty</th>
                     <th>Unit</th>
-                    <th>Unit Price</th>
-                    <th>VAT</th>
+                    <th>Our Unit Price</th>
+                    <th>Our VAT</th>
                     <th>Status</th>
                     <th>Confidence</th>
                     <th>Action</th>
@@ -1410,6 +1600,11 @@ const InquiryManager = ({ onOpenQuote }) => {
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
                         <td className="qm-import-price-cell">
                           <input aria-label={`Unit price row ${index + 1}`} type="number" min="0" step="0.001" value={line.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, { unit_price: event.target.value })} />
+                          {detectedSourcePricingForLine(line).unitPrice && (
+                            <small className="qm-source-pricing-evidence">
+                              Detected source: {detectedSourcePricingForLine(line).unitPrice}
+                            </small>
+                          )}
                           {line.price_reference_match && (
                             <small className={`qm-price-match ${line.price_reference_status || ''}`}>
                               {line.price_reference_match.match_label} match: {line.price_reference_match.item_name} ({Math.round(Number(line.price_reference_match.confidence || 0) * 100)}%)
@@ -1417,10 +1612,15 @@ const InquiryManager = ({ onOpenQuote }) => {
                           )}
                         </td>
                         <td className="qm-import-vat-cell">
-                          <select value={normalizeVatRate(line.vat_rate)} onChange={(event) => updateImportLine(index, { vat_rate: event.target.value })}>
+                          <select aria-label={`VAT row ${index + 1}`} value={normalizeVatRate(line.vat_rate)} onChange={(event) => updateImportLine(index, { vat_rate: event.target.value, _vat_reviewed_by_user: true })}>
                             <option value="0">0%</option>
                             <option value="5">5%</option>
                           </select>
+                          {detectedSourcePricingForLine(line).vatRate !== '' && (
+                            <small className="qm-source-pricing-evidence">
+                              Detected source: {detectedSourcePricingForLine(line).vatRate}%
+                            </small>
+                          )}
                         </td>
                         <td className="qm-import-status-cell">
                           <select value={line.parse_status || 'needs_review'} onChange={(event) => updateImportLine(index, { parse_status: event.target.value })}>

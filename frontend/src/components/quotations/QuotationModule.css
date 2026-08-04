@@ -3818,6 +3818,68 @@
   gap: 10px;
 }
 
+.qm-source-pricing-review {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid #5eead4;
+  border-radius: 10px;
+  background: #f0fdfa;
+  color: #134e4a;
+}
+
+.qm-source-pricing-review strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #115e59;
+}
+
+.qm-source-pricing-review p {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+}
+
+.qm-source-pricing-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qm-source-pricing-actions small {
+  flex: 1 1 100%;
+  color: #64748b;
+  text-align: right;
+}
+
+.qm-source-pricing-evidence {
+  display: block;
+  margin-top: 5px;
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+@media (max-width: 760px) {
+  .qm-source-pricing-review {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qm-source-pricing-actions {
+    justify-content: flex-start;
+  }
+
+  .qm-source-pricing-actions small {
+    text-align: left;
+  }
+}
+
 .qm-row-review-controls {
   display: flex;
   flex-direction: column;
