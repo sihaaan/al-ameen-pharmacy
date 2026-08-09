@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
+import socket
+import time
+import urllib.error
 import urllib.parse
 from email.utils import parseaddr
 from functools import lru_cache
 
 import jwt
 from django.conf import settings
+from django.db import DatabaseError
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -36,6 +41,10 @@ GOOGLE_ID_TOKEN_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 GOOGLE_ID_TOKEN_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 MAX_EVENT_BYTES = 256 * 1024
 MAX_SELECTED_MESSAGE_IDS = 25
+GMAIL_READ_MAX_ATTEMPTS = 2
+GMAIL_READ_TIMEOUT_SECONDS = 5
+GMAIL_READ_RETRY_DELAY_SECONDS = 0.1
+TRANSIENT_GMAIL_READ_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 REQUIRED_GOOGLE_OAUTH_SCOPES = (
     "https://www.googleapis.com/auth/gmail.addons.execute",
     "https://www.googleapis.com/auth/gmail.addons.current.message.metadata",
@@ -50,6 +59,35 @@ ALLOWED_MODES = {
     MODE_SELECTED_MESSAGES,
     MODE_AI_THREAD,
 }
+
+logger = logging.getLogger(__name__)
+
+SAFE_TELEMETRY_STAGES = frozenset(
+    {
+        "configuration",
+        "request",
+        "system_auth",
+        "user_auth",
+        "mailbox_connection",
+        "message_context",
+        "message_identity",
+        "thread_summary",
+        "handoff",
+        "response",
+    }
+)
+SAFE_TELEMETRY_CATEGORIES = frozenset(
+    {
+        "provider_rate_limited",
+        "provider_unavailable",
+        "provider_request_failed",
+        "network_timeout",
+        "network_unavailable",
+        "database_error",
+        "unexpected",
+    }
+)
+SAFE_TELEMETRY_OUTCOMES = frozenset({"retrying", "failed"})
 
 
 class GmailAddonError(Exception):
@@ -84,6 +122,149 @@ class GmailAddonSharedConnectionUnavailable(GmailAddonError):
 
 class GmailAddonInputError(GmailAddonError):
     status_code = 400
+
+
+class GmailAddonReadFailure(Exception):
+    """Private failure wrapper containing only allow-listed operational data."""
+
+    def __init__(self, *, stage, category):
+        self.safe_stage = _safe_telemetry_value(
+            stage,
+            allowed=SAFE_TELEMETRY_STAGES,
+            fallback="message_context",
+        )
+        self.safe_category = _safe_telemetry_value(
+            category,
+            allowed=SAFE_TELEMETRY_CATEGORIES,
+            fallback="unexpected",
+        )
+        super().__init__("A Gmail read operation failed.")
+
+
+def _safe_telemetry_value(value, *, allowed, fallback):
+    value = str(value or "").strip()
+    return value if value in allowed else fallback
+
+
+def _record_safe_reliability_event(*, stage, category, outcome):
+    """Log only fixed operational labels, never exception or request data."""
+
+    safe_stage = _safe_telemetry_value(
+        stage,
+        allowed=SAFE_TELEMETRY_STAGES,
+        fallback="response",
+    )
+    safe_category = _safe_telemetry_value(
+        category,
+        allowed=SAFE_TELEMETRY_CATEGORIES,
+        fallback="unexpected",
+    )
+    safe_outcome = _safe_telemetry_value(
+        outcome,
+        allowed=SAFE_TELEMETRY_OUTCOMES,
+        fallback="failed",
+    )
+    logger.warning(
+        "gmail_addon_reliability stage=%s category=%s outcome=%s",
+        safe_stage,
+        safe_category,
+        safe_outcome,
+    )
+
+
+def _exception_chain(exc, *, maximum=10):
+    pending = [exc]
+    seen = set()
+    while pending and len(seen) < maximum:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        for attribute in ("__cause__", "__context__"):
+            linked = getattr(current, attribute, None)
+            if isinstance(linked, BaseException) and id(linked) not in seen:
+                pending.append(linked)
+
+
+def _transient_gmail_read_category(exc):
+    for current in _exception_chain(exc):
+        if isinstance(current, urllib.error.HTTPError):
+            status_code = int(getattr(current, "code", 0) or 0)
+            if status_code == 429:
+                return "provider_rate_limited"
+            if status_code in TRANSIENT_GMAIL_READ_HTTP_STATUSES:
+                return "provider_unavailable"
+            continue
+        if isinstance(current, urllib.error.URLError):
+            reason = getattr(current, "reason", None)
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                return "network_timeout"
+            return "network_unavailable"
+        if isinstance(current, (TimeoutError, socket.timeout)):
+            return "network_timeout"
+        if isinstance(current, ConnectionError):
+            return "network_unavailable"
+    return ""
+
+
+def _gmail_read_failure_category(exc):
+    transient_category = _transient_gmail_read_category(exc)
+    if transient_category:
+        return transient_category
+    if any(
+        isinstance(current, urllib.error.HTTPError)
+        for current in _exception_chain(exc)
+    ):
+        return "provider_request_failed"
+    return "unexpected"
+
+
+def _gmail_addon_json_get(url, *, token, stage):
+    """Perform one bounded, retryable Gmail GET without ever retrying writes."""
+
+    for attempt in range(GMAIL_READ_MAX_ATTEMPTS):
+        try:
+            # No method or data is accepted by this helper, keeping every retry
+            # limited to an idempotent GET.
+            return _json_request(
+                url,
+                token=token,
+                timeout=GMAIL_READ_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            transient_category = _transient_gmail_read_category(exc)
+            if transient_category and attempt + 1 < GMAIL_READ_MAX_ATTEMPTS:
+                _record_safe_reliability_event(
+                    stage=stage,
+                    category=transient_category,
+                    outcome="retrying",
+                )
+                time.sleep(GMAIL_READ_RETRY_DELAY_SECONDS)
+                continue
+            raise GmailAddonReadFailure(
+                stage=stage,
+                category=_gmail_read_failure_category(exc),
+            ) from exc
+
+
+def _safe_failure_labels(exc, *, default_stage):
+    if isinstance(exc, GmailAddonReadFailure):
+        return exc.safe_stage, exc.safe_category
+    category = _transient_gmail_read_category(exc)
+    if not category and any(
+        isinstance(current, DatabaseError)
+        for current in _exception_chain(exc)
+    ):
+        category = "database_error"
+    return (
+        _safe_telemetry_value(
+            default_stage,
+            allowed=SAFE_TELEMETRY_STAGES,
+            fallback="response",
+        ),
+        category or "unexpected",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -350,13 +531,13 @@ def _fetch_message_identity(connection, message_id):
             ("fields", "id,threadId"),
         ]
     )
-    payload = _json_request(
+    payload = _gmail_addon_json_get(
         (
             f"{GMAIL_API_BASE}/messages/"
             f"{urllib.parse.quote(str(message_id))}?{query}"
         ),
         token=token,
-        timeout=10,
+        stage="message_identity",
     )
     canonical_message_id = _valid_gmail_id(
         payload.get("id"),
@@ -390,13 +571,13 @@ def _fetch_thread_message_summaries(
             ),
         ),
     ]
-    payload = _json_request(
+    payload = _gmail_addon_json_get(
         (
             f"{GMAIL_API_BASE}/threads/{urllib.parse.quote(thread_id)}"
             f"?{urllib.parse.urlencode(params, doseq=True)}"
         ),
         token=token,
-        timeout=10,
+        stage="thread_summary",
     )
     canonical_thread_id = str(payload.get("id") or "").strip()
     if not canonical_thread_id:
@@ -686,6 +867,48 @@ def _shared_gmail_reconnect_response(*, action_callback=False):
     return JsonResponse(render_actions)
 
 
+def _temporary_unavailable_contextual_response():
+    """Keep Gmail usable when an authenticated contextual read fails."""
+
+    card = {
+        "name": "quotation-inquiry-temporarily-unavailable",
+        "header": {
+            "title": "Quotation import temporarily unavailable",
+            "subtitle": "No inquiry was imported",
+        },
+        "sections": [
+            {
+                "widgets": [
+                    {
+                        "textParagraph": {
+                            "text": (
+                                "Try opening the add-on again. If this continues, "
+                                "close and reopen Gmail before retrying."
+                            )
+                        }
+                    }
+                ]
+            }
+        ],
+    }
+    # Contextual triggers consume RenderActions directly, not the
+    # SubmitFormResponse wrapper used by button callbacks.
+    return JsonResponse(
+        {
+            "action": {
+                "navigations": [{"pushCard": card}],
+            }
+        }
+    )
+
+
+def _temporary_unavailable_action_response():
+    return _notification_response(
+        "Quotation import is temporarily unavailable. Try again. If this "
+        "continues, close and reopen the add-on before retrying."
+    )
+
+
 def _notification_response(text, *, status=200):
     return JsonResponse(
         {
@@ -784,9 +1007,13 @@ def _error_response(error):
 @csrf_exempt
 @require_POST
 def gmail_addon_contextual(request):
+    stage = "configuration"
+    authenticated = False
     try:
         config = _require_configuration()
+        stage = "request"
         event = _parse_event(request)
+        stage = "system_auth"
         authorization_event = _authenticate_system_event(
             request,
             event,
@@ -796,10 +1023,14 @@ def gmail_addon_contextual(request):
         missing_scopes = _missing_required_google_scopes(authorization_event)
         if missing_scopes:
             return _requesting_google_scopes_response(missing_scopes)
+        stage = "user_auth"
         _authenticate_user_event(authorization_event, config)
+        authenticated = True
         event_message_id, event_thread_id = _gmail_context(event)
         try:
+            stage = "mailbox_connection"
             connection = _shared_connection(config["mailbox_email"])
+            stage = "message_context"
             (
                 anchor_message_id,
                 _thread_id,
@@ -820,8 +1051,20 @@ def gmail_addon_contextual(request):
         )
     except GmailAddonError as exc:
         return _error_response(exc)
-    except Exception:
-        # Do not expose or log event contents, Gmail identifiers, or tokens.
+    except Exception as exc:
+        safe_stage, safe_category = _safe_failure_labels(
+            exc,
+            default_stage=stage,
+        )
+        _record_safe_reliability_event(
+            stage=safe_stage,
+            category=safe_category,
+            outcome="failed",
+        )
+        if authenticated:
+            return _temporary_unavailable_contextual_response()
+        # Do not expose event contents, Gmail identifiers, tokens, or failure
+        # details when the callback has not been fully authenticated.
         return _error_response(GmailAddonConfigurationError(
             "The quotation Gmail add-on is temporarily unavailable."
         ))
@@ -830,9 +1073,13 @@ def gmail_addon_contextual(request):
 @csrf_exempt
 @require_POST
 def gmail_addon_action(request):
+    stage = "configuration"
+    authenticated = False
     try:
         config = _require_configuration()
+        stage = "request"
         event = _parse_event(request)
+        stage = "system_auth"
         authorization_event = _authenticate_system_event(
             request,
             event,
@@ -842,7 +1089,9 @@ def gmail_addon_action(request):
         missing_scopes = _missing_required_google_scopes(authorization_event)
         if missing_scopes:
             return _requesting_google_scopes_response(missing_scopes)
+        stage = "user_auth"
         _authenticate_user_event(authorization_event, config)
+        authenticated = True
         event_message_id, event_thread_id = _gmail_context(event)
         mode = _selection_mode(event)
         selected_message_ids = (
@@ -854,7 +1103,9 @@ def gmail_addon_action(request):
             )
 
         try:
+            stage = "mailbox_connection"
             connection = _shared_connection(config["mailbox_email"])
+            stage = "message_identity"
             anchor_message_id, thread_id = _fetch_message_identity(
                 connection,
                 event_message_id,
@@ -866,6 +1117,7 @@ def gmail_addon_action(request):
                 # their website analysis performs its own bounded membership
                 # fetch, so repeating the full sidebar summary call here adds
                 # latency without strengthening their selection boundary.
+                stage = "thread_summary"
                 summaries = _fetch_thread_message_summaries(
                     connection,
                     event_thread_id,
@@ -886,6 +1138,7 @@ def gmail_addon_action(request):
                     )
         except GmailAddonSharedConnectionUnavailable:
             return _shared_gmail_reconnect_response(action_callback=True)
+        stage = "handoff"
         _import_record, raw_token = _issue_handoff(
             connection,
             anchor_message_id=anchor_message_id,
@@ -918,8 +1171,20 @@ def gmail_addon_action(request):
         return _notification_response(exc.public_message)
     except GmailAddonError as exc:
         return _error_response(exc)
-    except Exception:
-        # Keep service/parser details and all Gmail context out of the response.
+    except Exception as exc:
+        safe_stage, safe_category = _safe_failure_labels(
+            exc,
+            default_stage=stage,
+        )
+        _record_safe_reliability_event(
+            stage=safe_stage,
+            category=safe_category,
+            outcome="failed",
+        )
+        if authenticated:
+            return _temporary_unavailable_action_response()
+        # Keep service/parser details and all Gmail context out of responses
+        # issued before the callback has been fully authenticated.
         return _error_response(GmailAddonConfigurationError(
             "The quotation Gmail add-on is temporarily unavailable."
         ))

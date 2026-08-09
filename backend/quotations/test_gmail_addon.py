@@ -1,4 +1,5 @@
 import json
+import urllib.error
 from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import ANY, patch
@@ -25,6 +26,20 @@ MAILBOX_EMAIL = "quotes@example.com"
 CANONICAL_MESSAGE_ID = "19fb2da13e1adcfa"
 CANONICAL_THREAD_ID = "19fb2da13e1adcfb"
 REQUIRED_SCOPES = list(gmail_addon.REQUIRED_GOOGLE_OAUTH_SCOPES)
+
+
+def google_http_runtime_error(status_code, detail="provider failure"):
+    provider_error = urllib.error.HTTPError(
+        "https://gmail.googleapis.test/resource",
+        status_code,
+        "provider error",
+        {},
+        None,
+    )
+    error = RuntimeError(detail)
+    error.__cause__ = provider_error
+    return error
+
 
 ADDON_SETTINGS = {
     "GMAIL_ADDON_ENABLED": True,
@@ -341,7 +356,7 @@ class GmailAddonEndpointTests(TestCase):
         mock_json_request.assert_called_once_with(
             ANY,
             token="stored-token",
-            timeout=10,
+            timeout=gmail_addon.GMAIL_READ_TIMEOUT_SECONDS,
         )
 
     @override_settings(GMAIL_ADDON_MAX_THREAD_MESSAGES=1000)
@@ -445,6 +460,112 @@ class GmailAddonEndpointTests(TestCase):
         request_url = mock_json_request.call_args.args[0]
         self.assertIn("msg-f%3A14399576835632390395", request_url)
         self.assertIn("fields=id%2CthreadId", request_url)
+
+    @patch("quotations.gmail_addon.time.sleep")
+    @patch("quotations.gmail_addon._json_request")
+    @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
+    def test_message_identity_retries_each_transient_provider_status_once(
+        self,
+        _mock_access_token,
+        mock_json_request,
+        mock_sleep,
+    ):
+        for status_code in sorted(gmail_addon.TRANSIENT_GMAIL_READ_HTTP_STATUSES):
+            with self.subTest(status_code=status_code):
+                mock_json_request.reset_mock()
+                mock_sleep.reset_mock()
+                mock_json_request.side_effect = [
+                    google_http_runtime_error(
+                        status_code,
+                        "secret msg-f:retry system-token",
+                    ),
+                    {
+                        "id": CANONICAL_MESSAGE_ID,
+                        "threadId": CANONICAL_THREAD_ID,
+                    },
+                ]
+
+                with self.assertLogs("quotations.gmail_addon", level="WARNING") as logs:
+                    identity = self.real_fetch_message_identity(
+                        self.connection,
+                        "msg-f:event-alias",
+                    )
+
+                self.assertEqual(
+                    identity,
+                    (CANONICAL_MESSAGE_ID, CANONICAL_THREAD_ID),
+                )
+                self.assertEqual(mock_json_request.call_count, 2)
+                mock_sleep.assert_called_once_with(
+                    gmail_addon.GMAIL_READ_RETRY_DELAY_SECONDS
+                )
+                log_text = " ".join(logs.output)
+                self.assertIn("stage=message_identity", log_text)
+                expected_category = (
+                    "provider_rate_limited"
+                    if status_code == 429
+                    else "provider_unavailable"
+                )
+                self.assertIn(f"category={expected_category}", log_text)
+                self.assertIn("outcome=retrying", log_text)
+                self.assertNotIn("msg-f:retry", log_text)
+                self.assertNotIn("system-token", log_text)
+
+    @patch("quotations.gmail_addon.time.sleep")
+    @patch("quotations.gmail_addon._json_request")
+    @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
+    def test_thread_summary_retries_network_timeout_once(
+        self,
+        _mock_access_token,
+        mock_json_request,
+        mock_sleep,
+    ):
+        mock_json_request.side_effect = [
+            TimeoutError("secret thread-f:timeout"),
+            {
+                "id": "thread-timeout",
+                "messages": [],
+            },
+        ]
+
+        summaries = gmail_addon._fetch_thread_message_summaries(
+            self.connection,
+            "thread-timeout",
+        )
+
+        self.assertEqual(summaries, [])
+        self.assertEqual(mock_json_request.call_count, 2)
+        mock_sleep.assert_called_once_with(
+            gmail_addon.GMAIL_READ_RETRY_DELAY_SECONDS
+        )
+
+    @patch("quotations.gmail_addon.time.sleep")
+    @patch("quotations.gmail_addon._json_request")
+    @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
+    def test_non_transient_gmail_get_failure_is_not_retried(
+        self,
+        _mock_access_token,
+        mock_json_request,
+        mock_sleep,
+    ):
+        mock_json_request.side_effect = google_http_runtime_error(
+            400,
+            "secret rejected request",
+        )
+
+        with self.assertRaises(gmail_addon.GmailAddonReadFailure) as raised:
+            self.real_fetch_message_identity(
+                self.connection,
+                "msg-f:event-alias",
+            )
+
+        self.assertEqual(raised.exception.safe_stage, "message_identity")
+        self.assertEqual(
+            raised.exception.safe_category,
+            "provider_request_failed",
+        )
+        mock_json_request.assert_called_once()
+        mock_sleep.assert_not_called()
 
     @patch("quotations.gmail_addon._json_request")
     @patch("quotations.gmail_addon.get_valid_access_token", return_value="stored-token")
@@ -982,18 +1103,168 @@ class GmailAddonEndpointTests(TestCase):
         "quotations.gmail_addon._issue_handoff",
         side_effect=RuntimeError("database secret msg-f:current system-token"),
     )
-    def test_unexpected_handoff_failure_is_sanitized(self, _mock_issue_handoff):
-        response = self._post(
-            "quotation-gmail-addon-action",
-            self._event(mode="current_message"),
-        )
+    @patch("quotations.gmail_addon.time.sleep")
+    def test_unexpected_handoff_failure_is_sanitized_and_never_retried(
+        self,
+        mock_sleep,
+        mock_issue_handoff,
+    ):
+        with self.assertLogs("quotations.gmail_addon", level="WARNING") as logs:
+            response = self._post(
+                "quotation-gmail-addon-action",
+                self._event(mode="current_message"),
+            )
 
-        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload), {"renderActions"})
+        notification = payload["renderActions"]["action"]["notification"]["text"]
+        self.assertIn("temporarily unavailable", notification.lower())
+        self.assertIn("try again", notification.lower())
+        self.assertIn("close and reopen", notification.lower())
+        self.assertNotIn("opening", notification.lower())
+        mock_issue_handoff.assert_called_once()
+        mock_sleep.assert_not_called()
         response_text = response.content.decode("utf-8")
-        self.assertIn("temporarily unavailable", response_text)
         self.assertNotIn("database secret", response_text)
         self.assertNotIn("msg-f:current", response_text)
         self.assertNotIn("system-token", response_text)
+        log_text = " ".join(logs.output)
+        self.assertIn("stage=handoff", log_text)
+        self.assertIn("category=unexpected", log_text)
+        self.assertIn("outcome=failed", log_text)
+        self.assertNotIn("database secret", log_text)
+        self.assertNotIn("msg-f:current", log_text)
+        self.assertNotIn("system-token", log_text)
+
+    @patch("quotations.gmail_addon._issue_handoff")
+    def test_authenticated_action_transient_read_failure_returns_notification(
+        self,
+        mock_issue_handoff,
+    ):
+        self.mock_fetch_identity.side_effect = gmail_addon.GmailAddonReadFailure(
+            stage="message_identity",
+            category="provider_unavailable",
+        )
+
+        with self.assertLogs("quotations.gmail_addon", level="WARNING") as logs:
+            response = self._post(
+                "quotation-gmail-addon-action",
+                self._event(mode="current_message"),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()), {"renderActions"})
+        notification = response.json()["renderActions"]["action"]["notification"]["text"]
+        self.assertIn("temporarily unavailable", notification.lower())
+        self.assertIn("try again", notification.lower())
+        self.assertIn("close and reopen", notification.lower())
+        mock_issue_handoff.assert_not_called()
+        log_text = " ".join(logs.output)
+        self.assertIn("stage=message_identity", log_text)
+        self.assertIn("category=provider_unavailable", log_text)
+
+    @patch(
+        "quotations.gmail_addon._fetch_thread_message_summaries",
+        side_effect=RuntimeError("provider secret thread-f:one user-token"),
+    )
+    def test_authenticated_contextual_failure_returns_recovery_card(
+        self,
+        _mock_fetch_summaries,
+    ):
+        with self.assertLogs("quotations.gmail_addon", level="WARNING") as logs:
+            response = self._post(
+                "quotation-gmail-addon-contextual",
+                self._event(),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload), {"action"})
+        card = payload["action"]["navigations"][0]["pushCard"]
+        self.assertEqual(
+            card["header"]["title"],
+            "Quotation import temporarily unavailable",
+        )
+        self.assertEqual(card["header"]["subtitle"], "No inquiry was imported")
+        recovery_text = card["sections"][0]["widgets"][0]["textParagraph"]["text"]
+        self.assertIn("opening the add-on again", recovery_text.lower())
+        self.assertIn("close and reopen", recovery_text.lower())
+        response_text = response.content.decode("utf-8")
+        self.assertNotIn("provider secret", response_text)
+        self.assertNotIn("thread-f:one", response_text)
+        self.assertNotIn("user-token", response_text)
+        log_text = " ".join(logs.output)
+        self.assertIn("stage=message_context", log_text)
+        self.assertIn("category=unexpected", log_text)
+        self.assertNotIn("provider secret", log_text)
+        self.assertNotIn("thread-f:one", log_text)
+        self.assertNotIn("user-token", log_text)
+
+    @patch("quotations.gmail_addon.time.sleep")
+    @patch("quotations.gmail_addon._json_request")
+    def test_permanent_transient_gmail_read_is_bounded_and_returns_recovery_card(
+        self,
+        mock_json_request,
+        mock_sleep,
+    ):
+        self.mock_fetch_identity.side_effect = self.real_fetch_message_identity
+        mock_json_request.side_effect = [
+            google_http_runtime_error(503, "secret first provider failure"),
+            google_http_runtime_error(503, "secret second provider failure"),
+        ]
+
+        with self.assertLogs("quotations.gmail_addon", level="WARNING") as logs:
+            response = self._post(
+                "quotation-gmail-addon-contextual",
+                self._event(),
+            )
+
+        self.assertEqual(response.status_code, 200)
+        card = response.json()["action"]["navigations"][0]["pushCard"]
+        self.assertEqual(
+            card["header"]["title"],
+            "Quotation import temporarily unavailable",
+        )
+        self.assertEqual(
+            mock_json_request.call_count,
+            gmail_addon.GMAIL_READ_MAX_ATTEMPTS,
+        )
+        mock_sleep.assert_called_once_with(
+            gmail_addon.GMAIL_READ_RETRY_DELAY_SECONDS
+        )
+        log_text = " ".join(logs.output)
+        self.assertEqual(log_text.count("category=provider_unavailable"), 2)
+        self.assertIn("outcome=retrying", log_text)
+        self.assertIn("outcome=failed", log_text)
+        self.assertNotIn("secret first", log_text)
+        self.assertNotIn("secret second", log_text)
+
+    @patch(
+        "quotations.gmail_addon._parse_event",
+        side_effect=RuntimeError("pre-auth secret system-token"),
+    )
+    def test_unexpected_failure_before_authentication_remains_fail_closed(
+        self,
+        _mock_parse_event,
+    ):
+        with self.assertLogs("quotations.gmail_addon", level="WARNING") as logs:
+            response = self._post(
+                "quotation-gmail-addon-contextual",
+                self._event(),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"detail": "The quotation Gmail add-on is temporarily unavailable."},
+        )
+        self.assertNotIn("action", response.json())
+        log_text = " ".join(logs.output)
+        self.assertIn("stage=request", log_text)
+        self.assertIn("category=unexpected", log_text)
+        self.assertNotIn("pre-auth secret", log_text)
+        self.assertNotIn("system-token", log_text)
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
     def test_ids_are_opaque_but_reject_path_or_whitespace_characters(
