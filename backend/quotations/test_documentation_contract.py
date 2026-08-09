@@ -332,7 +332,10 @@ class DocumentationContractTests(SimpleTestCase):
                 )
                 self.assertIn("HTTP 202", content)
                 self.assertIn("synchronous", content.lower())
-                self.assertIn("stop the worker", content.lower())
+                self.assertIn(
+                    "Rollback must disable web enqueueing before stopping workers.",
+                    content,
+                )
                 self.assertIn("no Railway worker service", content)
         self.assertIn("page\nreload resumes", deployment)
         self.assertIn("heartbeat", operations.lower())

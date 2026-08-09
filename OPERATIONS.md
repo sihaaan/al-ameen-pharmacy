@@ -107,9 +107,12 @@ required.
 ### Content-free Gmail analysis progress
 
 `QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED` is disabled by default. After
-additive migration `0040`, enabling it records monotonic stages for the current
-attempt and opaque source generation while the existing synchronous analyzer
-runs. Reloaded review pages can read the safe state from
+additive migrations `0040` and `0042`, enabling it records monotonic stages for
+the current attempt and opaque source generation while the existing
+synchronous analyzer runs. `0042` retains persistent empty/zero database
+defaults for the four non-null progress fields so application instances that
+predate `0040` can continue inserting Gmail imports during a rolling
+deployment. Reloaded review pages can read the safe state from
 `GET /gmail-inquiry-imports/{id}/analysis_progress/`; the response is private,
 no-store, contains no content or source counts, and follows the existing import
 access policy.
@@ -121,11 +124,13 @@ attempt, source fingerprint, or opaque generation cannot update a newer
 analysis. Source-selection changes clear progress, and completed/failed
 progress is persisted in the same transaction as the final import state.
 
-Rollback by setting the flag to `0`; do not reverse `0040` during an active
-analysis or while the new application is running. The endpoint becomes
-unavailable immediately, while an analysis that already owns an opaque
-generation is still allowed to persist its terminal success/failure state. No
-worker service, provider,
+Rollback by setting the flag to `0`; retain `0040` through `0042` during an
+ordinary application rollback. Do not reverse `0040` during an active analysis
+or while the new application is running. Reversing `0042` intentionally
+retains the database defaults needed by older application instances. The
+endpoint becomes unavailable immediately, while an analysis that already owns
+an opaque generation is still allowed to persist its terminal success/failure
+state. No worker service, provider,
 OAuth scope, AI model, prompt, email action, or infrastructure setting is added
 by this phase.
 
@@ -174,11 +179,14 @@ safe failure categories, completion latency, and jobs whose import generation
 moved. An HTTP 202 without an operating worker is an operator error: disable
 the flag rather than asking employees to enqueue again.
 
-Rollback in this order: stop the worker first; set
-`QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` on every web/worker process;
-verify new requests for unaffected imports complete synchronously. Flag
-disablement does not cancel imports already queued/running; those exact imports
-can remain Busy until they were deliberately drained before worker shutdown or
+Rollback must disable web enqueueing before stopping workers. First set
+`QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` on every web process and verify
+new requests for unaffected imports complete synchronously. Keep the worker
+service enabled while it drains the already queued/running jobs, then stop the
+worker and set its service-level flag to `0`. If Railway variables cannot be
+different between web and worker services, do not enable background mode until
+that service-variable boundary exists. Flag disablement does not cancel jobs
+already queued/running; those exact imports can remain Busy until they drain or
 the existing bounded stale-analysis window permits synchronous recovery. Leave
 their job rows untouched for audit and never manually replay them. Retain
 migration `0041` for ordinary application rollback. Reverse it only after all

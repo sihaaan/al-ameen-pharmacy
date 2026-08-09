@@ -10,22 +10,37 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="gmailinquiryimport",
             name="analysis_progress_stage",
-            field=models.CharField(blank=True, default="", max_length=40),
+            field=models.CharField(
+                blank=True,
+                db_default="",
+                default="",
+                max_length=40,
+            ),
         ),
         migrations.AddField(
             model_name="gmailinquiryimport",
             name="analysis_progress_attempt",
-            field=models.PositiveIntegerField(default=0),
+            field=models.PositiveIntegerField(db_default=0, default=0),
         ),
         migrations.AddField(
             model_name="gmailinquiryimport",
             name="analysis_progress_generation",
-            field=models.CharField(blank=True, default="", max_length=32),
+            field=models.CharField(
+                blank=True,
+                db_default="",
+                default="",
+                max_length=32,
+            ),
         ),
         migrations.AddField(
             model_name="gmailinquiryimport",
             name="analysis_progress_error_category",
-            field=models.CharField(blank=True, default="", max_length=64),
+            field=models.CharField(
+                blank=True,
+                db_default="",
+                default="",
+                max_length=64,
+            ),
         ),
         migrations.AddField(
             model_name="gmailinquiryimport",

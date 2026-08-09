@@ -336,18 +336,22 @@ never contains Gmail identifiers, sender/recipient addresses, subjects,
 filenames, customer/item text, document content, prices, tokens, or counts.
 
 Migration `quotations.0040_gmailinquiryimport_analysis_progress` adds five
-dedicated progress fields with empty/zero/null defaults and performs no
-customer-content backfill. Apply `0040` before promoting the new application;
-old application code can run after the additive migration, while new model
-queries are not safe before the columns exist. Deploy with the flag still at
-`0`, verify synchronous analysis, then enable it for a controlled cohort.
+dedicated progress fields and performs no customer-content backfill. Migration
+`quotations.0042_preserve_gmail_progress_db_defaults` retains persistent
+empty/zero database defaults for the four non-null fields so application
+instances that predate `0040` can continue inserting Gmail imports during a
+rolling deployment. Apply and verify through `0042` before promoting the new
+application. New model queries are not safe before the columns exist. Deploy
+with the flag still at `0`, verify synchronous analysis, then enable it for a
+controlled cohort.
 
 Rollback the feature first by setting the flag to `0`; synchronous analysis
 remains the fallback and no background worker is introduced by this phase.
-Prefer a schema-compatible application rollback that retains `0040`. Reversing
-`0040` removes only progress metadata but should be considered only before a
-newer application instance can query the fields and after active analyses have
-finished.
+Prefer a schema-compatible application rollback that retains `0040` through
+`0042`. Reversing `0040` removes only progress metadata but should be
+considered only before a newer application instance can query the fields and
+after active analyses have finished. Reversing `0042` intentionally retains
+the database defaults needed by older application instances.
 
 ### Durable background Gmail analysis (disabled by default)
 
@@ -404,12 +408,15 @@ worker command intentionally refuses to start while its own flag is disabled.
 If settings cannot be staged per service, coordinate the worker start and web
 flag change so a worker is ready before the first HTTP 202 response.
 
-Rollback order is fail-closed: stop the worker so it cannot claim more jobs,
-then set `QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` on every application
-process. New requests for unaffected imports immediately use the established
-synchronous route. Disabling the flag does not cancel an import that is already
-queued/running: that exact import can continue to return the existing Busy
-response until the worker is allowed to drain it before shutdown or the
+Rollback must disable web enqueueing before stopping workers. First set
+`QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED=0` on every web process so new
+requests for unaffected imports immediately use the established synchronous
+route. Keep the worker service enabled while it drains already queued/running
+jobs, then stop the worker and set its service-level flag to `0`. If Railway
+variables cannot be different between web and worker services, do not enable
+background mode until that service-variable boundary exists. Disabling the web
+flag does not cancel an import that is already queued/running: that exact import
+can continue to return the existing Busy response until it drains or the
 existing bounded stale-analysis window permits synchronous recovery. Leave its
 ledger row for audit and do not manually replay it. Prefer retaining additive
 migration `0041`; reverse it only after every new-code process and worker is

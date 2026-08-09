@@ -97,6 +97,7 @@ jobs:
         run: >-
           python manage.py test
           quotations.test_migration_0036_compatibility
+          quotations.test_migration_0042_compatibility
           --noinput --verbosity 2
       - name: Run PostgreSQL concurrency suite
         run: >-

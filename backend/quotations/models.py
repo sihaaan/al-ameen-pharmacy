@@ -534,17 +534,30 @@ class GmailInquiryImport(models.Model):
     analysis_attempts = models.PositiveIntegerField(default=0)
     analysis_started_at = models.DateTimeField(null=True, blank=True)
     analyzed_at = models.DateTimeField(null=True, blank=True)
-    analysis_progress_stage = models.CharField(max_length=40, blank=True, default="")
-    analysis_progress_attempt = models.PositiveIntegerField(default=0)
+    # Keep database defaults as well as Python defaults so an older web
+    # process can continue creating imports while a migration-first deployment
+    # promotes the progress-aware application release.
+    analysis_progress_stage = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        db_default="",
+    )
+    analysis_progress_attempt = models.PositiveIntegerField(
+        default=0,
+        db_default=0,
+    )
     analysis_progress_generation = models.CharField(
         max_length=32,
         blank=True,
         default="",
+        db_default="",
     )
     analysis_progress_error_category = models.CharField(
         max_length=64,
         blank=True,
         default="",
+        db_default="",
     )
     analysis_progress_updated_at = models.DateTimeField(null=True, blank=True)
 
