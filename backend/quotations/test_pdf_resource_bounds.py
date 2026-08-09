@@ -19,6 +19,7 @@ from pypdf.generic import (
     DictionaryObject,
     EncodedStreamObject,
     NameObject,
+    NullObject,
     NumberObject,
 )
 from reportlab.lib.utils import ImageReader
@@ -32,7 +33,11 @@ from .ai_parsing import (
     clean_historical_import_with_ai,
     clean_preview_with_ai,
 )
-from .attachment_inspection import PDFResourceLimitError, inspect_pdf_attachment
+from .attachment_inspection import (
+    PDFResourceLimitError,
+    _bounded_flate_decode,
+    inspect_pdf_attachment,
+)
 from .gmail_inquiry_import import _build_source_analysis
 from .historical_import_parsers import _extract_pdf_text, parse_historical_pdf_upload
 from .import_parsers import parse_pdf_preview
@@ -45,6 +50,22 @@ from .models import (
 
 
 PDF_MIME = "application/pdf"
+
+
+def flate_zlib_raw_polyglot(*, trailing=b"evil"):
+    payload = bytearray(b"A" * 0xFEFE)
+    final_data_length = (len(payload) - 260) + 4 + len(trailing)
+    payload[255:260] = (
+        b"\x01"
+        + final_data_length.to_bytes(2, "little")
+        + (0xFFFF - final_data_length).to_bytes(2, "little")
+    )
+    zlib_member = (
+        b"\x78\x01\x01\xfe\xfe\x01\x01"
+        + bytes(payload)
+        + zlib.adler32(payload).to_bytes(4, "big")
+    )
+    return zlib_member + trailing
 
 
 def blank_pdf(*, width=595, height=842):
@@ -190,6 +211,82 @@ def unsupported_filter_image_pdf():
     )
     content = DecodedStreamObject()
     content.set_data(b"q 10 0 0 10 0 0 cm /Im0 Do Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    writer.write(output)
+    return output.getvalue()
+
+
+def flate_wrapped_jpeg_image_pdf(
+    *,
+    intermediate_bytes=None,
+    image_count=1,
+    ascii_filter="",
+    flate_predictor=None,
+    trailing_bytes=b"",
+    truncate_flate=False,
+    indirect_decode_parameters=False,
+):
+    output = BytesIO()
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=100, height=100)
+    if intermediate_bytes is None:
+        image_output = BytesIO()
+        image_source = Image.new("RGB", (32, 48), color=(220, 40, 40))
+        image_source.save(image_output, format="JPEG", quality=60)
+        image_source.close()
+        intermediate_bytes = image_output.getvalue()
+    encoded = zlib.compress(intermediate_bytes)
+    if truncate_flate:
+        encoded = encoded[:-2]
+    encoded += trailing_bytes
+    filters = [NameObject("/FlateDecode"), NameObject("/DCTDecode")]
+    flate_parameters = (
+        NullObject()
+        if flate_predictor is None
+        else DictionaryObject(
+            {NameObject("/Predictor"): NumberObject(flate_predictor)}
+        )
+    )
+    decode_parameters = [
+        flate_parameters,
+        DictionaryObject({NameObject("/Quality"): NumberObject(60)}),
+    ]
+    if ascii_filter == "ascii85":
+        encoded = base64.a85encode(encoded, adobe=False) + b"~>"
+        filters.insert(0, NameObject("/ASCII85Decode"))
+        decode_parameters.insert(0, NullObject())
+    elif ascii_filter == "asciihex":
+        encoded = encoded.hex().encode("ascii") + b">"
+        filters.insert(0, NameObject("/ASCIIHexDecode"))
+        decode_parameters.insert(0, NullObject())
+    decode_parameters_value = ArrayObject(decode_parameters)
+    if indirect_decode_parameters:
+        decode_parameters_value = writer._add_object(decode_parameters_value)
+    image_references = {}
+    for index in range(image_count):
+        image = EncodedStreamObject()
+        image._data = encoded
+        image[NameObject("/Type")] = NameObject("/XObject")
+        image[NameObject("/Subtype")] = NameObject("/Image")
+        image[NameObject("/Width")] = NumberObject(32)
+        image[NameObject("/Height")] = NumberObject(48)
+        image[NameObject("/BitsPerComponent")] = NumberObject(8)
+        image[NameObject("/ColorSpace")] = NameObject("/DeviceRGB")
+        image[NameObject("/Filter")] = ArrayObject(filters)
+        image[NameObject("/DecodeParms")] = decode_parameters_value
+        image_references[NameObject(f"/Im{index}")] = writer._add_object(image)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/XObject"): DictionaryObject(image_references)
+        }
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        b"\n".join(
+            f"q 32 0 0 48 0 0 cm /Im{index} Do Q".encode("ascii")
+            for index in range(image_count)
+        )
+    )
     page[NameObject("/Contents")] = writer._add_object(content)
     writer.write(output)
     return output.getvalue()
@@ -413,6 +510,23 @@ class PDFResourceInspectionTests(SimpleTestCase):
             "compressed stream that expands beyond the safe limit",
         ):
             inspect_pdf_attachment(output.getvalue())
+
+    def test_completed_zlib_member_with_raw_deflate_polyglot_tail_is_rejected(self):
+        data = flate_zlib_raw_polyglot()
+        zlib_decoder = zlib.decompressobj(zlib.MAX_WBITS)
+        zlib_decoder.decompress(data)
+        raw_decoder = zlib.decompressobj(-zlib.MAX_WBITS)
+        raw_decoder.decompress(data)
+        self.assertTrue(zlib_decoder.eof)
+        self.assertEqual(zlib_decoder.unused_data, b"evil")
+        self.assertTrue(raw_decoder.eof)
+        self.assertEqual(raw_decoder.unused_data, b"")
+
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "malformed or trailing Flate stream data",
+        ):
+            _bounded_flate_decode(data, 100_000)
 
     @override_settings(
         QUOTATION_IMPORT_MAX_PDF_OBJECTS=10,
@@ -909,6 +1023,89 @@ class PDFResourceInspectionTests(SimpleTestCase):
         ):
             _render_pdf_bytes_images(data)
         fitz_open.assert_not_called()
+
+    def test_flate_wrapped_jpeg_is_bounded_and_available_to_ai_render(self):
+        data = flate_wrapped_jpeg_image_pdf()
+
+        _, report = inspect_pdf_attachment(data)
+
+        self.assertTrue(report["safety"]["local_traversal_safe"])
+        self.assertTrue(report["safety"]["decoded_stream_checks_complete"])
+        self.assertEqual(report["safety"]["unbounded_decoded_stream_count"], 0)
+        self.assertEqual(report["safety"]["bounded_image_prefix_count"], 1)
+        self.assertGreater(report["safety"]["bounded_image_prefix_bytes"], 0)
+        self.assertEqual(report["fidelity"]["unsafe_image_filter_count"], 0)
+        rendered, rendered_pages = _render_pdf_bytes_images(data)
+        self.assertEqual(rendered_pages, 1)
+        self.assertEqual(len(rendered), 1)
+        self.assertTrue(rendered[0].startswith("data:image/png;base64,"))
+
+    def test_indirect_aligned_decode_parameters_remain_supported(self):
+        _, report = inspect_pdf_attachment(
+            flate_wrapped_jpeg_image_pdf(indirect_decode_parameters=True)
+        )
+
+        self.assertTrue(report["safety"]["local_traversal_safe"])
+        self.assertEqual(report["safety"]["bounded_image_prefix_count"], 1)
+        self.assertEqual(report["fidelity"]["unsafe_image_filter_count"], 0)
+
+    def test_ascii_wrapped_flate_jpeg_chains_are_bounded(self):
+        for ascii_filter in ("ascii85", "asciihex"):
+            with self.subTest(ascii_filter=ascii_filter):
+                _, report = inspect_pdf_attachment(
+                    flate_wrapped_jpeg_image_pdf(ascii_filter=ascii_filter)
+                )
+
+                self.assertTrue(report["safety"]["local_traversal_safe"])
+                self.assertEqual(report["safety"]["bounded_image_prefix_count"], 1)
+                self.assertEqual(report["fidelity"]["unsafe_image_filter_count"], 0)
+
+    @override_settings(
+        QUOTATION_IMPORT_MAX_PDF_DECODED_STREAM_BYTES=8192,
+        QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES=32768,
+    )
+    def test_flate_wrapped_jpeg_prefix_still_honors_per_stream_limit(self):
+        data = flate_wrapped_jpeg_image_pdf(intermediate_bytes=b"x" * 16384)
+
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "compressed stream that expands beyond the safe limit",
+        ):
+            inspect_pdf_attachment(data)
+
+    @override_settings(
+        QUOTATION_IMPORT_MAX_PDF_DECODED_STREAM_BYTES=8192,
+        QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES=1000,
+    )
+    def test_flate_wrapped_jpeg_prefixes_share_aggregate_limit(self):
+        data = flate_wrapped_jpeg_image_pdf(image_count=2)
+
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "decoded streams exceed the safe aggregate processing limit",
+        ):
+            inspect_pdf_attachment(data)
+
+    def test_malformed_or_trailing_flate_wrappers_remain_blocked(self):
+        for options in (
+            {"truncate_flate": True},
+            {"trailing_bytes": b"unexpected"},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaisesMessage(
+                    PDFResourceLimitError,
+                    "malformed or trailing Flate stream data",
+                ):
+                    inspect_pdf_attachment(flate_wrapped_jpeg_image_pdf(**options))
+
+    def test_flate_wrapper_predictors_are_not_treated_as_safe(self):
+        _, report = inspect_pdf_attachment(
+            flate_wrapped_jpeg_image_pdf(flate_predictor=12)
+        )
+
+        self.assertFalse(report["safety"]["local_traversal_safe"])
+        self.assertEqual(report["safety"]["unbounded_decoded_stream_count"], 1)
+        self.assertEqual(report["fidelity"]["unsafe_image_filter_count"], 1)
 
     @patch("quotations.ai_parsing.fitz.open")
     def test_unsupported_image_filter_blocks_local_render(self, fitz_open):

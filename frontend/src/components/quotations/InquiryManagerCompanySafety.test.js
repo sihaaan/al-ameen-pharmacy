@@ -240,6 +240,81 @@ describe('InquiryManager company-scoped async safety', () => {
     expect(price).toHaveValue(12.5);
   });
 
+  test('shows detected source pricing and applies or undoes it only after explicit staff action', async () => {
+    quotationAPI.inquiries.parseText.mockResolvedValue({
+      data: {
+        ...parsedPreview,
+        ai_candidate: null,
+        lines: [{
+          raw_name: 'Priced item',
+          quantity: '1.000',
+          unit_price: null,
+          vat_rate: null,
+          customer_unit_price: '12.50',
+          customer_vat_rate: '5',
+          customer_vat: 'VAT rate 5%; VAT amount 0.63',
+          parse_status: 'parsed',
+        }],
+      },
+    });
+    render(<InquiryManager />);
+
+    fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
+      target: { value: 'Priced item' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
+
+    const price = await screen.findByLabelText('Unit price row 1');
+    const vat = screen.getByLabelText('VAT row 1');
+    expect(screen.getByText('Detected source: 12.50')).toBeInTheDocument();
+    expect(screen.getByText('Detected source: 5%')).toBeInTheDocument();
+    expect(price).toHaveValue(null);
+    expect(vat).toHaveValue('0');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use detected prices & VAT for all eligible rows' }));
+    expect(price).toHaveValue(12.5);
+    expect(vat).toHaveValue('5');
+    expect(screen.getByText(/Applied 1 detected prices and 1 VAT values/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Undo detected prices & VAT' }));
+    expect(price).toHaveValue(null);
+    expect(vat).toHaveValue('0');
+  });
+
+  test('saves explicitly adopted source price and VAT as reviewed quotation pricing', async () => {
+    quotationAPI.inquiries.parseText.mockResolvedValue({
+      data: {
+        ...parsedPreview,
+        ai_candidate: null,
+        lines: [{
+          raw_name: 'Priced item',
+          quantity: '2.000',
+          unit: 'BOX',
+          unit_price: null,
+          vat_rate: null,
+          customer_unit_price: '18.25',
+          customer_vat_rate: '5',
+          parse_status: 'parsed',
+        }],
+      },
+    });
+    quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
+    render(<InquiryManager onOpenQuote={jest.fn()} />);
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
+    fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
+      target: { value: 'Priced item' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
+    await screen.findByLabelText('Unit price row 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Use detected prices & VAT for all eligible rows' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Open Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.inquiries.createImported).toHaveBeenCalledWith(expect.objectContaining({
+      lines: [expect.objectContaining({ unit_price: '18.25', vat_rate: '5' })],
+    })));
+  });
+
   test('does not run AI cleanup after employee pricing has begun', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({
       data: {
