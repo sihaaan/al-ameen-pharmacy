@@ -1,6 +1,7 @@
 import {
   applyDetectedSourcePricing,
   aiCandidateWouldLoseReviewedRows,
+  autoApplyDetectedSourcePricing,
   detectedSourcePricingForLine,
   importCompanyRequestIsCurrent,
   importedInquiryLinePayload,
@@ -9,9 +10,10 @@ import {
   inquiryUploadModeForFile,
   insertInquiryRow,
   moveInquiryRow,
+  previewWithoutAutoAppliedSourcePricing,
+  removeDetectedSourcePricing,
   resetImportedMatchesForCompanyChange,
   summarizeDetectedSourcePricing,
-  undoAppliedSourcePricing,
 } from './InquiryManager';
 import { releaseNumberWheelFocus } from '../../utils/numberInput';
 
@@ -56,6 +58,20 @@ describe('InquiryManager imported match provenance', () => {
     expect(inquiryPreviewHasReviewedPricing({
       lines: [{ raw_name: 'Reference', price_reference_status: 'matched' }],
     })).toBe(true);
+    expect(inquiryPreviewHasReviewedPricing({
+      lines: [{ raw_name: 'Manually cleared price', unit_price: '', _price_reviewed_by_user: true }],
+    })).toBe(true);
+    expect(inquiryPreviewHasReviewedPricing({
+      lines: [{
+        raw_name: 'Auto priced',
+        unit_price: '12.50',
+        vat_rate: '5',
+        customer_unit_price: '12.50',
+        customer_vat_rate: '5',
+        _price_applied_from_source: true,
+        _vat_applied_from_source: true,
+      }],
+    })).toBe(false);
   });
 
   test('strictly reads valid detected source prices and supported VAT rates', () => {
@@ -116,28 +132,96 @@ describe('InquiryManager imported match provenance', () => {
     expect(summarizeDetectedSourcePricing(result.lines)).toEqual(expect.objectContaining({
       priceRows: 4,
       vatRows: 4,
+      appliedPriceRows: 2,
+      appliedVatRows: 2,
       evidenceRows: 4,
       adoptableRows: 0,
     }));
   });
 
-  test('undo reverts only unchanged values applied to the same stable row', () => {
-    const applied = applyDetectedSourcePricing([{
+  test('auto-applies source pricing and removes only unchanged auto-applied fields', () => {
+    const [autoPriced] = autoApplyDetectedSourcePricing([{
       _client_row_id: 'stable-row',
       unit_price: '',
       vat_rate: '0',
       customer_unit_price: '12.50',
       customer_vat_rate: '5',
+      notes: 'Customer/source unit price: 12.50',
     }]);
-    const edited = [{ ...applied.lines[0], unit_price: '99.00' }];
+    expect(autoPriced).toEqual(expect.objectContaining({
+      _client_row_id: 'stable-row',
+      unit_price: '12.50',
+      vat_rate: '5',
+      _price_applied_from_source: true,
+      _vat_applied_from_source: true,
+    }));
 
-    expect(undoAppliedSourcePricing(edited, applied.changes)[0]).toEqual(expect.objectContaining({
+    const autoOnlyRemoved = removeDetectedSourcePricing([autoPriced]);
+    expect(importedInquiryLinePayload(autoOnlyRemoved.lines[0])).toEqual(expect.objectContaining({
+      unit_price: null,
+      vat_rate: '0',
+      notes: 'Customer/source unit price: 12.50',
+    }));
+
+    const manualPrice = {
+      ...autoPriced,
+      unit_price: '99.00',
+      _price_applied_from_source: false,
+      _source_price_suppressed_by_user: true,
+    };
+    const removed = removeDetectedSourcePricing([manualPrice]);
+    expect(removed).toEqual(expect.objectContaining({ priceCount: 0, vatCount: 1 }));
+    expect(removed.lines[0]).toEqual(expect.objectContaining({
+      _client_row_id: 'stable-row',
+      unit_price: '99.00',
+      vat_rate: '0',
+      customer_unit_price: '12.50',
+      notes: 'Customer/source unit price: 12.50',
+    }));
+    expect(autoApplyDetectedSourcePricing(removed.lines)[0]).toEqual(expect.objectContaining({
       unit_price: '99.00',
       vat_rate: '0',
     }));
-    expect(undoAppliedSourcePricing([{ ...applied.lines[0], _client_row_id: 'different-row' }], applied.changes)[0]).toEqual(
-      expect.objectContaining({ unit_price: '12.50', vat_rate: '5' })
-    );
+
+    const referenceLine = {
+      ...autoPriced,
+      unit_price: '30.00',
+      price_reference_status: 'matched',
+    };
+    expect(removeDetectedSourcePricing([referenceLine]).lines[0]).toEqual(expect.objectContaining({
+      unit_price: '30.00',
+      vat_rate: '5',
+      price_reference_status: 'matched',
+    }));
+  });
+
+  test('sanitizes only auto-applied pricing before AI cleanup', () => {
+    const autoLine = autoApplyDetectedSourcePricing([{
+      raw_name: 'Auto priced',
+      unit_price: '',
+      vat_rate: '0',
+      customer_unit_price: '12.50',
+      customer_vat_rate: '5',
+    }])[0];
+    const preview = previewWithoutAutoAppliedSourcePricing({
+      _source_pricing_suppressed_by_user: true,
+      lines: [
+        autoLine,
+        { raw_name: 'Staff priced', unit_price: '99.00', vat_rate: '5', customer_unit_price: '10.00' },
+        { raw_name: 'Reference', unit_price: '30.00', vat_rate: '5', price_reference_status: 'matched' },
+      ],
+    });
+
+    expect(preview.lines[0]).toEqual(expect.objectContaining({
+      unit_price: null,
+      vat_rate: null,
+      customer_unit_price: '12.50',
+      customer_vat_rate: '5',
+    }));
+    expect(preview.lines[0]).not.toHaveProperty('_price_applied_from_source');
+    expect(preview).not.toHaveProperty('_source_pricing_suppressed_by_user');
+    expect(preview.lines[1]).toEqual(expect.objectContaining({ unit_price: '99.00', vat_rate: '5' }));
+    expect(preview.lines[2]).toEqual(expect.objectContaining({ unit_price: '30.00', vat_rate: '5' }));
   });
 
   test('changing company clears every company-scoped imported match', () => {
