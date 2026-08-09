@@ -9,6 +9,19 @@ from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.text import slugify
 
+from .gmail_workflow_metrics import (
+    CACHE_STATE_CHOICES,
+    GMAIL_WORKFLOW_EVENT_CHOICES,
+    MAX_METRIC_DURATION_MS,
+    OUTCOME_CODE_CHOICES,
+    SELECTION_MODE_CHOICES,
+    default_metric_contract_versions,
+    default_metric_feature_flags,
+    validate_metric_contract_versions,
+    validate_metric_counts,
+    validate_metric_feature_flags,
+)
+
 
 CONFIRMED_LPO_STATUS_DOWNGRADE_ERROR = (
     "A confirmed LPO cannot be moved back to a non-confirmed status. "
@@ -521,6 +534,32 @@ class GmailInquiryImport(models.Model):
     analysis_attempts = models.PositiveIntegerField(default=0)
     analysis_started_at = models.DateTimeField(null=True, blank=True)
     analyzed_at = models.DateTimeField(null=True, blank=True)
+    # Keep database defaults as well as Python defaults so an older web
+    # process can continue creating imports while a migration-first deployment
+    # promotes the progress-aware application release.
+    analysis_progress_stage = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        db_default="",
+    )
+    analysis_progress_attempt = models.PositiveIntegerField(
+        default=0,
+        db_default=0,
+    )
+    analysis_progress_generation = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        db_default="",
+    )
+    analysis_progress_error_category = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_default="",
+    )
+    analysis_progress_updated_at = models.DateTimeField(null=True, blank=True)
 
     claimed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -594,6 +633,98 @@ class GmailInquiryImport(models.Model):
         return f"Gmail inquiry {self.anchor_message_id} ({self.status})"
 
 
+class GmailInquiryAnalysisJob(models.Model):
+    """Durable, leased execution record for one Gmail analysis generation."""
+
+    STATUS_QUEUED = "queued"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, "Queued"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_SUPERSEDED, "Superseded"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+    ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
+    TERMINAL_STATUSES = (
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+        STATUS_SUPERSEDED,
+        STATUS_CANCELLED,
+    )
+
+    job_uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    gmail_import = models.ForeignKey(
+        GmailInquiryImport,
+        on_delete=models.CASCADE,
+        related_name="analysis_jobs",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="requested_gmail_inquiry_analysis_jobs",
+    )
+    source_fingerprint = models.CharField(max_length=64)
+    result_source_fingerprint = models.CharField(max_length=64, blank=True)
+    analysis_attempt = models.PositiveIntegerField()
+    source_generation = models.CharField(max_length=32)
+    force_requested = models.BooleanField(default=False)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_QUEUED,
+        db_index=True,
+    )
+    progress_stage = models.CharField(max_length=40, default="queued")
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    lease_owner = models.CharField(max_length=128, blank=True)
+    lease_token = models.CharField(max_length=64, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    safe_error_category = models.CharField(max_length=64, blank=True)
+    queued_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+        indexes = [
+            models.Index(
+                fields=["status", "queued_at"],
+                name="gmail_job_status_queued_idx",
+            ),
+            models.Index(
+                fields=["gmail_import", "created_at"],
+                name="gmail_job_imp_created_idx",
+            ),
+            models.Index(
+                fields=["status", "lease_expires_at"],
+                name="gmail_job_status_lease_idx",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["gmail_import", "source_generation"],
+                name="uniq_gmail_analysis_import_generation",
+            ),
+            models.UniqueConstraint(
+                fields=["gmail_import"],
+                condition=models.Q(status__in=("queued", "running")),
+                name="uniq_active_gmail_analysis_job",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Gmail analysis job {self.job_uuid} ({self.status})"
+
+
 class GmailInquiryHandoffToken(models.Model):
     """One short-lived, one-way token digest for a Gmail intake handoff."""
 
@@ -612,6 +743,89 @@ class GmailInquiryHandoffToken(models.Model):
         indexes = [
             models.Index(fields=["gmail_import", "expires_at"]),
         ]
+
+
+class GmailWorkflowMetricQuerySet(models.QuerySet):
+    def bulk_create(self, objs, *args, **kwargs):
+        for obj in objs:
+            obj.full_clean()
+        return super().bulk_create(objs, *args, **kwargs)
+
+    def update(self, **kwargs):
+        raise ValidationError("Gmail workflow metrics are append-only.")
+
+    def delete(self):
+        raise ValidationError("Gmail workflow metrics are append-only.")
+
+
+class GmailWorkflowMetric(models.Model):
+    """Content-free, append-only event in the employee Gmail funnel.
+
+    ``gmail_import`` provides the internal binding required for duration and
+    funnel analysis. It is intentionally absent from the exportable telemetry
+    envelope produced by ``export_gmail_workflow_metric``.
+    """
+
+    gmail_import = models.ForeignKey(
+        GmailInquiryImport,
+        on_delete=models.CASCADE,
+        related_name="workflow_metrics",
+        db_index=False,
+    )
+    event_name = models.CharField(max_length=40, choices=GMAIL_WORKFLOW_EVENT_CHOICES)
+    duration_ms = models.PositiveBigIntegerField(null=True, blank=True)
+    counts = models.JSONField(default=dict, blank=True, validators=[validate_metric_counts])
+    selection_mode = models.CharField(
+        max_length=30,
+        choices=SELECTION_MODE_CHOICES,
+        blank=True,
+    )
+    cache_state = models.CharField(
+        max_length=20,
+        choices=CACHE_STATE_CHOICES,
+        default="not_applicable",
+    )
+    feature_flags = models.JSONField(
+        default=default_metric_feature_flags,
+        validators=[validate_metric_feature_flags],
+    )
+    outcome_code = models.CharField(
+        max_length=30,
+        choices=OUTCOME_CODE_CHOICES,
+        blank=True,
+    )
+    contract_versions = models.JSONField(
+        default=default_metric_contract_versions,
+        validators=[validate_metric_contract_versions],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = GmailWorkflowMetricQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+        indexes = [
+            models.Index(fields=["event_name", "created_at"]),
+            models.Index(fields=["gmail_import", "created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(duration_ms__isnull=True)
+                    | models.Q(duration_ms__lte=MAX_METRIC_DURATION_MS)
+                ),
+                name="gmail_workflow_metric_duration_bounded",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Gmail workflow metrics are append-only.")
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Gmail workflow metrics are append-only.")
 
 
 class MailboxPOAuditRun(models.Model):

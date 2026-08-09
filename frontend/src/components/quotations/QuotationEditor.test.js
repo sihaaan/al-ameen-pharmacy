@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import QuotationEditor from './QuotationEditor';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 
@@ -89,6 +89,28 @@ const readyQuote = {
   }],
 };
 
+const INITIAL_EMAIL_REVIEW_FINGERPRINT = 'f'.repeat(64);
+const preparedReadyQuote = {
+  ...readyQuote,
+  quotation_review_fingerprint: INITIAL_EMAIL_REVIEW_FINGERPRINT,
+};
+
+const withGmailChainedActions = (sourceQuote = readyQuote) => ({
+  ...sourceQuote,
+  workflow_features: {
+    ...(sourceQuote.workflow_features || {}),
+    gmail_chained_actions: true,
+  },
+});
+
+const withProgressiveLoad = (sourceQuote = quote) => ({
+  ...sourceQuote,
+  workflow_features: {
+    ...(sourceQuote.workflow_features || {}),
+    quotation_editor_progressive_load: true,
+  },
+});
+
 const priceContext = (product, productName, price) => ({
   product,
   product_name: productName,
@@ -128,8 +150,12 @@ const priceContext = (product, productName, price) => ({
 
 const deferred = () => {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 };
 
 describe('QuotationEditor Product price context', () => {
@@ -192,6 +218,83 @@ describe('QuotationEditor Product price context', () => {
     expect(toggle.closest('.qm-terms-toggle-control')).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'Brand' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Brand for Imported gloves')).not.toBeInTheDocument();
+  });
+
+  test('consumes an exact one-shot Gmail handoff and opens only the existing hardened preview', async () => {
+    const onInitialEmailReviewHandled = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: preparedReadyQuote });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        initialEmailReviewFingerprint={INITIAL_EMAIL_REVIEW_FINGERPRINT}
+        onInitialEmailReviewHandled={onInitialEmailReviewHandled}
+      />
+    );
+
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(dialog).toBeInTheDocument();
+    expect(onInitialEmailReviewHandled).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: INITIAL_EMAIL_REVIEW_FINGERPRINT,
+    });
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('consumes but rejects a one-shot Gmail handoff when the loaded quotation fingerprint differs', async () => {
+    const onInitialEmailReviewHandled = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...preparedReadyQuote,
+        quotation_review_fingerprint: 'e'.repeat(64),
+      },
+    });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        initialEmailReviewFingerprint={INITIAL_EMAIL_REVIEW_FINGERPRINT}
+        onInitialEmailReviewHandled={onInitialEmailReviewHandled}
+      />
+    );
+
+    expect(await screen.findByText(/quotation changed before the email review opened/i)).toBeInTheDocument();
+    expect(onInitialEmailReviewHandled).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+  });
+
+  test('suppresses the one-shot preview when a local price changes during its authoritative refresh', async () => {
+    const refreshRequest = deferred();
+    quotationAPI.quotes.retrieve
+      .mockResolvedValueOnce({ data: preparedReadyQuote })
+      .mockReturnValueOnce(refreshRequest.promise);
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        initialEmailReviewFingerprint={INITIAL_EMAIL_REVIEW_FINGERPRINT}
+        onInitialEmailReviewHandled={jest.fn()}
+      />
+    );
+
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    await waitFor(() => expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2));
+    fireEvent.change(priceInput, { target: { value: '11.00' } });
+    await act(async () => {
+      refreshRequest.resolve({ data: preparedReadyQuote });
+      await refreshRequest.promise;
+    });
+
+    expect(await screen.findByText(/quotation lines changed while the email review was being prepared/i)).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
   });
 
   test('shows the saved Brand column and line snapshot when enabled', async () => {
@@ -402,6 +505,234 @@ describe('QuotationEditor Product price context', () => {
     }));
     expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+  });
+
+  test('keeps the existing Finalize action unless the strict server flag is true', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...readyQuote,
+        workflow_features: { gmail_chained_actions: 'true' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect((await screen.findAllByRole('button', { name: 'Finalize' })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
+  });
+
+  test('saves only changed lines once and previews the authoritative returned fingerprint', async () => {
+    const initialQuote = withGmailChainedActions({
+      ...readyQuote,
+      subtotal: '30.00',
+      total: '30.00',
+      lines: [
+        readyQuote.lines[0],
+        {
+          ...readyQuote.lines[0],
+          id: 32,
+          sort_order: 1,
+          product: 12,
+          product_name: 'Gloves B',
+          item_name_snapshot: 'Imported masks',
+          unit_price: '20.00',
+        },
+      ],
+    });
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      subtotal: '32.00',
+      total: '32.00',
+      lines: [
+        { ...initialQuote.lines[0], unit_price: '12.00' },
+        initialQuote.lines[1],
+      ],
+    };
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    const reviewButton = (await screen.findAllByRole('button', { name: 'Review Email' }))[0];
+    fireEvent.click(reviewButton);
+    fireEvent.click(reviewButton);
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      lines: [expect.objectContaining({
+        id: 31,
+        product: 11,
+        item_name_snapshot: 'Imported gloves',
+        quantity: '1.000',
+        unit: 'box',
+        unit_price: '12',
+        vat_rate: '0',
+        match_status: 'confirmed',
+      })],
+    }));
+    expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+
+    await act(async () => {
+      saveRequest.resolve({ data: { quotation: savedQuote } });
+      await saveRequest.promise;
+    });
+
+    await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('preserves edits made during a chained save and requires a fresh review action', async () => {
+    const initialQuote = withGmailChainedActions();
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      subtotal: '12.00',
+      total: '12.00',
+      lines: [{ ...initialQuote.lines[0], unit_price: '12.00' }],
+    };
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    fireEvent.change(priceInput, { target: { value: '12' } });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(priceInput, { target: { value: '13' } });
+    await act(async () => {
+      saveRequest.resolve({ data: { quotation: savedQuote } });
+      await saveRequest.promise;
+    });
+
+    expect(await screen.findByText(/saved response was applied without discarding your newer edits/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(13);
+    expect(screen.getByText('1 unsaved line change(s)')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+  });
+
+  test('discards a chained preview response when lines change while it is loading', async () => {
+    const initialQuote = withGmailChainedActions();
+    const previewRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: initialQuote });
+    quotationAPI.quotes.emailPreview.mockReturnValueOnce(previewRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+    await waitFor(() => expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), {
+      target: { value: '13' },
+    });
+    await act(async () => {
+      previewRequest.resolve({ data: {} });
+      await previewRequest.promise;
+    });
+
+    expect(await screen.findByText(/lines changed while the email review was being prepared/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+  });
+
+  test('does not open an email preview when the chained line save fails', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: { detail: 'The quotation line could not be saved.' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+
+    await waitFor(() => expect(screen.getAllByText('The quotation line could not be saved.').length).toBeGreaterThan(0));
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  test('refreshes stale chained saves without opening an email preview', async () => {
+    const staleQuote = {
+      ...withGmailChainedActions(),
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...readyQuote.lines[0],
+        item_name_snapshot: 'Changed by another employee',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed in another session.',
+          quote: staleQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+
+    expect(await screen.findByText('The quotation changed in another session.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
+  });
+
+  test('does not preview a chained action that finishes saving after unmount', async () => {
+    const saveRequest = deferred();
+    const initialQuote = withGmailChainedActions();
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{ ...initialQuote.lines[0], unit_price: '12.00' }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    const { unmount } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Review Email' }))[0]);
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+    unmount();
+
+    await act(async () => {
+      saveRequest.resolve({ data: { quotation: savedQuote } });
+      await saveRequest.promise;
+    });
+
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
   });
 
   test('refreshes a remotely changed quotation and requires a second explicit preview action', async () => {
@@ -1587,5 +1918,391 @@ describe('QuotationEditor Product price context', () => {
 
     expect(screen.getByText('Q-0022')).toBeInTheDocument();
     expect(screen.queryByText('Q-0021')).not.toBeInTheDocument();
+  });
+
+  test('renders the progressive editor shell before supporting datasets and unlocks each dependent control independently', async () => {
+    const fullCatalogue = deferred();
+    const companyCatalogue = deferred();
+    const companiesRequest = deferred();
+    const contactsRequest = deferred();
+    const lposRequest = deferred();
+    const historyRequest = deferred();
+    const progressiveQuote = withProgressiveLoad({
+      ...readyQuote,
+      status: 'approved',
+      status_display: 'Approved',
+      contact: 71,
+      contact_name: 'Buyer A',
+      lines: [{ ...readyQuote.lines[0], unit_price: '' }],
+    });
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: progressiveQuote });
+    quotationAPI.items.list.mockImplementation((params) => (
+      params?.company_used ? companyCatalogue.promise : fullCatalogue.promise
+    ));
+    quotationAPI.companies.list.mockReturnValue(companiesRequest.promise);
+    quotationAPI.contacts.list.mockReturnValue(contactsRequest.promise);
+    quotationAPI.quotes.lpos.mockReturnValue(lposRequest.promise);
+    quotationAPI.quotes.productPrices.mockReturnValue(historyRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    const priceInput = screen.getByLabelText('Unit price for Imported gloves');
+    const quantityInput = screen.getByLabelText('Quantity for Imported gloves');
+    const productSelect = screen.getByLabelText('Product for Imported gloves');
+    const companySelect = screen.getByRole('option', { name: 'Customer A' }).closest('select');
+    const contactSelect = screen.getByRole('option', { name: 'Buyer A' }).closest('select');
+
+    expect(priceInput).toBeEnabled();
+    expect(quantityInput).toBeEnabled();
+    expect(productSelect).toBeDisabled();
+    expect(companySelect).toBeDisabled();
+    expect(contactSelect).toBeDisabled();
+    expect(within(productSelect).getByRole('option', { name: 'Gloves A' })).toBeInTheDocument();
+    expect(screen.getByText('Product catalogue and images: Loading')).toBeInTheDocument();
+    expect(screen.getByText('Company directory: Loading')).toBeInTheDocument();
+    expect(screen.getByText('Company contacts: Loading')).toBeInTheDocument();
+    expect(screen.getByText('Loading LPO records...')).toBeInTheDocument();
+    expect(screen.queryByText('No LPO recorded')).not.toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(priceInput));
+
+    await act(async () => companiesRequest.resolve({
+      data: [{ id: 7, name: 'Customer A' }, { id: 8, name: 'Customer B' }],
+    }));
+    await waitFor(() => expect(companySelect).toBeEnabled());
+    expect(productSelect).toBeDisabled();
+    expect(contactSelect).toBeDisabled();
+
+    await act(async () => fullCatalogue.resolve({ data: products }));
+    await waitFor(() => expect(productSelect).toBeEnabled());
+    expect(contactSelect).toBeDisabled();
+
+    await act(async () => contactsRequest.resolve({
+      data: [{ id: 71, company: 7, name: 'Buyer A' }],
+    }));
+    await waitFor(() => expect(contactSelect).toBeEnabled());
+
+    await act(async () => lposRequest.resolve({ data: [] }));
+    expect(await screen.findByText('No LPO recorded')).toBeInTheDocument();
+
+    await act(async () => {
+      companyCatalogue.resolve({ data: [products[0]] });
+      historyRequest.resolve({ data: { results: { 11: priceContext(11, 'Gloves A', 10) } } });
+    });
+    await waitFor(() => expect(screen.queryByLabelText('Supporting quotation data status')).not.toBeInTheDocument());
+  });
+
+  test('keeps progressive selling prices blank and history review on demand for existing and new lines', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withProgressiveLoad(quote) });
+    quotationAPI.quotes.productPrice.mockResolvedValueOnce({
+      data: priceContext(11, 'Gloves A', 10),
+    });
+
+    const { container } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const existingProduct = await screen.findByLabelText('Product for Imported gloves');
+    fireEvent.change(existingProduct, { target: { value: '11' } });
+
+    const existingPrice = screen.getByLabelText('Unit price for Imported gloves');
+    await waitFor(() => expect(screen.getByText(/Last quoted AED 10/)).toBeInTheDocument());
+    expect(existingPrice).toHaveValue(null);
+    expect(screen.queryByRole('dialog', { name: /price history/i })).not.toBeInTheDocument();
+
+    const newLineProduct = container.querySelector('.qm-add-line select');
+    fireEvent.change(newLineProduct, { target: { value: '12' } });
+    expect(screen.getByPlaceholderText('Price')).toHaveValue(null);
+    expect(quotationAPI.quotes.productPrice).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog', { name: /price history/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'View price history' }));
+    expect(screen.getByRole('dialog', { name: /price history/i })).toBeInTheDocument();
+  });
+
+  test('does not let the initial progressive history batch overwrite a newer Product hint', async () => {
+    const catalogueRequest = deferred();
+    const initialHistoryRequest = deferred();
+    const progressiveQuote = withProgressiveLoad({
+      ...readyQuote,
+      lines: [{ ...readyQuote.lines[0], unit_price: '' }],
+    });
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: progressiveQuote });
+    quotationAPI.items.list.mockImplementation((params) => (
+      params?.company_used
+        ? Promise.resolve({ data: [products[0]] })
+        : catalogueRequest.promise
+    ));
+    quotationAPI.quotes.productPrices.mockReturnValue(initialHistoryRequest.promise);
+    quotationAPI.quotes.productPrice.mockResolvedValueOnce({
+      data: priceContext(12, 'Gloves B', 22),
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const productSelect = await screen.findByLabelText('Product for Imported gloves');
+    expect(productSelect).toBeDisabled();
+    await act(async () => catalogueRequest.resolve({ data: products }));
+    await waitFor(() => expect(productSelect).toBeEnabled());
+
+    fireEvent.change(productSelect, { target: { value: '12' } });
+    expect(await screen.findByText(/Last quoted AED 22/)).toBeInTheDocument();
+
+    await act(async () => initialHistoryRequest.resolve({
+      data: { results: { 11: priceContext(11, 'Gloves A', 10) } },
+    }));
+
+    expect(screen.getByText(/Last quoted AED 22/)).toBeInTheDocument();
+    expect(screen.queryByText(/Last quoted AED 10/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(null);
+
+    fireEvent.click(screen.getByRole('button', { name: 'View price history' }));
+    const dialog = screen.getByRole('dialog', { name: /price history/i });
+    expect(within(dialog).getByText(/Gloves B/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Gloves A/)).not.toBeInTheDocument();
+  });
+
+  test('does not cache a Product price response after switching to another quotation', async () => {
+    const quoteAHistory = deferred();
+    const quoteB = {
+      ...quote,
+      id: 22,
+      quotation_number: 'Q-0022',
+      company: 8,
+      company_name: 'Customer B',
+      lines: [{
+        ...quote.lines[0],
+        id: 41,
+        item_name_snapshot: 'Imported masks',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockImplementation((id) => Promise.resolve({
+      data: Number(id) === 21 ? quote : quoteB,
+    }));
+    quotationAPI.quotes.productPrice.mockImplementation((id) => (
+      Number(id) === 21
+        ? quoteAHistory.promise
+        : Promise.resolve({ data: priceContext(11, 'Company B Gloves', 30) })
+    ));
+
+    const { rerender } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+
+    rerender(<QuotationEditor quoteId={22} onClose={jest.fn()} />);
+    expect(await screen.findByText('Q-0022')).toBeInTheDocument();
+    const quoteBProduct = await screen.findByLabelText('Product for Imported masks');
+    fireEvent.change(quoteBProduct, { target: { value: '11' } });
+
+    const quoteBPrice = screen.getByLabelText('Unit price for Imported masks');
+    await waitFor(() => expect(quoteBPrice).toHaveValue(30));
+    let dialog = await screen.findByRole('dialog', { name: /price history/i });
+    expect(within(dialog).getByText(/Company B Gloves/)).toBeInTheDocument();
+
+    await act(async () => quoteAHistory.resolve({
+      data: priceContext(11, 'Company A Gloves', 10),
+    }));
+    expect(quoteBPrice).toHaveValue(30);
+    expect(within(dialog).queryByText(/Company A Gloves/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    fireEvent.change(quoteBProduct, { target: { value: '' } });
+    fireEvent.change(quoteBPrice, { target: { value: '' } });
+    fireEvent.change(quoteBProduct, { target: { value: '11' } });
+
+    await waitFor(() => expect(quoteBPrice).toHaveValue(30));
+    dialog = await screen.findByRole('dialog', { name: /price history/i });
+    expect(within(dialog).getByText(/Company B Gloves/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Company A Gloves/)).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.productPrice).toHaveBeenCalledTimes(2);
+  });
+
+  test('requires the progressive feature flag to be the exact boolean true', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        workflow_features: { quotation_editor_progressive_load: 'true' },
+      },
+    });
+    quotationAPI.quotes.productPrice.mockResolvedValueOnce({
+      data: priceContext(11, 'Gloves A', 10),
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+
+    await waitFor(() => expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(10));
+    expect(screen.getByRole('dialog', { name: /price history/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Supporting quotation data status')).not.toBeInTheDocument();
+  });
+
+  test('focuses the first blank price once and advances only to later rendered blank prices', async () => {
+    const line = (id, sortOrder, name, unitPrice, matchStatus = 'confirmed') => ({
+      ...readyQuote.lines[0],
+      id,
+      sort_order: sortOrder,
+      item_name_snapshot: name,
+      product_name: name,
+      unit_price: unitPrice,
+      match_status: matchStatus,
+    });
+    const progressiveQuote = withProgressiveLoad({
+      ...readyQuote,
+      lines: [
+        line(31, 0, 'First blank', ''),
+        line(32, 1, 'Filled price', '4.00'),
+        line(33, 2, 'Second blank', ''),
+        line(34, 3, 'Last blank', ''),
+        line(35, 4, 'Skipped blank', '', 'ignored'),
+      ],
+    });
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: progressiveQuote });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const first = await screen.findByLabelText('Unit price for First blank');
+    const second = screen.getByLabelText('Unit price for Second blank');
+    const last = screen.getByLabelText('Unit price for Last blank');
+    await waitFor(() => expect(document.activeElement).toBe(first));
+
+    const forwardTab = createEvent.keyDown(first, { key: 'Tab' });
+    fireEvent(first, forwardTab);
+    expect(forwardTab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(second);
+
+    const reverseTab = createEvent.keyDown(second, { key: 'Tab', shiftKey: true });
+    fireEvent(second, reverseTab);
+    expect(reverseTab.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(second);
+
+    const enter = createEvent.keyDown(second, { key: 'Enter' });
+    fireEvent(second, enter);
+    expect(enter.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
+
+    const finalTab = createEvent.keyDown(last, { key: 'Tab' });
+    fireEvent(last, finalTab);
+    expect(finalTab.defaultPrevented).toBe(false);
+
+    const quantity = screen.getByLabelText('Quantity for First blank');
+    quantity.focus();
+    fireEvent.change(screen.getByDisplayValue('Active lines'), { target: { value: 'all' } });
+    expect(document.activeElement).toBe(quantity);
+  });
+
+  test('focuses a new quotation once its blank row becomes visible through the persisted filter', async () => {
+    const quoteA = withProgressiveLoad(readyQuote);
+    const quoteB = withProgressiveLoad({
+      ...quote,
+      id: 22,
+      quotation_number: 'Q-0022',
+      lines: [{
+        ...quote.lines[0],
+        id: 41,
+        item_name_snapshot: 'Hidden blank row',
+      }],
+    });
+    quotationAPI.quotes.retrieve.mockImplementation((id) => Promise.resolve({
+      data: Number(id) === 21 ? quoteA : quoteB,
+    }));
+
+    const { rerender } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const lineFilter = await screen.findByDisplayValue('Active lines');
+    fireEvent.change(lineFilter, { target: { value: 'ready' } });
+    expect(lineFilter).toHaveValue('ready');
+
+    rerender(<QuotationEditor quoteId={22} onClose={jest.fn()} />);
+    expect(await screen.findByText('Q-0022')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Unit price for Hidden blank row')).not.toBeInTheDocument();
+
+    const persistedFilter = screen.getByDisplayValue('Ready');
+    fireEvent.change(persistedFilter, { target: { value: 'active' } });
+    const blankPrice = await screen.findByLabelText('Unit price for Hidden blank row');
+    await waitFor(() => expect(document.activeElement).toBe(blankPrice));
+  });
+
+  test('does not focus a blank price when the progressive quotation is locked', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: withProgressiveLoad({
+        ...quote,
+        status: 'finalized',
+        status_display: 'Finalized',
+      }),
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
+    expect(priceInput).toBeDisabled();
+    expect(document.activeElement).not.toBe(priceInput);
+  });
+
+  test('keeps an unrelated initial dataset current while retrying one failed progressive dataset', async () => {
+    const companiesRequest = deferred();
+    const catalogueRetry = deferred();
+    const catalogueFailure = {
+      response: { status: 500, data: { detail: 'Temporary catalogue failure.' } },
+      config: { url: '/quotations/items/' },
+    };
+    let fullCatalogueAttempts = 0;
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withProgressiveLoad(quote) });
+    quotationAPI.companies.list.mockReturnValue(companiesRequest.promise);
+    quotationAPI.items.list.mockImplementation((params) => {
+      if (params?.company_used) return Promise.resolve({ data: [products[0]] });
+      fullCatalogueAttempts += 1;
+      if (fullCatalogueAttempts <= 2) return Promise.reject(catalogueFailure);
+      return catalogueRetry.promise;
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByText(/supporting data is temporarily unavailable/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry missing data' }));
+    expect(await screen.findByRole('button', { name: 'Retrying missing data...' })).toBeDisabled();
+
+    await act(async () => companiesRequest.resolve({
+      data: [{ id: 7, name: 'Customer A' }, { id: 8, name: 'Customer B' }],
+    }));
+    expect(await screen.findByRole('option', { name: 'Customer B' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Customer B' }).closest('select')).toBeEnabled();
+
+    await act(async () => catalogueRetry.resolve({ data: products }));
+    await waitFor(() => expect(screen.queryByText(/supporting data is temporarily unavailable/i)).not.toBeInTheDocument());
+    expect(screen.getByLabelText('Product for Imported gloves')).toBeEnabled();
+  });
+
+  test('marks progressive contacts unavailable after a company-switch failure and recovers with targeted retry', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let companyBContactAttempts = 0;
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withProgressiveLoad(quote) });
+    quotationAPI.companies.list.mockResolvedValueOnce({
+      data: [{ id: 7, name: 'Customer A' }, { id: 8, name: 'Customer B' }],
+    });
+    quotationAPI.contacts.list.mockImplementation(({ company }) => {
+      if (String(company) === '7') return Promise.resolve({ data: [] });
+      companyBContactAttempts += 1;
+      if (companyBContactAttempts === 1) {
+        return Promise.reject({
+          response: { status: 400, data: { detail: 'Contacts unavailable.' } },
+          config: { url: '/quotations/contacts/?company=8' },
+        });
+      }
+      return Promise.resolve({ data: [{ id: 81, company: 8, name: 'Buyer B' }] });
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const companyBOption = await screen.findByRole('option', { name: 'Customer B' });
+    fireEvent.change(companyBOption.closest('select'), { target: { value: '8' } });
+
+    expect(await screen.findByText('Company contacts: Unavailable')).toBeInTheDocument();
+    const contactSelect = screen.getByLabelText('Contact / Purchaser');
+    expect(contactSelect).toBeDisabled();
+    expect(screen.getByText(/supporting data is temporarily unavailable/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry missing data' }));
+
+    expect(await screen.findByRole('option', { name: 'Buyer B' })).toBeInTheDocument();
+    await waitFor(() => expect(contactSelect).toBeEnabled());
+    expect(screen.queryByText('Company contacts: Unavailable')).not.toBeInTheDocument();
+    expect(screen.queryByText(/supporting data is temporarily unavailable/i)).not.toBeInTheDocument();
+    expect(companyBContactAttempts).toBe(2);
+    consoleError.mockRestore();
   });
 });
