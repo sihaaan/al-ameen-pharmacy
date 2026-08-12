@@ -57,7 +57,6 @@ MODE_AI_THREAD = "ai_thread"
 ALLOWED_MODES = {
     MODE_CURRENT_MESSAGE,
     MODE_SELECTED_MESSAGES,
-    MODE_AI_THREAD,
 }
 
 logger = logging.getLogger(__name__)
@@ -744,8 +743,11 @@ def _contextual_card(*, summaries, anchor_message_id, action_url):
                     {
                         "textParagraph": {
                             "text": (
-                                "Import the inquiry into Al Ameen. The website will "
-                                "open with the company and item rows ready for review."
+                                "Choose the customer email message(s) that contain the "
+                                "current request. Only checked messages and their "
+                                "eligible attachments are analyzed when you choose "
+                                "Import selected. Choose Current only to analyze just "
+                                "the email you have open."
                             )
                         }
                     },
@@ -761,15 +763,10 @@ def _contextual_card(*, summaries, anchor_message_id, action_url):
                         "buttonList": {
                             "buttons": [
                                 _action_button(
-                                    "Let AI choose",
-                                    MODE_AI_THREAD,
-                                    action_url,
-                                    primary=True,
-                                ),
-                                _action_button(
                                     "Import selected",
                                     MODE_SELECTED_MESSAGES,
                                     action_url,
+                                    primary=True,
                                 ),
                                 _action_button(
                                     "Current only",
@@ -954,6 +951,11 @@ def _selection_mode(event):
     common = event.get("commonEventObject")
     parameters = common.get("parameters") if isinstance(common, dict) else {}
     mode = str((parameters or {}).get("selection_mode") or "").strip()
+    if mode == MODE_AI_THREAD:
+        raise GmailAddonInputError(
+            "AI thread selection is no longer available. Close and reopen the "
+            "add-on, then choose checked messages or Current only."
+        )
     if mode not in ALLOWED_MODES:
         raise GmailAddonInputError("Choose how Gmail should import this inquiry.")
     return mode
@@ -1112,11 +1114,10 @@ def gmail_addon_action(request):
             )
             if mode == MODE_SELECTED_MESSAGES:
                 # Selected IDs are form input, so verify them against a fresh
-                # canonical thread membership read. Current-message and
-                # AI-thread actions need only the canonical anchor identity;
-                # their website analysis performs its own bounded membership
-                # fetch, so repeating the full sidebar summary call here adds
-                # latency without strengthening their selection boundary.
+                # canonical thread membership read. Current-message actions
+                # need only the canonical anchor identity, so repeating the
+                # full sidebar summary call adds latency without strengthening
+                # their selection boundary.
                 stage = "thread_summary"
                 summaries = _fetch_thread_message_summaries(
                     connection,

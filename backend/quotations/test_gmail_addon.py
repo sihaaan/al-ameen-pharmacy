@@ -233,7 +233,7 @@ class GmailAddonEndpointTests(TestCase):
         self.mock_verify_token.assert_not_called()
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
-    def test_contextual_card_has_thread_selection_and_three_import_actions(
+    def test_contextual_card_has_thread_selection_and_user_chosen_actions(
         self,
         mock_fetch_summaries,
     ):
@@ -275,15 +275,21 @@ class GmailAddonEndpointTests(TestCase):
         buttons = widgets[2]["buttonList"]["buttons"]
         self.assertEqual(
             [button["text"] for button in buttons],
-            ["Let AI choose", "Import selected", "Current only"],
+            ["Import selected", "Current only"],
         )
         self.assertEqual(
             [
                 button["onClick"]["action"]["parameters"][0]["value"]
                 for button in buttons
             ],
-            ["ai_thread", "selected_messages", "current_message"],
+            ["selected_messages", "current_message"],
         )
+        self.assertEqual(
+            buttons[0]["color"],
+            {"red": 0.05, "green": 0.55, "blue": 0.50},
+        )
+        self.assertNotIn("Let AI choose", response.content.decode("utf-8"))
+        self.assertNotIn("ai_thread", response.content.decode("utf-8"))
         self.assertTrue(
             all(
                 button["onClick"]["action"]["function"] == ACTION_URL
@@ -867,7 +873,7 @@ class GmailAddonEndpointTests(TestCase):
         self.mock_fetch_identity.side_effect = self.real_fetch_message_identity
         response = self._post(
             "quotation-gmail-addon-action",
-            self._event(mode="ai_thread"),
+            self._event(mode="current_message"),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -1013,7 +1019,7 @@ class GmailAddonEndpointTests(TestCase):
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
     @patch("quotations.gmail_addon._issue_handoff")
-    def test_current_and_ai_modes_map_to_core_service_without_callback_ai(
+    def test_current_mode_maps_to_core_service_and_ignores_checked_messages(
         self,
         mock_issue_handoff,
         mock_fetch_summaries,
@@ -1026,25 +1032,20 @@ class GmailAddonEndpointTests(TestCase):
         mock_fetch_summaries.return_value = [
             {"message_id": CANONICAL_MESSAGE_ID, "label": "Current"}
         ]
-        mock_issue_handoff.side_effect = [
-            (object(), "current-handoff"),
-            (object(), "ai-handoff"),
-        ]
+        mock_issue_handoff.return_value = (object(), "current-handoff")
 
         current_response = self._post(
             "quotation-gmail-addon-action",
-            self._event(mode="current_message"),
-        )
-        ai_response = self._post(
-            "quotation-gmail-addon-action",
-            self._event(mode="ai_thread"),
+            self._event(
+                mode="current_message",
+                selected=["msg-f:older", CANONICAL_MESSAGE_ID],
+            ),
         )
 
         self.assertEqual(current_response.status_code, 200)
-        self.assertEqual(ai_response.status_code, 200)
-        self.assertEqual(mock_issue_handoff.call_count, 2)
+        self.assertEqual(mock_issue_handoff.call_count, 1)
         self.assertEqual(
-            mock_issue_handoff.call_args_list[0].kwargs,
+            mock_issue_handoff.call_args.kwargs,
             {
                 "anchor_message_id": CANONICAL_MESSAGE_ID,
                 "gmail_thread_id": CANONICAL_THREAD_ID,
@@ -1053,17 +1054,30 @@ class GmailAddonEndpointTests(TestCase):
                 "ttl_seconds": 1800,
             },
         )
-        self.assertEqual(
-            mock_issue_handoff.call_args_list[1].kwargs,
-            {
-                "anchor_message_id": CANONICAL_MESSAGE_ID,
-                "gmail_thread_id": CANONICAL_THREAD_ID,
-                "mode": "ai_thread",
-                "selected_message_ids": [],
-                "ttl_seconds": 1800,
-            },
-        )
         mock_fetch_summaries.assert_not_called()
+
+    @patch("quotations.gmail_addon._shared_connection")
+    @patch("quotations.gmail_addon._fetch_message_identity")
+    @patch("quotations.gmail_addon._issue_handoff")
+    def test_cached_ai_thread_action_is_rejected_before_mailbox_or_handoff(
+        self,
+        mock_issue_handoff,
+        mock_fetch_identity,
+        mock_shared_connection,
+    ):
+        response = self._post(
+            "quotation-gmail-addon-action",
+            self._event(mode="ai_thread"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        notification = response.json()["renderActions"]["action"]["notification"]["text"]
+        self.assertIn("no longer available", notification.lower())
+        self.assertIn("checked messages", notification.lower())
+        self.assertIn("current only", notification.lower())
+        mock_shared_connection.assert_not_called()
+        mock_fetch_identity.assert_not_called()
+        mock_issue_handoff.assert_not_called()
 
     @patch("quotations.gmail_addon._fetch_thread_message_summaries")
     def test_event_aliases_render_as_one_canonical_message(
