@@ -632,6 +632,10 @@ The reviewed repository exposes these document-parser controls in
   `QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS`,
   `QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS`, and
   `QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS`;
+- `QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED`,
+  `QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS`,
+  `QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS`, and
+  `QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS`;
 - `QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE`,
   `QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS`,
   `QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE`, and
@@ -648,6 +652,15 @@ Product and branding image byte limits are controlled by
 `PRODUCT_IMAGE_MAX_UPLOAD_BYTES` and
 `QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES`; fixed decoded-image ceilings are
 12,000 pixels on either edge, 25 million total pixels, and one frame.
+
+The image-mask settings do not relax ordinary PDF images. They apply only to
+explicit one-bit CCITT Fax `/ImageMask true` streams with matching row/column
+geometry and a bounded wrapper chain. Defaults are 50 million pixels per mask,
+100 million per page, and 200 million across unique objects and cumulative
+page references; each default is also its code-level hard cap. Existing
+decoded-byte, object, stream, page, geometry, render, and output limits remain
+in force. Roll back only this narrow path with
+`QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED=0`; no migration is involved.
 
 Task 2.4 requires additive migration
 `quotations.0036_quotationoutcomepoimport_parsed_meta` before application-code

@@ -355,6 +355,13 @@ not in the repository.
 - Spot-check that new parsed quotation rows have evidence and blank selling prices.
 - Review attachment hard failures and fidelity warnings; compare warning-only
   rows with the visible customer source rather than clearing warnings blindly.
+- If a known scanner PDF unexpectedly fails an embedded-image pixel check,
+  inspect its attachment metadata before changing limits. Separate mask
+  budgets apply only to bounded one-bit CCITT image masks; ordinary images
+  retain the generic limit. Emergency rollback is
+  `QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED=0`, which restores generic
+  mask behavior without disabling any other attachment bound or requiring a
+  migration.
 - Reanalyze any pre-v4 Gmail identity review that displays the matcher-upgrade
   warning; unversioned results are included, and their cleared historical
   company/contact suggestion must not be trusted.

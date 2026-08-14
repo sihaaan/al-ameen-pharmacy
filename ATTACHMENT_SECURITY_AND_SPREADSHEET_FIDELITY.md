@@ -137,6 +137,19 @@ Gmail native analysis may still submit the original byte-identical document to
 the configured provider after all other hard checks pass, and exposes this
 limitation for employee review.
 
+A narrow default-on compatibility profile gives explicit one-bit
+`/ImageMask true` CCITT Fax streams separate pixel budgets. It applies only
+when the effective bits per component is one, explicit `/Columns` and `/Rows`
+match the image, CCITT parameters are bounded, no color space or nested mask
+is present, and any wrapper filters pass the existing bounded allowlist. DCT,
+JPX, JBIG2, unsupported or malformed filters, ordinary grayscale/RGB/CMYK
+images, and masks outside that profile retain the generic 25-million-pixel
+boundary. Mask decoded bytes include per-row byte padding and still share the
+existing per-stream, page decoded-byte, object, stream, geometry, render, and
+output limits. If any qualifying relaxed-mask object exists anywhere in the
+document, every page containing Pattern, Type3, annotation-appearance,
+soft-mask, or nested image-mask render paths fails closed.
+
 Each embedded image must remain within the decoded image ceiling. A document
 whose aggregate estimated image memory exceeds the decoded-stream aggregate
 limit receives a warning rather than a hard rejection so ordinary multi-page
@@ -206,6 +219,10 @@ The canonical examples for document-parser settings are in
 | `QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS` | 16,000,000; clamped to 32,000,000 | Effective PDF page area |
 | `QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS` | 25,000,000; clamped to 50,000,000 | One locally rasterized PDF page |
 | `QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS` | 25,000,000; clamped to 50,000,000 | One embedded PDF image |
+| `QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED` | enabled | Strict rollback gate for the narrow CCITT one-bit image-mask profile |
+| `QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS` | 50,000,000; hard-clamped to the same value | One eligible one-bit CCITT image mask |
+| `QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS` | 100,000,000; hard-clamped to the same value | Eligible one-bit CCITT masks referenced by one page |
+| `QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS` | 200,000,000; hard-clamped to the same value | Eligible one-bit CCITT mask objects and cumulative page references in one document |
 | `QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE` | 250,000; clamped to 1,000,000 | Extracted/OCR characters per page |
 | `QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS` | 1,000,000; clamped to 4,000,000 | Aggregate extracted/OCR characters |
 | `QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE` | 50,000; clamped to 200,000 | Extracted words per page |
@@ -268,6 +285,10 @@ must revert inspection call sites and their tests together; it weakens
 attachment defenses and therefore requires an explicit security decision.
 Re-run a fresh preview after rollback rather than trusting results produced
 under a different inspection contract.
+To disable only the image-mask compatibility profile without removing the
+generic attachment defenses, set
+`QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED=0`. This restores the generic
+image-pixel limit for masks immediately and requires no migration.
 
 ## 9. Residual risks and non-claims
 
