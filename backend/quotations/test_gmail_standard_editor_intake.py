@@ -9,9 +9,10 @@ from .workflow_features import (
 class GmailStandardEditorIntakeFeatureTests(SimpleTestCase):
     @override_settings(
         QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
         QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=True,
     )
-    def test_feature_is_projected_when_review_ui_v2_is_enabled(self):
+    def test_feature_is_projected_when_both_safety_foundations_are_enabled(self):
         self.assertIs(
             quotation_workflow_features()["gmail_standard_editor_intake"],
             True,
@@ -20,6 +21,7 @@ class GmailStandardEditorIntakeFeatureTests(SimpleTestCase):
 
     @override_settings(
         QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=False,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
         QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=True,
     )
     def test_feature_fails_closed_without_review_ui_v2(self):
@@ -30,6 +32,19 @@ class GmailStandardEditorIntakeFeatureTests(SimpleTestCase):
 
     @override_settings(
         QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=False,
+        QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=True,
+    )
+    def test_feature_fails_closed_without_stale_bound_chained_actions(self):
+        features = quotation_workflow_features()
+
+        self.assertIs(features["gmail_chained_actions"], False)
+        self.assertIs(features["gmail_standard_editor_intake"], False)
+        self.assertIs(gmail_standard_editor_intake_enabled(), False)
+
+    @override_settings(
+        QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
         QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED=True,
         QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=True,
     )
@@ -39,7 +54,10 @@ class GmailStandardEditorIntakeFeatureTests(SimpleTestCase):
         self.assertIs(features["gmail_standard_editor_intake"], True)
         self.assertIs(features["gmail_unified_workspace"], True)
 
-    @override_settings(QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True)
+    @override_settings(
+        QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
+        QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
+    )
     def test_projection_requires_a_strict_boolean_true(self):
         for configured_value, expected in (
             (True, True),

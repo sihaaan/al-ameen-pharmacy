@@ -41,13 +41,13 @@ def quotation_workflow_features():
         features["gmail_unified_workspace"]
         and features["gmail_review_ui_v2"]
     )
-    # The standard editor intake retains the same persisted company-review
-    # safety boundary. Frontends give this route precedence over the optional
-    # unified workspace while both projections remain available for a
-    # configuration-only rollback.
+    # The standard editor intake combines persisted company approval with a
+    # stale-bound approve/save/confirm sequence. Fail closed unless both
+    # safety foundations are active; a partial rollout keeps the prior route.
     features["gmail_standard_editor_intake"] = bool(
         features["gmail_standard_editor_intake"]
         and features["gmail_review_ui_v2"]
+        and features["gmail_chained_actions"]
     )
     # Durable jobs always expose the same content-free progress contract so a
     # polling browser never has to reload full email evidence. This implication

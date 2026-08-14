@@ -74,6 +74,29 @@ jest.mock('./CompanySelectWithCreate', () => ({
   ),
 }));
 
+jest.mock('./QuotationEditor', () => ({
+  __esModule: true,
+  default: ({ quoteId, onOpenGmailImport, onReviewOutcome, gmailEvidenceVisible }) => (
+    <section aria-label="Embedded standard quotation editor">
+      <h3>Standard quotation editor #{quoteId}</h3>
+      <button type="button" onClick={() => onOpenGmailImport?.(31)}>
+        {gmailEvidenceVisible ? 'Hide Gmail evidence' : 'View Gmail evidence'}
+      </button>
+      <button type="button" onClick={() => onReviewOutcome?.(quoteId)}>Review outcome</button>
+    </section>
+  ),
+}));
+
+jest.mock('./QuotationOutcomeReview', () => ({
+  __esModule: true,
+  default: ({ quoteId, onBack }) => (
+    <section aria-label="Embedded quotation outcome review">
+      <h3>Quotation outcome #{quoteId}</h3>
+      <button type="button" onClick={onBack}>Back to quotation editor</button>
+    </section>
+  ),
+}));
+
 const baseRecord = {
   id: 31,
   status: 'review_required',
@@ -682,28 +705,49 @@ describe('GmailInquiryReview', () => {
     expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).not.toHaveBeenCalled();
   });
 
-  test('uses compact company intake then opens the normal quotation instead of the unified pricing table', async () => {
+  test('confirms the company once and unlocks the standard quotation editor on the same page', async () => {
     const onOpenQuote = jest.fn();
-    const record = standardEditorRecord();
+    const record = standardEditorRecord(reviewedRecord, {
+      identity_review_approved: false,
+    });
+    const approvedRecord = {
+      ...record,
+      identity_review_approved: true,
+    };
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: approvedRecord });
     quotationAPI.gmailInquiryImports.confirm.mockResolvedValueOnce({
-      data: { ...record, status: 'confirmed', quotation_id: 99 },
+      data: { ...approvedRecord, status: 'confirmed', quotation_id: 99 },
     });
 
     render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
 
     expect(await screen.findByRole('heading', {
-      name: '2. Request ready for the standard quotation editor',
+      name: '2. Quotation lines',
     })).toBeInTheDocument();
-    expect(screen.getByText('1 verified request row ready')).toBeInTheDocument();
+    expect(screen.getByText(/1 request row loaded/i)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '1. Confirm customer identity' })).toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'Product Decision' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('columnheader', { name: 'Our Unit Price' })).not.toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: /Unit Price/i })).toBeInTheDocument();
     expect(screen.queryByLabelText('Requested item row 1')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save reviewed rows' })).not.toBeInTheDocument();
+    const lockedEditor = screen.getByRole('group', {
+      name: 'Quotation editor locked until company confirmation',
+    });
+    expect(lockedEditor).toBeDisabled();
+    within(lockedEditor).getAllByRole('button').forEach((button) => expect(button).toBeDisabled());
+    expect(within(lockedEditor).getByRole('button', { name: 'Finalize' })).toBeDisabled();
+    expect(within(lockedEditor).queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
     expect(quotationAPI.items.list).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create & Open Standard Quotation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm company & unlock quotation' }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      suggested: false,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+    }));
 
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(31, {
       company: '7',
@@ -715,7 +759,143 @@ describe('GmailInquiryReview', () => {
       selected_source_keys: ['attachment:opaque-1'],
     }));
     expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).not.toHaveBeenCalled();
-    expect(onOpenQuote).toHaveBeenCalledWith(99);
+    expect(onOpenQuote).not.toHaveBeenCalled();
+    expect(await screen.findByRole('heading', { name: 'Standard quotation editor #99' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '1. Confirmed customer identity' })).toBeInTheDocument();
+  });
+
+  test('prevents a double company-confirm click from creating duplicate quotations', async () => {
+    const record = standardEditorRecord(reviewedRecord, {
+      identity_review_approved: false,
+    });
+    const approvedRecord = { ...record, identity_review_approved: true };
+    const approval = deferred();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.approveCompany.mockReturnValueOnce(approval.promise);
+    quotationAPI.gmailInquiryImports.confirm.mockResolvedValueOnce({
+      data: { ...approvedRecord, status: 'confirmed', quotation_id: 99 },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const button = await screen.findByRole('button', {
+      name: 'Confirm company & unlock quotation',
+    });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      approval.resolve({ data: approvedRecord });
+      await approval.promise;
+    });
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole('heading', { name: 'Standard quotation editor #99' })).toBeInTheDocument();
+  });
+
+  test('keeps a successful company approval and safely retries quotation unlock after a failure', async () => {
+    const record = standardEditorRecord(reviewedRecord, {
+      identity_review_approved: false,
+    });
+    const approvedRecord = { ...record, identity_review_approved: true };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: approvedRecord });
+    quotationAPI.gmailInquiryImports.confirm
+      .mockRejectedValueOnce(new Error('temporary network failure'))
+      .mockResolvedValueOnce({
+        data: { ...approvedRecord, status: 'confirmed', quotation_id: 99 },
+      });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Confirm company & unlock quotation',
+    }));
+
+    expect(await screen.findByText(/company is confirmed, but the quotation did not unlock/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '2. Quotation lines' })).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry unlocking quotation' }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledTimes(2));
+    expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole('heading', { name: 'Standard quotation editor #99' })).toBeInTheDocument();
+  });
+
+  test('keeps the quotation locked when the approval response is not actually approved', async () => {
+    const record = standardEditorRecord(reviewedRecord, {
+      identity_review_approved: false,
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({
+      data: { ...record, identity_review_approved: false },
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Confirm company & unlock quotation',
+    }));
+
+    expect(await screen.findByText(/server did not confirm the company approval/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+    expect(screen.getByRole('group', {
+      name: 'Quotation editor locked until company confirmation',
+    })).toBeDisabled();
+    expect(screen.queryByRole('heading', { name: /standard quotation editor/i })).not.toBeInTheDocument();
+  });
+
+  test('keeps the quotation locked when the approved response lacks a current safety binding', async () => {
+    const record = standardEditorRecord(reviewedRecord, {
+      identity_review_approved: false,
+    });
+    const approvedWithoutBinding = {
+      ...record,
+      identity_review_approved: true,
+      review_rows_fingerprint: '',
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({
+      data: approvedWithoutBinding,
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Confirm company & unlock quotation',
+    }));
+
+    expect(await screen.findByText(/safety binding is incomplete/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Unlock quotation' })).toBeDisabled();
+  });
+
+  test('does not attempt to create a quotation when analysis returned no usable rows', async () => {
+    const emptySource = {
+      ...reviewedRecord,
+      analysis: {
+        ...reviewedRecord.analysis,
+        preview: { ...reviewedRecord.analysis.preview, lines: [] },
+      },
+    };
+    const record = standardEditorRecord(emptySource, {
+      identity_review_approved: false,
+    });
+    const approvedRecord = { ...record, identity_review_approved: true };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: approvedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Confirm company & unlock quotation',
+    }));
+
+    expect(await screen.findByText(/no usable request rows are available/i)).toBeInTheDocument();
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+    expect(screen.getByText(/no usable request rows are ready yet/i)).toBeInTheDocument();
   });
 
   test('shows only exceptional rows before the standard quotation can be created', async () => {
@@ -749,17 +929,19 @@ describe('GmailInquiryReview', () => {
     render(<GmailInquiryReview importId="31" />);
 
     expect(await screen.findByRole('heading', {
-      name: '2. Review exceptions before opening the quotation',
+      name: 'Source exceptions to resolve before unlocking',
     })).toBeInTheDocument();
     expect(screen.queryByLabelText('Requested item row 1')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Requested item row 2')).toHaveValue('Possible Dressing');
-    expect(screen.getByRole('button', { name: 'Save reviewed rows' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Create & Open Standard Quotation' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Save reviewed rows' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Unlock quotation' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Mark reviewed' }));
-    const saveButton = screen.getByRole('button', { name: 'Save reviewed rows' });
-    expect(saveButton).toBeEnabled();
-    fireEvent.click(saveButton);
+    const saveAndUnlockButton = screen.getByRole('button', {
+      name: 'Save exceptions & unlock quotation',
+    });
+    expect(saveAndUnlockButton).toBeEnabled();
+    fireEvent.click(saveAndUnlockButton);
 
     await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
       review_lines: [{
@@ -777,6 +959,89 @@ describe('GmailInquiryReview', () => {
     }));
   });
 
+  test('keeps source-exception controls locked until the employee confirms the company', async () => {
+    const source = standardEditorRecord(baseRecord, {
+      identity_review_approved: false,
+    });
+    const approvedSource = {
+      ...source,
+      identity_review_approved: true,
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: source });
+    quotationAPI.gmailInquiryImports.approveCompany.mockResolvedValueOnce({ data: approvedSource });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const requestedItem = await screen.findByLabelText('Requested item row 1');
+    expect(requestedItem).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Confirm company & review exceptions',
+    }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.approveCompany).toHaveBeenCalledTimes(1));
+    expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Requested item row 1')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeEnabled();
+  });
+
+  test('keeps a sole excluded exception visible so it can be saved or restored', async () => {
+    const source = standardEditorRecord(baseRecord);
+    const excludedLine = {
+      ...baseRecord.analysis.preview.lines[0],
+      included: false,
+    };
+    const savedRecord = standardEditorRecord({
+      ...baseRecord,
+      analysis: {
+        ...baseRecord.analysis,
+        preview: {
+          ...baseRecord.analysis.preview,
+          lines: [excludedLine],
+        },
+      },
+    });
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: source });
+    quotationAPI.gmailInquiryImports.update.mockResolvedValueOnce({ data: savedRecord });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    const requestedItem = await screen.findByLabelText('Requested item row 1');
+    const row = requestedItem.closest('tr');
+    const includeCheckbox = within(row).getByRole('checkbox');
+    fireEvent.click(includeCheckbox);
+
+    await waitFor(() => expect(screen.getByText('Excluded')).toBeInTheDocument());
+    expect(screen.getByLabelText('Requested item row 1')).toBeInTheDocument();
+    const saveButton = await screen.findByRole('button', { name: 'Save reviewed rows' });
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      review_lines: [{
+        row_key: 'row-key-000000000001',
+        raw_name: 'Bandage',
+        quantity: '10.000',
+        unit: 'Pcs',
+        included: false,
+        reviewed: false,
+      }],
+      expected_source_fingerprint: CHAIN_SOURCE_BEFORE,
+      expected_analysis_attempt: 2,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+    }));
+
+    const savedRow = screen.getByText('Excluded').closest('tr');
+    const restoreCheckbox = within(savedRow).getByRole('checkbox');
+    expect(restoreCheckbox).not.toBeChecked();
+    fireEvent.click(restoreCheckbox);
+    expect(restoreCheckbox).toBeChecked();
+    expect(screen.queryByRole('button', { name: 'Save reviewed rows' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeEnabled();
+  });
+
   test('shows every retained source row when a confirmed quotation reopens Gmail evidence', async () => {
     quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
       data: standardEditorRecord(reviewedRecord, {
@@ -788,16 +1053,44 @@ describe('GmailInquiryReview', () => {
 
     render(<GmailInquiryReview importId="31" />);
 
-    expect(await screen.findByRole('heading', { name: '2. Gmail source evidence' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Standard quotation editor #99' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '1. Confirmed customer identity' })).toBeInTheDocument();
-    expect(screen.getByText(/this quotation is already created.*retained read-only/i)).toBeInTheDocument();
+    expect(screen.getByText(/quotation is unlocked below.*evidence remains available/i)).toBeInTheDocument();
     expect(screen.queryByText(/nothing is created automatically/i)).not.toBeInTheDocument();
+    const embeddedEditor = screen.getByRole('region', { name: 'Embedded standard quotation editor' });
+    fireEvent.click(within(embeddedEditor).getByRole('button', { name: 'View Gmail evidence' }));
+    expect(await screen.findByRole('heading', { name: '2. Gmail source evidence' })).toBeInTheDocument();
+    expect(within(embeddedEditor).getByRole('button', { name: 'Hide Gmail evidence' })).toBeInTheDocument();
     expect(screen.getByLabelText('Requested item row 1')).toHaveValue('Sterile Bandage');
     expect(screen.getByLabelText('Requested item row 1')).toBeDisabled();
     expect(screen.getByRole('button', { name: /open source request\.pdf/i })).toBeInTheDocument();
     expect(screen.queryByText(/confirm below to create the draft/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save reviewed rows' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /create.*quotation/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review outcome' }));
+    expect(screen.getByRole('heading', { name: 'Quotation outcome #99' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to quotation editor' }));
+    expect(screen.getByRole('heading', { name: 'Standard quotation editor #99' })).toBeInTheDocument();
+  });
+
+  test('shows confirmed Gmail evidence immediately when opened from its quotation', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: standardEditorRecord(reviewedRecord, {
+        status: 'confirmed',
+        quotation: 99,
+        quotation_id: 99,
+      }),
+    });
+
+    render(<GmailInquiryReview importId="31" initialShowEvidence />);
+
+    expect(await screen.findByRole('heading', { name: '2. Gmail source evidence' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Requested item row 1')).toHaveValue('Sterile Bandage');
+    expect(screen.getByRole('heading', { name: 'Standard quotation editor #99' })).toBeInTheDocument();
+    expect(within(
+      screen.getByRole('region', { name: 'Embedded standard quotation editor' })
+    ).getByRole('button', { name: 'Hide Gmail evidence' })).toBeInTheDocument();
   });
 
   test('keeps backend-rejected quantity boundaries visible as standard-intake exceptions', async () => {
@@ -829,7 +1122,7 @@ describe('GmailInquiryReview', () => {
 
     expect(await screen.findByLabelText('Requested item row 1')).toHaveValue('Large quantity item');
     expect(screen.getByLabelText('Requested item row 2')).toHaveValue('Over-precise item');
-    expect(screen.getByRole('button', { name: 'Create & Open Standard Quotation' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Unlock quotation' })).toBeDisabled();
   });
 
   test('reviews evidence, saves exact row edits, then confirms and opens the returned quotation', async () => {
@@ -2068,11 +2361,12 @@ describe('GmailInquiryReview', () => {
     fireEvent.change(await screen.findByLabelText('Requested item row 1'), {
       target: { value: 'Sterile Bandage' },
     });
-    fireEvent.click(screen.getByRole('button', {
+    const saveAndCreateButton = screen.getByRole('button', {
       name: 'Save Review & Create Quotation',
-    }));
+    });
 
-    expect(await screen.findByText(/missing current safety fingerprints/i)).toBeInTheDocument();
+    expect(saveAndCreateButton).toBeDisabled();
+    expect(screen.getByText(/refresh this Gmail review to restore its current safety binding/i)).toBeInTheDocument();
     expect(quotationAPI.gmailInquiryImports.update).not.toHaveBeenCalled();
     expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
   });
@@ -2110,9 +2404,10 @@ describe('GmailInquiryReview', () => {
 
     render(<GmailInquiryReview importId="31" />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Create Quotation' }));
+    const createButton = await screen.findByRole('button', { name: 'Create Quotation' });
 
-    expect(await screen.findByText(/saved review is no longer current/i)).toBeInTheDocument();
+    expect(createButton).toBeDisabled();
+    expect(screen.getByText(/refresh this Gmail review to restore its current safety binding/i)).toBeInTheDocument();
     expect(quotationAPI.gmailInquiryImports.update).not.toHaveBeenCalled();
     expect(quotationAPI.gmailInquiryImports.confirm).not.toHaveBeenCalled();
   });

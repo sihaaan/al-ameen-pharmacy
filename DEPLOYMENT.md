@@ -461,12 +461,15 @@ immediately by setting the unified-workspace flag to `0`; the old Gmail review
 and quotation editor remain available, and already-created drafts require no
 data reversal.
 
-### Standard Gmail intake into the quotation editor (enabled by default)
+### Standard Gmail intake into the quotation editor (requires safety flags)
 
 `QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=1` keeps the evidence-bound
-Gmail company/source confirmation gate and then opens the resulting draft in
-the established quotation editor. The server projects the feature as enabled
-only when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is also strictly enabled. When
+Gmail company/source confirmation gate and shows a locked preview of the
+established quotation layout directly below it. For a clean request, one
+explicit company-confirm action approves the evidence and creates or reuses the blank-price draft; the
+real quotation editor then unlocks in that same page and URL. The server projects the feature as enabled
+only when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` and
+`QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED` are also strictly enabled. When
 both this flag and `QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` are effective,
 the frontend must give the standard-editor route precedence. The hardened
 unified endpoint remains available but is not selected by that browser route,
@@ -479,6 +482,11 @@ migration, OAuth scope, provider, worker, package, or infrastructure change is
 required. The private quotation-detail response adds only the internal import
 record ID, inquiry subject, and confirmed company/contact display names for the
 editor banner; it never exposes Gmail message/thread IDs, bodies, or tokens.
+Rows that are invalid, uncertain, or missing evidence remain a compact
+pre-creation exception gate and cannot unlock the quotation until an employee
+corrects, approves, or excludes them. A successful company approval followed
+by a failed draft request is safe to retry; the confirmation endpoint remains
+idempotent and cannot create a duplicate quotation.
 Roll back by setting
 `QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=0`: if the unified-workspace
 flag is enabled, the prior unified presentation resumes; otherwise the prior

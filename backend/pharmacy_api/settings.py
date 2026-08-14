@@ -414,8 +414,9 @@ QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED = env_bool(
 )
 # Default Gmail intake presentation: retain the evidence-bound company/row
 # confirmation gate, then continue in the established quotation editor. This
-# is effective only with review UI V2 and takes browser-routing precedence over
-# the optional unified workspace. Set it to false to restore the prior route.
+# is effective only with review UI V2 plus stale-bound chained actions and
+# takes browser-routing precedence over the optional unified workspace. Set it
+# to false to restore the prior route.
 QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED = env_bool(
     "QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED",
     True,

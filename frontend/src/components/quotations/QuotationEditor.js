@@ -305,6 +305,7 @@ const QuotationEditor = ({
   onClose,
   onReviewOutcome,
   onOpenGmailImport,
+  gmailEvidenceVisible = false,
   initialEmailReviewFingerprint = '',
   onInitialEmailReviewHandled,
 }) => {
@@ -2592,6 +2593,9 @@ const QuotationEditor = ({
     || contactSaving
     || actionInFlight
   );
+  const gmailEvidenceActionBlocked = Boolean(
+    !gmailEvidenceVisible && gmailEvidenceNavigationBlocked
+  );
   const gmailEvidenceNavigationHintId = `gmail-evidence-navigation-hint-${quote.id}`;
 
   return (
@@ -2710,15 +2714,15 @@ const QuotationEditor = ({
               <button
                 type="button"
                 className="qm-secondary"
-                disabled={gmailEvidenceNavigationBlocked}
-                aria-describedby={gmailEvidenceNavigationBlocked
+                disabled={gmailEvidenceActionBlocked}
+                aria-describedby={gmailEvidenceActionBlocked
                   ? gmailEvidenceNavigationHintId
                   : undefined}
                 onClick={() => onOpenGmailImport(gmailImportId)}
               >
-                View Gmail evidence
+                {gmailEvidenceVisible ? 'Hide Gmail evidence' : 'View Gmail evidence'}
               </button>
-              {gmailEvidenceNavigationBlocked && (
+              {gmailEvidenceActionBlocked && (
                 <small id={gmailEvidenceNavigationHintId} role="status">
                   Finish the current action, or save or clear unfinished quotation changes before opening Gmail evidence.
                 </small>

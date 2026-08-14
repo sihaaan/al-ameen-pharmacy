@@ -266,6 +266,33 @@ describe('QuotationEditor Product price context', () => {
     )).toBeVisible();
   });
 
+  test('keeps the evidence toggle usable while evidence is already visible', async () => {
+    const onOpenGmailImport = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        gmail_source: { import_id: 74, inquiry_subject: 'RFQ' },
+      },
+    });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        onOpenGmailImport={onOpenGmailImport}
+        gmailEvidenceVisible
+      />
+    );
+
+    const evidenceButton = await screen.findByRole('button', { name: 'Hide Gmail evidence' });
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12.50' },
+    });
+    expect(evidenceButton).toBeEnabled();
+    fireEvent.click(evidenceButton);
+    expect(onOpenGmailImport).toHaveBeenCalledWith(74);
+  });
+
   test('does not show a Gmail source banner for a manual quotation', async () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} onOpenGmailImport={jest.fn()} />);
 

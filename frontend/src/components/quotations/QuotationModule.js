@@ -253,6 +253,7 @@ const QuotationModule = () => {
               onOpenQuote={openQuote}
               onBack={closeGmailReview}
               backLabel={gmailReturnQuoteId ? 'Back to quotation' : 'Back to quotations'}
+              initialShowEvidence={Boolean(gmailReturnQuoteId)}
             />
           ) : reviewingOutcomeQuoteId ? (
             <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} />

@@ -33,10 +33,19 @@ jest.mock('./QuotationEditor', () => ({
 ));
 jest.mock('./GmailInquiryReview', () => ({
   __esModule: true,
-  default: ({ token, importId, onClaimed, onOpenQuote, onBack, backLabel }) => (
+  default: ({
+    token,
+    importId,
+    onClaimed,
+    onOpenQuote,
+    onBack,
+    backLabel,
+    initialShowEvidence,
+  }) => (
     <div>
       <span>Gmail token {token || 'none'}</span>
       <span>Gmail import {importId || 'none'}</span>
+      <span>Gmail evidence {initialShowEvidence ? 'visible' : 'collapsed'}</span>
       <button type="button" onClick={() => onClaimed(45)}>Remember import</button>
       <button type="button" onClick={() => onOpenQuote(88)}>Open exact quote</button>
       <button type="button" onClick={onBack}>{backLabel}</button>
@@ -118,6 +127,7 @@ describe('QuotationModule Gmail deep links', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open Gmail source' }));
 
     expect(await screen.findByText('Gmail import 31')).toBeInTheDocument();
+    expect(screen.getByText('Gmail evidence visible')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
     expect(screen.getByLabelText('location').textContent).toContain('quotation_tab=quotes');
     expect(screen.getByLabelText('location').textContent).toContain('gmail_import_id=31');

@@ -217,14 +217,18 @@ cleared in the browser and rejected by the server. The employee must make an
 explicit Product correction; this remains suggestion-only and does not create
 or learn aliases.
 
-### Standard Gmail intake into the quotation editor (enabled by default)
+### Standard Gmail intake into the quotation editor (requires safety flags)
 
 `QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED` defaults to `1` but is
-projected as effective only while `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is
-strictly enabled. It retains the compact evidence-bound company/source gate,
+projected as effective only while `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` and
+`QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED` are strictly enabled. It retains the
+compact evidence-bound company/source gate,
 creates or reuses the draft through the existing hardened confirmation path,
-and then uses the familiar quotation editor for Product decisions, deletion,
-quantity, unit, VAT, and employee-entered pricing. When the unified-workspace
+and displays the familiar quotation layout immediately below the company
+section. Before confirmation that lower layout is a native-disabled preview.
+For a clean request, one company-confirm action creates or reuses the draft and
+unlocks the real editor in place, without a route or page transition. Product decisions, deletion,
+quantity, unit, VAT, and employee-entered pricing then use the normal editor. When the unified-workspace
 flag is also enabled, this standard-editor route has frontend presentation
 precedence; the unified endpoint remains intact for rollback.
 

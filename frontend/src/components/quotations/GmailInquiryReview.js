@@ -3,6 +3,8 @@ import quotationAPI, { describeQuotationError, formatQuotationError } from '../.
 import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
+import QuotationEditor from './QuotationEditor';
+import QuotationOutcomeReview from './QuotationOutcomeReview';
 
 const ACTIVE_ANALYSIS_STATUSES = new Set(['analyzing', 'processing', 'queued', 'running']);
 const AUTO_ANALYZE_STATUSES = new Set(['claimed', 'new', 'pending', 'ready_to_analyze']);
@@ -743,6 +745,14 @@ const reviewLineUncertain = (line) => {
   return reviewLineRequiresUncertaintyDecision(line);
 };
 
+const standardEditorReviewRowsFor = (lines = []) => lines
+  .map((line, index) => ({ line, index }))
+  .filter(({ line }) => (
+    reviewLineInvalid(line)
+    || reviewLineUncertain(line)
+    || (line.included && sourceKeysForLine(line).length === 0)
+  ));
+
 const unifiedUncertaintyCorrectionMade = (line) => (
   String(line.raw_name || '') !== String(line.unified_original_raw_name || '')
   || String(firstDefined(line.quantity, '')) !== String(line.unified_original_quantity || '')
@@ -856,6 +866,133 @@ const safeAttachmentFilename = (attachment) => Array.from(
     : character;
 }).join('').slice(0, 240) || 'gmail-inquiry-attachment';
 
+const GmailLockedQuotationPreview = ({
+  lines = [],
+  lockedReason = '',
+  primaryActionLabel = 'Finalize',
+}) => (
+  <section
+    className="qm-panel qm-gmail-quotation-workspace"
+    aria-labelledby="gmail-quotation-heading"
+  >
+    <div className="qm-panel-heading">
+      <div>
+        <h3 id="gmail-quotation-heading">2. Quotation lines</h3>
+        <p>
+          This is the familiar quotation layout. Confirm the company above to create the
+          draft and unlock Product matching, prices, VAT, row order, and actions here.
+        </p>
+      </div>
+      <div className="qm-total" aria-label="Locked quotation totals">
+        <span>Subtotal AED 0.00</span>
+        <strong>Total AED 0.00</strong>
+      </div>
+    </div>
+    <div
+      id="gmail-quotation-lock-help"
+      className="qm-gmail-quotation-lock"
+      role="status"
+      aria-live="polite"
+    >
+      <div>
+        <strong>Confirm the customer company above to unlock this quotation.</strong>
+        <span>
+          {lines.length} request row{lines.length === 1 ? '' : 's'} loaded. Selling prices
+          remain blank until an employee enters them.
+        </span>
+      </div>
+      <span className="qm-gmail-quotation-lock-state" aria-hidden="true">Locked</span>
+    </div>
+    {lockedReason && <p className="qm-gmail-quotation-lock-reason">{lockedReason}</p>}
+    <fieldset
+      className="qm-gmail-locked-editor"
+      disabled
+      aria-describedby="gmail-quotation-lock-help"
+    >
+      <legend className="qm-sr-only">Quotation editor locked until company confirmation</legend>
+      <div className="qm-save-row sticky-line-actions">
+        <span className="qm-saved">Waiting for company confirmation</span>
+        <span className="qm-sticky-total">Total <strong>AED 0.00</strong></span>
+        <select aria-label="Locked quotation line filter" defaultValue="active">
+          <option value="active">Active lines</option>
+        </select>
+        <button type="button">Select visible unmatched</button>
+        <button type="button">Create Products for Selected Unmatched Rows</button>
+        <button type="button">Save All Lines</button>
+        <span className="qm-sticky-action-divider" aria-hidden="true" />
+        <button type="button">{primaryActionLabel}</button>
+        <button type="button">Cancel</button>
+      </div>
+      <div className="qm-table-wrap">
+        <table className="qm-table line-table">
+          <thead>
+            <tr>
+              <th className="qm-check-cell"><input type="checkbox" aria-label="Select all locked quotation rows" /></th>
+              <th className="qm-serial-cell">#</th>
+              <th className="qm-line-product-cell">Matched Item <span className="qm-required">*</span></th>
+              <th className="qm-line-snapshot-cell">Snapshot Name <span className="qm-required">*</span></th>
+              <th className="qm-line-quantity-cell">Qty <span className="qm-required">*</span></th>
+              <th className="qm-line-unit-cell">Unit</th>
+              <th className="qm-price-cell">Unit Price <span className="qm-required">*</span></th>
+              <th className="qm-vat-cell">VAT % <span className="qm-required">*</span></th>
+              <th className="qm-line-status-cell">Status</th>
+              <th className="qm-line-total-cell">Total</th>
+              <th className="qm-line-actions-cell">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((line, index) => {
+              const rowIdentity = firstDefined(reviewRowKey(line), line.id, `${line.raw_name || 'line'}-${index}`);
+              const rowLabel = String(line.raw_name || `row ${index + 1}`);
+              return (
+                <tr key={rowIdentity}>
+                  <td className="qm-check-cell">
+                    <input type="checkbox" checked readOnly aria-label={`Select ${rowLabel}`} />
+                  </td>
+                  <td className="qm-serial-cell">{index + 1}</td>
+                  <td className="qm-line-product-cell">
+                    <select aria-label={`Product for ${rowLabel}`} defaultValue="">
+                      <option value="">Unmatched</option>
+                    </select>
+                  </td>
+                  <td className="qm-line-snapshot-cell">
+                    <input aria-label={`Snapshot name for ${rowLabel}`} value={line.raw_name || ''} readOnly />
+                  </td>
+                  <td className="qm-line-quantity-cell">
+                    <input aria-label={`Quantity for ${rowLabel}`} value={firstDefined(line.quantity, '')} readOnly />
+                  </td>
+                  <td className="qm-line-unit-cell">
+                    <input aria-label={`Unit for ${rowLabel}`} value={line.unit || ''} readOnly />
+                  </td>
+                  <td className="qm-price-cell">
+                    <input aria-label={`Unit price for ${rowLabel}`} value="" readOnly placeholder="Blank" />
+                  </td>
+                  <td className="qm-vat-cell">
+                    <select aria-label={`VAT for ${rowLabel}`} defaultValue="0">
+                      <option value="0">0%</option>
+                    </select>
+                  </td>
+                  <td className="qm-line-status-cell"><span className="qm-line-status needs_review">Locked</span></td>
+                  <td className="qm-line-total-cell">AED 0.00</td>
+                  <td className="qm-row-actions qm-line-actions-cell">
+                    <button type="button">Save</button>
+                    <button type="button">Delete</button>
+                  </td>
+                </tr>
+              );
+            })}
+            {!lines.length && (
+              <tr>
+                <td colSpan="11"><div className="qm-empty">No usable request rows are ready yet.</div></td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </fieldset>
+  </section>
+);
+
 const GmailInquiryReview = ({
   token = '',
   importId = '',
@@ -863,6 +1000,7 @@ const GmailInquiryReview = ({
   onOpenQuote,
   onBack,
   backLabel = 'Back to quotations',
+  initialShowEvidence = false,
 }) => {
   const [record, setRecord] = useState(null);
   const [companies, setCompanies] = useState([]);
@@ -883,6 +1021,8 @@ const GmailInquiryReview = ({
   const [errorInfo, setErrorInfo] = useState(null);
   const [notice, setNotice] = useState(null);
   const [attachmentError, setAttachmentError] = useState('');
+  const [showEmbeddedEvidence, setShowEmbeddedEvidence] = useState(Boolean(initialShowEvidence));
+  const [embeddedOutcomeQuoteId, setEmbeddedOutcomeQuoteId] = useState(null);
   const [analysisProgress, setAnalysisProgress] = useState(null);
   const [analysisProgressTarget, setAnalysisProgressTarget] = useState(null);
   const [analysisProgressUnavailable, setAnalysisProgressUnavailable] = useState(false);
@@ -891,6 +1031,7 @@ const GmailInquiryReview = ({
   const [unifiedProductError, setUnifiedProductError] = useState('');
   const [unifiedProductRetry, setUnifiedProductRetry] = useState(0);
   const [unifiedPriceHistory, setUnifiedPriceHistory] = useState({});
+  const embeddedEvidenceRef = useRef(null);
   const recordRef = useRef(null);
   const mountedRef = useRef(false);
   const requestGenerationRef = useRef(0);
@@ -1630,6 +1771,19 @@ const GmailInquiryReview = ({
     [enrichedEvidenceSources]
   );
   const quoteId = quotationIdFromGmailImportPayload(record || {});
+  useEffect(() => {
+    if (!quoteId) {
+      setShowEmbeddedEvidence(false);
+      setEmbeddedOutcomeQuoteId(null);
+    } else if (initialShowEvidence) {
+      setShowEmbeddedEvidence(true);
+    }
+  }, [initialShowEvidence, quoteId]);
+  useEffect(() => {
+    if (quoteId && showEmbeddedEvidence) {
+      embeddedEvidenceRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+    }
+  }, [quoteId, showEmbeddedEvidence]);
   const analysisActive = !analysisProgressUnavailable && (
     gmailAnalysisProgress && currentAnalysisProgress
       ? currentAnalysisProgress.state === 'running'
@@ -2318,7 +2472,10 @@ const GmailInquiryReview = ({
     }
     const sourceRecord = recordRef.current || {};
     const reviewUiV2 = gmailReviewUiV2Enabled(sourceRecord);
-    const chainedActions = gmailChainedActionsEnabled(sourceRecord);
+    const chainedActions = (
+      gmailChainedActionsEnabled(sourceRecord)
+      || gmailStandardEditorIntakeEnabled(sourceRecord)
+    );
     const linesToSave = reviewUiV2
       ? reviewLines.filter((line, index) => (
         dirtyReviewRowKeys.has(reviewRowKey(line))
@@ -2374,7 +2531,11 @@ const GmailInquiryReview = ({
 
   const saveReviewLines = async () => {
     if (!recordId || !reviewDirty || busyAction || chainedActionLockRef.current) return;
-    const useSynchronousLock = gmailChainedActionsEnabled(recordRef.current || {});
+    const lockRecord = recordRef.current || {};
+    const useSynchronousLock = (
+      gmailChainedActionsEnabled(lockRecord)
+      || gmailStandardEditorIntakeEnabled(lockRecord)
+    );
     if (useSynchronousLock) chainedActionLockRef.current = true;
     const actionGeneration = ++actionGenerationRef.current;
     setBusyAction('review-lines');
@@ -2406,14 +2567,22 @@ const GmailInquiryReview = ({
     const normalizedContactId = String(entityId(contact) || contact || '');
     const currentRecord = recordRef.current || {};
     const fingerprint = identityReviewState(currentRecord).fingerprint;
+    const useSynchronousLock = (
+      gmailStandardEditorIntakeEnabled(currentRecord)
+      || gmailChainedActionsEnabled(currentRecord)
+    );
     if (
       !recordId
       || !normalizedCompanyId
       || !fingerprint
       || busyAction
       || analysisInteractionBlocked
+      || (useSynchronousLock && chainedActionLockRef.current)
     ) return;
+    if (useSynchronousLock) chainedActionLockRef.current = true;
     const actionGeneration = ++actionGenerationRef.current;
+    let endpoint = `POST /quotations/gmail-inquiry-imports/${recordId}/approve_company/`;
+    let companyApproved = false;
     setBusyAction('approve-company');
     setErrorInfo(null);
     setNotice(null);
@@ -2438,19 +2607,82 @@ const GmailInquiryReview = ({
       });
       if (!actionIsCurrent(actionGeneration)) return;
       applyPayload(response.data, { preserveSelection: true });
-      setNotice({
-        type: 'success',
-        message: 'Customer company approved for this Gmail evidence.',
-      });
+      const authoritativeRecord = recordRef.current || gmailImportRecordFromPayload(response.data);
+      const authoritativeIdentityReview = identityReviewState(authoritativeRecord);
+      companyApproved = authoritativeIdentityReview.approved;
+      if (!companyApproved) {
+        setNotice({
+          type: 'warning',
+          message: 'The server did not confirm the company approval. Refresh this Gmail review and approve the company again.',
+        });
+        return;
+      }
+      const authoritativeLines = normalizeReviewLines(authoritativeRecord);
+      const hasUsableAuthoritativeLine = authoritativeLines.some((line) => line.included);
+      const hasCurrentWorkflowBinding = completeWorkflowConcurrencyPayload(
+        workflowConcurrencyPayload(authoritativeRecord)
+      );
+      const authoritativeMode = initialAnalysisMode(authoritativeRecord);
+      const authoritativeSelectionValid = Boolean(
+        authoritativeMode !== 'selected_messages'
+        || initiallySelectedMessageIds(authoritativeRecord).length > 0
+      );
+      const shouldUnlockQuotation = (
+        gmailStandardEditorIntakeEnabled(authoritativeRecord)
+        && hasUsableAuthoritativeLine
+        && hasCurrentWorkflowBinding
+        && authoritativeSelectionValid
+        && standardEditorReviewRowsFor(authoritativeLines).length === 0
+      );
+      if (shouldUnlockQuotation) {
+        setBusyAction('approve-unlock');
+        endpoint = `POST /quotations/gmail-inquiry-imports/${entityId(authoritativeRecord) || recordId}/confirm/`;
+        const confirmation = await confirmAuthoritativeImport(
+          authoritativeRecord,
+          actionGeneration,
+          { navigate: false }
+        );
+        if (!actionIsCurrent(actionGeneration)) return;
+        if (!confirmation) return;
+        setNotice({
+          type: 'success',
+          message: 'Customer company confirmed. The quotation editor is ready below.',
+        });
+      } else {
+        setNotice({
+          type: gmailStandardEditorIntakeEnabled(authoritativeRecord)
+            && (!hasCurrentWorkflowBinding || !authoritativeSelectionValid || !hasUsableAuthoritativeLine)
+            ? 'warning'
+            : 'success',
+          message: gmailStandardEditorIntakeEnabled(authoritativeRecord)
+            ? !hasCurrentWorkflowBinding
+              ? 'Customer company approved, but the safety binding is incomplete. Refresh this Gmail review before unlocking the quotation.'
+              : !authoritativeSelectionValid
+                ? 'Customer company approved, but no selected Gmail message is available. Return to Gmail and import the relevant email again.'
+                : hasUsableAuthoritativeLine
+                  ? 'Customer company approved. Review the highlighted source exceptions below to unlock the quotation.'
+                  : 'Customer company approved, but no usable request rows are available. Retry analysis or import the relevant email again.'
+            : 'Customer company approved for this Gmail evidence.',
+        });
+      }
     } catch (error) {
       if (actionIsCurrent(actionGeneration)) {
         await handleError(
           error,
-          'Approve Gmail inquiry company',
-          `POST /quotations/gmail-inquiry-imports/${recordId}/approve_company/`
+          companyApproved
+            ? 'Create quotation after confirming Gmail company'
+            : 'Approve Gmail inquiry company',
+          endpoint
         );
+        if (companyApproved) {
+          setNotice({
+            type: 'warning',
+            message: 'The company is confirmed, but the quotation did not unlock. Retry below; this will not create a duplicate.',
+          });
+        }
       }
     } finally {
+      if (useSynchronousLock) chainedActionLockRef.current = false;
       if (actionIsCurrent(actionGeneration)) setBusyAction('');
     }
   };
@@ -2554,7 +2786,7 @@ const GmailInquiryReview = ({
       if (!exactQuoteId) {
         throw new Error('The Gmail inquiry was confirmed, but the backend did not return its quotation ID.');
       }
-      onOpenQuote?.(exactQuoteId);
+      if (!gmailStandardEditorIntake) onOpenQuote?.(exactQuoteId);
     } catch (error) {
       if (actionIsCurrent(actionGeneration)) {
         await handleError(
@@ -2568,7 +2800,11 @@ const GmailInquiryReview = ({
     }
   };
 
-  const confirmAuthoritativeImport = async (authoritativeRecord, actionGeneration) => {
+  async function confirmAuthoritativeImport(
+    authoritativeRecord,
+    actionGeneration,
+    { navigate = true } = {}
+  ) {
     if (!authoritativeRecord || !actionIsCurrent(actionGeneration)) return null;
     const authoritativeImportId = entityId(authoritativeRecord) || recordId;
     const authoritativeCompanyId = String(entityId(firstDefined(
@@ -2616,15 +2852,19 @@ const GmailInquiryReview = ({
       payload
     );
     if (!actionIsCurrent(actionGeneration)) return null;
-    applyPayload(response.data);
+    const incoming = applyPayload(response.data);
     const exactQuoteId = quotationIdFromGmailImportPayload(response.data);
     if (!exactQuoteId) {
       throw new Error('The Gmail inquiry was confirmed, but the backend did not return its quotation ID.');
     }
     if (!actionIsCurrent(actionGeneration)) return null;
-    onOpenQuote?.(exactQuoteId);
-    return response.data;
-  };
+    const canonicalImportId = entityId(recordRef.current || incoming);
+    if (canonicalImportId && String(canonicalImportId) !== String(recordId)) {
+      onClaimed?.(canonicalImportId);
+    }
+    if (navigate) onOpenQuote?.(exactQuoteId);
+    return { payload: response.data, quoteId: exactQuoteId };
+  }
 
   const saveReviewAndCreateQuotation = async () => {
     if (
@@ -2650,7 +2890,9 @@ const GmailInquiryReview = ({
       }
       if (!authoritativeRecord || !actionIsCurrent(actionGeneration)) return;
       endpoint = `POST /quotations/gmail-inquiry-imports/${entityId(authoritativeRecord) || recordId}/confirm/`;
-      await confirmAuthoritativeImport(authoritativeRecord, actionGeneration);
+      await confirmAuthoritativeImport(authoritativeRecord, actionGeneration, {
+        navigate: !gmailStandardEditorIntake,
+      });
     } catch (error) {
       if (actionIsCurrent(actionGeneration)) {
         await handleError(
@@ -2892,16 +3134,27 @@ const GmailInquiryReview = ({
   const includedLinesWithoutEvidence = usableLines.filter(
     (line) => sourceKeysForLine(line).length === 0
   );
+  const standardBlockingReviewRows = standardEditorReviewRowsFor(reviewLines);
   const standardEditorReviewRows = reviewLines
     .map((line, index) => ({ line, index }))
-    .filter(({ line }) => (
-      reviewLineInvalid(line)
-      || reviewLineUncertain(line)
-      || (line.included && sourceKeysForLine(line).length === 0)
+    .filter(({ line, index }) => (
+      standardBlockingReviewRows.some((candidate) => candidate.index === index)
+      || dirtyReviewRowKeys.has(reviewRowKey(line))
+      || dirtyReviewRowKeys.has(`__missing-row-${index}`)
+      || (
+        usableLines.length === 0
+        && !line.included
+        && !['removed', 'duplicate'].includes(lineOperation(line))
+      )
     ));
   const legacyReviewRows = gmailStandardEditorIntake && !quoteId
     ? standardEditorReviewRows
     : reviewLines.map((line, index) => ({ line, index }));
+  const standardIntakeLocked = Boolean(
+    gmailStandardEditorIntake
+    && !quoteId
+    && !identityReviewApproved
+  );
   const selectedCompany = companies.find((company) => String(company.id) === companyId);
   const selectedContact = contacts.find((contact) => String(contact.id) === contactId);
   const aiIdentity = record?.candidates?.ai_identity || {};
@@ -2966,17 +3219,33 @@ const GmailInquiryReview = ({
     analysisMode !== 'selected_messages'
     || selectedMessageIds.length > 0
   );
+  const workflowBindingReady = Boolean(
+    !(gmailChainedActions || gmailStandardEditorIntake)
+    || completeWorkflowConcurrencyPayload(workflowConcurrencyPayload(record || {}))
+  );
   const confirmDisabled = Boolean(
     busyAction
     || analysisInteractionBlocked
-    || (reviewDirty && !gmailChainedActions)
+    || (reviewDirty && !gmailChainedActions && !gmailStandardEditorIntake)
     || !companyId
     || !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
+    || !workflowBindingReady
     || !messageSelectionValid
     || invalidIncludedLines.length > 0
     || uncertainIncludedLines.length > 0
     || includedLinesWithoutEvidence.length > 0
     || usableLines.length === 0
+  );
+  const standardQuotationLockedReason = firstDefined(
+    analysisInteractionBlocked ? 'Wait for the current Gmail analysis to finish or retry it above.' : null,
+    !companyId ? 'Select the customer company above.' : null,
+    !identityReviewApproved ? 'Review the evidence and confirm the selected company above.' : null,
+    !workflowBindingReady ? 'Refresh this Gmail review to restore its current safety binding.' : null,
+    standardEditorReviewRows.length
+      ? `${standardEditorReviewRows.length} source exception${standardEditorReviewRows.length === 1 ? '' : 's'} must be corrected, approved, or excluded before the draft can be created.`
+      : null,
+    reviewDirty ? 'Save the reviewed source exceptions before creating the draft.' : null,
+    'The quotation is ready to unlock.'
   );
   const unifiedCurrentBinding = unifiedBindingPayload(record || {});
   const unifiedConfirmDisabled = Boolean(
@@ -3057,7 +3326,9 @@ const GmailInquiryReview = ({
         </div>
         <div className={`qm-helper ${quoteId ? 'info' : 'warning'}`}>
           {quoteId
-            ? 'This quotation is already created. The customer identity and Gmail source evidence below are retained read-only.'
+            ? gmailStandardEditorIntake
+              ? 'The quotation is unlocked below. The confirmed customer identity stays read-only, and Gmail evidence remains available from the quotation.'
+              : 'This quotation is already created. The customer identity and Gmail source evidence below are retained read-only.'
             : 'Nothing is created automatically. Check the customer identity, extracted rows, and source evidence before confirming.'}
         </div>
         {analysisUiActive && !gmailAnalysisProgress && (
@@ -3136,7 +3407,7 @@ const GmailInquiryReview = ({
           </div>
         )}
         {notice && <div className={`qm-feedback ${notice.type}`}>{notice.message}</div>}
-        {quoteId && (
+        {quoteId && !gmailStandardEditorIntake && (
           <div className="qm-gmail-existing-quote">
             <div>
               <strong>This email has already been converted to a quotation.</strong>
@@ -3191,10 +3462,16 @@ const GmailInquiryReview = ({
                   : selectCompany(companySuggestionId, companySuggestion)
               )}
             >
-              {busyAction === 'approve-company'
-                ? 'Approving...'
+              {['approve-company', 'approve-unlock'].includes(busyAction)
+                ? gmailStandardEditorIntake
+                  ? 'Confirming & preparing...'
+                  : 'Approving...'
                 : gmailReviewUiV2 && identityReview.suggestionApprovable
-                  ? 'Approve suggested company'
+                  ? gmailStandardEditorIntake
+                    ? standardEditorReviewRows.length
+                      ? 'Confirm suggested company & review exceptions'
+                      : 'Confirm suggested company & unlock quotation'
+                    : 'Approve suggested company'
                   : gmailReviewUiV2
                     ? 'Select company for manual approval'
                   : 'Use suggested company'}
@@ -3333,8 +3610,14 @@ const GmailInquiryReview = ({
                   suggested: selectedSuggestionCanUseOneClickApproval,
                 })}
               >
-                {busyAction === 'approve-company'
-                  ? 'Approving...'
+                {['approve-company', 'approve-unlock'].includes(busyAction)
+                  ? gmailStandardEditorIntake
+                    ? 'Confirming company & preparing quotation...'
+                    : 'Approving...'
+                  : gmailStandardEditorIntake
+                    ? standardEditorReviewRows.length
+                      ? 'Confirm company & review exceptions'
+                      : 'Confirm company & unlock quotation'
                   : selectedSuggestionCanUseOneClickApproval
                     ? 'Approve suggested company'
                     : 'Approve selected company'}
@@ -3357,17 +3640,25 @@ const GmailInquiryReview = ({
         )}
       </div>
 
-      <div className="qm-panel qm-gmail-lines-panel">
+      {(
+        !gmailStandardEditorIntake
+        || (!quoteId && standardEditorReviewRows.length > 0)
+        || (Boolean(quoteId) && showEmbeddedEvidence)
+      ) && (
+      <div
+        className="qm-panel qm-gmail-lines-panel"
+        ref={gmailStandardEditorIntake && quoteId ? embeddedEvidenceRef : undefined}
+      >
         <div className="qm-panel-heading">
           <div>
             <h3>{gmailUnifiedWorkspace
               ? '2. Review request and price quotation'
               : gmailStandardEditorIntake
-                ? quoteId
+                  ? quoteId
                   ? '2. Gmail source evidence'
                   : standardEditorReviewRows.length
-                  ? '2. Review exceptions before opening the quotation'
-                  : '2. Request ready for the standard quotation editor'
+                  ? 'Source exceptions to resolve before unlocking'
+                  : '2. Request ready for the quotation editor'
                 : '2. Review extracted request lines'}</h3>
             <p>
               {gmailUnifiedWorkspace
@@ -3381,7 +3672,18 @@ const GmailInquiryReview = ({
                   : 'Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.'}
             </p>
           </div>
-          {gmailUnifiedWorkspace ? (
+          {gmailStandardEditorIntake && quoteId ? (
+            <div className="qm-gmail-lines-actions">
+              <span className="qm-heading-count">{usableLines.length} retained row{usableLines.length === 1 ? '' : 's'}</span>
+              <button
+                type="button"
+                className="qm-secondary"
+                onClick={() => setShowEmbeddedEvidence(false)}
+              >
+                Hide Gmail evidence
+              </button>
+            </div>
+          ) : gmailUnifiedWorkspace ? (
             <div className="qm-gmail-lines-actions">
               <span className="qm-heading-count">{usableLines.length} included row{usableLines.length === 1 ? '' : 's'}</span>
               <span className={`qm-gmail-catalogue-state state-${unifiedProductState}`} role="status">
@@ -3396,7 +3698,9 @@ const GmailInquiryReview = ({
             </div>
           ) : (
             (!gmailStandardEditorIntake || (
-              !quoteId && (standardEditorReviewRows.length > 0 || reviewDirty)
+              !quoteId
+              && usableLines.length === 0
+              && (standardEditorReviewRows.length > 0 || reviewDirty)
             )) && (
               <div className={`qm-gmail-lines-actions${reviewDirty ? ' is-dirty' : ''}`}>
             <div className="qm-gmail-lines-save-state">
@@ -3410,7 +3714,13 @@ const GmailInquiryReview = ({
             <button
               type="button"
               className={reviewDirty ? 'qm-primary qm-gmail-save-review-button' : 'qm-secondary'}
-              disabled={readOnlyImport || !reviewDirty || Boolean(busyAction) || analysisInteractionBlocked}
+              disabled={
+                readOnlyImport
+                || standardIntakeLocked
+                || !reviewDirty
+                || Boolean(busyAction)
+                || analysisInteractionBlocked
+              }
               onClick={saveReviewLines}
             >
               {busyAction === 'review-lines' ? 'Saving rows...' : 'Save reviewed rows'}
@@ -3453,16 +3763,6 @@ const GmailInquiryReview = ({
         )}
         {attachmentError && <div className="qm-feedback error" role="alert">{attachmentError}</div>}
         <div className="qm-table-wrap">
-          {gmailStandardEditorIntake && !quoteId && standardEditorReviewRows.length === 0 && (
-            <div className="qm-gmail-standard-intake-summary" role="status">
-              <strong>{usableLines.length} verified request row{usableLines.length === 1 ? '' : 's'} ready</strong>
-              <span>
-                Confirm below to create the draft and continue in the familiar quotation editor,
-                where you can match Products, enter prices, reorder rows, or delete anything that is not required.
-              </span>
-              <small>The original Gmail messages, attachments, and row evidence remain linked to the quotation.</small>
-            </div>
-          )}
           {gmailUnifiedWorkspace && (
             <table className="qm-table qm-gmail-unified-table">
               <thead>
@@ -3833,6 +4133,7 @@ const GmailInquiryReview = ({
                           checked={Boolean(line.included)}
                           disabled={
                             readOnlyImport
+                            || standardIntakeLocked
                             || ['removed', 'duplicate'].includes(operation)
                             || analysisInteractionBlocked
                             || Boolean(busyAction)
@@ -3852,7 +4153,13 @@ const GmailInquiryReview = ({
                       <input
                         className="qm-input"
                         value={line.raw_name}
-                        disabled={readOnlyImport || !line.included || analysisInteractionBlocked || Boolean(busyAction)}
+                        disabled={
+                          readOnlyImport
+                          || standardIntakeLocked
+                          || !line.included
+                          || analysisInteractionBlocked
+                          || Boolean(busyAction)
+                        }
                         aria-label={`Requested item row ${index + 1}`}
                         onChange={(event) => updateReviewLine(index, 'raw_name', event.target.value)}
                       />
@@ -3873,7 +4180,13 @@ const GmailInquiryReview = ({
                         type="text"
                         inputMode="decimal"
                         value={line.quantity}
-                        disabled={readOnlyImport || !line.included || analysisInteractionBlocked || Boolean(busyAction)}
+                        disabled={
+                          readOnlyImport
+                          || standardIntakeLocked
+                          || !line.included
+                          || analysisInteractionBlocked
+                          || Boolean(busyAction)
+                        }
                         aria-label={`Quantity row ${index + 1}`}
                         onChange={(event) => updateReviewLine(index, 'quantity', event.target.value)}
                       />
@@ -3882,7 +4195,13 @@ const GmailInquiryReview = ({
                       <input
                         className="qm-input compact"
                         value={line.unit}
-                        disabled={readOnlyImport || !line.included || analysisInteractionBlocked || Boolean(busyAction)}
+                        disabled={
+                          readOnlyImport
+                          || standardIntakeLocked
+                          || !line.included
+                          || analysisInteractionBlocked
+                          || Boolean(busyAction)
+                        }
                         aria-label={`Unit row ${index + 1}`}
                         onChange={(event) => updateReviewLine(index, 'unit', event.target.value)}
                       />
@@ -3921,6 +4240,7 @@ const GmailInquiryReview = ({
                             className="qm-secondary small qm-gmail-mark-reviewed"
                             disabled={
                               readOnlyImport
+                              || standardIntakeLocked
                               || analysisInteractionBlocked
                               || Boolean(busyAction)
                               || reviewLineInvalid(line)
@@ -4007,8 +4327,28 @@ const GmailInquiryReview = ({
           )}
         </div>
       </div>
+      )}
 
-      {!quoteId && (
+      {gmailStandardEditorIntake && quoteId && (
+        <section className="qm-gmail-inline-editor" aria-label="Quotation editor">
+          {embeddedOutcomeQuoteId ? (
+            <QuotationOutcomeReview
+              quoteId={embeddedOutcomeQuoteId}
+              onBack={() => setEmbeddedOutcomeQuoteId(null)}
+            />
+          ) : (
+            <QuotationEditor
+              quoteId={quoteId}
+              onClose={onBack}
+              onReviewOutcome={(exactQuoteId) => setEmbeddedOutcomeQuoteId(exactQuoteId)}
+              gmailEvidenceVisible={showEmbeddedEvidence}
+              onOpenGmailImport={() => setShowEmbeddedEvidence((visible) => !visible)}
+            />
+          )}
+        </section>
+      )}
+
+      {!quoteId && (!gmailStandardEditorIntake || identityReviewApproved) && (
         <div className="qm-panel qm-gmail-confirm-panel">
           {gmailUnifiedWorkspace ? (
             <>
@@ -4036,10 +4376,12 @@ const GmailInquiryReview = ({
             <>
               <div>
                 <h3>{gmailStandardEditorIntake
-                  ? 'Open this request in the standard quotation editor?'
+                  ? standardEditorReviewRows.length || reviewDirty
+                    ? 'Finish the source exceptions and unlock the quotation'
+                    : 'Company confirmed — unlock the quotation'
                   : 'Ready to create the draft quotation?'}</h3>
                 <p>{gmailStandardEditorIntake
-                  ? 'The approved company and verified request rows will be saved as a draft with blank selling prices. You will continue on this page in the normal quotation layout, where incorrect rows can be edited or deleted.'
+                  ? 'The approved company and verified request rows will be saved as a draft with blank selling prices. The locked layout below will become the normal quotation editor on this same page.'
                   : 'The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.'}</p>
                 <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
               </div>
@@ -4047,27 +4389,33 @@ const GmailInquiryReview = ({
                 type="button"
                 className="qm-primary"
                 disabled={confirmDisabled}
-                onClick={gmailChainedActions ? saveReviewAndCreateQuotation : confirmImport}
+                onClick={
+                  gmailChainedActions || gmailStandardEditorIntake
+                    ? saveReviewAndCreateQuotation
+                    : confirmImport
+                }
               >
                 {busyAction === 'save-create'
                   ? 'Saving review & creating quotation...'
                   : busyAction === 'confirm'
                     ? 'Creating quotation...'
-                    : gmailChainedActions && reviewDirty
+                    : (gmailChainedActions || gmailStandardEditorIntake) && reviewDirty
                       ? gmailStandardEditorIntake
-                        ? 'Save Review & Open Standard Quotation'
+                        ? 'Save exceptions & unlock quotation'
                         : 'Save Review & Create Quotation'
-                      : gmailChainedActions
-                        ? gmailStandardEditorIntake
-                          ? 'Create & Open Standard Quotation'
+                      : gmailChainedActions || gmailStandardEditorIntake
+                          ? gmailStandardEditorIntake
+                          ? notice?.type === 'warning' && !confirmDisabled
+                            ? 'Retry unlocking quotation'
+                            : 'Unlock quotation'
                           : 'Create Quotation'
                         : gmailStandardEditorIntake
-                          ? 'Create & Open Standard Quotation'
+                          ? 'Unlock quotation'
                           : 'Confirm & Open Quotation'}
               </button>
               {confirmDisabled && (
                 <small>
-                  {reviewDirty && !gmailChainedActions
+                  {reviewDirty && !gmailChainedActions && !gmailStandardEditorIntake
                     ? 'Save the reviewed rows before confirming.'
                       : invalidIncludedLines.length
                         ? 'Correct or exclude every invalid row first.'
@@ -4079,16 +4427,26 @@ const GmailInquiryReview = ({
                               ? 'Select the customer company first.'
                               : !(gmailReviewUiV2 ? identityReviewApproved : identityConfirmed)
                                 ? 'Confirm the customer identity first.'
-                                : !messageSelectionValid
-                                  ? 'This Gmail import has no usable source messages. Return to Gmail and import it again.'
-                                  : !usableLines.length
-                                    ? 'Analysis must return at least one usable row.'
-                                    : 'Wait for the current operation to finish.'}
+                                : !workflowBindingReady
+                                  ? 'Refresh this Gmail review to restore its current safety binding.'
+                                  : !messageSelectionValid
+                                    ? 'This Gmail import has no usable source messages. Return to Gmail and import it again.'
+                                    : !usableLines.length
+                                      ? 'Analysis must return at least one usable row.'
+                                      : 'Wait for the current operation to finish.'}
                 </small>
               )}
             </>
           )}
         </div>
+      )}
+
+      {gmailStandardEditorIntake && !quoteId && (
+        <GmailLockedQuotationPreview
+          lines={usableLines}
+          lockedReason={standardQuotationLockedReason}
+          primaryActionLabel="Finalize"
+        />
       )}
     </div>
   );
