@@ -461,6 +461,38 @@ immediately by setting the unified-workspace flag to `0`; the old Gmail review
 and quotation editor remain available, and already-created drafts require no
 data reversal.
 
+### Standard Gmail intake into the quotation editor (requires safety flags)
+
+`QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=1` keeps the evidence-bound
+Gmail company/source confirmation gate and shows a locked preview of the
+established quotation layout directly below it. For a clean request, one
+explicit company-confirm action approves the evidence and creates or reuses the blank-price draft; the
+real quotation editor then unlocks in that same page and URL. The server projects the feature as enabled
+only when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` and
+`QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED` are also strictly enabled. When
+both this flag and `QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` are effective,
+the frontend must give the standard-editor route precedence. The hardened
+unified endpoint remains available but is not selected by that browser route,
+which preserves a configuration-only rollback.
+
+The route does not change confirmation APIs, Gmail verification, row-evidence
+requirements, nullable/blank selling prices, Product suggestion semantics,
+quotation finalization, preview, send idempotency, or reconciliation. No
+migration, OAuth scope, provider, worker, package, or infrastructure change is
+required. The private quotation-detail response adds only the internal import
+record ID, inquiry subject, and confirmed company/contact display names for the
+editor banner; it never exposes Gmail message/thread IDs, bodies, or tokens.
+Rows that are invalid, uncertain, or missing evidence remain a compact
+pre-creation exception gate and cannot unlock the quotation until an employee
+corrects, approves, or excludes them. A successful company approval followed
+by a failed draft request is safe to retry; the confirmation endpoint remains
+idempotent and cannot create a duplicate quotation.
+Roll back by setting
+`QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=0`: if the unified-workspace
+flag is enabled, the prior unified presentation resumes; otherwise the prior
+separate Gmail review and quotation editor resume. Existing imports and draft
+quotations need no data reversal.
+
 ### Bounded parallel Gmail intake reads (disabled by default)
 
 `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=0` preserves the established
@@ -600,6 +632,10 @@ The reviewed repository exposes these document-parser controls in
   `QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS`,
   `QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS`, and
   `QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS`;
+- `QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED`,
+  `QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS`,
+  `QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS`, and
+  `QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS`;
 - `QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE`,
   `QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS`,
   `QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE`, and
@@ -616,6 +652,15 @@ Product and branding image byte limits are controlled by
 `PRODUCT_IMAGE_MAX_UPLOAD_BYTES` and
 `QUOTATION_BRANDING_IMAGE_MAX_UPLOAD_BYTES`; fixed decoded-image ceilings are
 12,000 pixels on either edge, 25 million total pixels, and one frame.
+
+The image-mask settings do not relax ordinary PDF images. They apply only to
+explicit one-bit CCITT Fax `/ImageMask true` streams with matching row/column
+geometry and a bounded wrapper chain. Defaults are 50 million pixels per mask,
+100 million per page, and 200 million across unique objects and cumulative
+page references; each default is also its code-level hard cap. Existing
+decoded-byte, object, stream, page, geometry, render, and output limits remain
+in force. Roll back only this narrow path with
+`QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED=0`; no migration is involved.
 
 Task 2.4 requires additive migration
 `quotations.0036_quotationoutcomepoimport_parsed_meta` before application-code

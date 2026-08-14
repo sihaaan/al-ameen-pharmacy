@@ -49,7 +49,7 @@ export const quotationRouteFromSearch = (search) => {
 
   if (gmailToken || gmailImportId) {
     return {
-      activeTab: 'inquiries',
+      activeTab: 'quotes',
       gmailToken,
       gmailImportId,
       quoteId: null,
@@ -75,6 +75,9 @@ const QuotationModule = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const route = useMemo(() => quotationRouteFromSearch(location.search), [location.search]);
+  const gmailReturnQuoteId = useMemo(() => positiveId(
+    new URLSearchParams(location.search).get('gmail_return_quote_id')
+  ), [location.search]);
   const [activeTab, setActiveTab] = useState(route.activeTab);
   const [editingQuoteId, setEditingQuoteId] = useState(route.quoteId);
   const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
@@ -132,6 +135,7 @@ const QuotationModule = () => {
       params.set('quote_id', String(exactQuoteId));
       params.delete('gmail_import');
       params.delete('gmail_import_id');
+      params.delete('gmail_return_quote_id');
     });
   }, [updateLocation]);
 
@@ -150,6 +154,7 @@ const QuotationModule = () => {
     updateLocation((params) => {
       params.set('quotation_tab', 'quotes');
       params.delete('quote_id');
+      params.delete('gmail_return_quote_id');
     }, { replace: true });
   }, [refresh, updateLocation]);
 
@@ -163,6 +168,7 @@ const QuotationModule = () => {
       params.delete('gmail_import');
       params.delete('gmail_import_id');
       params.delete('quote_id');
+      params.delete('gmail_return_quote_id');
     });
   }, [updateLocation]);
 
@@ -170,23 +176,45 @@ const QuotationModule = () => {
     const normalizedId = positiveId(claimedImportId);
     if (!normalizedId) return;
     updateLocation((params) => {
-      params.set('quotation_tab', 'inquiries');
+      params.set('quotation_tab', 'quotes');
       params.set('gmail_import_id', String(normalizedId));
       params.delete('gmail_import');
       params.delete('quote_id');
     }, { replace: true });
   }, [updateLocation]);
 
-  const closeGmailReview = useCallback(() => {
+  const openGmailImport = useCallback((gmailImportId) => {
+    const normalizedId = positiveId(gmailImportId);
+    if (!normalizedId) return;
     setPendingEmailReview(null);
-    setActiveTab('inquiries');
+    setEditingQuoteId(null);
+    setReviewingOutcomeQuoteId(null);
+    setActiveTab('quotes');
     updateLocation((params) => {
-      params.set('quotation_tab', 'inquiries');
+      params.set('quotation_tab', 'quotes');
+      params.set('gmail_import_id', String(normalizedId));
+      if (editingQuoteId) params.set('gmail_return_quote_id', String(editingQuoteId));
+      else params.delete('gmail_return_quote_id');
+      params.delete('gmail_import');
+      params.delete('quote_id');
+    });
+  }, [editingQuoteId, updateLocation]);
+
+  const closeGmailReview = useCallback(() => {
+    if (gmailReturnQuoteId) {
+      openQuote(gmailReturnQuoteId);
+      return;
+    }
+    setPendingEmailReview(null);
+    setActiveTab('quotes');
+    updateLocation((params) => {
+      params.set('quotation_tab', 'quotes');
       params.delete('gmail_import');
       params.delete('gmail_import_id');
       params.delete('quote_id');
+      params.delete('gmail_return_quote_id');
     }, { replace: true });
-  }, [updateLocation]);
+  }, [gmailReturnQuoteId, openQuote, updateLocation]);
 
   return (
     <div className="quotation-module">
@@ -214,7 +242,8 @@ const QuotationModule = () => {
         {activeTab === 'dashboard' && <QuotationDashboard key={refreshKey} onOpenQuotes={() => selectTab('quotes')} />}
         {activeTab === 'companies' && <CompanyManager />}
         {activeTab === 'items' && <QuoteItemManager />}
-        {activeTab === 'inquiries' && (
+        {activeTab === 'inquiries' && <InquiryManager onOpenQuote={openQuote} />}
+        {activeTab === 'quotes' && (
           route.gmailToken || route.gmailImportId ? (
             <GmailInquiryReview
               key={route.gmailToken ? `token:${route.gmailToken}` : `import:${route.gmailImportId}`}
@@ -223,13 +252,10 @@ const QuotationModule = () => {
               onClaimed={rememberClaimedImport}
               onOpenQuote={openQuote}
               onBack={closeGmailReview}
+              backLabel={gmailReturnQuoteId ? 'Back to quotation' : 'Back to quotations'}
+              initialShowEvidence={Boolean(gmailReturnQuoteId)}
             />
-          ) : (
-            <InquiryManager onOpenQuote={openQuote} />
-          )
-        )}
-        {activeTab === 'quotes' && (
-          reviewingOutcomeQuoteId ? (
+          ) : reviewingOutcomeQuoteId ? (
             <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} />
           ) : editingQuoteId ? (
             <QuotationEditor
@@ -247,6 +273,7 @@ const QuotationModule = () => {
                   current?.requestKey === handledKey ? null : current
                 ));
               }}
+              onOpenGmailImport={openGmailImport}
             />
           ) : (
             <QuotationList key={refreshKey} onOpenQuote={openQuote} onReviewOutcome={openOutcome} />

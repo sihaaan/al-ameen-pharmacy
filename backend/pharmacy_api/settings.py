@@ -251,6 +251,22 @@ QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS = int(
 QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS = int(
     os.environ.get("QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS", "25000000")
 )
+QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED = env_bool(
+    "QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED",
+    True,
+)
+QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS", "50000000")
+)
+QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS = int(
+    os.environ.get(
+        "QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS",
+        "100000000",
+    )
+)
+QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS = int(
+    os.environ.get("QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS", "200000000")
+)
 QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE = int(
     os.environ.get("QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE", "250000")
 )
@@ -411,6 +427,15 @@ QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED = env_bool(
 QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED = env_bool(
     "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
     False,
+)
+# Default Gmail intake presentation: retain the evidence-bound company/row
+# confirmation gate, then continue in the established quotation editor. This
+# is effective only with review UI V2 plus stale-bound chained actions and
+# takes browser-routing precedence over the optional unified workspace. Set it
+# to false to restore the prior route.
+QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED = env_bool(
+    "QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED",
+    True,
 )
 # Optional bounded concurrency for read-only Gmail inquiry retrieval. The
 # disabled path retains the established sequential fetch behavior exactly.

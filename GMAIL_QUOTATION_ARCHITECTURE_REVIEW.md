@@ -66,7 +66,7 @@ authenticated website account that claims and confirms an import.
 | Area | Gmail add-on route | Manual upload/paste route |
 |---|---|---|
 | Start | Open a message and use the Gmail sidebar | Paste text or upload/drop a supported file |
-| Selection | Current message, checked messages, or AI-assisted thread | One employee-selected source |
+| Selection | Current message or employee-checked messages | One employee-selected source |
 | Main extraction | One semantic thread/document request | Deterministic parsing, then optional AI cleanup |
 | Revision reasoning | Message classification and cross-message revision semantics | Normally one source; no automatic thread reconstruction |
 | Company suggestion | Verified sender/contact/domain plus signature/AI evidence | Employee selection, with existing suggestions |
@@ -91,9 +91,14 @@ analysis happens on the website, not inside Google's callback deadline.
 
 The sidebar offers:
 
-- **Let AI choose**: the analyzer classifies the available thread messages.
-- **Import selected**: only employee-checked messages are authoritative.
+- **Import selected**: only employee-checked messages are authoritative; this
+  is the primary action.
 - **Current only**: only the anchor message is analyzed.
+
+The former **Let AI choose** action is retired. A cached sidebar card that
+still submits the legacy action is rejected before Gmail content is read or a
+new handoff is issued. Existing imports retain their recorded mode so their
+evidence, audit history, and confirmed quotation links remain readable.
 
 Primary files:
 
@@ -337,13 +342,12 @@ message/source allow-list, and deterministic company/product matching still runs
 afterward. An explicit employee **Reanalyze** bypasses the cache.
 
 Gmail retrieval remains selection-bounded. Current-message mode fetches only the
-open message body; selected-message mode fetches only the checked messages; and
-AI-thread mode fetches the open message plus the newest remaining messages up to
-the configured limit. An old open message now occupies one of those slots rather
-than creating an invisible `limit + 1` request. The add-on action avoids a second
-thread-summary request for Current/AI actions, while selected-message actions
-retain a fresh canonical membership check. Both add-on and backend limits are
-hard-capped at 100.
+open message body, and selected-message mode fetches only the checked messages.
+The add-on action avoids a second thread-summary request for Current actions,
+while selected-message actions retain a fresh canonical membership check. Both
+add-on and backend limits are hard-capped at 100. The backend retains legacy
+AI-thread processing only for existing import records; new add-on cards cannot
+select or create that mode.
 
 Task 2.7 adds an opt-in website designated-mailbox boundary without changing
 the add-on or OAuth scopes. The default-off

@@ -241,7 +241,10 @@ customer content was accessed.
 
 ## Feature flags and dependencies
 
-Every Boolean flag introduced by this branch defaults to `False` / `0`.
+The experimental and infrastructure-dependent flags introduced by the
+optimization branch default to `False` / `0`. The later standard-editor intake
+routing flag intentionally defaults to `True` / `1`, but remains ineffective
+until Review UI V2 is enabled.
 
 | Flag | Dependency / rollback |
 | --- | --- |
@@ -251,6 +254,7 @@ Every Boolean flag introduced by this branch defaults to `False` / `0`.
 | `QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED` | Independent UI-only behavior. Disable to restore all-at-once editor loading. |
 | `QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED` | Requires migration `0040`. Disable to hide the private progress projection. |
 | `QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` | Effective only with Review UI V2. Disable to restore Gmail review followed by the separate QuotationEditor. |
+| `QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED` | Defaults on but is effective only with Review UI V2 and stale-bound chained actions. It keeps company confirmation and a locked familiar quotation preview on one page, then unlocks the actual standard editor in place. It takes frontend presentation precedence over unified workspace; disable it to restore the prior unified or separate-editor route without changing stored data. |
 | `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED` | Read-only Gmail retrieval; disable for sequential reads. `QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT` defaults to `4` and is clamped to `1-8`. |
 | `QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED` | Requires `0040`, `0041`, PostgreSQL, and a separately operated worker. Disable web enqueueing before stopping/draining workers to restore synchronous analysis. |
 | `QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED` | Internal extra comparison call only. Keep disabled pending the approved benchmark. |
@@ -273,6 +277,7 @@ variable and mandatory where applicable.
 | Default Gmail route | Gmail add-on, Gmail review, quotation editor, verified email preview | About `7`; `8` when reviewed rows were edited |
 | Phase 1 review V2 plus chaining | Same four surfaces | About `5` |
 | Phase 2 unified workspace | Gmail add-on, unified review/pricing, verified email preview | About `4` |
+| Standard-editor same-page intake | Gmail add-on, company confirmation plus locked quotation, inline standard editor, verified email preview | About `4`; the clean intake uses one company-confirm action and no review-to-editor navigation |
 
 The optimized clean case combines suggested-company choice with the required
 identity acknowledgement, reviewed-row save with quotation preparation, and

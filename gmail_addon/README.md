@@ -105,11 +105,12 @@ GMAIL_INQUIRY_ATTACHMENT_VIEW_MAX_BYTES=20971520
 ```
 
 `GMAIL_ADDON_MAX_THREAD_MESSAGES` is clamped to the safe range `1..100` by
-both the add-on and the website analyzer. If the open message is older than the
-newest configured window, it occupies one slot and the other slots contain the
-newest thread messages. Current-message and AI-thread action clicks reuse the
-canonical open-message identity without re-fetching sidebar summaries;
-selected-message imports always re-fetch membership before issuing a handoff.
+both the add-on and the website analyzer. The sidebar shows bounded thread
+metadata so the employee can choose the source messages. Current-message
+action clicks reuse the canonical open-message identity without re-fetching
+sidebar summaries; selected-message imports always re-fetch membership before
+issuing a handoff. The former AI-thread action is no longer rendered, and a
+cached old card that submits it is rejected before a handoff is issued.
 
 `GMAIL_ADDON_ALLOWED_AUDIENCES` must contain both exact endpoint URLs; do not
 use a wildcard. `GMAIL_ADDON_OAUTH_CLIENT_ID` is the client ID in the add-on
@@ -136,7 +137,8 @@ For the developer deployment, record evidence for each item:
 - [ ] Service-account email and both exact audiences match Railway.
 - [ ] Signed callback for `pharmacydxb@gmail.com` opens the sidebar.
 - [ ] A different mailbox is rejected.
-- [ ] Current, selected, and AI-thread modes open an opaque website handoff.
+- [ ] Import selected and Current only open an opaque website handoff.
+- [ ] A cached legacy AI-thread action is rejected and creates no handoff.
 - [ ] Login returns to the exact import review.
 - [ ] Company, rows, uncertainty, and evidence require employee confirmation.
 - [ ] Selling prices remain blank.

@@ -304,6 +304,8 @@ const QuotationEditor = ({
   quoteId,
   onClose,
   onReviewOutcome,
+  onOpenGmailImport,
+  gmailEvidenceVisible = false,
   initialEmailReviewFingerprint = '',
   onInitialEmailReviewHandled,
 }) => {
@@ -2560,6 +2562,41 @@ const QuotationEditor = ({
   const productCreationWarnings = productCreateModal ? Object.values(productCreateModal.confirmations || {}) : [];
   const hasProductCreationWarnings = productCreationWarnings.length > 0;
   const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked);
+  const gmailSource = quote.gmail_source && typeof quote.gmail_source === 'object'
+    ? quote.gmail_source
+    : null;
+  const gmailImportId = gmailSource?.import_id ?? gmailSource?.id ?? null;
+  const gmailSourceSubject = gmailSource?.subject || gmailSource?.inquiry_subject || '';
+  const gmailSourceCompany = (
+    gmailSource?.confirmed_company_name
+    || gmailSource?.company_name
+    || quote.company_name
+    || 'Not recorded'
+  );
+  const gmailSourceContact = (
+    gmailSource?.confirmed_contact_name
+    || gmailSource?.contact_name
+    || quote.contact_name
+    || 'No contact selected'
+  );
+  const hasUnsavedLineForm = Object.keys(emptyLine).some(
+    (key) => lineForm[key] !== emptyLine[key]
+  );
+  const hasUnsavedContactForm = showContactForm && Object.keys(emptyContactForm).some(
+    (key) => contactForm[key] !== emptyContactForm[key]
+  );
+  const gmailEvidenceNavigationBlocked = Boolean(
+    hasUnsavedCustomerDocument
+    || hasUnsavedLineForm
+    || hasUnsavedContactForm
+    || saving
+    || contactSaving
+    || actionInFlight
+  );
+  const gmailEvidenceActionBlocked = Boolean(
+    !gmailEvidenceVisible && gmailEvidenceNavigationBlocked
+  );
+  const gmailEvidenceNavigationHintId = `gmail-evidence-navigation-hint-${quote.id}`;
 
   return (
     <div className="qm-editor">
@@ -2660,6 +2697,40 @@ const QuotationEditor = ({
           </button>
         </div>
       </div>
+
+      {gmailSource && (
+        <section className="qm-gmail-source-banner" aria-label="Gmail inquiry source">
+          <div className="qm-gmail-source-content">
+            <span className="qm-gmail-source-kicker">Imported from Gmail</span>
+            <strong>{gmailSourceSubject || 'Gmail inquiry'}</strong>
+            <div className="qm-gmail-source-details">
+              <span><b>Confirmed company</b>{gmailSourceCompany}</span>
+              <span><b>Confirmed contact</b>{gmailSourceContact}</span>
+            </div>
+            <p>Source messages, attachments, and row evidence are retained with this quotation.</p>
+          </div>
+          {gmailImportId && typeof onOpenGmailImport === 'function' && (
+            <div className="qm-gmail-source-actions">
+              <button
+                type="button"
+                className="qm-secondary"
+                disabled={gmailEvidenceActionBlocked}
+                aria-describedby={gmailEvidenceActionBlocked
+                  ? gmailEvidenceNavigationHintId
+                  : undefined}
+                onClick={() => onOpenGmailImport(gmailImportId)}
+              >
+                {gmailEvidenceVisible ? 'Hide Gmail evidence' : 'View Gmail evidence'}
+              </button>
+              {gmailEvidenceActionBlocked && (
+                <small id={gmailEvidenceNavigationHintId} role="status">
+                  Finish the current action, or save or clear unfinished quotation changes before opening Gmail evidence.
+                </small>
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="qm-status-progress" aria-label="Quotation status progress">
         {statusSteps.map((step, index) => {

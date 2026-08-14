@@ -18,6 +18,7 @@ jest.mock('./QuotationEditor', () => ({
   quoteId,
   initialEmailReviewFingerprint,
   onInitialEmailReviewHandled,
+  onOpenGmailImport,
 }) => (
   <div>
     <span>Quotation editor {quoteId}</span>
@@ -27,16 +28,27 @@ jest.mock('./QuotationEditor', () => ({
     {initialEmailReviewFingerprint && (
       <button type="button" onClick={onInitialEmailReviewHandled}>Consume email review</button>
     )}
+    <button type="button" onClick={() => onOpenGmailImport(31)}>Open Gmail source</button>
   </div>
 ));
 jest.mock('./GmailInquiryReview', () => ({
   __esModule: true,
-  default: ({ token, importId, onClaimed, onOpenQuote }) => (
+  default: ({
+    token,
+    importId,
+    onClaimed,
+    onOpenQuote,
+    onBack,
+    backLabel,
+    initialShowEvidence,
+  }) => (
     <div>
       <span>Gmail token {token || 'none'}</span>
       <span>Gmail import {importId || 'none'}</span>
+      <span>Gmail evidence {initialShowEvidence ? 'visible' : 'collapsed'}</span>
       <button type="button" onClick={() => onClaimed(45)}>Remember import</button>
       <button type="button" onClick={() => onOpenQuote(88)}>Open exact quote</button>
+      <button type="button" onClick={onBack}>{backLabel}</button>
       <button
         type="button"
         onClick={() => onOpenQuote(88, {
@@ -70,7 +82,7 @@ describe('QuotationModule Gmail deep links', () => {
     renderModule('/admin?gmail_import=opaque-token');
 
     expect(screen.getByText('Gmail token opaque-token')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Inquiries' })).toHaveClass('active');
+    expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
     fireEvent.click(screen.getByRole('button', { name: /remember import/i }));
 
     await waitFor(() => {
@@ -78,6 +90,7 @@ describe('QuotationModule Gmail deep links', () => {
       expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import=opaque-token');
     });
     expect(screen.getByText('Gmail import 45')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
 
     fireEvent.click(screen.getByRole('button', { name: /open exact quote/i }));
     expect(await screen.findByText('Quotation editor 88')).toBeInTheDocument();
@@ -108,9 +121,40 @@ describe('QuotationModule Gmail deep links', () => {
     ).toHaveTextContent('none'));
   });
 
+  test('lets the standard editor reopen its Gmail source on the Quotations tab', async () => {
+    renderModule('/admin?quote_id=88');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Gmail source' }));
+
+    expect(await screen.findByText('Gmail import 31')).toBeInTheDocument();
+    expect(screen.getByText('Gmail evidence visible')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
+    expect(screen.getByLabelText('location').textContent).toContain('quotation_tab=quotes');
+    expect(screen.getByLabelText('location').textContent).toContain('gmail_import_id=31');
+    expect(screen.getByLabelText('location').textContent).toContain('gmail_return_quote_id=88');
+    expect(screen.getByLabelText('location').textContent).not.toMatch(/[?&]quote_id=/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to quotation' }));
+    expect(await screen.findByText('Quotation editor 88')).toBeInTheDocument();
+    expect(screen.getByLabelText('location').textContent).toContain('quote_id=88');
+    expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import_id');
+    expect(screen.getByLabelText('location').textContent).not.toContain('gmail_return_quote_id');
+  });
+
+  test('returns from Gmail intake to the quotation list, not the old inquiries page', async () => {
+    renderModule('/admin?quotation_tab=quotes&gmail_import_id=31');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to quotations' }));
+
+    expect(await screen.findByText('Quotation list')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
+    expect(screen.getByLabelText('location').textContent).toContain('quotation_tab=quotes');
+    expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import_id');
+  });
+
   test('normalizes route precedence and rejects invalid IDs', () => {
     expect(quotationRouteFromSearch('?quotation_tab=quotes&gmail_import=token')).toEqual({
-      activeTab: 'inquiries',
+      activeTab: 'quotes',
       gmailToken: 'token',
       gmailImportId: '',
       quoteId: null,

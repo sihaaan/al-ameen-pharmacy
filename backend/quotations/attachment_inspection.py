@@ -22,7 +22,13 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
-from pypdf.generic import DictionaryObject, IndirectObject, NullObject, StreamObject
+from pypdf.generic import (
+    BooleanObject,
+    DictionaryObject,
+    IndirectObject,
+    NullObject,
+    StreamObject,
+)
 
 
 PDF_MIME = "application/pdf"
@@ -93,6 +99,12 @@ DEFAULT_MAX_PDF_RENDER_PIXELS = 25_000_000
 HARD_MAX_PDF_RENDER_PIXELS = 50_000_000
 DEFAULT_MAX_PDF_IMAGE_PIXELS = 25_000_000
 HARD_MAX_PDF_IMAGE_PIXELS = 50_000_000
+DEFAULT_MAX_PDF_IMAGE_MASK_PIXELS = 50_000_000
+HARD_MAX_PDF_IMAGE_MASK_PIXELS = 50_000_000
+DEFAULT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS = 100_000_000
+HARD_MAX_PDF_PAGE_IMAGE_MASK_PIXELS = 100_000_000
+DEFAULT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS = 200_000_000
+HARD_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS = 200_000_000
 DEFAULT_MAX_PDF_TEXT_CHARS_PER_PAGE = 250_000
 HARD_MAX_PDF_TEXT_CHARS_PER_PAGE = 1_000_000
 DEFAULT_MAX_PDF_TOTAL_TEXT_CHARS = 1_000_000
@@ -207,6 +219,41 @@ def max_pdf_image_pixels():
         "QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS",
         DEFAULT_MAX_PDF_IMAGE_PIXELS,
         HARD_MAX_PDF_IMAGE_PIXELS,
+    )
+
+
+def pdf_image_mask_limits_enabled():
+    value = getattr(
+        settings,
+        "QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED",
+        True,
+    )
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def max_pdf_image_mask_pixels():
+    return _bounded_setting(
+        "QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS",
+        DEFAULT_MAX_PDF_IMAGE_MASK_PIXELS,
+        HARD_MAX_PDF_IMAGE_MASK_PIXELS,
+    )
+
+
+def max_pdf_page_image_mask_pixels():
+    return _bounded_setting(
+        "QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS",
+        DEFAULT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS,
+        HARD_MAX_PDF_PAGE_IMAGE_MASK_PIXELS,
+    )
+
+
+def max_pdf_total_image_mask_pixels():
+    return _bounded_setting(
+        "QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS",
+        DEFAULT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS,
+        HARD_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS,
     )
 
 
@@ -1868,7 +1915,7 @@ def _pdf_filter_decode_parameters(stream, filter_count):
     return None
 
 
-def _pdf_image_filter_chain_native_prefix_bytes(stream):
+def _pdf_image_filter_chain_native_prefix_bytes(stream, *, decode_prefix=True):
     """Return bounded wrapper bytes for a geometry-bounded native image.
 
     The final image codec is bounded separately through the declared image
@@ -1929,6 +1976,8 @@ def _pdf_image_filter_chain_native_prefix_bytes(stream):
         terminal_parameters, DictionaryObject
     ):
         return None
+    if not decode_prefix:
+        return 0
     bounded_prefix = _bounded_filter_chain_data(
         getattr(stream, "_data", b"") or b"",
         prefix,
@@ -2090,28 +2139,191 @@ def _page_has_inline_image_content(page, *, page_number):
     return False
 
 
+def _pdf_one_bit_image_mask_uses_bounded_limits(stream, *, width, height, bits):
+    """Recognize the narrow CCITT image-mask compatibility profile.
+
+    Image masks receive a larger pixel budget only when their declared shape,
+    row geometry, and native filter chain can all be bounded without decoding
+    the terminal codec. Other images retain the generic image limits.
+    """
+
+    if not pdf_image_mask_limits_enabled() or bits != 1:
+        return False
+    image_mask_value = _resolve_pdf_value(stream.get("/ImageMask"))
+    bits_value = _resolve_pdf_value(stream.get("/BitsPerComponent"))
+    bits_declares_one = (
+        bits_value is None
+        or isinstance(bits_value, NullObject)
+        or (
+            not isinstance(bits_value, bool)
+            and isinstance(bits_value, int)
+            and int(bits_value) == 1
+        )
+    )
+    if not (
+        isinstance(image_mask_value, BooleanObject)
+        and image_mask_value.value is True
+        and bits_declares_one
+    ):
+        return False
+    for key in (
+        "/ColorSpace",
+        "/Mask",
+        "/SMask",
+        "/Alternates",
+        "/SMaskInData",
+    ):
+        value = _resolve_pdf_value(stream.get(key))
+        if value is not None and not isinstance(value, NullObject):
+            return False
+    decode_value = _resolve_pdf_value(stream.get("/Decode"))
+    if decode_value is not None and not isinstance(decode_value, NullObject):
+        if not isinstance(decode_value, (list, tuple)) or len(decode_value) != 2:
+            return False
+        decoded_numbers = []
+        for item in decode_value:
+            item = _resolve_pdf_value(item)
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                return False
+            decoded_numbers.append(float(item))
+        if decoded_numbers not in ([0.0, 1.0], [1.0, 0.0]):
+            return False
+
+    aliases = {
+        "/A85": "/ASCII85Decode",
+        "/AHx": "/ASCIIHexDecode",
+        "/CCF": "/CCITTFaxDecode",
+        "/Fl": "/FlateDecode",
+    }
+    filters = [
+        aliases.get(value, value) for value in _pdf_filter_names(stream)
+    ]
+    if not filters or filters[-1] != "/CCITTFaxDecode":
+        return False
+    if (
+        _pdf_image_filter_chain_native_prefix_bytes(
+            stream,
+            decode_prefix=False,
+        )
+        is None
+    ):
+        return False
+    decode_parameters = _pdf_filter_decode_parameters(stream, len(filters))
+    if decode_parameters is None:
+        return False
+    terminal_parameters = decode_parameters[-1]
+    if terminal_parameters is None:
+        terminal_parameters = DictionaryObject()
+    if not isinstance(terminal_parameters, DictionaryObject):
+        return False
+    allowed_keys = {
+        "/K",
+        "/Columns",
+        "/Rows",
+        "/EndOfLine",
+        "/EncodedByteAlign",
+        "/EndOfBlock",
+        "/BlackIs1",
+        "/DamagedRowsBeforeError",
+    }
+    if any(str(key) not in allowed_keys for key in terminal_parameters):
+        return False
+
+    def integer_parameter(name, default, *, minimum=None):
+        value = _resolve_pdf_value(terminal_parameters.get(name, default))
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        value = int(value)
+        if minimum is not None and value < minimum:
+            return None
+        return value
+
+    if "/Columns" not in terminal_parameters or "/Rows" not in terminal_parameters:
+        return False
+    columns = integer_parameter("/Columns", None, minimum=1)
+    rows = integer_parameter("/Rows", None, minimum=1)
+    k_value = integer_parameter("/K", 0)
+    damaged_rows = integer_parameter("/DamagedRowsBeforeError", 0, minimum=0)
+    if (
+        columns != width
+        or rows != height
+        or k_value is None
+        or not (k_value == -1 or 0 <= k_value <= height)
+        or damaged_rows is None
+        or damaged_rows > height
+    ):
+        return False
+    for key in ("/EndOfLine", "/EncodedByteAlign", "/EndOfBlock", "/BlackIs1"):
+        if key not in terminal_parameters:
+            continue
+        value = _resolve_pdf_value(terminal_parameters.get(key))
+        if not isinstance(value, BooleanObject):
+            return False
+    return True
+
+
 def _pdf_image_dimensions(stream):
-    if str(stream.get("/Subtype") or "") != "/Image":
+    subtype_value = _resolve_pdf_value(stream.get("/Subtype"))
+    if str(subtype_value or "") != "/Image":
         return None
-    try:
-        width = int(stream.get("/Width") or 0)
-        height = int(stream.get("/Height") or 0)
-        bits = int(stream.get("/BitsPerComponent") or (1 if stream.get("/ImageMask") else 8))
-    except (TypeError, ValueError, OverflowError) as exc:
+    image_mask_value = _resolve_pdf_value(stream.get("/ImageMask"))
+    bits_value = _resolve_pdf_value(stream.get("/BitsPerComponent"))
+    default_bits = (
+        1
+        if (
+            isinstance(image_mask_value, BooleanObject)
+            and image_mask_value.value is True
+        )
+        else 8
+    )
+    width = _resolve_pdf_value(stream.get("/Width"))
+    height = _resolve_pdf_value(stream.get("/Height"))
+    bits = (
+        default_bits
+        if bits_value is None or isinstance(bits_value, NullObject)
+        else bits_value
+    )
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in (width, height, bits)
+    ):
         raise PDFResourceLimitError(
             "PDF contains invalid embedded-image dimensions."
-        ) from exc
+        )
+    width = int(width)
+    height = int(height)
+    bits = int(bits)
     if width <= 0 or height <= 0 or bits <= 0:
         raise PDFResourceLimitError(
             "PDF contains invalid embedded-image dimensions."
         )
     pixels = width * height
-    if pixels > max_pdf_image_pixels():
+    explicit_one_bit_mask = (
+        isinstance(image_mask_value, BooleanObject)
+        and image_mask_value.value is True
+        and bits == 1
+    )
+    mask_limits_applied = _pdf_one_bit_image_mask_uses_bounded_limits(
+        stream,
+        width=width,
+        height=height,
+        bits=bits,
+    )
+    image_pixel_limit = (
+        max_pdf_image_mask_pixels()
+        if mask_limits_applied
+        else max_pdf_image_pixels()
+    )
+    if pixels > image_pixel_limit:
+        if mask_limits_applied:
+            raise PDFResourceLimitError(
+                "PDF contains an embedded one-bit image mask that exceeds the safe pixel limit."
+            )
         raise PDFResourceLimitError(
             "PDF contains an embedded image that exceeds the safe pixel limit."
         )
     color_space = str(stream.get("/ColorSpace") or "")
-    if stream.get("/ImageMask") or color_space == "/DeviceGray":
+    if explicit_one_bit_mask or color_space == "/DeviceGray":
         components = 1
     elif color_space == "/DeviceRGB":
         components = 3
@@ -2119,12 +2331,21 @@ def _pdf_image_dimensions(stream):
         # CMYK, ICC-based, indexed, or indirect color spaces use a conservative
         # upper estimate; this is only a memory-safety boundary.
         components = 4
-    estimated_bytes = math.ceil(pixels * components * bits / 8)
+    estimated_bytes = (
+        math.ceil(width / 8) * height
+        if explicit_one_bit_mask
+        else math.ceil(pixels * components * bits / 8)
+    )
     if estimated_bytes > max_pdf_decoded_stream_bytes():
         raise PDFResourceLimitError(
             "PDF contains an embedded image whose decoded size exceeds the safe limit."
         )
-    return pixels, estimated_bytes
+    return {
+        "pixels": pixels,
+        "estimated_bytes": estimated_bytes,
+        "explicit_one_bit_mask": explicit_one_bit_mask,
+        "mask_limits_applied": mask_limits_applied,
+    }
 
 
 def _inspect_pdf_objects(reader):
@@ -2137,6 +2358,11 @@ def _inspect_pdf_objects(reader):
     bounded_image_prefix_count = 0
     bounded_image_prefix_bytes = 0
     image_object_count = 0
+    image_mask_object_count = 0
+    bounded_image_mask_object_count = 0
+    image_mask_pixels = 0
+    bounded_image_mask_pixels = 0
+    estimated_image_mask_bytes = 0
     unsafe_image_filter_count = 0
     estimated_image_bytes = 0
     max_image_pixels_seen = 0
@@ -2159,9 +2385,21 @@ def _inspect_pdf_objects(reader):
         image_dimensions = _pdf_image_dimensions(value)
         if image_dimensions:
             image_object_count += 1
-            pixels, image_bytes = image_dimensions
+            pixels = image_dimensions["pixels"]
+            image_bytes = image_dimensions["estimated_bytes"]
             max_image_pixels_seen = max(max_image_pixels_seen, pixels)
             estimated_image_bytes += image_bytes
+            if image_dimensions["explicit_one_bit_mask"]:
+                image_mask_object_count += 1
+                image_mask_pixels += pixels
+                estimated_image_mask_bytes += image_bytes
+            if image_dimensions["mask_limits_applied"]:
+                bounded_image_mask_object_count += 1
+                bounded_image_mask_pixels += pixels
+                if bounded_image_mask_pixels > max_pdf_total_image_mask_pixels():
+                    raise PDFResourceLimitError(
+                        "PDF one-bit image masks exceed the safe document pixel limit."
+                    )
 
         decoded = _bounded_pdf_stream_data(value)
         if decoded is None:
@@ -2222,33 +2460,57 @@ def _inspect_pdf_objects(reader):
         "bounded_image_prefix_count": bounded_image_prefix_count,
         "bounded_image_prefix_bytes": bounded_image_prefix_bytes,
         "image_object_count": image_object_count,
+        "image_mask_object_count": image_mask_object_count,
+        "bounded_image_mask_object_count": bounded_image_mask_object_count,
+        "image_mask_pixels": image_mask_pixels,
+        "bounded_image_mask_pixels": bounded_image_mask_pixels,
+        "estimated_image_mask_bytes": estimated_image_mask_bytes,
         "unsafe_image_filter_count": unsafe_image_filter_count,
         "estimated_image_bytes": estimated_image_bytes,
         "max_image_pixels": max_image_pixels_seen,
     }
 
 
-def _page_referenced_image_usage(page, *, page_number):
+def _page_referenced_image_usage(
+    page,
+    *,
+    page_number,
+    relaxed_image_mask_present=False,
+):
     """Bound unique image XObjects reachable from one page's resources."""
 
     try:
-        resources = page.get("/Resources")
+        resources = _resolve_pdf_value(page.get("/Resources"))
     except Exception as exc:
         raise PDFResourceLimitError(
             f"PDF page {page_number} resources could not be inspected safely."
         ) from exc
-    if not resources:
-        return {"pixels": 0, "estimated_bytes": 0, "image_count": 0}
-
-    resource_stack = [resources]
+    resource_stack = [resources] if resources else []
     seen_resources = set()
     seen_xobjects = set()
     total_pixels = 0
+    generic_limit_pixels = 0
+    image_mask_pixels = 0
     total_estimated_bytes = 0
+    estimated_image_mask_bytes = 0
     image_count = 0
+    image_mask_count = 0
+    complex_render_path = False
+
+    try:
+        annotations = _resolve_pdf_value(page.get("/Annots"))
+        for annotation_value in list(annotations) if annotations else []:
+            annotation = _resolve_pdf_value(annotation_value)
+            if hasattr(annotation, "get") and annotation.get("/AP") is not None:
+                complex_render_path = True
+                break
+    except Exception as exc:
+        raise PDFResourceLimitError(
+            f"PDF page {page_number} annotation resources could not be inspected safely."
+        ) from exc
 
     while resource_stack:
-        current_resources = resource_stack.pop()
+        current_resources = _resolve_pdf_value(resource_stack.pop())
         resource_key = id(current_resources)
         indirect_reference = getattr(current_resources, "indirect_reference", None)
         if indirect_reference is not None:
@@ -2262,6 +2524,28 @@ def _page_referenced_image_usage(page, *, page_number):
         try:
             xobjects = current_resources.get("/XObject")
             values = list(xobjects.values()) if xobjects else []
+            patterns = _resolve_pdf_value(current_resources.get("/Pattern"))
+            if patterns and list(patterns.values()):
+                complex_render_path = True
+            fonts = _resolve_pdf_value(current_resources.get("/Font"))
+            for font_value in list(fonts.values()) if fonts else []:
+                font = _resolve_pdf_value(font_value)
+                if hasattr(font, "get") and str(font.get("/Subtype") or "") == "/Type3":
+                    complex_render_path = True
+                    break
+            graphics_states = _resolve_pdf_value(
+                current_resources.get("/ExtGState")
+            )
+            for graphics_state_value in (
+                list(graphics_states.values()) if graphics_states else []
+            ):
+                graphics_state = _resolve_pdf_value(graphics_state_value)
+                if not hasattr(graphics_state, "get"):
+                    continue
+                soft_mask = _resolve_pdf_value(graphics_state.get("/SMask"))
+                if soft_mask is not None and str(soft_mask) != "/None":
+                    complex_render_path = True
+                    break
         except Exception as exc:
             raise PDFResourceLimitError(
                 f"PDF page {page_number} image resources could not be inspected safely."
@@ -2287,11 +2571,28 @@ def _page_referenced_image_usage(page, *, page_number):
                 continue
             image_dimensions = _pdf_image_dimensions(xobject)
             if image_dimensions:
-                pixels, estimated_bytes = image_dimensions
+                for nested_mask_key in ("/Mask", "/SMask"):
+                    nested_mask = _resolve_pdf_value(xobject.get(nested_mask_key))
+                    if isinstance(nested_mask, StreamObject):
+                        complex_render_path = True
+                pixels = image_dimensions["pixels"]
+                estimated_bytes = image_dimensions["estimated_bytes"]
                 total_pixels += pixels
                 total_estimated_bytes += estimated_bytes
                 image_count += 1
-                if total_pixels > max_pdf_image_pixels():
+                if image_dimensions["mask_limits_applied"]:
+                    image_mask_pixels += pixels
+                    if image_mask_pixels > max_pdf_page_image_mask_pixels():
+                        raise PDFResourceLimitError(
+                            f"PDF page {page_number} references one-bit image masks "
+                            "whose aggregate pixel count exceeds the safe limit."
+                        )
+                else:
+                    generic_limit_pixels += pixels
+                if image_dimensions["explicit_one_bit_mask"]:
+                    image_mask_count += 1
+                    estimated_image_mask_bytes += estimated_bytes
+                if generic_limit_pixels > max_pdf_image_pixels():
                     raise PDFResourceLimitError(
                         f"PDF page {page_number} references images whose aggregate "
                         "pixel count exceeds the safe limit."
@@ -2307,10 +2608,19 @@ def _page_referenced_image_usage(page, *, page_number):
                 if nested_resources:
                     resource_stack.append(nested_resources)
 
+    if relaxed_image_mask_present and complex_render_path:
+        raise PDFResourceLimitError(
+            f"PDF page {page_number} combines one-bit image masks with a complex "
+            "render path that cannot be accounted safely."
+        )
+
     return {
         "pixels": total_pixels,
         "estimated_bytes": total_estimated_bytes,
         "image_count": image_count,
+        "image_mask_count": image_mask_count,
+        "image_mask_pixels": image_mask_pixels,
+        "estimated_image_mask_bytes": estimated_image_mask_bytes,
     }
 
 
@@ -2411,6 +2721,12 @@ def inspect_pdf_attachment(data, *, declared_mime_type="", max_pages=None):
     max_page_referenced_image_pixels = 0
     max_page_referenced_image_bytes = 0
     max_page_referenced_image_count = 0
+    max_page_referenced_image_mask_count = 0
+    max_page_referenced_image_mask_pixels = 0
+    max_page_referenced_image_mask_bytes = 0
+    total_referenced_image_mask_count = 0
+    total_referenced_image_mask_pixels = 0
+    total_referenced_image_mask_bytes = 0
     inline_image_page_count = 0
     for page_number, page in enumerate(reader.pages, start=1):
         try:
@@ -2429,6 +2745,9 @@ def inspect_pdf_attachment(data, *, declared_mime_type="", max_pages=None):
             page_image_usage = _page_referenced_image_usage(
                 page,
                 page_number=page_number,
+                relaxed_image_mask_present=(
+                    object_inspection["bounded_image_mask_object_count"] > 0
+                ),
             )
             max_page_referenced_image_pixels = max(
                 max_page_referenced_image_pixels,
@@ -2442,6 +2761,35 @@ def inspect_pdf_attachment(data, *, declared_mime_type="", max_pages=None):
                 max_page_referenced_image_count,
                 page_image_usage["image_count"],
             )
+            max_page_referenced_image_mask_count = max(
+                max_page_referenced_image_mask_count,
+                page_image_usage["image_mask_count"],
+            )
+            max_page_referenced_image_mask_pixels = max(
+                max_page_referenced_image_mask_pixels,
+                page_image_usage["image_mask_pixels"],
+            )
+            max_page_referenced_image_mask_bytes = max(
+                max_page_referenced_image_mask_bytes,
+                page_image_usage["estimated_image_mask_bytes"],
+            )
+            total_referenced_image_mask_count += page_image_usage[
+                "image_mask_count"
+            ]
+            total_referenced_image_mask_pixels += page_image_usage[
+                "image_mask_pixels"
+            ]
+            total_referenced_image_mask_bytes += page_image_usage[
+                "estimated_image_mask_bytes"
+            ]
+            if (
+                total_referenced_image_mask_pixels
+                > max_pdf_total_image_mask_pixels()
+            ):
+                raise PDFResourceLimitError(
+                    "PDF page references to one-bit image masks exceed the safe "
+                    "document pixel limit."
+                )
             if _page_has_inline_image_content(page, page_number=page_number):
                 inline_image_page_count += 1
         except PDFResourceLimitError:
@@ -2528,13 +2876,44 @@ def inspect_pdf_attachment(data, *, declared_mime_type="", max_pages=None):
                 "compressed_object_count"
             ],
             "image_object_count": object_inspection["image_object_count"],
+            "image_mask_object_count": object_inspection[
+                "image_mask_object_count"
+            ],
+            "bounded_image_mask_object_count": object_inspection[
+                "bounded_image_mask_object_count"
+            ],
+            "image_mask_pixels": object_inspection["image_mask_pixels"],
+            "bounded_image_mask_pixels": object_inspection[
+                "bounded_image_mask_pixels"
+            ],
+            "estimated_image_mask_bytes": object_inspection[
+                "estimated_image_mask_bytes"
+            ],
             "max_image_pixels": object_inspection["max_image_pixels"],
             "estimated_image_bytes": object_inspection[
                 "estimated_image_bytes"
             ],
             "max_page_referenced_image_count": max_page_referenced_image_count,
+            "max_page_referenced_image_mask_count": (
+                max_page_referenced_image_mask_count
+            ),
             "max_page_referenced_image_pixels": max_page_referenced_image_pixels,
             "max_page_referenced_image_bytes": max_page_referenced_image_bytes,
+            "max_page_referenced_image_mask_pixels": (
+                max_page_referenced_image_mask_pixels
+            ),
+            "max_page_referenced_image_mask_bytes": (
+                max_page_referenced_image_mask_bytes
+            ),
+            "total_referenced_image_mask_count": (
+                total_referenced_image_mask_count
+            ),
+            "total_referenced_image_mask_pixels": (
+                total_referenced_image_mask_pixels
+            ),
+            "total_referenced_image_mask_bytes": (
+                total_referenced_image_mask_bytes
+            ),
             "inline_image_page_count": inline_image_page_count,
             "unsafe_image_filter_count": object_inspection[
                 "unsafe_image_filter_count"

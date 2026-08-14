@@ -220,6 +220,129 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.queryByLabelText('Brand for Imported gloves')).not.toBeInTheDocument();
   });
 
+  test('shows retained Gmail source confirmation and opens its evidence', async () => {
+    const onOpenGmailImport = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        gmail_source: {
+          import_id: 74,
+          subject: 'RFQ - First aid supplies',
+          confirmed_company_name: 'Customer A',
+          confirmed_contact_name: 'Amina Buyer',
+        },
+      },
+    });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        onOpenGmailImport={onOpenGmailImport}
+      />
+    );
+
+    const banner = await screen.findByRole('region', { name: 'Gmail inquiry source' });
+    expect(within(banner).getByText('Imported from Gmail')).toBeInTheDocument();
+    expect(within(banner).getByText('RFQ - First aid supplies')).toBeInTheDocument();
+    expect(within(banner).getByText('Customer A')).toBeInTheDocument();
+    expect(within(banner).getByText('Amina Buyer')).toBeInTheDocument();
+    expect(within(banner).getByText(/source messages, attachments, and row evidence are retained/i)).toBeInTheDocument();
+
+    const evidenceButton = within(banner).getByRole('button', { name: 'View Gmail evidence' });
+    fireEvent.click(evidenceButton);
+    expect(onOpenGmailImport).toHaveBeenCalledTimes(1);
+    expect(onOpenGmailImport).toHaveBeenCalledWith(74);
+
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12.50' },
+    });
+    expect(evidenceButton).toBeDisabled();
+    expect(evidenceButton).toHaveAccessibleDescription(
+      'Finish the current action, or save or clear unfinished quotation changes before opening Gmail evidence.'
+    );
+    expect(screen.getByText(
+      'Finish the current action, or save or clear unfinished quotation changes before opening Gmail evidence.'
+    )).toBeVisible();
+  });
+
+  test('keeps the evidence toggle usable while evidence is already visible', async () => {
+    const onOpenGmailImport = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        gmail_source: { import_id: 74, inquiry_subject: 'RFQ' },
+      },
+    });
+
+    render(
+      <QuotationEditor
+        quoteId={21}
+        onClose={jest.fn()}
+        onOpenGmailImport={onOpenGmailImport}
+        gmailEvidenceVisible
+      />
+    );
+
+    const evidenceButton = await screen.findByRole('button', { name: 'Hide Gmail evidence' });
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12.50' },
+    });
+    expect(evidenceButton).toBeEnabled();
+    fireEvent.click(evidenceButton);
+    expect(onOpenGmailImport).toHaveBeenCalledWith(74);
+  });
+
+  test('does not show a Gmail source banner for a manual quotation', async () => {
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} onOpenGmailImport={jest.fn()} />);
+
+    await screen.findByText('Q-0021');
+    expect(screen.queryByRole('region', { name: 'Gmail inquiry source' })).not.toBeInTheDocument();
+  });
+
+  test('does not leave for Gmail evidence while a new quotation row is unfinished', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        gmail_source: { import_id: 74, inquiry_subject: 'RFQ' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} onOpenGmailImport={jest.fn()} />);
+
+    const evidenceButton = await screen.findByRole('button', { name: 'View Gmail evidence' });
+    fireEvent.change(screen.getByPlaceholderText('Snapshot name'), {
+      target: { value: 'Unfinished new item' },
+    });
+
+    expect(evidenceButton).toBeDisabled();
+    expect(evidenceButton).toHaveAccessibleDescription(
+      'Finish the current action, or save or clear unfinished quotation changes before opening Gmail evidence.'
+    );
+  });
+
+  test('does not leave for Gmail evidence while a new purchaser is unfinished', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...quote,
+        gmail_source: { import_id: 74, inquiry_subject: 'RFQ' },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} onOpenGmailImport={jest.fn()} />);
+
+    const evidenceButton = await screen.findByRole('button', { name: 'View Gmail evidence' });
+    fireEvent.click(screen.getByRole('button', { name: '+ Create contact' }));
+    fireEvent.change(screen.getByLabelText('Name'), {
+      target: { value: 'Unfinished purchaser' },
+    });
+
+    expect(evidenceButton).toBeDisabled();
+    expect(evidenceButton).toHaveAccessibleDescription(
+      'Finish the current action, or save or clear unfinished quotation changes before opening Gmail evidence.'
+    );
+  });
+
   test('consumes an exact one-shot Gmail handoff and opens only the existing hardened preview', async () => {
     const onInitialEmailReviewHandled = jest.fn();
     quotationAPI.quotes.retrieve.mockResolvedValue({ data: preparedReadyQuote });

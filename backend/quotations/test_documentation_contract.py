@@ -221,6 +221,7 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
             "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED",
             "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+            "QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED",
             "QUOTATION_GMAIL_PARALLEL_FETCH_LIMIT",
             "QUOTATION_GMAIL_COMPACT_SCHEMA_SHADOW_ENABLED",
@@ -245,6 +246,10 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_IMPORT_MAX_PDF_PAGE_AREA_POINTS": "16000000",
             "QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS": "25000000",
             "QUOTATION_IMPORT_MAX_PDF_IMAGE_PIXELS": "25000000",
+            "QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED": "1",
+            "QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS": "50000000",
+            "QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS": "100000000",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS": "200000000",
             "QUOTATION_IMPORT_MAX_PDF_TEXT_CHARS_PER_PAGE": "250000",
             "QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS": "1000000",
             "QUOTATION_IMPORT_MAX_PDF_WORDS_PER_PAGE": "50000",
@@ -313,6 +318,28 @@ class DocumentationContractTests(SimpleTestCase):
         self.assertIn("Customer budget/source prices are never read", deployment)
         self.assertIn("Exact\ndouble clicks", deployment)
         self.assertIn("not eligible to auto-preview", operations)
+
+    def test_standard_editor_intake_is_documented_as_default_on_and_reversible(self):
+        environment = read_repository_file("backend/.env.example")
+        deployment = read_repository_file("DEPLOYMENT.md")
+        operations = read_repository_file("OPERATIONS.md")
+
+        self.assertRegex(
+            environment,
+            r"(?m)^QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=1$",
+        )
+        for content in (deployment, operations):
+            with self.subTest(
+                document="deployment" if content is deployment else "operations"
+            ):
+                self.assertIn(
+                    "QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED",
+                    content,
+                )
+                self.assertIn("QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED", content)
+                self.assertIn("precedence", content.lower())
+                self.assertIn("no migration", content.lower())
+                self.assertIn("rollback", content.lower())
 
     def test_background_gmail_analysis_is_migration_first_and_reversible(self):
         deployment = read_repository_file("DEPLOYMENT.md")
@@ -449,6 +476,10 @@ class DocumentationContractTests(SimpleTestCase):
             "QUOTATION_IMPORT_MAX_PDF_TOTAL_DECODED_STREAM_BYTES",
             "QUOTATION_IMPORT_MAX_PDF_PAGE_DIMENSION_POINTS",
             "QUOTATION_IMPORT_MAX_PDF_RENDER_PIXELS",
+            "QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED",
+            "QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS",
+            "QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS",
+            "QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS",
             "QUOTATION_IMPORT_MAX_PDF_TOTAL_TEXT_CHARS",
             "QUOTATION_IMPORT_MAX_PDF_TOTAL_WORDS",
             "QUOTATION_IMPORT_MAX_PDF_TABLE_CELLS",

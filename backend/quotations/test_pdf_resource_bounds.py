@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import math
+import tempfile
 import zlib
 from io import BytesIO
 from types import SimpleNamespace
@@ -15,9 +17,11 @@ from pypdf import PdfWriter
 from PIL import Image
 from pypdf.generic import (
     ArrayObject,
+    BooleanObject,
     DecodedStreamObject,
     DictionaryObject,
     EncodedStreamObject,
+    FloatObject,
     NameObject,
     NullObject,
     NumberObject,
@@ -37,6 +41,9 @@ from .attachment_inspection import (
     PDFResourceLimitError,
     _bounded_flate_decode,
     inspect_pdf_attachment,
+    max_pdf_image_mask_pixels,
+    max_pdf_page_image_mask_pixels,
+    max_pdf_total_image_mask_pixels,
 )
 from .gmail_inquiry_import import _build_source_analysis
 from .historical_import_parsers import _extract_pdf_text, parse_historical_pdf_upload
@@ -47,9 +54,35 @@ from .models import (
     HistoricalPriceImport,
     QuotationSettings,
 )
+from .private_storage import read_private_ref
 
 
 PDF_MIME = "application/pdf"
+
+KONICA_ONE_BIT_MASK_DIMENSIONS = [
+    (48, 40),
+    (784, 144),
+    (816, 336),
+    (560, 112),
+    (352, 88),
+    (4112, 3344),
+    (368, 56),
+    (4304, 5624),
+    (4320, 5560),
+    (4160, 6256),
+    (704, 64),
+    (304, 24),
+    (704, 32),
+    (48, 40),
+    (224, 112),
+    (240, 160),
+    (368, 80),
+    (192, 16),
+    (784, 128),
+    (288, 32),
+    (48, 40),
+]
+AUTO_CCITT_DECODE_PARAMETERS = object()
 
 
 def flate_zlib_raw_polyglot(*, trailing=b"evil"):
@@ -211,6 +244,258 @@ def unsupported_filter_image_pdf():
     )
     content = DecodedStreamObject()
     content.set_data(b"q 10 0 0 10 0 0 cm /Im0 Do Q")
+    page[NameObject("/Contents")] = writer._add_object(content)
+    writer.write(output)
+    return output.getvalue()
+
+
+def one_bit_image_mask_pdf(
+    pages,
+    *,
+    filters=("/CCITTFaxDecode",),
+    bits_per_component=1,
+    image_mask=True,
+    decode_parameters=AUTO_CCITT_DECODE_PARAMETERS,
+    encoded=b"\x00",
+    complex_render_path="",
+    forbidden_image_key="",
+    indirect_geometry=False,
+    geometry_overrides=None,
+):
+    """Build geometry-valid mask resources for deterministic preflight tests.
+
+    The native codec payload is intentionally never decoded by the inspector;
+    the existing native-filter allowlist bounds it by declared geometry.
+    """
+
+    output = BytesIO()
+    writer = PdfWriter()
+    for page_index, dimensions in enumerate(pages):
+        page = writer.add_blank_page(width=100, height=100)
+        image_references = {}
+        for image_index, (width, height) in enumerate(dimensions):
+            image = EncodedStreamObject()
+            image._data = encoded
+            image[NameObject("/Type")] = NameObject("/XObject")
+            geometry_values = {
+                "/Subtype": NameObject("/Image"),
+                "/Width": NumberObject(width),
+                "/Height": NumberObject(height),
+            }
+            geometry_values.update(
+                {
+                    key: value
+                    for key, value in (geometry_overrides or {}).items()
+                    if key in {"/Subtype", "/Width", "/Height"}
+                }
+            )
+            for key, value in geometry_values.items():
+                image[NameObject(key)] = (
+                    writer._add_object(value) if indirect_geometry else value
+                )
+            if image_mask is not None:
+                image[NameObject("/ImageMask")] = BooleanObject(image_mask)
+            if bits_per_component is not None:
+                bits_object = (geometry_overrides or {}).get(
+                    "/BitsPerComponent",
+                    NumberObject(bits_per_component),
+                )
+                image[NameObject("/BitsPerComponent")] = (
+                    writer._add_object(bits_object)
+                    if indirect_geometry
+                    else bits_object
+                )
+            if forbidden_image_key == "colorspace":
+                image[NameObject("/ColorSpace")] = NameObject("/DeviceGray")
+            elif forbidden_image_key == "mask":
+                image[NameObject("/Mask")] = ArrayObject(
+                    [NumberObject(0), NumberObject(1)]
+                )
+            elif forbidden_image_key == "smask":
+                image[NameObject("/SMask")] = NameObject("/Unexpected")
+            elif forbidden_image_key == "alternates":
+                image[NameObject("/Alternates")] = ArrayObject([])
+            elif forbidden_image_key == "smask_in_data":
+                image[NameObject("/SMaskInData")] = NumberObject(1)
+            elif forbidden_image_key == "decode":
+                image[NameObject("/Decode")] = ArrayObject(
+                    [NumberObject(0), NumberObject(2)]
+                )
+            filter_values = [NameObject(value) for value in filters]
+            image[NameObject("/Filter")] = (
+                filter_values[0]
+                if len(filter_values) == 1
+                else ArrayObject(filter_values)
+            )
+            current_decode_parameters = decode_parameters
+            if decode_parameters is AUTO_CCITT_DECODE_PARAMETERS:
+                current_decode_parameters = DictionaryObject(
+                    {
+                        NameObject("/K"): NumberObject(-1),
+                        NameObject("/Columns"): NumberObject(width),
+                        NameObject("/Rows"): NumberObject(height),
+                    }
+                )
+            if current_decode_parameters is not None:
+                image[NameObject("/DecodeParms")] = current_decode_parameters
+            image_references[
+                NameObject(f"/P{page_index}Im{image_index}")
+            ] = writer._add_object(image)
+        if complex_render_path in {"parent_mask", "parent_smask"}:
+            parent_image = DecodedStreamObject()
+            parent_image.set_data(b"\x00\x00\x00")
+            parent_image[NameObject("/Type")] = NameObject("/XObject")
+            parent_image[NameObject("/Subtype")] = NameObject("/Image")
+            parent_image[NameObject("/Width")] = NumberObject(1)
+            parent_image[NameObject("/Height")] = NumberObject(1)
+            parent_image[NameObject("/BitsPerComponent")] = NumberObject(8)
+            parent_image[NameObject("/ColorSpace")] = NameObject("/DeviceRGB")
+            parent_image[
+                NameObject(
+                    "/Mask"
+                    if complex_render_path == "parent_mask"
+                    else "/SMask"
+                )
+            ] = next(iter(image_references.values()))
+            image_references[NameObject("/ParentImage")] = writer._add_object(
+                parent_image
+            )
+        resources = DictionaryObject(
+            {NameObject("/XObject"): DictionaryObject(image_references)}
+        )
+        if complex_render_path == "pattern":
+            resources[NameObject("/Pattern")] = DictionaryObject(
+                {NameObject("/P0"): DictionaryObject()}
+            )
+        elif complex_render_path == "type3":
+            resources[NameObject("/Font")] = DictionaryObject(
+                {
+                    NameObject("/F0"): DictionaryObject(
+                        {NameObject("/Subtype"): NameObject("/Type3")}
+                    )
+                }
+            )
+        elif complex_render_path == "softmask":
+            resources[NameObject("/ExtGState")] = DictionaryObject(
+                {
+                    NameObject("/GS0"): DictionaryObject(
+                        {
+                            NameObject("/SMask"): DictionaryObject(
+                                {NameObject("/G"): DictionaryObject()}
+                            )
+                        }
+                    )
+                }
+            )
+        page[NameObject("/Resources")] = resources
+        if complex_render_path == "annotation":
+            page[NameObject("/Annots")] = ArrayObject(
+                [
+                    DictionaryObject(
+                        {NameObject("/AP"): DictionaryObject()}
+                    )
+                ]
+            )
+        content = DecodedStreamObject()
+        content.set_data(b"q Q")
+        page[NameObject("/Contents")] = writer._add_object(content)
+    writer.write(output)
+    return output.getvalue()
+
+
+def reused_one_bit_image_mask_pdf(*, width, height, page_count):
+    output = BytesIO()
+    writer = PdfWriter()
+    image = EncodedStreamObject()
+    image._data = b"\x00"
+    image[NameObject("/Type")] = NameObject("/XObject")
+    image[NameObject("/Subtype")] = NameObject("/Image")
+    image[NameObject("/Width")] = NumberObject(width)
+    image[NameObject("/Height")] = NumberObject(height)
+    image[NameObject("/ImageMask")] = BooleanObject(True)
+    image[NameObject("/BitsPerComponent")] = NumberObject(1)
+    image[NameObject("/Filter")] = NameObject("/CCITTFaxDecode")
+    image[NameObject("/DecodeParms")] = DictionaryObject(
+        {
+            NameObject("/K"): NumberObject(-1),
+            NameObject("/Columns"): NumberObject(width),
+            NameObject("/Rows"): NumberObject(height),
+        }
+    )
+    image_reference = writer._add_object(image)
+    for _ in range(page_count):
+        page = writer.add_blank_page(width=100, height=100)
+        page[NameObject("/Resources")] = DictionaryObject(
+            {
+                NameObject("/XObject"): DictionaryObject(
+                    {NameObject("/SharedMask"): image_reference}
+                )
+            }
+        )
+        content = DecodedStreamObject()
+        content.set_data(b"q Q")
+        page[NameObject("/Contents")] = writer._add_object(content)
+    writer.write(output)
+    return output.getvalue()
+
+
+def valid_group4_image_mask_pdf(*, width=64, height=64):
+    tiff_output = BytesIO()
+    source = Image.new("1", (width, height), color=1)
+    source.paste(0, (8, 8, width - 8, height - 8))
+    source.save(tiff_output, format="TIFF", compression="group4")
+    source.close()
+    tiff_data = tiff_output.getvalue()
+    with Image.open(BytesIO(tiff_data)) as encoded_image:
+        strip_offsets = encoded_image.tag_v2.get(273)
+        strip_byte_counts = encoded_image.tag_v2.get(279)
+        offsets = (
+            list(strip_offsets)
+            if isinstance(strip_offsets, (list, tuple))
+            else [strip_offsets]
+        )
+        counts = (
+            list(strip_byte_counts)
+            if isinstance(strip_byte_counts, (list, tuple))
+            else [strip_byte_counts]
+        )
+    encoded = b"".join(
+        tiff_data[int(offset) : int(offset) + int(count)]
+        for offset, count in zip(offsets, counts)
+    )
+
+    output = BytesIO()
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=width, height=height)
+    image = EncodedStreamObject()
+    image._data = encoded
+    image[NameObject("/Type")] = NameObject("/XObject")
+    image[NameObject("/Subtype")] = NameObject("/Image")
+    image[NameObject("/Width")] = NumberObject(width)
+    image[NameObject("/Height")] = NumberObject(height)
+    image[NameObject("/ImageMask")] = BooleanObject(True)
+    image[NameObject("/BitsPerComponent")] = NumberObject(1)
+    image[NameObject("/Filter")] = NameObject("/CCITTFaxDecode")
+    image[NameObject("/DecodeParms")] = DictionaryObject(
+        {
+            NameObject("/K"): NumberObject(-1),
+            NameObject("/Columns"): NumberObject(width),
+            NameObject("/Rows"): NumberObject(height),
+            NameObject("/BlackIs1"): BooleanObject(True),
+        }
+    )
+    image_reference = writer._add_object(image)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/XObject"): DictionaryObject(
+                {NameObject("/MaskImage"): image_reference}
+            )
+        }
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        f"q {width} 0 0 {height} 0 0 cm /MaskImage Do Q".encode("ascii")
+    )
     page[NameObject("/Contents")] = writer._add_object(content)
     writer.write(output)
     return output.getvalue()
@@ -1166,6 +1451,277 @@ class PDFResourceInspectionTests(SimpleTestCase):
             any("multiple high-resolution images" in value for value in report["warnings"])
         )
 
+    def test_legitimate_multi_mask_page_uses_separate_bounded_limits(self):
+        data = one_bit_image_mask_pdf([KONICA_ONE_BIT_MASK_DIMENSIONS])
+
+        reader, report = inspect_pdf_attachment(data)
+
+        expected_pixels = 88_787_968
+        self.assertEqual(len(reader.pages), 1)
+        self.assertEqual(report["fidelity"]["image_mask_object_count"], 21)
+        self.assertEqual(
+            report["fidelity"]["bounded_image_mask_object_count"],
+            21,
+        )
+        self.assertEqual(report["fidelity"]["image_mask_pixels"], expected_pixels)
+        self.assertEqual(
+            report["fidelity"]["bounded_image_mask_pixels"],
+            expected_pixels,
+        )
+        self.assertEqual(
+            report["fidelity"]["max_page_referenced_image_mask_pixels"],
+            expected_pixels,
+        )
+        self.assertEqual(
+            report["fidelity"]["estimated_image_mask_bytes"],
+            sum(
+                math.ceil(width * height / 8)
+                for width, height in KONICA_ONE_BIT_MASK_DIMENSIONS
+            ),
+        )
+        self.assertTrue(report["safety"]["local_traversal_safe"])
+
+    def test_valid_group4_mask_passes_inspection_parse_and_render_recheck(self):
+        data = valid_group4_image_mask_pdf()
+
+        _, report = inspect_pdf_attachment(data)
+        preview = parse_pdf_preview(
+            data,
+            "group4-mask.pdf",
+            PDF_MIME,
+            hashlib.sha256(data).hexdigest(),
+        )
+        rendered, rendered_pages = _render_pdf_bytes_images(data)
+
+        self.assertEqual(report["fidelity"]["bounded_image_mask_object_count"], 1)
+        self.assertTrue(report["safety"]["local_traversal_safe"])
+        self.assertEqual(
+            preview["meta"]["pdf_fidelity"][
+                "bounded_image_mask_object_count"
+            ],
+            1,
+        )
+        self.assertEqual(rendered_pages, 1)
+        self.assertEqual(len(rendered), 1)
+        self.assertTrue(rendered[0].startswith("data:image/png;base64,"))
+
+    @override_settings(
+        QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS=999_000_000,
+        QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS=999_000_000,
+        QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS=999_000_000,
+    )
+    def test_one_bit_mask_configuration_is_clamped_to_hard_caps(self):
+        self.assertEqual(max_pdf_image_mask_pixels(), 50_000_000)
+        self.assertEqual(max_pdf_page_image_mask_pixels(), 100_000_000)
+        self.assertEqual(max_pdf_total_image_mask_pixels(), 200_000_000)
+
+    def test_indirect_integer_image_geometry_is_resolved(self):
+        _, report = inspect_pdf_attachment(
+            one_bit_image_mask_pdf(
+                [[(100, 100)]],
+                indirect_geometry=True,
+            )
+        )
+
+        self.assertEqual(report["fidelity"]["bounded_image_mask_object_count"], 1)
+
+    def test_non_integer_image_geometry_is_rejected(self):
+        invalid_values = (
+            {"/Width": FloatObject(100.5)},
+            {"/Height": BooleanObject(True)},
+            {"/BitsPerComponent": FloatObject(1.5)},
+        )
+        for geometry_overrides in invalid_values:
+            with self.subTest(geometry_overrides=geometry_overrides):
+                with self.assertRaisesMessage(
+                    PDFResourceLimitError,
+                    "invalid embedded-image dimensions",
+                ):
+                    inspect_pdf_attachment(
+                        one_bit_image_mask_pdf(
+                            [[(100, 100)]],
+                            geometry_overrides=geometry_overrides,
+                        )
+                    )
+
+    @override_settings(QUOTATION_IMPORT_PDF_IMAGE_MASK_LIMITS_ENABLED=False)
+    def test_one_bit_mask_compatibility_can_be_rolled_back_strictly(self):
+        data = one_bit_image_mask_pdf([[KONICA_ONE_BIT_MASK_DIMENSIONS[9]]])
+
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "embedded image that exceeds the safe pixel limit",
+        ):
+            inspect_pdf_attachment(data)
+
+    @override_settings(QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS=100)
+    def test_one_bit_mask_per_image_limit_remains_bounded(self):
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "one-bit image mask that exceeds the safe pixel limit",
+        ):
+            inspect_pdf_attachment(one_bit_image_mask_pdf([[(11, 10)]]))
+
+    @override_settings(
+        QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS=100,
+        QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS=100,
+        QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS=1_000,
+    )
+    def test_one_bit_mask_page_aggregate_limit_remains_bounded(self):
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "one-bit image masks whose aggregate pixel count exceeds the safe limit",
+        ):
+            inspect_pdf_attachment(
+                one_bit_image_mask_pdf([[(6, 10), (6, 10)]])
+            )
+
+    @override_settings(
+        QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS=100,
+        QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS=100,
+        QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS=100,
+    )
+    def test_one_bit_mask_document_aggregate_limit_remains_bounded(self):
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "one-bit image masks exceed the safe document pixel limit",
+        ):
+            inspect_pdf_attachment(
+                one_bit_image_mask_pdf([[(6, 10)], [(6, 10)]])
+            )
+
+    @override_settings(
+        QUOTATION_IMPORT_MAX_PDF_IMAGE_MASK_PIXELS=100,
+        QUOTATION_IMPORT_MAX_PDF_PAGE_IMAGE_MASK_PIXELS=100,
+        QUOTATION_IMPORT_MAX_PDF_TOTAL_IMAGE_MASK_PIXELS=100,
+    )
+    def test_reused_mask_page_references_share_document_limit(self):
+        with self.assertRaisesMessage(
+            PDFResourceLimitError,
+            "page references to one-bit image masks exceed the safe document pixel limit",
+        ):
+            inspect_pdf_attachment(
+                reused_one_bit_image_mask_pdf(width=6, height=10, page_count=2)
+            )
+
+    def test_unsupported_or_malformed_mask_filters_are_not_exempt(self):
+        cases = (
+            {
+                "filters": ("/RunLengthDecode",),
+            },
+            {
+                "filters": ("/DCTDecode",),
+            },
+            {
+                "filters": ("/JPXDecode",),
+            },
+            {
+                "filters": ("/JBIG2Decode",),
+            },
+            {
+                "filters": ("/ASCII85Decode", "/CCITTFaxDecode"),
+                "decode_parameters": ArrayObject([NullObject()]),
+            },
+            {
+                "decode_parameters": DictionaryObject(
+                    {
+                        NameObject("/Columns"): NumberObject(1),
+                        NameObject("/Rows"): NumberObject(1),
+                    }
+                ),
+            },
+            {
+                "decode_parameters": DictionaryObject(
+                    {
+                        NameObject("/Columns"): NumberObject(4320),
+                        NameObject("/Rows"): NumberObject(5560),
+                        NameObject("/UnexpectedGeometry"): NumberObject(1),
+                    }
+                ),
+            },
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with self.assertRaisesMessage(
+                    PDFResourceLimitError,
+                    "embedded image that exceeds the safe pixel limit",
+                ):
+                    inspect_pdf_attachment(
+                        one_bit_image_mask_pdf(
+                            [[KONICA_ONE_BIT_MASK_DIMENSIONS[9]]],
+                            **options,
+                        )
+                    )
+
+    def test_relaxed_mask_rejects_complex_render_paths(self):
+        for complex_render_path in (
+            "pattern",
+            "type3",
+            "softmask",
+            "annotation",
+            "parent_mask",
+            "parent_smask",
+        ):
+            with self.subTest(complex_render_path=complex_render_path):
+                with self.assertRaisesMessage(
+                    PDFResourceLimitError,
+                    "complex render path that cannot be accounted safely",
+                ):
+                    inspect_pdf_attachment(
+                        one_bit_image_mask_pdf(
+                            [[(10, 10)]],
+                            complex_render_path=complex_render_path,
+                        )
+                    )
+
+    def test_false_mask_or_non_one_bit_mask_are_not_exempt(self):
+        for options in (
+            {"image_mask": False},
+            {"bits_per_component": 8},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaisesMessage(
+                    PDFResourceLimitError,
+                    "embedded image that exceeds the safe pixel limit",
+                ):
+                    inspect_pdf_attachment(
+                        one_bit_image_mask_pdf(
+                            [[KONICA_ONE_BIT_MASK_DIMENSIONS[9]]],
+                            **options,
+                        )
+                    )
+
+    def test_mask_with_disallowed_image_semantics_is_not_exempt(self):
+        for forbidden_image_key in (
+            "colorspace",
+            "mask",
+            "smask",
+            "alternates",
+            "smask_in_data",
+            "decode",
+        ):
+            with self.subTest(forbidden_image_key=forbidden_image_key):
+                with self.assertRaisesMessage(
+                    PDFResourceLimitError,
+                    "embedded image that exceeds the safe pixel limit",
+                ):
+                    inspect_pdf_attachment(
+                        one_bit_image_mask_pdf(
+                            [[KONICA_ONE_BIT_MASK_DIMENSIONS[9]]],
+                            forbidden_image_key=forbidden_image_key,
+                        )
+                    )
+
+    def test_true_mask_with_omitted_bits_uses_pdf_one_bit_default(self):
+        _, report = inspect_pdf_attachment(
+            one_bit_image_mask_pdf(
+                [[KONICA_ONE_BIT_MASK_DIMENSIONS[9]]],
+                bits_per_component=None,
+            )
+        )
+
+        self.assertEqual(report["fidelity"]["bounded_image_mask_object_count"], 1)
+
     def test_single_page_image_aggregate_is_bounded_before_render(self):
         data = single_page_multi_image_pdf()
 
@@ -1261,6 +1817,65 @@ class PDFResourceInspectionTests(SimpleTestCase):
             "Could not safely extract text from historical PDF page 1",
         ):
             _extract_pdf_text(b"%PDF-1.4", reader=reader)
+
+
+class ManualPDFMaskEndpointTests(TestCase):
+    def setUp(self):
+        self.staff = User.objects.create_user(
+            username="pdf-mask-endpoint-reviewer",
+            is_staff=True,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.staff)
+
+    def test_manual_parse_endpoint_accepts_and_retains_group4_mask_pdf(self):
+        data = valid_group4_image_mask_pdf()
+        digest = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as private_root:
+            with override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=private_root):
+                response = self.client.post(
+                    reverse("quotation-inquiry-parse-file"),
+                    {
+                        "file": SimpleUploadedFile(
+                            "group4-mask.pdf",
+                            data,
+                            content_type=PDF_MIME,
+                        )
+                    },
+                    format="multipart",
+                )
+
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                source_ref = response.data["source_file_ref"]
+                self.assertTrue(source_ref)
+                self.assertEqual(
+                    read_private_ref(source_ref, expected_sha256=digest),
+                    data,
+                )
+                self.assertEqual(
+                    response.data["meta"]["pdf_fidelity"][
+                        "bounded_image_mask_object_count"
+                    ],
+                    1,
+                )
+
+    @patch("quotations.import_parsers.store_import_source")
+    def test_rejected_ordinary_image_aggregate_is_not_stored(self, store_source):
+        response = self.client.post(
+            reverse("quotation-inquiry-parse-file"),
+            {
+                "file": SimpleUploadedFile(
+                    "oversized-rgb.pdf",
+                    single_page_multi_image_pdf(),
+                    content_type=PDF_MIME,
+                )
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("aggregate pixel count", str(response.data))
+        store_source.assert_not_called()
 
 
 class GmailPDFResourceInspectionTests(TestCase):
