@@ -96,6 +96,130 @@
   color: #6b7280;
 }
 
+.qm-gmail-source-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  background: #f0fdfa;
+}
+
+.qm-gmail-source-content {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qm-gmail-source-kicker {
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qm-gmail-source-content > strong {
+  overflow: hidden;
+  color: #111827;
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qm-gmail-source-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qm-gmail-source-details span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.qm-gmail-source-details b {
+  color: #0f766e;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.qm-gmail-source-content > p {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+}
+
+.qm-gmail-source-actions {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+  max-width: 280px;
+}
+
+.qm-gmail-source-actions > small {
+  color: #92400e;
+  font-size: 11px;
+  text-align: right;
+}
+
+.qm-gmail-standard-intake-summary {
+  display: grid;
+  gap: 8px;
+  padding: 22px;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  background: #f0fdfa;
+  color: #334155;
+}
+
+.qm-gmail-standard-intake-summary > strong {
+  color: #0f766e;
+  font-size: 16px;
+}
+
+.qm-gmail-standard-intake-summary > span,
+.qm-gmail-standard-intake-summary > small {
+  max-width: 880px;
+}
+
+.qm-gmail-standard-intake-summary > small {
+  color: #64748b;
+}
+
+@media (max-width: 720px) {
+  .qm-gmail-source-banner {
+    grid-template-columns: 1fr;
+  }
+
+  .qm-gmail-source-actions > button {
+    width: 100%;
+  }
+
+  .qm-gmail-source-actions {
+    justify-items: stretch;
+    max-width: none;
+  }
+
+  .qm-gmail-source-actions > small {
+    text-align: left;
+  }
+
+  .qm-gmail-source-content > strong {
+    white-space: normal;
+  }
+}
+
 .qm-tabs {
   display: flex;
   gap: 8px;

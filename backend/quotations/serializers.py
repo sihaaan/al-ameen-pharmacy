@@ -2639,6 +2639,7 @@ class QuotationSerializer(serializers.ModelSerializer):
     lines = QuotationLineSerializer(many=True, read_only=True)
     quotation_review_fingerprint = serializers.SerializerMethodField()
     workflow_features = serializers.SerializerMethodField()
+    gmail_source = serializers.SerializerMethodField()
 
     class Meta:
         model = Quotation
@@ -2699,6 +2700,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "lines",
             "quotation_review_fingerprint",
             "workflow_features",
+            "gmail_source",
             "created_at",
             "updated_at",
         ]
@@ -2746,6 +2748,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "lines",
             "quotation_review_fingerprint",
             "workflow_features",
+            "gmail_source",
             "created_at",
             "updated_at",
         ]
@@ -2777,6 +2780,45 @@ class QuotationSerializer(serializers.ModelSerializer):
 
     def get_workflow_features(self, _obj):
         return quotation_workflow_features()
+
+    def get_gmail_source(self, obj):
+        """Expose only the confirmed, internal provenance needed by the editor."""
+
+        if (
+            not obj.pk
+            or not obj.inquiry_id
+            or obj.inquiry.source_type != Inquiry.SOURCE_TYPE_GMAIL
+        ):
+            return None
+        gmail_import = (
+            GmailInquiryImport.objects.select_related(
+                "inquiry",
+                "selected_company",
+                "selected_contact",
+            )
+            .filter(
+                quotation_id=obj.pk,
+                inquiry_id=obj.inquiry_id,
+                status=GmailInquiryImport.STATUS_CONFIRMED,
+            )
+            .first()
+        )
+        if gmail_import is None:
+            return None
+        return {
+            "import_id": gmail_import.pk,
+            "inquiry_subject": gmail_import.inquiry.subject,
+            "confirmed_company_name": (
+                gmail_import.selected_company.name
+                if gmail_import.selected_company_id
+                else None
+            ),
+            "confirmed_contact_name": (
+                gmail_import.selected_contact.name
+                if gmail_import.selected_contact_id
+                else None
+            ),
+        }
 
 
 class QuotationListSerializer(serializers.ModelSerializer):

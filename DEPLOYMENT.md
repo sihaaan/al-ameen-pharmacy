@@ -461,6 +461,30 @@ immediately by setting the unified-workspace flag to `0`; the old Gmail review
 and quotation editor remain available, and already-created drafts require no
 data reversal.
 
+### Standard Gmail intake into the quotation editor (enabled by default)
+
+`QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=1` keeps the evidence-bound
+Gmail company/source confirmation gate and then opens the resulting draft in
+the established quotation editor. The server projects the feature as enabled
+only when `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is also strictly enabled. When
+both this flag and `QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED` are effective,
+the frontend must give the standard-editor route precedence. The hardened
+unified endpoint remains available but is not selected by that browser route,
+which preserves a configuration-only rollback.
+
+The route does not change confirmation APIs, Gmail verification, row-evidence
+requirements, nullable/blank selling prices, Product suggestion semantics,
+quotation finalization, preview, send idempotency, or reconciliation. No
+migration, OAuth scope, provider, worker, package, or infrastructure change is
+required. The private quotation-detail response adds only the internal import
+record ID, inquiry subject, and confirmed company/contact display names for the
+editor banner; it never exposes Gmail message/thread IDs, bodies, or tokens.
+Roll back by setting
+`QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED=0`: if the unified-workspace
+flag is enabled, the prior unified presentation resumes; otherwise the prior
+separate Gmail review and quotation editor resume. Existing imports and draft
+quotations need no data reversal.
+
 ### Bounded parallel Gmail intake reads (disabled by default)
 
 `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED=0` preserves the established

@@ -1,4 +1,4 @@
-"""Server-owned, default-off quotation workflow feature projections."""
+"""Server-owned quotation workflow feature projections."""
 
 from django.conf import settings
 
@@ -11,6 +11,9 @@ WORKFLOW_FEATURE_SETTINGS = {
     ),
     "gmail_analysis_progress": "QUOTATION_GMAIL_ANALYSIS_PROGRESS_ENABLED",
     "gmail_unified_workspace": "QUOTATION_GMAIL_UNIFIED_WORKSPACE_ENABLED",
+    "gmail_standard_editor_intake": (
+        "QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED"
+    ),
     "gmail_background_analysis": (
         "QUOTATION_GMAIL_BACKGROUND_ANALYSIS_ENABLED"
     ),
@@ -38,6 +41,14 @@ def quotation_workflow_features():
         features["gmail_unified_workspace"]
         and features["gmail_review_ui_v2"]
     )
+    # The standard editor intake retains the same persisted company-review
+    # safety boundary. Frontends give this route precedence over the optional
+    # unified workspace while both projections remain available for a
+    # configuration-only rollback.
+    features["gmail_standard_editor_intake"] = bool(
+        features["gmail_standard_editor_intake"]
+        and features["gmail_review_ui_v2"]
+    )
     # Durable jobs always expose the same content-free progress contract so a
     # polling browser never has to reload full email evidence. This implication
     # is one-way: enabling standalone synchronous progress does not enqueue.
@@ -62,6 +73,10 @@ def gmail_analysis_progress_enabled():
 
 def gmail_unified_workspace_enabled():
     return quotation_workflow_features()["gmail_unified_workspace"]
+
+
+def gmail_standard_editor_intake_enabled():
+    return quotation_workflow_features()["gmail_standard_editor_intake"]
 
 
 def gmail_background_analysis_enabled():

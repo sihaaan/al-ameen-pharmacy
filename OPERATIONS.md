@@ -217,6 +217,28 @@ cleared in the browser and rejected by the server. The employee must make an
 explicit Product correction; this remains suggestion-only and does not create
 or learn aliases.
 
+### Standard Gmail intake into the quotation editor (enabled by default)
+
+`QUOTATION_GMAIL_STANDARD_EDITOR_INTAKE_ENABLED` defaults to `1` but is
+projected as effective only while `QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED` is
+strictly enabled. It retains the compact evidence-bound company/source gate,
+creates or reuses the draft through the existing hardened confirmation path,
+and then uses the familiar quotation editor for Product decisions, deletion,
+quantity, unit, VAT, and employee-entered pricing. When the unified-workspace
+flag is also enabled, this standard-editor route has frontend presentation
+precedence; the unified endpoint remains intact for rollback.
+
+Monitor Gmail confirmation failures, stale-review 409 responses, draft reuse,
+and transitions from confirmation to quotation loading. This feature changes
+no finalization, preview, verified-recipient, send-idempotency, ambiguous-send,
+or reconciliation behavior. The quotation-detail provenance summary is
+read-only and limited to the internal import ID, inquiry subject, and confirmed
+company/contact display names; it contains no Gmail IDs, bodies, or tokens.
+There is no migration or data conversion. For immediate rollback, set the flag
+to `0`; the next page load returns to the
+unified workspace when that flag is enabled, or to the earlier separate review
+and editor when it is not. Do not alter stored imports or quotations.
+
 ### Bounded parallel Gmail intake reads
 
 `QUOTATION_GMAIL_PARALLEL_FETCH_ENABLED` defaults to `0`, retaining the exact

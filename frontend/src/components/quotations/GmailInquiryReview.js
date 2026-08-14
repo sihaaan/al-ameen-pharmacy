@@ -99,8 +99,13 @@ const gmailAnalysisProgressEnabled = (record) => (
   record?.workflow_features?.gmail_analysis_progress === true
 );
 
+const gmailStandardEditorIntakeEnabled = (record) => (
+  record?.workflow_features?.gmail_standard_editor_intake === true
+);
+
 const gmailUnifiedWorkspaceEnabled = (record) => (
   record?.workflow_features?.gmail_unified_workspace === true
+  && !gmailStandardEditorIntakeEnabled(record)
 );
 
 const gmailBackgroundAnalysisEnabled = (record) => (
@@ -712,14 +717,24 @@ const normalizeReviewLines = (record) => {
   });
 };
 
+const reviewQuantityIsValid = (value) => {
+  const text = String(firstDefined(value, '')).trim();
+  const match = text.match(/^[-+]?(?:\d+(?:\.(\d*))?|\.(\d+))(?:[eE]([-+]?\d+))?$/);
+  if (!match) return false;
+  const quantity = Number(text);
+  if (!Number.isFinite(quantity) || quantity <= 0 || quantity >= 1000000000) return false;
+  const fractionalDigits = String(firstDefined(match[1], match[2], '')).length;
+  const explicitExponent = Number(firstDefined(match[3], 0));
+  return Number.isSafeInteger(explicitExponent)
+    && Math.abs(explicitExponent - fractionalDigits) <= 3;
+};
+
 const reviewLineInvalid = (line) => {
   if (!line.included) return false;
-  const quantity = Number(line.quantity);
   return (
     !String(line.raw_name || '').trim()
     || !String(line.unit || '').trim()
-    || !Number.isFinite(quantity)
-    || quantity <= 0
+    || !reviewQuantityIsValid(line.quantity)
   );
 };
 
@@ -847,6 +862,7 @@ const GmailInquiryReview = ({
   onClaimed,
   onOpenQuote,
   onBack,
+  backLabel = 'Back to quotations',
 }) => {
   const [record, setRecord] = useState(null);
   const [companies, setCompanies] = useState([]);
@@ -1514,6 +1530,7 @@ const GmailInquiryReview = ({
   const gmailReviewUiV2 = gmailReviewUiV2Enabled(record || {});
   const gmailChainedActions = gmailChainedActionsEnabled(record || {});
   const gmailAnalysisProgress = gmailAnalysisProgressEnabled(record || {});
+  const gmailStandardEditorIntake = gmailStandardEditorIntakeEnabled(record || {});
   const gmailUnifiedWorkspace = gmailUnifiedWorkspaceEnabled(record || {});
   const gmailBackgroundAnalysis = gmailBackgroundAnalysisEnabled(record || {});
   const backgroundAnalysisJob = useMemo(
@@ -2875,6 +2892,16 @@ const GmailInquiryReview = ({
   const includedLinesWithoutEvidence = usableLines.filter(
     (line) => sourceKeysForLine(line).length === 0
   );
+  const standardEditorReviewRows = reviewLines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => (
+      reviewLineInvalid(line)
+      || reviewLineUncertain(line)
+      || (line.included && sourceKeysForLine(line).length === 0)
+    ));
+  const legacyReviewRows = gmailStandardEditorIntake && !quoteId
+    ? standardEditorReviewRows
+    : reviewLines.map((line, index) => ({ line, index }));
   const selectedCompany = companies.find((company) => String(company.id) === companyId);
   const selectedContact = contacts.find((contact) => String(contact.id) === contactId);
   const aiIdentity = record?.candidates?.ai_identity || {};
@@ -3021,11 +3048,17 @@ const GmailInquiryReview = ({
                     ? 'Quotation created'
                     : status.replaceAll('_', ' ') || 'Ready for review'}
             </span>
-            {onBack && <button type="button" className="qm-secondary" onClick={onBack}>Back to inquiries</button>}
+            {onBack && (
+              <button type="button" className="qm-secondary" onClick={onBack}>
+                {backLabel}
+              </button>
+            )}
           </div>
         </div>
-        <div className="qm-helper warning">
-          Nothing is created automatically. Check the customer identity, extracted rows, and source evidence before confirming.
+        <div className={`qm-helper ${quoteId ? 'info' : 'warning'}`}>
+          {quoteId
+            ? 'This quotation is already created. The customer identity and Gmail source evidence below are retained read-only.'
+            : 'Nothing is created automatically. Check the customer identity, extracted rows, and source evidence before confirming.'}
         </div>
         {analysisUiActive && !gmailAnalysisProgress && (
           <div className="qm-feedback info" role="status" aria-live="polite">
@@ -3122,8 +3155,10 @@ const GmailInquiryReview = ({
       <div className="qm-panel qm-gmail-identity-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>1. Confirm customer identity</h3>
-            <p>Sender matching is a suggestion. Confirm the company and purchaser yourself before creating the quotation.</p>
+            <h3>{quoteId ? '1. Confirmed customer identity' : '1. Confirm customer identity'}</h3>
+            <p>{quoteId
+              ? 'This is the company and purchaser approved when the linked quotation was created.'
+              : 'Sender matching is a suggestion. Confirm the company and purchaser yourself before creating the quotation.'}</p>
           </div>
         </div>
         {companySuggestion && !companyId && (
@@ -3325,11 +3360,25 @@ const GmailInquiryReview = ({
       <div className="qm-panel qm-gmail-lines-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>{gmailUnifiedWorkspace ? '2. Review request and price quotation' : '2. Review extracted request lines'}</h3>
+            <h3>{gmailUnifiedWorkspace
+              ? '2. Review request and price quotation'
+              : gmailStandardEditorIntake
+                ? quoteId
+                  ? '2. Gmail source evidence'
+                  : standardEditorReviewRows.length
+                  ? '2. Review exceptions before opening the quotation'
+                  : '2. Request ready for the standard quotation editor'
+                : '2. Review extracted request lines'}</h3>
             <p>
               {gmailUnifiedWorkspace
                 ? 'Approve or correct each Product suggestion, resolve uncertainty, and enter your selling price. Customer prices remain separate evidence and never fill your price.'
-                : 'Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.'}
+                : gmailStandardEditorIntake
+                  ? quoteId
+                    ? 'This is the retained, read-only request evidence for the linked quotation. Open cited attachments from the Source Evidence column.'
+                    : standardEditorReviewRows.length
+                    ? 'Only rows that cannot safely enter the quotation are shown below. Correct, approve, or exclude them first.'
+                    : 'The verified request rows will open in the normal quotation layout. Selling prices stay blank and Product suggestions stay unconfirmed.'
+                  : 'Edit the request details or exclude a row before confirming. Customer prices are evidence only; your quotation price remains blank.'}
             </p>
           </div>
           {gmailUnifiedWorkspace ? (
@@ -3346,7 +3395,10 @@ const GmailInquiryReview = ({
               </span>
             </div>
           ) : (
-          <div className={`qm-gmail-lines-actions${reviewDirty ? ' is-dirty' : ''}`}>
+            (!gmailStandardEditorIntake || (
+              !quoteId && (standardEditorReviewRows.length > 0 || reviewDirty)
+            )) && (
+              <div className={`qm-gmail-lines-actions${reviewDirty ? ' is-dirty' : ''}`}>
             <div className="qm-gmail-lines-save-state">
               <span className="qm-heading-count">{usableLines.length} included row{usableLines.length === 1 ? '' : 's'}</span>
               {reviewDirty && (
@@ -3363,7 +3415,8 @@ const GmailInquiryReview = ({
             >
               {busyAction === 'review-lines' ? 'Saving rows...' : 'Save reviewed rows'}
             </button>
-          </div>
+              </div>
+            )
           )}
         </div>
         {!gmailUnifiedWorkspace && (
@@ -3400,6 +3453,16 @@ const GmailInquiryReview = ({
         )}
         {attachmentError && <div className="qm-feedback error" role="alert">{attachmentError}</div>}
         <div className="qm-table-wrap">
+          {gmailStandardEditorIntake && !quoteId && standardEditorReviewRows.length === 0 && (
+            <div className="qm-gmail-standard-intake-summary" role="status">
+              <strong>{usableLines.length} verified request row{usableLines.length === 1 ? '' : 's'} ready</strong>
+              <span>
+                Confirm below to create the draft and continue in the familiar quotation editor,
+                where you can match Products, enter prices, reorder rows, or delete anything that is not required.
+              </span>
+              <small>The original Gmail messages, attachments, and row evidence remain linked to the quotation.</small>
+            </div>
+          )}
           {gmailUnifiedWorkspace && (
             <table className="qm-table qm-gmail-unified-table">
               <thead>
@@ -3728,6 +3791,10 @@ const GmailInquiryReview = ({
             </table>
           )}
           {!gmailUnifiedWorkspace && (
+            !gmailStandardEditorIntake
+            || Boolean(quoteId)
+            || standardEditorReviewRows.length > 0
+          ) && (
           <table className="qm-table qm-gmail-lines-table">
             <thead>
               <tr>
@@ -3745,7 +3812,7 @@ const GmailInquiryReview = ({
               </tr>
             </thead>
             <tbody>
-              {reviewLines.map((line, index) => {
+              {legacyReviewRows.map(({ line, index }) => {
                 const lineStatus = String(firstDefined(line.status, line.parse_status, 'needs_review')).toLowerCase();
                 const operation = lineOperation(line);
                 const commercial = lineCustomerCommercialEvidence(line);
@@ -3919,7 +3986,7 @@ const GmailInquiryReview = ({
                   </tr>
                 );
               })}
-              {!reviewLines.length && (
+              {!legacyReviewRows.length && (
                 <tr>
                   <td colSpan="11">
                     {analysisUiActive ? (
@@ -3968,8 +4035,12 @@ const GmailInquiryReview = ({
           ) : (
             <>
               <div>
-                <h3>Ready to create the draft quotation?</h3>
-                <p>The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.</p>
+                <h3>{gmailStandardEditorIntake
+                  ? 'Open this request in the standard quotation editor?'
+                  : 'Ready to create the draft quotation?'}</h3>
+                <p>{gmailStandardEditorIntake
+                  ? 'The approved company and verified request rows will be saved as a draft with blank selling prices. You will continue on this page in the normal quotation layout, where incorrect rows can be edited or deleted.'
+                  : 'The reviewed company, quantities, product matches, and source evidence will be saved. You will be taken to the exact new quotation to enter your prices.'}</p>
                 <span className="qm-gmail-confirm-actor">Confirming as {claimedBy}</span>
               </div>
               <button
@@ -3983,10 +4054,16 @@ const GmailInquiryReview = ({
                   : busyAction === 'confirm'
                     ? 'Creating quotation...'
                     : gmailChainedActions && reviewDirty
-                      ? 'Save Review & Create Quotation'
+                      ? gmailStandardEditorIntake
+                        ? 'Save Review & Open Standard Quotation'
+                        : 'Save Review & Create Quotation'
                       : gmailChainedActions
-                        ? 'Create Quotation'
-                        : 'Confirm & Open Quotation'}
+                        ? gmailStandardEditorIntake
+                          ? 'Create & Open Standard Quotation'
+                          : 'Create Quotation'
+                        : gmailStandardEditorIntake
+                          ? 'Create & Open Standard Quotation'
+                          : 'Confirm & Open Quotation'}
               </button>
               {confirmDisabled && (
                 <small>

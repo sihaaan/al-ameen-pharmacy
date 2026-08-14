@@ -256,6 +256,18 @@ const unifiedRecord = (overrides = {}) => ({
   ...overrides,
 });
 
+const standardEditorRecord = (source = reviewedRecord, overrides = {}) => {
+  const record = chainedRecord(source, overrides);
+  return {
+    ...record,
+    workflow_features: {
+      ...(record.workflow_features || {}),
+      gmail_unified_workspace: true,
+      gmail_standard_editor_intake: true,
+    },
+  };
+};
+
 const analysisProgress = (state = 'running', overrides = {}) => ({
   version: 'gmail_analysis_progress_v1',
   state,
@@ -668,6 +680,156 @@ describe('GmailInquiryReview', () => {
     expect(screen.getByRole('button', { name: 'Confirm & Open Quotation' })).toBeInTheDocument();
     expect(quotationAPI.items.list).not.toHaveBeenCalled();
     expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).not.toHaveBeenCalled();
+  });
+
+  test('uses compact company intake then opens the normal quotation instead of the unified pricing table', async () => {
+    const onOpenQuote = jest.fn();
+    const record = standardEditorRecord();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({ data: record });
+    quotationAPI.gmailInquiryImports.confirm.mockResolvedValueOnce({
+      data: { ...record, status: 'confirmed', quotation_id: 99 },
+    });
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    expect(await screen.findByRole('heading', {
+      name: '2. Request ready for the standard quotation editor',
+    })).toBeInTheDocument();
+    expect(screen.getByText('1 verified request row ready')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '1. Confirm customer identity' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Product Decision' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Our Unit Price' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Requested item row 1')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save reviewed rows' })).not.toBeInTheDocument();
+    expect(quotationAPI.items.list).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create & Open Standard Quotation' }));
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.confirm).toHaveBeenCalledWith(31, {
+      company: '7',
+      contact: null,
+      expected_source_fingerprint: CHAIN_SOURCE_BEFORE,
+      expected_analysis_attempt: 2,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+      selected_source_keys: ['attachment:opaque-1'],
+    }));
+    expect(quotationAPI.gmailInquiryImports.confirmAndPrepareQuotation).not.toHaveBeenCalled();
+    expect(onOpenQuote).toHaveBeenCalledWith(99);
+  });
+
+  test('shows only exceptional rows before the standard quotation can be created', async () => {
+    const validLine = {
+      ...reviewedRecord.analysis.preview.lines[0],
+      row_key: 'row-key-valid-0000001',
+      raw_name: 'Sterile Gauze',
+      operation: 'added',
+      parse_status: 'parsed',
+      reviewed_by_user: true,
+    };
+    const uncertainLine = {
+      ...baseRecord.analysis.preview.lines[0],
+      row_key: 'row-key-uncertain-001',
+      raw_name: 'Possible Dressing',
+    };
+    const source = {
+      ...reviewedRecord,
+      analysis: {
+        ...reviewedRecord.analysis,
+        preview: {
+          ...reviewedRecord.analysis.preview,
+          lines: [validLine, uncertainLine],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: standardEditorRecord(source),
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByRole('heading', {
+      name: '2. Review exceptions before opening the quotation',
+    })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Requested item row 1')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Requested item row 2')).toHaveValue('Possible Dressing');
+    expect(screen.getByRole('button', { name: 'Save reviewed rows' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create & Open Standard Quotation' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark reviewed' }));
+    const saveButton = screen.getByRole('button', { name: 'Save reviewed rows' });
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(quotationAPI.gmailInquiryImports.update).toHaveBeenCalledWith(31, {
+      review_lines: [{
+        row_key: 'row-key-uncertain-001',
+        raw_name: 'Possible Dressing',
+        quantity: '10.000',
+        unit: 'Pcs',
+        included: true,
+        reviewed: true,
+      }],
+      expected_source_fingerprint: CHAIN_SOURCE_BEFORE,
+      expected_analysis_attempt: 2,
+      identity_review_fingerprint: CHAIN_IDENTITY_BEFORE,
+      expected_review_rows_fingerprint: CHAIN_ROWS_BEFORE,
+    }));
+  });
+
+  test('shows every retained source row when a confirmed quotation reopens Gmail evidence', async () => {
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: standardEditorRecord(reviewedRecord, {
+        status: 'confirmed',
+        quotation: 99,
+        quotation_id: 99,
+      }),
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByRole('heading', { name: '2. Gmail source evidence' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '1. Confirmed customer identity' })).toBeInTheDocument();
+    expect(screen.getByText(/this quotation is already created.*retained read-only/i)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing is created automatically/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Requested item row 1')).toHaveValue('Sterile Bandage');
+    expect(screen.getByLabelText('Requested item row 1')).toBeDisabled();
+    expect(screen.getByRole('button', { name: /open source request\.pdf/i })).toBeInTheDocument();
+    expect(screen.queryByText(/confirm below to create the draft/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save reviewed rows' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /create.*quotation/i })).not.toBeInTheDocument();
+  });
+
+  test('keeps backend-rejected quantity boundaries visible as standard-intake exceptions', async () => {
+    const source = {
+      ...reviewedRecord,
+      analysis: {
+        ...reviewedRecord.analysis,
+        preview: {
+          ...reviewedRecord.analysis.preview,
+          lines: [{
+            ...reviewedRecord.analysis.preview.lines[0],
+            row_key: 'row-key-too-large-001',
+            raw_name: 'Large quantity item',
+            quantity: '1000000000',
+          }, {
+            ...reviewedRecord.analysis.preview.lines[0],
+            row_key: 'row-key-too-precise-1',
+            raw_name: 'Over-precise item',
+            quantity: '1.0000',
+          }],
+        },
+      },
+    };
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: standardEditorRecord(source),
+    });
+
+    render(<GmailInquiryReview importId="31" />);
+
+    expect(await screen.findByLabelText('Requested item row 1')).toHaveValue('Large quantity item');
+    expect(screen.getByLabelText('Requested item row 2')).toHaveValue('Over-precise item');
+    expect(screen.getByRole('button', { name: 'Create & Open Standard Quotation' })).toBeDisabled();
   });
 
   test('reviews evidence, saves exact row edits, then confirms and opens the returned quotation', async () => {
