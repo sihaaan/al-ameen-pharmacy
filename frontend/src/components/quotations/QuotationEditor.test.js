@@ -546,6 +546,210 @@ describe('QuotationEditor Product price context', () => {
     }));
   });
 
+  test('sends and retains the exact edited item snapshot when Save All succeeds', async () => {
+    const editedSnapshot = 'Nitroglycerin 5M/10 ml Injection (glyceryl trinitrate spray 0.4mg/dose)';
+    const matchedQuote = {
+      ...readyQuote,
+      lines: [{
+        ...readyQuote.lines[0],
+        item_name_snapshot: 'Nitroglycerin 5M/10 ml Injection',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: matchedQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({
+      data: {
+        quotation: {
+          ...matchedQuote,
+          lines: [{ ...matchedQuote.lines[0], item_name_snapshot: editedSnapshot }],
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByDisplayValue('Nitroglycerin 5M/10 ml Injection'), {
+      target: { value: editedSnapshot },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save All Lines' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      lines: [expect.objectContaining({
+        id: 31,
+        item_name_snapshot: editedSnapshot,
+      })],
+    }));
+    await waitFor(() => expect(screen.getByDisplayValue(editedSnapshot)).toBeInTheDocument());
+    expect(screen.getByText('All line changes saved')).toBeInTheDocument();
+  });
+
+  test('keeps only newer row edits when a multi-line Save All response arrives', async () => {
+    const firstSubmittedSnapshot = 'Nitroglycerin injection';
+    const firstServerSnapshot = 'Nitroglycerin Injection 5 mg/10 ml';
+    const secondSubmittedSnapshot = 'Glyceryl trinitrate spray';
+    const secondNewerSnapshot = 'Glyceryl trinitrate spray 0.4mg/dose';
+    const twoLineQuote = {
+      ...readyQuote,
+      lines: [
+        readyQuote.lines[0],
+        {
+          ...readyQuote.lines[0],
+          id: 32,
+          sort_order: 1,
+          item_name_snapshot: 'Imported masks',
+        },
+      ],
+    };
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: twoLineQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const firstInput = await screen.findByDisplayValue('Imported gloves');
+    const secondInput = screen.getByDisplayValue('Imported masks');
+    fireEvent.change(firstInput, { target: { value: firstSubmittedSnapshot } });
+    fireEvent.change(secondInput, { target: { value: secondSubmittedSnapshot } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save All Lines' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(secondInput, { target: { value: secondNewerSnapshot } });
+    await act(async () => {
+      saveRequest.resolve({
+        data: {
+          quotation: {
+            ...twoLineQuote,
+            lines: [
+              { ...twoLineQuote.lines[0], item_name_snapshot: firstServerSnapshot },
+              { ...twoLineQuote.lines[1], item_name_snapshot: secondSubmittedSnapshot },
+            ],
+          },
+        },
+      });
+      await saveRequest.promise;
+    });
+
+    expect(screen.getByDisplayValue(firstServerSnapshot)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(secondNewerSnapshot)).toBeInTheDocument();
+    expect(screen.getByText('1 unsaved line change(s)')).toBeInTheDocument();
+    expect(screen.getByText('Saved the submitted changes; newer edits remain unsaved.')).toBeInTheDocument();
+  });
+
+  test('keeps a newer item snapshot edit made while an individual Save is pending', async () => {
+    const firstSnapshot = 'Nitroglycerin 5M/10 ml Injection';
+    const newerSnapshot = `${firstSnapshot} (glyceryl trinitrate spray 0.4mg/dose)`;
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const snapshotInput = await screen.findByDisplayValue('Imported gloves');
+    fireEvent.change(snapshotInput, { target: { value: firstSnapshot } });
+    fireEvent.click(within(snapshotInput.closest('tr')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(snapshotInput, { target: { value: newerSnapshot } });
+    await act(async () => {
+      saveRequest.resolve({
+        data: {
+          quotation: {
+            ...readyQuote,
+            lines: [{ ...readyQuote.lines[0], item_name_snapshot: firstSnapshot }],
+          },
+        },
+      });
+      await saveRequest.promise;
+    });
+
+    expect(screen.getByDisplayValue(newerSnapshot)).toBeInTheDocument();
+    expect(screen.getByText('1 unsaved line change(s)')).toBeInTheDocument();
+    expect(screen.getByText('Saved the submitted changes; newer edits remain unsaved.')).toBeInTheDocument();
+  });
+
+  test('ignores a late Save All success after switching to another quotation', async () => {
+    const saveRequest = deferred();
+    const nextQuote = {
+      ...readyQuote,
+      id: 22,
+      quotation_number: 'Q-0022',
+      lines: [{
+        ...readyQuote.lines[0],
+        id: 41,
+        item_name_snapshot: 'Company B masks',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockImplementation((id) => Promise.resolve({
+      data: Number(id) === 21 ? readyQuote : nextQuote,
+    }));
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    const { rerender } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByDisplayValue('Imported gloves'), {
+      target: { value: 'Old quotation edit' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save All Lines' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+
+    rerender(<QuotationEditor quoteId={22} onClose={jest.fn()} />);
+    expect(await screen.findByText('Q-0022')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Company B masks')).toBeInTheDocument();
+
+    await act(async () => {
+      saveRequest.resolve({
+        data: {
+          quotation: {
+            ...readyQuote,
+            lines: [{ ...readyQuote.lines[0], item_name_snapshot: 'Old quotation edit' }],
+          },
+        },
+      });
+      await saveRequest.promise;
+    });
+
+    expect(screen.getByText('Q-0022')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Company B masks')).toBeInTheDocument();
+    expect(screen.queryByText('Saved 1 line.')).not.toBeInTheDocument();
+  });
+
+  test('ignores a late individual Save rejection after switching to another quotation', async () => {
+    const saveRequest = deferred();
+    const oldSaveError = new Error('Old quotation save failed.');
+    const nextQuote = {
+      ...readyQuote,
+      id: 22,
+      quotation_number: 'Q-0022',
+      lines: [{
+        ...readyQuote.lines[0],
+        id: 41,
+        item_name_snapshot: 'Company B masks',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockImplementation((id) => Promise.resolve({
+      data: Number(id) === 21 ? readyQuote : nextQuote,
+    }));
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    const { rerender } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const snapshotInput = await screen.findByDisplayValue('Imported gloves');
+    fireEvent.change(snapshotInput, { target: { value: 'Old quotation edit' } });
+    fireEvent.click(within(snapshotInput.closest('tr')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+
+    rerender(<QuotationEditor quoteId={22} onClose={jest.fn()} />);
+    expect(await screen.findByText('Q-0022')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Company B masks')).toBeInTheDocument();
+
+    await act(async () => {
+      saveRequest.reject(oldSaveError);
+      await saveRequest.promise.catch(() => {});
+    });
+
+    expect(screen.getByText('Q-0022')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Company B masks')).toBeInTheDocument();
+    expect(describeQuotationError).not.toHaveBeenCalled();
+    expect(screen.queryByText('Old quotation save failed.')).not.toBeInTheDocument();
+  });
+
   test('keeps an unsaved Brand override after bulk Product creation updates the row', async () => {
     const quoteWithBrandColumn = {
       ...quote,

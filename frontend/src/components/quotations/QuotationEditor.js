@@ -379,6 +379,7 @@ const QuotationEditor = ({
   const emailThreadSearchGenerationRef = useRef(0);
   const emailReconcileGenerationRef = useRef(0);
   const reviewEmailGenerationRef = useRef(0);
+  const lineSaveGenerationRef = useRef(0);
   const reviewEmailInFlightRef = useRef(false);
   const initialEmailReviewRequestRef = useRef('');
   const loadEmailPreviewRef = useRef(null);
@@ -768,6 +769,8 @@ const QuotationEditor = ({
 
   useEffect(() => {
     const mountedPriceInputs = priceInputRefs.current;
+    lineSaveGenerationRef.current += 1;
+    setSaving(false);
     setEmailPreviewOpen(false);
     setEmailPreviewLoading(false);
     setEmailPreview(null);
@@ -794,6 +797,7 @@ const QuotationEditor = ({
       emailThreadSearchGenerationRef.current += 1;
       emailReconcileGenerationRef.current += 1;
       reviewEmailGenerationRef.current += 1;
+      lineSaveGenerationRef.current += 1;
       reviewEmailInFlightRef.current = false;
       supportingDatasetGenerationRef.current = {};
       mountedPriceInputs.clear();
@@ -1279,13 +1283,17 @@ const QuotationEditor = ({
 
   const mergeSavedQuote = (quoteData, savedIds = [], preserveCurrentDrafts = false) => {
     const savedSet = new Set(savedIds);
+    const preserveEveryCurrentDraft = preserveCurrentDrafts === true;
+    const preservedDraftIds = new Set(
+      Array.isArray(preserveCurrentDrafts) ? preserveCurrentDrafts.map(String) : []
+    );
     const currentDrafts = lineDraftsRef.current || {};
     const currentSavedDrafts = savedLineDraftsRef.current || {};
     const nextDrafts = {};
     const nextSavedDrafts = {};
     (quoteData.lines || []).forEach((line) => {
       const savedDraft = draftFromLine(line);
-      if (preserveCurrentDrafts) {
+      if (preserveEveryCurrentDraft || preservedDraftIds.has(String(line.id))) {
         nextDrafts[line.id] = currentDrafts[line.id] || savedDraft;
       } else if (savedSet.has(line.id)) {
         nextDrafts[line.id] = savedDraft;
@@ -1309,42 +1317,93 @@ const QuotationEditor = ({
 
   const saveLine = async (lineId) => {
     if (saving || actionInFlight) return;
+    const currentQuote = quoteRef.current || quote;
+    const expectedQuoteId = String(currentQuote?.id || '');
+    const expectedLoadGeneration = loadGenerationRef.current;
+    const requestGeneration = ++lineSaveGenerationRef.current;
+    const requestIsCurrent = () => (
+      lineSaveGenerationRef.current === requestGeneration
+      && loadGenerationRef.current === expectedLoadGeneration
+      && String(quoteRef.current?.id || '') === expectedQuoteId
+    );
+    const draftsAtSaveStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
+    const payloadDraft = { ...(lineDraftsRef.current[lineId] || {}) };
     setSaving(true);
     setLineFeedback(null);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
-        lines: [{ id: lineId, ...payloadForLine(lineDrafts[lineId]) }],
+        lines: [{ id: lineId, ...payloadForLine(payloadDraft) }],
       });
-      mergeSavedQuote(response.data.quotation, [lineId]);
-      setLineFeedback({ type: 'success', message: 'Line saved.' });
+      if (!requestIsCurrent()) return;
+      const draftsChangedDuringSave = Object.entries(draftsAtSaveStart)
+        .filter(([savedLineId, expected]) => !draftsMatch(lineDraftsRef.current[savedLineId], expected))
+        .map(([savedLineId]) => savedLineId);
+      const newerEditsRemain = draftsChangedDuringSave.length > 0;
+      mergeSavedQuote(
+        response.data.quotation,
+        [lineId],
+        draftsChangedDuringSave,
+      );
+      setLineFeedback(newerEditsRemain
+        ? { type: 'warning', message: 'Saved the submitted changes; newer edits remain unsaved.' }
+        : { type: 'success', message: 'Line saved.' });
     } catch (error) {
+      if (!requestIsCurrent()) return;
       const details = await describeQuotationError(error, 'Save quote line', `PATCH /quotations/quote-lines/${lineId}/`);
+      if (!requestIsCurrent()) return;
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
     } finally {
-      setSaving(false);
+      if (requestIsCurrent()) setSaving(false);
     }
   };
 
   const saveAllLines = async () => {
     if (saving || actionInFlight || !changedLineIds.length) return;
+    const currentQuote = quoteRef.current || quote;
+    const expectedQuoteId = String(currentQuote?.id || '');
+    const expectedLoadGeneration = loadGenerationRef.current;
+    const requestGeneration = ++lineSaveGenerationRef.current;
+    const requestIsCurrent = () => (
+      lineSaveGenerationRef.current === requestGeneration
+      && loadGenerationRef.current === expectedLoadGeneration
+      && String(quoteRef.current?.id || '') === expectedQuoteId
+    );
+    const lineIdsToSave = [...changedLineIds];
+    const draftsAtSaveStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
+    const payloadDrafts = Object.fromEntries(
+      lineIdsToSave.map((lineId) => [lineId, { ...(lineDraftsRef.current[lineId] || {}) }])
+    );
     setSaving(true);
     setLineFeedback(null);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
-        lines: changedLineIds.map((lineId) => ({ id: lineId, ...payloadForLine(lineDrafts[lineId]) })),
+        lines: lineIdsToSave.map((lineId) => ({ id: lineId, ...payloadForLine(payloadDrafts[lineId]) })),
       });
-      mergeSavedQuote(response.data.quotation, changedLineIds);
-      setLineFeedback({ type: 'success', message: `Saved ${changedLineIds.length} line${changedLineIds.length === 1 ? '' : 's'}.` });
+      if (!requestIsCurrent()) return;
+      const draftsChangedDuringSave = Object.entries(draftsAtSaveStart)
+        .filter(([lineId, expected]) => !draftsMatch(lineDraftsRef.current[lineId], expected))
+        .map(([lineId]) => lineId);
+      const newerEditsRemain = draftsChangedDuringSave.length > 0;
+      mergeSavedQuote(
+        response.data.quotation,
+        lineIdsToSave,
+        draftsChangedDuringSave,
+      );
+      setLineFeedback(newerEditsRemain
+        ? { type: 'warning', message: 'Saved the submitted changes; newer edits remain unsaved.' }
+        : { type: 'success', message: `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}.` });
     } catch (error) {
+      if (!requestIsCurrent()) return;
       const details = await describeQuotationError(error, 'Save all quote lines', 'PATCH /quotations/quote-lines/{id}/');
+      if (!requestIsCurrent()) return;
       setErrorInfo(details);
       setLineFeedback({ type: 'error', message: 'Some line changes could not be saved.' });
       console.error(formatQuotationError(details), error);
     } finally {
-      setSaving(false);
+      if (requestIsCurrent()) setSaving(false);
     }
   };
 
