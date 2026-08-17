@@ -261,6 +261,7 @@ const QuotationModule = () => {
             <QuotationEditor
               quoteId={editingQuoteId}
               onClose={closeQuote}
+              onOpenQuote={openQuote}
               onReviewOutcome={openOutcome}
               initialEmailReviewFingerprint={
                 pendingEmailReview?.quoteId === editingQuoteId

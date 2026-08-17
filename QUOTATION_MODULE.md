@@ -940,7 +940,7 @@ Supported statuses:
 Rules:
 - Only draft, pending review, and approved quotations are editable.
 - Finalized, sent, revised, and cancelled quotations cannot be edited directly.
-- Revisions create a new draft version linked to the previous quotation.
+- Revisions create a new draft version linked to the previous quotation, and the editor opens that new draft immediately.
 - A quotation cannot be finalized with unresolved required item matches.
 - A quotation cannot be finalized with missing or invalid prices.
 - Only finalization appends company-specific price history.

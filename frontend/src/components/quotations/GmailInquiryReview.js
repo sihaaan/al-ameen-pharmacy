@@ -4340,6 +4340,7 @@ const GmailInquiryReview = ({
             <QuotationEditor
               quoteId={quoteId}
               onClose={onBack}
+              onOpenQuote={onOpenQuote}
               onReviewOutcome={(exactQuoteId) => setEmbeddedOutcomeQuoteId(exactQuoteId)}
               gmailEvidenceVisible={showEmbeddedEvidence}
               onOpenGmailImport={() => setShowEmbeddedEvidence((visible) => !visible)}

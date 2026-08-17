@@ -76,9 +76,10 @@ jest.mock('./CompanySelectWithCreate', () => ({
 
 jest.mock('./QuotationEditor', () => ({
   __esModule: true,
-  default: ({ quoteId, onOpenGmailImport, onReviewOutcome, gmailEvidenceVisible }) => (
+  default: ({ quoteId, onOpenQuote, onOpenGmailImport, onReviewOutcome, gmailEvidenceVisible }) => (
     <section aria-label="Embedded standard quotation editor">
       <h3>Standard quotation editor #{quoteId}</h3>
+      <button type="button" onClick={() => onOpenQuote?.(100)}>Open revision draft</button>
       <button type="button" onClick={() => onOpenGmailImport?.(31)}>
         {gmailEvidenceVisible ? 'Hide Gmail evidence' : 'View Gmail evidence'}
       </button>
@@ -1091,6 +1092,29 @@ describe('GmailInquiryReview', () => {
     expect(within(
       screen.getByRole('region', { name: 'Embedded standard quotation editor' })
     ).getByRole('button', { name: 'Hide Gmail evidence' })).toBeInTheDocument();
+  });
+
+  test('routes an embedded editor revision directly to the returned draft quotation', async () => {
+    const onOpenQuote = jest.fn();
+    quotationAPI.gmailInquiryImports.retrieve.mockResolvedValueOnce({
+      data: standardEditorRecord(reviewedRecord, {
+        status: 'confirmed',
+        quotation: 99,
+        quotation_id: 99,
+      }),
+    });
+
+    render(<GmailInquiryReview importId="31" onOpenQuote={onOpenQuote} />);
+
+    const embeddedEditor = await screen.findByRole('region', {
+      name: 'Embedded standard quotation editor',
+    });
+    fireEvent.click(within(embeddedEditor).getByRole('button', {
+      name: 'Open revision draft',
+    }));
+
+    expect(onOpenQuote).toHaveBeenCalledWith(100);
+    expect(onOpenQuote).toHaveBeenCalledTimes(1);
   });
 
   test('keeps backend-rejected quantity boundaries visible as standard-intake exceptions', async () => {

@@ -19,6 +19,7 @@ jest.mock('../../api/quotations', () => ({
       sendEmail: jest.fn(),
       reconcileEmail: jest.fn(),
       finalize: jest.fn(),
+      revise: jest.fn(),
       pdf: jest.fn(),
     },
     items: { list: jest.fn() },
@@ -195,6 +196,15 @@ describe('QuotationEditor Product price context', () => {
       },
     });
     quotationAPI.quotes.finalize.mockResolvedValue({ data: { ...quote, status: 'finalized', status_display: 'Finalized' } });
+    quotationAPI.quotes.revise.mockResolvedValue({
+      data: {
+        ...quote,
+        id: 22,
+        quotation_number: 'Q-0021-R1',
+        status: 'draft',
+        status_display: 'Draft',
+      },
+    });
     quotationAPI.quotes.pdf.mockResolvedValue({ data: new Blob(['pdf']) });
     quotationAPI.gmail.connectUrl.mockResolvedValue({ data: {} });
     quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
@@ -800,6 +810,73 @@ describe('QuotationEditor Product price context', () => {
     expect(await screen.findByRole('checkbox', { name: 'Show Brand column' })).toBeDisabled();
     expect(screen.getByLabelText('Brand for Imported gloves')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Save Terms & Layout' })).not.toBeInTheDocument();
+  });
+
+  test('shows a clear optional unit placeholder instead of presenting each as saved data', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...readyQuote,
+        lines: [{ ...readyQuote.lines[0], unit: '' }],
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const unitInput = await screen.findByLabelText('Unit for Imported gloves');
+    expect(unitInput).toHaveValue('');
+    expect(unitInput).toHaveAttribute('placeholder', 'Enter unit');
+    expect(unitInput).not.toBeRequired();
+    expect(screen.getByRole('columnheader', { name: 'Unit' })).toBeInTheDocument();
+    expect(within(unitInput.closest('tr')).getByText('Ready')).toBeInTheDocument();
+    (await screen.findAllByRole('button', { name: 'Finalize' })).forEach((button) => {
+      expect(button).toBeEnabled();
+    });
+  });
+
+  test('keeps chained Review Email available when the optional unit is blank', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: withGmailChainedActions({
+        ...readyQuote,
+        lines: [{ ...readyQuote.lines[0], unit: '' }],
+      }),
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const reviewButtons = await screen.findAllByRole('button', { name: 'Review Email' });
+    reviewButtons.forEach((button) => expect(button).toBeEnabled());
+    expect(screen.queryByText('Imported gloves: enter a unit.')).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+  });
+
+  test('opens the returned draft immediately after creating a revision', async () => {
+    const onOpenQuote = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: { ...readyQuote, status: 'finalized', status_display: 'Finalized' },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} onOpenQuote={onOpenQuote} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Revision' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.revise).toHaveBeenCalledWith(21));
+    expect(onOpenQuote).toHaveBeenCalledWith(22);
+    expect(onOpenQuote).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(1);
+  });
+
+  test('reloads the source quote instead of mixing quote ids when revision navigation is unavailable', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: { ...readyQuote, status: 'finalized', status_display: 'Finalized' },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Revision' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.revise).toHaveBeenCalledWith(21));
+    await waitFor(() => expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('Created Q-0021-R1. Return to the quotation list to open it.')).toBeInTheDocument();
   });
 
   test('opens a verified Gmail preview before finalizing and sends only after explicit confirmation', async () => {
