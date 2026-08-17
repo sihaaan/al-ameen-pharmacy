@@ -63,6 +63,12 @@ const parsedPreview = {
   },
 };
 
+const renderPasteInquiryManager = (props = {}) => {
+  const result = render(<InquiryManager {...props} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Paste Text' }));
+  return result;
+};
+
 describe('InquiryManager company-scoped async safety', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -76,9 +82,23 @@ describe('InquiryManager company-scoped async safety', () => {
     });
   });
 
+  test('opens on file upload by default and keeps paste text available', async () => {
+    render(<InquiryManager />);
+
+    await screen.findByText('Companies ready:');
+    expect(screen.getByRole('button', { name: 'Upload File' })).toHaveClass('active');
+    expect(screen.getByLabelText('Inquiry file')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Paste the customer's requested items here...")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste Text' }));
+
+    expect(screen.getByRole('button', { name: 'Paste Text' })).toHaveClass('active');
+    expect(screen.getByPlaceholderText("Paste the customer's requested items here...")).toBeInTheDocument();
+  });
+
   test('applies AI cleanup once and clears company-scoped matches after company changes', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({ data: parsedPreview });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
@@ -99,7 +119,7 @@ describe('InquiryManager company-scoped async safety', () => {
     quotationAPI.inquiries.parseText.mockReturnValue(new Promise((resolve) => {
       resolveParse = resolve;
     }));
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     const companyButton = (await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0];
     fireEvent.click(companyButton);
@@ -121,7 +141,7 @@ describe('InquiryManager company-scoped async safety', () => {
     quotationAPI.inquiries.createImported.mockReturnValue(new Promise((resolve) => {
       resolveSave = resolve;
     }));
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
@@ -144,7 +164,7 @@ describe('InquiryManager company-scoped async safety', () => {
 
   test('keeps focus while typing more than one character into an added or parsed row', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({ data: { ...parsedPreview, ai_candidate: null } });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'A' },
@@ -171,7 +191,7 @@ describe('InquiryManager company-scoped async safety', () => {
         ],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'First item\nSecond item' },
@@ -190,7 +210,7 @@ describe('InquiryManager company-scoped async safety', () => {
 
   test('changing the import source clears old preview rows so they cannot be saved for a new file', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({ data: { ...parsedPreview, ai_candidate: null } });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Old company item' },
@@ -217,7 +237,7 @@ describe('InquiryManager company-scoped async safety', () => {
         }],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Priced item' },
@@ -257,7 +277,7 @@ describe('InquiryManager company-scoped async safety', () => {
         }],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Priced item' },
@@ -294,7 +314,7 @@ describe('InquiryManager company-scoped async safety', () => {
         }],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Staff repriced item' },
@@ -326,7 +346,7 @@ describe('InquiryManager company-scoped async safety', () => {
       },
     });
     quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
-    render(<InquiryManager onOpenQuote={jest.fn()} />);
+    renderPasteInquiryManager({ onOpenQuote: jest.fn() });
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
@@ -359,7 +379,7 @@ describe('InquiryManager company-scoped async safety', () => {
       },
     });
     quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 502, company: 7 } });
-    render(<InquiryManager onOpenQuote={jest.fn()} />);
+    renderPasteInquiryManager({ onOpenQuote: jest.fn() });
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
@@ -408,7 +428,7 @@ describe('InquiryManager company-scoped async safety', () => {
         }],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Initial priced item' },
@@ -467,7 +487,7 @@ describe('InquiryManager company-scoped async safety', () => {
         }],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Source-priced item' },
@@ -498,7 +518,7 @@ describe('InquiryManager company-scoped async safety', () => {
         lines: [{ raw_name: 'Priced item', quantity: '1.000', unit_price: null, parse_status: 'parsed' }],
       },
     });
-    render(<InquiryManager />);
+    renderPasteInquiryManager();
 
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
       target: { value: 'Priced item' },
@@ -531,7 +551,7 @@ describe('InquiryManager company-scoped async safety', () => {
     const onOpenQuote = jest.fn();
     quotationAPI.inquiries.parseText.mockResolvedValue({ data: { ...parsedPreview, ai_candidate: null } });
     quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
-    render(<InquiryManager onOpenQuote={onOpenQuote} />);
+    renderPasteInquiryManager({ onOpenQuote });
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
@@ -552,7 +572,7 @@ describe('InquiryManager company-scoped async safety', () => {
     quotationAPI.inquiries.createImported.mockReturnValue(new Promise((resolve) => {
       resolveSave = resolve;
     }));
-    render(<InquiryManager onOpenQuote={jest.fn()} />);
+    renderPasteInquiryManager({ onOpenQuote: jest.fn() });
 
     fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {

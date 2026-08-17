@@ -392,7 +392,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [saving, setSaving] = useState(false);
   const [creatingQuoteId, setCreatingQuoteId] = useState(null);
   const [quoteSuccess, setQuoteSuccess] = useState(null);
-  const [importMode, setImportMode] = useState('paste');
+  const [importMode, setImportMode] = useState('upload');
   const [importForm, setImportForm] = useState(emptyImportForm);
   const [importFile, setImportFile] = useState(null);
   const [importDragActive, setImportDragActive] = useState(false);
