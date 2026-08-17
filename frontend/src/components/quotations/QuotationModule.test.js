@@ -18,6 +18,7 @@ jest.mock('./QuotationEditor', () => ({
   quoteId,
   initialEmailReviewFingerprint,
   onInitialEmailReviewHandled,
+  onOpenQuote,
   onOpenGmailImport,
 }) => (
   <div>
@@ -28,6 +29,7 @@ jest.mock('./QuotationEditor', () => ({
     {initialEmailReviewFingerprint && (
       <button type="button" onClick={onInitialEmailReviewHandled}>Consume email review</button>
     )}
+    <button type="button" onClick={() => onOpenQuote(89)}>Open revision</button>
     <button type="button" onClick={() => onOpenGmailImport(31)}>Open Gmail source</button>
   </div>
 ));
@@ -104,6 +106,17 @@ describe('QuotationModule Gmail deep links', () => {
     expect(screen.getByText('Quotation editor 73')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
     expect(screen.getByLabelText('initial email review fingerprint')).toHaveTextContent('none');
+  });
+
+  test('opens a newly created revision in the editor and updates the exact quote URL', async () => {
+    renderModule('/admin?quotation_tab=quotes&quote_id=73');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open revision' }));
+
+    expect(await screen.findByText('Quotation editor 89')).toBeInTheDocument();
+    expect(screen.getByLabelText('location').textContent).toContain('quotation_tab=quotes');
+    expect(screen.getByLabelText('location').textContent).toContain('quote_id=89');
+    expect(screen.getByLabelText('location').textContent).not.toContain('quote_id=73');
   });
 
   test('passes a prepared review only in memory and consumes it once without putting it in the URL', async () => {

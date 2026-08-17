@@ -303,6 +303,7 @@ export const retryTransientQuotationGet = async (request, delayMs = 150) => {
 const QuotationEditor = ({
   quoteId,
   onClose,
+  onOpenQuote,
   onReviewOutcome,
   onOpenGmailImport,
   gmailEvidenceVisible = false,
@@ -2433,7 +2434,16 @@ const QuotationEditor = ({
     try {
       const response = await action(quote.id);
       if (label === 'Create Revision' && response.data?.id) {
-        window.alert(`Created revision ${response.data.quotation_number}`);
+        if (onOpenQuote) {
+          onOpenQuote(response.data.id);
+        } else {
+          setLineFeedback({
+            type: 'success',
+            message: `Created ${response.data.quotation_number || 'a draft revision'}. Return to the quotation list to open it.`,
+          });
+          await load({ refreshReferences: false });
+        }
+        return;
       }
       if (label === 'Finalize') {
         setDownloadLoading(true);
@@ -3166,10 +3176,11 @@ const QuotationEditor = ({
                     <td className="qm-line-unit-cell">
                       <input
                         className="qm-unit-input"
+                        aria-label={`Unit for ${lineLabel(line, draft)}`}
                         disabled={!isEditable}
                         list="quotation-unit-suggestions"
                         inputMode="text"
-                        placeholder="each"
+                        placeholder="Enter unit"
                         value={draft.unit || ''}
                         onKeyDown={preventUnitNumberKey}
                         onChange={(event) => updateLineDraft(line.id, { unit: sanitizeUnitText(event.target.value) })}
@@ -3261,6 +3272,7 @@ const QuotationEditor = ({
             )}
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />
             <input
+              aria-label="Unit"
               placeholder="Unit"
               list="quotation-unit-suggestions"
               inputMode="text"
