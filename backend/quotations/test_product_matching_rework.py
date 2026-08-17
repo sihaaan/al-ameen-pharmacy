@@ -36,6 +36,7 @@ from .models import (
     Inquiry,
     InquiryLine,
     ProductAlias,
+    QuoteItem,
     Quotation,
     QuotationAuditLog,
     QuotationLine,
@@ -1374,6 +1375,59 @@ class ProductMatchingReworkTests(APITestCase):
             ).exists()
         )
 
+    def test_direct_snapshot_only_edit_persists_for_inquiry_backed_product_line(self):
+        product = self.product("Nitroglycerin 5M/10 ml Injection")
+        source_wording = "Nitroglycerin 5M/10 ml Injection"
+        requested_snapshot = (
+            "Nitroglycerin 5M/10 ml Injection "
+            "(glyceryl trinitrate spray 0.4mg/dose)"
+        )
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Nitroglycerin request",
+            created_by=self.staff,
+        )
+        inquiry_line = InquiryLine.objects.create(
+            inquiry=inquiry,
+            raw_name=source_wording,
+            quantity=Decimal("8.000"),
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            inquiry=inquiry,
+            created_by=self.staff,
+        )
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            inquiry_line=inquiry_line,
+            product=product,
+            item_name_snapshot=source_wording,
+            quantity=Decimal("8.000"),
+            unit="PCS",
+            unit_price=Decimal("49.50"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+
+        response = self.client.patch(
+            reverse("quotation-line-detail", args=[line.id]),
+            {"item_name_snapshot": requested_snapshot},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        inquiry_line.refresh_from_db()
+        self.assertEqual(line.item_name_snapshot, requested_snapshot)
+        self.assertEqual(response.data["item_name_snapshot"], requested_snapshot)
+        self.assertEqual(inquiry_line.raw_name, source_wording)
+        self.assertFalse(
+            ProductAlias.objects.filter(
+                company=self.company,
+                product=product,
+                alias=requested_snapshot,
+            ).exists()
+        )
+
     def test_bulk_candidate_link_preserves_snapshot_and_learns_alias(self):
         product = self.product("Pulse Oximeter")
         quotation = Quotation.objects.create(company=self.company, created_by=self.staff)
@@ -1412,6 +1466,432 @@ class ProductMatchingReworkTests(APITestCase):
                 alias="Pulse Oximtre",
             ).exists()
         )
+
+    def test_bulk_snapshot_only_edit_persists_for_inquiry_backed_product_line(self):
+        product = self.product("Nitroglycerin 5M/10 ml Injection")
+        source_wording = "Nitroglycerin 5M/10 ml Injection"
+        requested_snapshot = (
+            "Nitroglycerin 5M/10 ml Injection "
+            "(glyceryl trinitrate spray 0.4mg/dose)"
+        )
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Nitroglycerin request",
+            created_by=self.staff,
+        )
+        inquiry_line = InquiryLine.objects.create(
+            inquiry=inquiry,
+            raw_name=source_wording,
+            quantity=Decimal("8.000"),
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            inquiry=inquiry,
+            created_by=self.staff,
+        )
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            inquiry_line=inquiry_line,
+            product=product,
+            item_name_snapshot=source_wording,
+            quantity=Decimal("8.000"),
+            unit="PCS",
+            unit_price=Decimal("49.50"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": line.id,
+                        "product": product.id,
+                        "item_name_snapshot": requested_snapshot,
+                        "match_status": QuotationLine.MATCH_CONFIRMED,
+                        "quantity": "8.000",
+                        "unit": "PCS",
+                        "unit_price": "49.50",
+                        "vat_rate": "0",
+                    }
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        inquiry_line.refresh_from_db()
+        returned_line = next(
+            row
+            for row in response.data["quotation"]["lines"]
+            if row["id"] == line.id
+        )
+        self.assertEqual(line.item_name_snapshot, requested_snapshot)
+        self.assertEqual(returned_line["item_name_snapshot"], requested_snapshot)
+        self.assertEqual(inquiry_line.raw_name, source_wording)
+        self.assertFalse(
+            ProductAlias.objects.filter(
+                company=self.company,
+                product=product,
+                alias=requested_snapshot,
+            ).exists()
+        )
+
+    def test_clearing_product_match_keeps_the_submitted_snapshot(self):
+        product = self.product("Canonical Nitroglycerin Product")
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Clear product match",
+            created_by=self.staff,
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            inquiry=inquiry,
+            created_by=self.staff,
+        )
+
+        def make_line(raw_name):
+            inquiry_line = InquiryLine.objects.create(
+                inquiry=inquiry,
+                raw_name=raw_name,
+                quantity=Decimal("1.000"),
+            )
+            return QuotationLine.objects.create(
+                quotation=quotation,
+                inquiry_line=inquiry_line,
+                product=product,
+                item_name_snapshot=raw_name,
+                quantity=Decimal("1.000"),
+                unit="PCS",
+                unit_price=Decimal("49.50"),
+                match_status=QuotationLine.MATCH_CONFIRMED,
+            )
+
+        bulk_line = make_line("Nitroglycerin bulk source wording")
+        direct_line = make_line("Nitroglycerin direct source wording")
+
+        bulk_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": bulk_line.id,
+                        "product": None,
+                        "item_name_snapshot": "Bulk unmatched wording",
+                        "match_status": QuotationLine.MATCH_UNRESOLVED,
+                    }
+                ]
+            },
+            format="json",
+        )
+        direct_response = self.client.patch(
+            reverse("quotation-line-detail", args=[direct_line.id]),
+            {
+                "product": None,
+                "item_name_snapshot": "Direct unmatched wording",
+                "match_status": QuotationLine.MATCH_UNRESOLVED,
+            },
+            format="json",
+        )
+
+        self.assertEqual(bulk_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(direct_response.status_code, status.HTTP_200_OK)
+        bulk_line.refresh_from_db()
+        direct_line.refresh_from_db()
+        self.assertIsNone(bulk_line.product)
+        self.assertIsNone(direct_line.product)
+        self.assertEqual(bulk_line.item_name_snapshot, "Bulk unmatched wording")
+        self.assertEqual(direct_line.item_name_snapshot, "Direct unmatched wording")
+
+    def test_inquiry_snapshot_only_edits_do_not_touch_source_aliases(self):
+        product = self.product("Canonical Nitroglycerin Product")
+        conflicting_product = self.product("Conflicting Nitroglycerin Product")
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Snapshot-only alias safety",
+            created_by=self.staff,
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            inquiry=inquiry,
+            created_by=self.staff,
+        )
+
+        def make_line(source_wording):
+            inquiry_line = InquiryLine.objects.create(
+                inquiry=inquiry,
+                raw_name=source_wording,
+                quantity=Decimal("1.000"),
+            )
+            return QuotationLine.objects.create(
+                quotation=quotation,
+                inquiry_line=inquiry_line,
+                product=product,
+                item_name_snapshot=source_wording,
+                quantity=Decimal("1.000"),
+                unit="PCS",
+                unit_price=Decimal("49.50"),
+                match_status=QuotationLine.MATCH_CONFIRMED,
+            )
+
+        bulk_retired_line = make_line("Bulk retired Nitroglycerin source")
+        bulk_conflict_line = make_line("Bulk conflicting Nitroglycerin source")
+        direct_retired_line = make_line("Direct retired Nitroglycerin source")
+        direct_conflict_line = make_line("Direct conflicting Nitroglycerin source")
+        bulk_retired_alias = ProductAlias.objects.create(
+            company=self.company,
+            product=product,
+            alias=bulk_retired_line.inquiry_line.raw_name,
+            is_active=False,
+            notes="Deliberately retired bulk alias.",
+            created_by=self.staff,
+        )
+        bulk_conflict_alias = ProductAlias.objects.create(
+            company=self.company,
+            product=conflicting_product,
+            alias=bulk_conflict_line.inquiry_line.raw_name,
+            notes="Curated bulk conflict.",
+            created_by=self.staff,
+        )
+        direct_retired_alias = ProductAlias.objects.create(
+            company=self.company,
+            product=product,
+            alias=direct_retired_line.inquiry_line.raw_name,
+            is_active=False,
+            notes="Deliberately retired direct alias.",
+            created_by=self.staff,
+        )
+        direct_conflict_alias = ProductAlias.objects.create(
+            company=self.company,
+            product=conflicting_product,
+            alias=direct_conflict_line.inquiry_line.raw_name,
+            notes="Curated direct conflict.",
+            created_by=self.staff,
+        )
+
+        bulk_snapshots = {
+            bulk_retired_line.id: "Bulk retired display override",
+            bulk_conflict_line.id: "Bulk conflict display override",
+        }
+        bulk_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": line_id,
+                        "product": product.id,
+                        "item_name_snapshot": snapshot,
+                        "match_status": QuotationLine.MATCH_CONFIRMED,
+                    }
+                    for line_id, snapshot in bulk_snapshots.items()
+                ]
+            },
+            format="json",
+        )
+        direct_responses = []
+        direct_snapshots = {
+            direct_retired_line.id: "Direct retired display override",
+            direct_conflict_line.id: "Direct conflict display override",
+        }
+        for line_id, snapshot in direct_snapshots.items():
+            direct_responses.append(
+                self.client.patch(
+                    reverse("quotation-line-detail", args=[line_id]),
+                    {"item_name_snapshot": snapshot},
+                    format="json",
+                )
+            )
+
+        self.assertEqual(bulk_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            all(response.status_code == status.HTTP_200_OK for response in direct_responses)
+        )
+        for line_id, snapshot in {**bulk_snapshots, **direct_snapshots}.items():
+            self.assertEqual(
+                QuotationLine.objects.get(pk=line_id).item_name_snapshot,
+                snapshot,
+            )
+        for alias in [bulk_retired_alias, direct_retired_alias]:
+            alias.refresh_from_db()
+            self.assertFalse(alias.is_active)
+        for alias in [bulk_conflict_alias, direct_conflict_alias]:
+            alias.refresh_from_db()
+            self.assertEqual(alias.product, conflicting_product)
+        self.assertFalse(
+            QuotationAuditLog.objects.filter(
+                target_type="ProductAlias",
+                target_id__in=[
+                    bulk_retired_alias.id,
+                    bulk_conflict_alias.id,
+                    direct_retired_alias.id,
+                    direct_conflict_alias.id,
+                ],
+            ).exists()
+        )
+
+    def test_confirming_prelinked_matches_restores_inquiry_wording(self):
+        product = self.product("Canonical Nitroglycerin Injection")
+        quote_item = QuoteItem.objects.create(name="Legacy Canonical Nitroglycerin")
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Confirm prelinked matches",
+            created_by=self.staff,
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            inquiry=inquiry,
+            created_by=self.staff,
+        )
+
+        def make_line(source_wording, *, selected_product=None, selected_quote_item=None):
+            inquiry_line = InquiryLine.objects.create(
+                inquiry=inquiry,
+                raw_name=source_wording,
+                quantity=Decimal("1.000"),
+            )
+            return QuotationLine.objects.create(
+                quotation=quotation,
+                inquiry_line=inquiry_line,
+                product=selected_product,
+                quote_item=selected_quote_item,
+                item_name_snapshot=source_wording,
+                quantity=Decimal("1.000"),
+                unit="PCS",
+                unit_price=Decimal("49.50"),
+                match_status=QuotationLine.MATCH_UNRESOLVED,
+            )
+
+        bulk_product_line = make_line(
+            "Bulk customer Nitroglycerin product wording",
+            selected_product=product,
+        )
+        bulk_quote_item_line = make_line(
+            "Bulk customer Nitroglycerin item wording",
+            selected_quote_item=quote_item,
+        )
+        direct_product_line = make_line(
+            "Direct customer Nitroglycerin product wording",
+            selected_product=product,
+        )
+        direct_quote_item_line = make_line(
+            "Direct customer Nitroglycerin item wording",
+            selected_quote_item=quote_item,
+        )
+
+        bulk_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": bulk_product_line.id,
+                        "product": product.id,
+                        "item_name_snapshot": product.name,
+                        "match_status": QuotationLine.MATCH_CONFIRMED,
+                    },
+                    {
+                        "id": bulk_quote_item_line.id,
+                        "quote_item": quote_item.id,
+                        "item_name_snapshot": quote_item.name,
+                        "match_status": QuotationLine.MATCH_CONFIRMED,
+                    },
+                ]
+            },
+            format="json",
+        )
+        direct_product_response = self.client.patch(
+            reverse("quotation-line-detail", args=[direct_product_line.id]),
+            {
+                "product": product.id,
+                "item_name_snapshot": product.name,
+                "match_status": QuotationLine.MATCH_CONFIRMED,
+            },
+            format="json",
+        )
+        direct_quote_item_response = self.client.patch(
+            reverse("quotation-line-detail", args=[direct_quote_item_line.id]),
+            {
+                "quote_item": quote_item.id,
+                "item_name_snapshot": quote_item.name,
+                "match_status": QuotationLine.MATCH_CONFIRMED,
+            },
+            format="json",
+        )
+
+        self.assertEqual(bulk_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(direct_product_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(direct_quote_item_response.status_code, status.HTTP_200_OK)
+        for line in [
+            bulk_product_line,
+            bulk_quote_item_line,
+            direct_product_line,
+            direct_quote_item_line,
+        ]:
+            line.refresh_from_db()
+            self.assertEqual(line.match_status, QuotationLine.MATCH_CONFIRMED)
+            self.assertEqual(line.item_name_snapshot, line.inquiry_line.raw_name)
+        for line in [bulk_product_line, direct_product_line]:
+            self.assertTrue(
+                ProductAlias.objects.filter(
+                    company=self.company,
+                    product=product,
+                    alias=line.inquiry_line.raw_name,
+                ).exists()
+            )
+
+    def test_bulk_quote_item_selection_repairs_a_custom_snapshot_to_source_wording(self):
+        quote_item = QuoteItem.objects.create(name="Legacy Canonical Nitroglycerin")
+        source_wording = "Customer Nitroglycerin quote-item wording"
+        inquiry = Inquiry.objects.create(
+            company=self.company,
+            subject="Select legacy quote item",
+            created_by=self.staff,
+        )
+        inquiry_line = InquiryLine.objects.create(
+            inquiry=inquiry,
+            raw_name=source_wording,
+            quantity=Decimal("1.000"),
+        )
+        quotation = Quotation.objects.create(
+            company=self.company,
+            inquiry=inquiry,
+            created_by=self.staff,
+        )
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            inquiry_line=inquiry_line,
+            item_name_snapshot="Temporary employee display override",
+            quantity=Decimal("1.000"),
+            unit="PCS",
+            unit_price=Decimal("49.50"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [
+                    {
+                        "id": line.id,
+                        "quote_item": quote_item.id,
+                        "item_name_snapshot": quote_item.name,
+                        "match_status": QuotationLine.MATCH_CONFIRMED,
+                    }
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        returned_line = next(
+            row
+            for row in response.data["quotation"]["lines"]
+            if row["id"] == line.id
+        )
+        self.assertEqual(line.quote_item, quote_item)
+        self.assertEqual(line.item_name_snapshot, source_wording)
+        self.assertEqual(returned_line["item_name_snapshot"], source_wording)
 
     def test_single_and_bulk_create_or_reuse_preserve_source_snapshots(self):
         single_product = self.product("Alcohol Detector Mouth-Piece")

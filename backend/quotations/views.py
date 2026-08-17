@@ -4794,9 +4794,14 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 else line.item_name_snapshot
             )
             next_product = serializer.validated_data.get("product", line.product)
+            next_quote_item = serializer.validated_data.get("quote_item", line.quote_item)
             product_changed = (
                 "product" in serializer.validated_data
                 and getattr(next_product, "pk", None) != line.product_id
+            )
+            quote_item_changed = (
+                "quote_item" in serializer.validated_data
+                and getattr(next_quote_item, "pk", None) != line.quote_item_id
             )
             inquiry_changed = (
                 "inquiry_line" in serializer.validated_data
@@ -4812,11 +4817,37 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 and str(serializer.validated_data.get("match_status") or "")
                 != str(line.match_status or "")
             )
-            match_fields_changed = product_changed or inquiry_changed or snapshot_changed or match_status_changed
+            matching_decision_changed = (
+                product_changed
+                or quote_item_changed
+                or inquiry_changed
+                or match_status_changed
+            )
+            requested_snapshot = serializer.validated_data.get(
+                "item_name_snapshot",
+                line.item_name_snapshot,
+            )
+            canonical_selection_name = (
+                getattr(next_product, "name", "")
+                if next_product
+                else getattr(next_quote_item, "name", "")
+            )
+            confirming_prelinked_canonical_name = bool(
+                next_inquiry_line
+                and match_status_changed
+                and serializer.validated_data.get("match_status")
+                == QuotationLine.MATCH_CONFIRMED
+                and normalize_label(requested_snapshot)
+                == normalize_label(canonical_selection_name)
+            )
             restore_source_snapshot = bool(
                 source_wording
-                and next_product
-                and (next_inquiry_line or product_changed or inquiry_changed)
+                and (
+                    (next_product and product_changed)
+                    or (next_quote_item and quote_item_changed)
+                    or ((next_product or next_quote_item) and inquiry_changed)
+                    or confirming_prelinked_canonical_name
+                )
             )
             if restore_source_snapshot:
                 serializer.validated_data["item_name_snapshot"] = source_wording
@@ -4824,7 +4855,10 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             if restore_source_snapshot and line.item_name_snapshot != source_wording:
                 line.item_name_snapshot = source_wording
                 line.save(update_fields=["item_name_snapshot", "updated_at"])
-            if match_fields_changed:
+            should_learn_alias = matching_decision_changed or (
+                snapshot_changed and not line.inquiry_line_id
+            )
+            if should_learn_alias:
                 learn_confirmed_quotation_line_alias(
                     line,
                     self.request.user,

@@ -2560,11 +2560,25 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             "match_status" in payload
             and str(requested_match_status or "") != str(line.match_status or "")
         )
-        match_fields_changed = product_changed or quote_item_changed or snapshot_changed or match_status_changed
+        matching_decision_changed = product_changed or quote_item_changed or match_status_changed
+        canonical_selection_name = ""
+        if requested_product_id and str(requested_product_id) == str(line.product_id):
+            canonical_selection_name = getattr(line.product, "name", "")
+        elif requested_quote_item_id and str(requested_quote_item_id) == str(line.quote_item_id):
+            canonical_selection_name = getattr(line.quote_item, "name", "")
+        confirming_prelinked_canonical_name = bool(
+            line.inquiry_line_id
+            and match_status_changed
+            and requested_match_status == QuotationLine.MATCH_CONFIRMED
+            and normalize_label(requested_snapshot) == normalize_label(canonical_selection_name)
+        )
         restore_source_snapshot = bool(
             str(source_wording or "").strip()
-            and requested_product_id
-            and (product_changed or (line.inquiry_line_id and match_fields_changed))
+            and (
+                (requested_product_id and product_changed)
+                or (requested_quote_item_id and quote_item_changed)
+                or confirming_prelinked_canonical_name
+            )
         )
         for field in allowed_fields:
             if field not in payload:
@@ -2614,12 +2628,15 @@ def bulk_update_quotation_lines(quotation, rows, actor):
             line.match_status = QuotationLine.MATCH_CONFIRMED
         if not line.product_id and not line.quote_item_id and line.match_status == QuotationLine.MATCH_CONFIRMED:
             line.match_status = QuotationLine.MATCH_UNRESOLVED
-        if line.product_id and restore_source_snapshot:
+        if (line.product_id or line.quote_item_id) and restore_source_snapshot:
             line.item_name_snapshot = source_wording
         elif line.product_id and not str(line.item_name_snapshot or "").strip():
             line.item_name_snapshot = source_wording or line.product.name
         line.save()
-        if match_fields_changed:
+        should_learn_alias = matching_decision_changed or (
+            snapshot_changed and not line.inquiry_line_id
+        )
+        if should_learn_alias:
             learn_confirmed_quotation_line_alias(
                 line,
                 actor,
