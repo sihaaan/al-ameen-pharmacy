@@ -207,7 +207,7 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/quotes/${id}/`, data),
     submitReview: (id) => axiosInstance.post(`/quotations/quotes/${id}/submit_review/`),
     approve: (id) => axiosInstance.post(`/quotations/quotes/${id}/approve/`),
-    finalize: (id) => axiosInstance.post(`/quotations/quotes/${id}/finalize/`),
+    finalize: (id, data = {}) => axiosInstance.post(`/quotations/quotes/${id}/finalize/`, data),
     emailPreview: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/email_preview/`, { params }),
     emailThreadCandidates: (id, recipient, limit = 10) => axiosInstance.get(
       `/quotations/quotes/${id}/email_thread_candidates/`,

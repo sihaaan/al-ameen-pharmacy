@@ -849,6 +849,135 @@ describe('QuotationEditor Product price context', () => {
     expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
   });
 
+  test('offers direct finalization beside Review Email without sending an email', async () => {
+    const finalizedQuote = {
+      ...withGmailChainedActions(),
+      status: 'finalized',
+      status_display: 'Finalized',
+    };
+    const originalCreateObjectURL = window.URL.createObjectURL;
+    const originalRevokeObjectURL = window.URL.revokeObjectURL;
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const anchorClickSpy = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    window.URL.createObjectURL = jest.fn(() => 'blob:finalized-quotation');
+    window.URL.revokeObjectURL = jest.fn();
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: withGmailChainedActions() })
+      .mockResolvedValueOnce({ data: finalizedQuote });
+    quotationAPI.quotes.finalize.mockResolvedValueOnce({ data: finalizedQuote });
+
+    try {
+      render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+      const finalizeButtons = await screen.findAllByRole('button', { name: 'Finalize' });
+      const reviewButtons = screen.getAllByRole('button', { name: 'Review Email' });
+      expect(finalizeButtons).toHaveLength(2);
+      expect(reviewButtons).toHaveLength(2);
+
+      fireEvent.click(finalizeButtons[0]);
+
+      await waitFor(() => expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+        quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      }));
+      expect(confirmSpy).toHaveBeenCalledWith('Finalize this quotation without sending an email?');
+      await waitFor(() => expect(quotationAPI.quotes.pdf).toHaveBeenCalledWith(21));
+      expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+      expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+      expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+      expect(await screen.findByRole('button', { name: 'Email Quotation' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+      anchorClickSpy.mockRestore();
+      window.URL.createObjectURL = originalCreateObjectURL;
+      window.URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+  });
+
+  test('refreshes a stale direct-finalization review without finalizing or downloading', async () => {
+    const latestQuote = withGmailChainedActions({
+      ...readyQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...readyQuote.lines[0],
+        item_name_snapshot: 'Gloves changed by another employee',
+      }],
+    });
+    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+    quotationAPI.quotes.finalize.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed in another session.',
+          refresh_quote: true,
+          quote: latestQuote,
+        },
+      },
+    });
+
+    try {
+      render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+
+      expect(await screen.findByText('The quotation changed in another session.')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('Gloves changed by another employee')).toBeInTheDocument();
+      expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+        quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      });
+      expect(quotationAPI.quotes.pdf).not.toHaveBeenCalled();
+      expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+      expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+      expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  test('keeps direct Finalize blocked while Review Email can save changed lines', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText('Unit price for Imported gloves'), {
+      target: { value: '12' },
+    });
+
+    const finalizeButtons = screen.getAllByRole('button', { name: 'Finalize' });
+    const reviewButtons = screen.getAllByRole('button', { name: 'Review Email' });
+    finalizeButtons.forEach((button) => {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('title', 'Save all line changes before finalizing.');
+    });
+    reviewButtons.forEach((button) => expect(button).toBeEnabled());
+    expect(screen.getByText('Finalize is blocked until:')).toBeInTheDocument();
+    expect(screen.getByText('Save all line changes before finalizing.')).toBeInTheDocument();
+  });
+
+  test('keeps direct Finalize blocked until a missing review fingerprint is reloaded', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: withGmailChainedActions({
+        ...readyQuote,
+        quotation_review_fingerprint: '',
+      }),
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const finalizeButtons = await screen.findAllByRole('button', { name: 'Finalize' });
+    const reviewButtons = screen.getAllByRole('button', { name: 'Review Email' });
+    finalizeButtons.forEach((button) => {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('title', 'Reload the quotation before finalizing.');
+    });
+    reviewButtons.forEach((button) => expect(button).toBeEnabled());
+    expect(screen.getByText('Reload the quotation before finalizing.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
+  });
+
   test('opens the returned draft immediately after creating a revision', async () => {
     const onOpenQuote = jest.fn();
     quotationAPI.quotes.retrieve.mockResolvedValueOnce({
@@ -909,6 +1038,44 @@ describe('QuotationEditor Product price context', () => {
     }));
     expect(quotationAPI.quotes.finalize).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
+  });
+
+  test('refreshes a stale quotation when Finalize Only is chosen from the email preview', async () => {
+    const latestQuote = {
+      ...readyQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...readyQuote.lines[0],
+        item_name_snapshot: 'Latest gloves wording',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: readyQuote });
+    quotationAPI.quotes.finalize.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed before finalization.',
+          quote: latestQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize Only' }));
+
+    expect(await screen.findByText('The quotation changed before finalization.')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Latest gloves wording')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Finalize and send quotation' })).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+    });
+    expect(quotationAPI.quotes.pdf).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
+    expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
   });
 
   test('keeps the existing Finalize action unless the strict server flag is true', async () => {

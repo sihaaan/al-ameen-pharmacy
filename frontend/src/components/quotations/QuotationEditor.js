@@ -1087,6 +1087,9 @@ const QuotationEditor = ({
   const primaryEmailActionIssues = chainedActionsEnabled
     ? reviewEmailIssues
     : finalizeIssues;
+  const directFinalizeIssues = !isEditable || quote?.quotation_review_fingerprint
+    ? finalizeIssues
+    : [...finalizeIssues, 'Reload the quotation before finalizing.'];
 
   const updateLineDraft = (lineId, patch) => {
     setLineFeedback(null);
@@ -2253,6 +2256,10 @@ const QuotationEditor = ({
     ));
   };
 
+  const finalizeWithoutEmail = (id) => quotationAPI.quotes.finalize(id, {
+    quotation_review_fingerprint: quoteRef.current?.quotation_review_fingerprint || '',
+  });
+
   const reconcileQuotationEmail = async () => {
     if (emailReconciling || emailSending) return;
     const requestGeneration = ++emailReconcileGenerationRef.current;
@@ -2316,14 +2323,14 @@ const QuotationEditor = ({
   };
 
   const finalizeOnlyFromPreview = async () => {
-    if (emailSending || saving || actionInFlight || finalizeIssues.length > 0) return;
+    if (emailSending || saving || actionInFlight || directFinalizeIssues.length > 0) return;
     setEmailSending(true);
     setSaving(true);
     setActionInFlight('Finalize');
     setEmailSendError(null);
     setErrorInfo(null);
     try {
-      const response = await quotationAPI.quotes.finalize(quote.id);
+      const response = await finalizeWithoutEmail(quote.id);
       setEmailQuoteFinalized(true);
       try {
         setDownloadLoading(true);
@@ -2343,6 +2350,7 @@ const QuotationEditor = ({
       setLineFeedback({ type: 'success', message: 'Quotation finalized. No email was sent.' });
       await load({ refreshReferences: false });
     } catch (error) {
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(
         error,
         'Finalize quotation',
@@ -2427,7 +2435,11 @@ const QuotationEditor = ({
   const runAction = async (label, action) => {
     if (saving || actionInFlight) return;
     if (label === 'Finalize' && finalizeIssues.length > 0) return;
-    if ((label === 'Finalize' || label === 'Cancel') && !window.confirm(`${label} this quotation?`)) return;
+    if (
+      label === 'Finalize'
+      && !window.confirm('Finalize this quotation without sending an email?')
+    ) return;
+    if (label === 'Cancel' && !window.confirm('Cancel this quotation?')) return;
     setSaving(true);
     setActionInFlight(label);
     setErrorInfo(null);
@@ -2459,6 +2471,7 @@ const QuotationEditor = ({
       }
       await load({ refreshReferences: false });
     } catch (error) {
+      if (label === 'Finalize' && replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(error, label, actionEndpoint(label));
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -2666,6 +2679,35 @@ const QuotationEditor = ({
     !gmailEvidenceVisible && gmailEvidenceNavigationBlocked
   );
   const gmailEvidenceNavigationHintId = `gmail-evidence-navigation-hint-${quote.id}`;
+  const renderDraftCompletionActions = () => {
+    if (!['draft', 'pending_review', 'approved'].includes(quote.status)) return null;
+
+    return (
+      <>
+        {chainedActionsEnabled && (
+          <button
+            type="button"
+            className="qm-secondary"
+            disabled={saving || Boolean(actionInFlight) || directFinalizeIssues.length > 0}
+            title={directFinalizeIssues.length > 0 ? directFinalizeIssues[0] : 'Finalize without sending an email.'}
+            onClick={() => runAction('Finalize', finalizeWithoutEmail)}
+          >
+            {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
+          </button>
+        )}
+        <button
+          type="button"
+          className="qm-primary"
+          disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
+          onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
+        >
+          {chainedActionsEnabled
+            ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
+            : 'Finalize'}
+        </button>
+      </>
+    );
+  };
 
   return (
     <div className="qm-editor">
@@ -2729,18 +2771,7 @@ const QuotationEditor = ({
           )}
         </div>
         <div className="qm-action-row">
-          {['draft', 'pending_review', 'approved'].includes(quote.status) && (
-            <button
-              type="button"
-              className="qm-primary"
-              disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
-              onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
-            >
-              {chainedActionsEnabled
-                ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
-                : 'Finalize'}
-            </button>
-          )}
+          {renderDraftCompletionActions()}
           {quote.status === 'finalized' && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
           {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
           {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
@@ -3048,12 +3079,16 @@ const QuotationEditor = ({
         </div>
       </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
-      {primaryEmailActionIssues.length > 0 && (
+      {directFinalizeIssues.length > 0 && (
         <div className="qm-notice">
-          <strong>{chainedActionsEnabled ? 'Review Email is blocked until:' : 'Finalize is blocked until:'}</strong>
+          <strong>
+            {chainedActionsEnabled && reviewEmailIssues.length > 0
+              ? 'Finalize and Review Email are blocked until:'
+              : 'Finalize is blocked until:'}
+          </strong>
           <ul>
-            {primaryEmailActionIssues.slice(0, 5).map((issue) => <li key={issue}><button type="button" className="qm-link-button" onClick={() => setLineFilter('active')}>{issue}</button></li>)}
-            {primaryEmailActionIssues.length > 5 && <li>{primaryEmailActionIssues.length - 5} more issue(s).</li>}
+            {directFinalizeIssues.slice(0, 5).map((issue) => <li key={issue}><button type="button" className="qm-link-button" onClick={() => setLineFilter('active')}>{issue}</button></li>)}
+            {directFinalizeIssues.length > 5 && <li>{directFinalizeIssues.length - 5} more issue(s).</li>}
           </ul>
         </div>
       )}
@@ -3089,18 +3124,7 @@ const QuotationEditor = ({
               {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
             </button>
             <span className="qm-sticky-action-divider" aria-hidden="true" />
-            {['draft', 'pending_review', 'approved'].includes(quote.status) && (
-              <button
-                type="button"
-                className="qm-primary"
-                disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
-                onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
-              >
-                {chainedActionsEnabled
-                  ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
-                  : 'Finalize'}
-              </button>
-            )}
+            {renderDraftCompletionActions()}
             {!['revised', 'cancelled'].includes(quote.status) && (
               <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>
                 {actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}

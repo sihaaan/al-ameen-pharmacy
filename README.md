@@ -351,8 +351,8 @@ GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/api/quotations/gmail/oauth/callb
 
 The website connection requests `gmail.readonly` and `gmail.send`. Existing
 read-only connections must be reconnected once after quotation-email delivery
-is deployed. Finalizing a quotation opens a preview; no customer email is sent
-without an explicit staff Send action.
+is deployed. Staff may review an email or finalize without email; no customer
+email is sent without an explicit staff Send action.
 
 **Database safety:** Do not point local `backend/.env` at the production Neon
 `DATABASE_URL`. Local testing writes to whichever database is in `DATABASE_URL`.

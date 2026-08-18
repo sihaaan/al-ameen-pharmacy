@@ -3424,12 +3424,36 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def finalize(self, request, pk=None):
         quotation = self.get_object()
+        has_review_fingerprint = (
+            hasattr(request.data, "get")
+            and "quotation_review_fingerprint" in request.data
+        )
+        review_fingerprint = (
+            request.data.get("quotation_review_fingerprint")
+            if has_review_fingerprint
+            else None
+        )
         try:
-            quotation = finalize_quotation(quotation, request.user)
+            with transaction.atomic():
+                quotation = _quotations_for_update().get(pk=quotation.pk)
+                if has_review_fingerprint:
+                    # Keep older clients compatible while allowing current
+                    # editors to bind finalization to the exact quotation they
+                    # reviewed. The quote-first dependency lock matches the
+                    # email workflow's mutation order and closes the gap
+                    # between fingerprint validation and finalization.
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
+                quotation = finalize_quotation(quotation, request.user)
+                payload = self.get_serializer(quotation).data
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
-        serializer = self.get_serializer(quotation)
-        return Response(serializer.data)
+        return Response(payload)
 
     def _quotation_email_error_response(self, exc):
         quotation = self.get_object()
