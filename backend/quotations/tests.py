@@ -55,6 +55,7 @@ from .models import (
     ProformaInvoice,
     Quotation,
     QuotationAuditLog,
+    QuotationEmailDelivery,
     QuotationLine,
     QuotationLPO,
     QuotationOutcomePOImport,
@@ -823,6 +824,122 @@ class QuotationWorkflowTests(APITestCase):
         second_response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
         self.assertEqual(second_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(CompanyPriceHistory.objects.count(), 1)
+
+    @patch("quotations.views.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_finalize_accepts_current_review_fingerprint_without_email_or_pdf_side_effect(
+        self,
+        gmail_send,
+        build_pdf,
+    ):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        response = self.client.post(
+            reverse("quotation-finalize", args=[quotation.id]),
+            {
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], Quotation.STATUS_FINALIZED)
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
+        self.assertIsNotNone(quotation.finalized_at)
+        self.assertEqual(CompanyPriceHistory.objects.filter(quotation=quotation).count(), 1)
+        self.assertTrue(
+            QuotationAuditLog.objects.filter(
+                quotation=quotation,
+                action=QuotationAuditLog.ACTION_FINALIZED,
+            ).exists()
+        )
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+        build_pdf.assert_not_called()
+        gmail_send.assert_not_called()
+
+    @patch("quotations.views.build_quotation_pdf")
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_finalize_rejects_stale_review_fingerprint_without_side_effects(
+        self,
+        gmail_send,
+        build_pdf,
+    ):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        stale_fingerprint = detail.data["quotation_review_fingerprint"]
+        changed = self.client.patch(
+            reverse("quotation-line-detail", args=[line.id]),
+            {"unit_price": "11.00"},
+            format="json",
+        )
+        self.assertEqual(changed.status_code, status.HTTP_200_OK)
+
+        response = self.client.post(
+            reverse("quotation-finalize", args=[quotation.id]),
+            {"quotation_review_fingerprint": stale_fingerprint},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "stale_quotation_review")
+        self.assertTrue(response.data["refresh_quote"])
+        self.assertFalse(response.data["quote_finalized"])
+        self.assertEqual(
+            Decimal(response.data["quote"]["lines"][0]["unit_price"]),
+            Decimal("11.000"),
+        )
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        self.assertFalse(CompanyPriceHistory.objects.filter(quotation=quotation).exists())
+        self.assertFalse(
+            QuotationAuditLog.objects.filter(
+                quotation=quotation,
+                action=QuotationAuditLog.ACTION_FINALIZED,
+            ).exists()
+        )
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+        build_pdf.assert_not_called()
+        gmail_send.assert_not_called()
+
+    def test_finalize_rejects_explicit_empty_review_fingerprint(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        response = self.client.post(
+            reverse("quotation-finalize", args=[quotation.id]),
+            {"quotation_review_fingerprint": ""},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "quotation_review_required")
+        self.assertFalse(response.data["quote_finalized"])
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        self.assertFalse(CompanyPriceHistory.objects.filter(quotation=quotation).exists())
+        self.assertFalse(
+            QuotationAuditLog.objects.filter(
+                quotation=quotation,
+                action=QuotationAuditLog.ACTION_FINALIZED,
+            ).exists()
+        )
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+
+    def test_finalize_without_review_fingerprint_remains_backward_compatible(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+
+        response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
 
     def test_outcome_review_requires_finalized_or_sent_quote(self):
         quotation = self.create_quote()
