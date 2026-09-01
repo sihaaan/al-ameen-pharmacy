@@ -133,6 +133,21 @@ def _unit_money(currency, value):
     return _money(currency, value, places=3, min_places=2)
 
 
+def _quotation_totals_rows(quotation):
+    rows = [
+        ["Subtotal", _money(quotation.currency, quotation.subtotal)],
+        ["VAT", _money(quotation.currency, quotation.vat_total)],
+    ]
+    discount_amount = (
+        getattr(quotation, "discount_amount", Decimal("0.00"))
+        or Decimal("0.00")
+    )
+    if discount_amount > 0:
+        rows.append(["Discount", _money(quotation.currency, -discount_amount)])
+    rows.append(["Grand Total", _money(quotation.currency, quotation.total)])
+    return rows
+
+
 def _number(value):
     if value is None:
         return "-"
@@ -710,11 +725,7 @@ def build_quotation_pdf(quotation, *, config=None):
     line_count = max(lines.count(), 1)
 
     totals_table = Table(
-        [
-            ["Subtotal", _money(quotation.currency, quotation.subtotal)],
-            ["VAT", _money(quotation.currency, quotation.vat_total)],
-            ["Grand Total", _money(quotation.currency, quotation.total)],
-        ],
+        _quotation_totals_rows(quotation),
         colWidths=[34 * mm, 36 * mm],
         hAlign="RIGHT",
     )
@@ -878,11 +889,7 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
     elements.append(line_table)
 
     totals_table = Table(
-        [
-            ["Subtotal", _money(quotation.currency, quotation.subtotal)],
-            ["VAT", _money(quotation.currency, quotation.vat_total)],
-            ["Grand Total", _money(quotation.currency, quotation.total)],
-        ],
+        _quotation_totals_rows(quotation),
         colWidths=[34 * mm, 36 * mm],
         hAlign="RIGHT",
     )

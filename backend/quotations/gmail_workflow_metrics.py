@@ -136,9 +136,13 @@ KNOWN_CONTRACT_VERSIONS = {
     "ai_observability": frozenset({"ai_parse_observability_v1"}),
     "ai_pipeline": frozenset({"gmail_inquiry_v2"}),
     "ai_schema": frozenset({"gmail_inquiry_native_v2"}),
-    "email_preview": frozenset({"quotation_email_preview_v1"}),
+    "email_preview": frozenset(
+        {"quotation_email_preview_v1", "quotation_email_preview_v2"}
+    ),
     "outbound_snapshot": frozenset({"quotation_email_outbound_v1"}),
-    "quotation_review": frozenset({"quotation_editor_review_v1"}),
+    "quotation_review": frozenset(
+        {"quotation_editor_review_v1", "quotation_editor_review_v2"}
+    ),
     "semantic_cache": frozenset({"gmail_semantic_cache_v1"}),
     "workflow_metrics": frozenset({GMAIL_WORKFLOW_METRICS_VERSION}),
 }

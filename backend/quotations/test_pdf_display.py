@@ -151,6 +151,93 @@ class QuotationPdfDisplayTests(TestCase):
         self.assert_compact_values(standalone_text)
 
 
+class QuotationDiscountExportTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="discount_export_staff",
+            is_staff=True,
+        )
+        self.company = Company.objects.create(name="Export Company")
+
+    def create_quotation(self, *, discount_amount):
+        quotation = Quotation.objects.create(
+            company=self.company,
+            created_by=self.user,
+            subtotal=Decimal("100.00"),
+            vat_total=Decimal("5.00"),
+            discount_amount=discount_amount,
+            total=Decimal("105.00") - discount_amount,
+        )
+        QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="Medical supply",
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("100.000"),
+            vat_rate=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+        )
+        return quotation
+
+    @staticmethod
+    def pdf_text(pdf_bytes):
+        reader = PdfReader(BytesIO(pdf_bytes))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    @staticmethod
+    def excel_totals(quotation):
+        workbook = load_workbook(
+            BytesIO(build_quotation_excel(quotation)),
+            data_only=True,
+        )
+        sheet = workbook["Quotation"]
+        return [
+            (
+                sheet.cell(row=row, column=7).value,
+                sheet.cell(row=row, column=8).value,
+            )
+            for row in range(1, sheet.max_row + 1)
+            if sheet.cell(row=row, column=7).value
+            in {"Subtotal", "VAT", "Discount", "Grand Total"}
+        ]
+
+    def test_discount_is_shown_after_vat_in_customer_outputs(self):
+        quotation = self.create_quotation(discount_amount=Decimal("10.00"))
+
+        for pdf_bytes in (
+            build_quotation_pdf(quotation),
+            build_proforma_invoice_pdf(quotation),
+        ):
+            text = self.pdf_text(pdf_bytes)
+            self.assertLess(text.index("VAT"), text.index("Discount"))
+            self.assertLess(text.index("Discount"), text.index("Grand Total"))
+            self.assertIn("AED -10.00", text)
+            self.assertIn("AED 95.00", text)
+
+        self.assertEqual(
+            self.excel_totals(quotation),
+            [
+                ("Subtotal", 100),
+                ("VAT", 5),
+                ("Discount", -10),
+                ("Grand Total", 95),
+            ],
+        )
+
+    def test_zero_discount_keeps_existing_customer_output_totals(self):
+        quotation = self.create_quotation(discount_amount=Decimal("0.00"))
+
+        self.assertNotIn("Discount", self.pdf_text(build_quotation_pdf(quotation)))
+        self.assertNotIn(
+            "Discount",
+            self.pdf_text(build_proforma_invoice_pdf(quotation)),
+        )
+        self.assertEqual(
+            self.excel_totals(quotation),
+            [("Subtotal", 100), ("VAT", 5), ("Grand Total", 105)],
+        )
+
+
 class QuotationBrandColumnExportTests(TestCase):
     snapshot_brand = "Original Snapshot Brand"
 

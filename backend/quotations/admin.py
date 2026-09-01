@@ -458,6 +458,7 @@ class QuotationAdmin(admin.ModelAdmin):
         "quotation_number",
         "subtotal",
         "vat_total",
+        "discount_amount",
         "total",
         "finalized_at",
         "sent_at",

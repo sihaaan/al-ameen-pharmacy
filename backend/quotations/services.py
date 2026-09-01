@@ -1,5 +1,5 @@
 from datetime import datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import re
 
 from django.core.exceptions import ValidationError
@@ -30,6 +30,11 @@ from .models import (
     QuotationLine,
     QuotationOutcomePOImport,
 )
+
+
+_DISCOUNT_AMOUNT_UNSET = object()
+_MONEY_QUANTUM = Decimal("0.01")
+_MAX_QUOTATION_MONEY = Decimal("9999999999.99")
 
 
 def audit_log(actor, action, target, message="", changes=None, company=None, quotation=None):
@@ -93,16 +98,73 @@ def _quotations_for_update():
     return Quotation.objects.select_for_update(of=("self",))
 
 
+def normalize_quotation_discount_amount(value):
+    if value in (None, ""):
+        value = Decimal("0.00")
+    try:
+        discount_amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValidationError(
+            {"discount_amount": "Discount must be a valid AED amount."}
+        ) from exc
+    if not discount_amount.is_finite():
+        raise ValidationError(
+            {"discount_amount": "Discount must be a valid AED amount."}
+        )
+    if discount_amount < 0:
+        raise ValidationError(
+            {"discount_amount": "Discount cannot be negative."}
+        )
+    if discount_amount > _MAX_QUOTATION_MONEY:
+        raise ValidationError(
+            {"discount_amount": "Discount is too large."}
+        )
+    normalized = discount_amount.quantize(_MONEY_QUANTUM)
+    if normalized != discount_amount:
+        raise ValidationError(
+            {"discount_amount": "Discount can have at most two decimal places."}
+        )
+    return normalized
+
+
 def recalculate_quotation_totals(quotation):
     totals = quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED).aggregate(
         subtotal=Sum("line_subtotal"),
         vat_total=Sum("vat_amount"),
         total=Sum("line_total"),
     )
-    quotation.subtotal = totals["subtotal"] or Decimal("0.00")
-    quotation.vat_total = totals["vat_total"] or Decimal("0.00")
-    quotation.total = totals["total"] or Decimal("0.00")
-    quotation.save(update_fields=["subtotal", "vat_total", "total", "updated_at"])
+    subtotal = Decimal(totals["subtotal"] or 0).quantize(_MONEY_QUANTUM)
+    vat_total = Decimal(totals["vat_total"] or 0).quantize(_MONEY_QUANTUM)
+    gross_total = Decimal(totals["total"] or 0).quantize(_MONEY_QUANTUM)
+    discount_amount = normalize_quotation_discount_amount(
+        quotation.discount_amount
+    )
+    if discount_amount > 0 and str(quotation.currency or "").upper() != "AED":
+        raise ValidationError(
+            {"discount_amount": "Quotation discounts are available only in AED."}
+        )
+    if discount_amount > gross_total:
+        raise ValidationError(
+            {
+                "discount_amount": (
+                    "Discount cannot exceed the quotation total before discount "
+                    f"({quotation.currency} {gross_total:.2f})."
+                )
+            }
+        )
+    quotation.subtotal = subtotal
+    quotation.vat_total = vat_total
+    quotation.discount_amount = discount_amount
+    quotation.total = (gross_total - discount_amount).quantize(_MONEY_QUANTUM)
+    quotation.save(
+        update_fields=[
+            "subtotal",
+            "vat_total",
+            "discount_amount",
+            "total",
+            "updated_at",
+        ]
+    )
     return quotation
 
 
@@ -588,11 +650,154 @@ def update_quotation_outcome(quotation, data, actor):
     return quotation
 
 
-def outcome_summary_for_quotation(quotation):
-    lines = [line for line in quotation.lines.all() if line.match_status != QuotationLine.MATCH_IGNORED]
-    quoted_value = sum((line.line_total or Decimal("0.00")) for line in lines)
-    accepted_value = sum((line.accepted_total or Decimal("0.00")) for line in lines)
-    lost_value = sum((line.lost_value or Decimal("0.00")) for line in lines)
+def quotation_line_outcome_analytics(quotation, lines):
+    """Return discount-adjusted outcome values keyed by quotation-line ID.
+
+    A fixed quotation discount is allocated across active lines in proportion
+    to each line's VAT-inclusive quoted total. Allocations are rounded down to
+    cents, then the remaining cents go to the largest fractional shares with
+    quotation line order and ID as deterministic tie-breakers. This makes the
+    full allocation equal the quotation discount while allowing filtered
+    analytics to include only the selected lines' shares.
+
+    Accepted value receives the same proportional share of a line's discount
+    as the accepted portion of that line. Profit is reduced by the identical
+    allocated amount, preventing the quotation-level discount from being
+    counted once for revenue and again for every filtered line. With a zero
+    discount, persisted outcome values are returned unchanged.
+    """
+
+    active_lines = sorted(
+        (
+            line
+            for line in lines
+            if line.match_status != QuotationLine.MATCH_IGNORED
+        ),
+        key=lambda line: (line.sort_order, line.pk),
+    )
+    discount_amount = _money(getattr(quotation, "discount_amount", 0))
+    allocations = {line.pk: Decimal("0.00") for line in active_lines}
+
+    if discount_amount > 0:
+        weighted_lines = [
+            (line, _money(line.line_total))
+            for line in active_lines
+            if _money(line.line_total) > 0
+        ]
+        gross_total = sum(
+            (line_total for _line, line_total in weighted_lines),
+            Decimal("0.00"),
+        )
+        if gross_total > 0:
+            allocation_rows = []
+            allocated = Decimal("0.00")
+            for line, line_total in weighted_lines:
+                exact = (discount_amount * line_total) / gross_total
+                rounded_down = exact.quantize(_MONEY_QUANTUM, rounding=ROUND_DOWN)
+                allocations[line.pk] = rounded_down
+                allocated += rounded_down
+                allocation_rows.append((line, exact - rounded_down))
+
+            remaining_cents = int(
+                (discount_amount - allocated) / _MONEY_QUANTUM
+            )
+            ranked_remainders = sorted(
+                allocation_rows,
+                key=lambda row: (-row[1], row[0].sort_order, row[0].pk),
+            )
+            for line, _remainder in ranked_remainders[:remaining_cents]:
+                allocations[line.pk] += _MONEY_QUANTUM
+
+    analytics = {}
+    for line in active_lines:
+        line_discount = allocations[line.pk]
+        quoted_value = _money(line.line_total)
+        accepted_value = _money(line.accepted_total)
+
+        if discount_amount <= 0:
+            net_quoted_value = quoted_value
+            net_accepted_value = accepted_value
+            net_lost_value = _money(line.lost_value)
+            net_quoted_profit = (
+                _money(line.quoted_gross_profit)
+                if line.quoted_gross_profit is not None
+                else None
+            )
+            net_accepted_profit = (
+                _money(line.accepted_gross_profit)
+                if line.accepted_gross_profit is not None
+                else None
+            )
+            net_lost_profit = (
+                _money(line.lost_gross_profit)
+                if line.lost_gross_profit is not None
+                else None
+            )
+        else:
+            net_quoted_value = _money(quoted_value - line_discount)
+            accepted_discount = Decimal("0.00")
+            if quoted_value > 0 and accepted_value > 0:
+                accepted_fraction = min(
+                    accepted_value / quoted_value,
+                    Decimal("1.00"),
+                )
+                accepted_discount = _money(line_discount * accepted_fraction)
+            net_accepted_value = _money(accepted_value - accepted_discount)
+            net_lost_value = max(
+                net_quoted_value - net_accepted_value,
+                Decimal("0.00"),
+            ).quantize(_MONEY_QUANTUM)
+            net_quoted_profit = (
+                _money(Decimal(line.quoted_gross_profit) - line_discount)
+                if line.quoted_gross_profit is not None
+                else None
+            )
+            net_accepted_profit = (
+                _money(Decimal(line.accepted_gross_profit) - accepted_discount)
+                if line.accepted_gross_profit is not None
+                else None
+            )
+            net_lost_profit = (
+                max(
+                    net_quoted_profit
+                    - (net_accepted_profit or Decimal("0.00")),
+                    Decimal("0.00"),
+                ).quantize(_MONEY_QUANTUM)
+                if net_quoted_profit is not None
+                else None
+            )
+
+        analytics[line.pk] = {
+            "discount_amount": line_discount,
+            "quoted_value": net_quoted_value,
+            "accepted_value": net_accepted_value,
+            "lost_value": net_lost_value,
+            "quoted_gross_profit": net_quoted_profit,
+            "accepted_gross_profit": net_accepted_profit,
+            "lost_gross_profit": net_lost_profit,
+        }
+    return analytics
+
+
+def outcome_summary_for_quotation(quotation, *, lines=None):
+    lines = [
+        line
+        for line in (lines if lines is not None else quotation.lines.all())
+        if line.match_status != QuotationLine.MATCH_IGNORED
+    ]
+    line_analytics = quotation_line_outcome_analytics(quotation, lines)
+    quoted_value = sum(
+        (line_analytics[line.pk]["quoted_value"] for line in lines),
+        Decimal("0.00"),
+    )
+    accepted_value = sum(
+        (line_analytics[line.pk]["accepted_value"] for line in lines),
+        Decimal("0.00"),
+    )
+    lost_value = sum(
+        (line_analytics[line.pk]["lost_value"] for line in lines),
+        Decimal("0.00"),
+    )
     accepted_lines = sum(1 for line in lines if (line.accepted_total or 0) > 0)
     rejected_lines = sum(
         1
@@ -605,9 +810,33 @@ def outcome_summary_for_quotation(quotation):
         }
     )
     pending_lines = sum(1 for line in lines if line.outcome_status == QuotationLine.OUTCOME_PENDING)
-    quoted_profit = sum((line.quoted_gross_profit or Decimal("0.00")) for line in lines if line.quoted_gross_profit is not None)
-    accepted_profit = sum((line.accepted_gross_profit or Decimal("0.00")) for line in lines if line.accepted_gross_profit is not None)
-    lost_profit = sum((line.lost_gross_profit or Decimal("0.00")) for line in lines if line.lost_gross_profit is not None)
+    quoted_profit = sum(
+        (
+            line_analytics[line.pk]["quoted_gross_profit"]
+            or Decimal("0.00")
+            for line in lines
+            if line_analytics[line.pk]["quoted_gross_profit"] is not None
+        ),
+        Decimal("0.00"),
+    )
+    accepted_profit = sum(
+        (
+            line_analytics[line.pk]["accepted_gross_profit"]
+            or Decimal("0.00")
+            for line in lines
+            if line_analytics[line.pk]["accepted_gross_profit"] is not None
+        ),
+        Decimal("0.00"),
+    )
+    lost_profit = sum(
+        (
+            line_analytics[line.pk]["lost_gross_profit"]
+            or Decimal("0.00")
+            for line in lines
+            if line_analytics[line.pk]["lost_gross_profit"] is not None
+        ),
+        Decimal("0.00"),
+    )
     has_profit = any(line.quoted_gross_profit is not None for line in lines)
     return {
         "quoted_value": _money(quoted_value),
@@ -1308,6 +1537,7 @@ def build_quotation_delete_snapshot(quotation):
             "show_brand_column": quotation.show_brand_column,
             "subtotal": _snapshot_decimal(quotation.subtotal),
             "vat_total": _snapshot_decimal(quotation.vat_total),
+            "discount_amount": _snapshot_decimal(quotation.discount_amount),
             "total": _snapshot_decimal(quotation.total),
         },
         "lines": [
@@ -2485,17 +2715,26 @@ def bulk_create_products_from_quotation_lines(
 
 
 @transaction.atomic
-def bulk_update_quotation_lines(quotation, rows, actor):
+def bulk_update_quotation_lines(
+    quotation,
+    rows,
+    actor,
+    *,
+    discount_amount=_DISCOUNT_AMOUNT_UNSET,
+):
     quotation = Quotation.objects.select_for_update().get(pk=quotation.pk)
     ensure_quotation_editable(quotation)
+    discount_supplied = discount_amount is not _DISCOUNT_AMOUNT_UNSET
+    discount_before = quotation.discount_amount
+    total_before = quotation.total
     rows_by_id = {}
     for row in rows or []:
         try:
             rows_by_id[int(row.get("id"))] = row
         except (TypeError, ValueError):
             raise ValidationError("Each line update must include a valid id.")
-    if not rows_by_id:
-        raise ValidationError("No line changes were provided.")
+    if not rows_by_id and not discount_supplied:
+        raise ValidationError("No quotation changes were provided.")
 
     lines = {
         line.id: line
@@ -2644,12 +2883,37 @@ def bulk_update_quotation_lines(quotation, rows, actor):
                 explicit_confirmation=True,
             )
         updated.append(line)
+    if discount_supplied:
+        quotation.discount_amount = normalize_quotation_discount_amount(
+            discount_amount
+        )
     recalculate_quotation_totals(quotation)
+    changes = {}
+    if discount_supplied:
+        changes = {
+            "discount_amount": {
+                "before": _snapshot_decimal(discount_before),
+                "after": _snapshot_decimal(quotation.discount_amount),
+            },
+            "total": {
+                "before": _snapshot_decimal(total_before),
+                "after": _snapshot_decimal(quotation.total),
+            },
+        }
     audit_log(
         actor,
         QuotationAuditLog.ACTION_UPDATED,
         quotation,
-        message=f"Saved {len(updated)} quotation line(s).",
+        message=(
+            f"Saved {len(updated)} quotation line(s) and quotation discount."
+            if discount_supplied and updated
+            else (
+                "Saved quotation discount."
+                if discount_supplied
+                else f"Saved {len(updated)} quotation line(s)."
+            )
+        ),
+        changes=changes,
     )
     return quotation, updated
 
@@ -2832,6 +3096,7 @@ def revise_quotation(quotation, actor):
         currency=source.currency,
         payment_terms=source.payment_terms,
         show_brand_column=source.show_brand_column,
+        discount_amount=source.discount_amount,
         notes=source.notes,
         internal_notes=source.internal_notes,
         created_by=actor if getattr(actor, "is_authenticated", False) else None,
