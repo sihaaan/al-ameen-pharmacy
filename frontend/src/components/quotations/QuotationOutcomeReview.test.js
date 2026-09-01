@@ -1291,7 +1291,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(await screen.findByText('Next archived match')).toBeInTheDocument();
   });
 
-  test('refetches complete mailbox-wide evidence without a capped per-quote Gmail search', async () => {
+  test('refetches complete Gmail evidence without a capped per-quote search', async () => {
     const archivedEvidence = {
       ...evidence,
       id: 86,
@@ -1319,7 +1319,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(quotationAPI.quotes.findPOEvidence).not.toHaveBeenCalled();
     expect(await screen.findByText('New current match')).toBeInTheDocument();
     expect(screen.getByText('Archived evidence (1)')).toBeInTheDocument();
-    expect(screen.getByText(/mailbox-wide evidence refreshed/i)).toBeInTheDocument();
+    expect(screen.getByText(/gmail evidence refreshed/i)).toBeInTheDocument();
   });
 
   test.each([

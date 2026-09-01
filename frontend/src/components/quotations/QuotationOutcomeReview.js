@@ -1433,7 +1433,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       setNotice({
         type: historyRefreshed ? 'success' : 'warning',
         message: historyRefreshed
-          ? 'Mailbox-wide evidence refreshed. Nothing was saved to the outcome.'
+          ? 'Gmail evidence refreshed. Nothing was saved to the outcome.'
           : 'The evidence history could not be refreshed, so the existing review list was preserved.',
       });
     } catch (error) {
@@ -1613,8 +1613,8 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
         <div className="qm-panel-heading">
           <div>
             <span className="qm-step-kicker">Gmail evidence</span>
-            <h3>Review mailbox-wide PO/LPO evidence</h3>
-            <p>The mailbox audit compares source attachments or the newest email body with quotation items, quantities, prices/totals, customer and timing. A staff member must still inspect and approve each link before parsing.</p>
+            <h3>Review Gmail PO/LPO evidence</h3>
+            <p>Gmail evidence compares source attachments or the newest email body with quotation items, quantities, prices/totals, customer and timing. A staff member must still inspect and approve each link before parsing.</p>
           </div>
           <div className="qm-evidence-controls">
             <label className="qm-checkbox">
@@ -1651,7 +1651,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           <div className="qm-empty subtle">
             {archivedEvidence.length
               ? 'No active Gmail evidence. Archived scan history is available below.'
-              : 'No Gmail evidence candidates yet. Run the mailbox-wide audit from the quotations list, then refresh this review.'}
+              : 'No Gmail evidence candidates yet. Refresh this review later to check for new evidence.'}
           </div>
         )}
         {archivedEvidence.length > 0 && (

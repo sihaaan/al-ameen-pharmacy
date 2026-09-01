@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.core.exceptions import PermissionDenied
 
+from .permissions import user_can_manage_mailbox_audit
 from .models import (
     Company,
     CompanyContact,
@@ -54,6 +55,22 @@ class ReadOnlyHistoryAdminMixin:
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+class MailboxAuditOperatorAdminMixin(ReadOnlyHistoryAdminMixin):
+    """Keep mailbox-wide contents out of non-operator admin accounts."""
+
+    def has_module_permission(self, request):
+        return (
+            user_can_manage_mailbox_audit(request.user)
+            and super().has_module_permission(request)
+        )
+
+    def has_view_permission(self, request, obj=None):
+        return (
+            user_can_manage_mailbox_audit(request.user)
+            and super().has_view_permission(request, obj)
+        )
 
 
 @admin.register(QuotationEmailDelivery)
@@ -193,7 +210,7 @@ class GmailInquiryImportAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(MailboxPOAuditRun)
-class MailboxPOAuditRunAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+class MailboxPOAuditRunAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = [
         "id",
         "gmail_connection",
@@ -210,7 +227,7 @@ class MailboxPOAuditRunAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(MailboxPOAuditFailure)
-class MailboxPOAuditFailureAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+class MailboxPOAuditFailureAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = ["audit_run", "gmail_message_id", "status", "attempts", "last_failed_at"]
     list_filter = ["status", "last_failed_at"]
     search_fields = ["gmail_message_id", "last_error", "audit_run__gmail_connection__email"]
@@ -218,14 +235,14 @@ class MailboxPOAuditFailureAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(MailboxPOMatchRun)
-class MailboxPOMatchRunAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+class MailboxPOMatchRunAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = ["id", "audit_run", "algorithm_version", "status", "completed_at", "created_at"]
     list_filter = ["status", "algorithm_version", "created_at"]
     readonly_fields = [field.name for field in MailboxPOMatchRun._meta.fields]
 
 
 @admin.register(MailboxPOMessage)
-class MailboxPOMessageAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+class MailboxPOMessageAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = ["subject", "sender", "sent_at", "classification", "is_relevant", "auto_link_eligible"]
     list_filter = ["classification", "is_relevant", "auto_link_eligible", "sent_at"]
     search_fields = ["gmail_message_id", "subject", "sender", "newest_body_text"]
@@ -446,10 +463,24 @@ class QuotationAdmin(admin.ModelAdmin):
         "sent_at",
         "outcome_closed_at",
         "outcome_last_updated_at",
+        "po_evidence_last_scanned_at",
+        "po_evidence_last_scan_count",
+        "po_evidence_last_scan_error",
         "created_at",
         "updated_at",
     ]
     inlines = [QuotationLineInline]
+
+    def get_fields(self, request, obj=None):
+        fields = super().get_fields(request, obj)
+        if user_can_manage_mailbox_audit(request.user):
+            return fields
+        mailbox_audit_fields = {
+            "po_evidence_last_scanned_at",
+            "po_evidence_last_scan_count",
+            "po_evidence_last_scan_error",
+        }
+        return [field for field in fields if field not in mailbox_audit_fields]
 
     def has_delete_permission(self, request, obj=None):
         if obj is not None and obj.lpos.filter(status=QuotationLPO.STATUS_CONFIRMED).exists():
@@ -497,7 +528,7 @@ class QuotationOutcomePOImportAdmin(admin.ModelAdmin):
 
 
 @admin.register(QuotationPOEvidence)
-class QuotationPOEvidenceAdmin(admin.ModelAdmin):
+class QuotationPOEvidenceAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = ["quotation", "subject", "sender", "sent_at", "confidence", "status", "updated_at"]
     list_filter = ["status", "sent_at", "updated_at"]
     search_fields = ["quotation__quotation_number", "subject", "sender", "gmail_message_id", "gmail_thread_id"]
@@ -603,7 +634,7 @@ class CompanyPriceHistoryAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(QuotationAuditLog)
-class QuotationAuditLogAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+class QuotationAuditLogAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = ["created_at", "actor", "action", "target_type", "target_id", "company", "quotation"]
     list_filter = ["action", "created_at"]
     search_fields = ["message", "actor__username", "company__name", "quotation__quotation_number"]

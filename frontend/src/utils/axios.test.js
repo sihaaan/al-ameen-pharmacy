@@ -6,6 +6,7 @@ import axiosInstance, { AUTH_SESSION_CLEARED_EVENT } from './axios';
 
 jest.mock('axios', () => {
   const instance = jest.fn((config) => Promise.resolve({ config }));
+  instance.get = jest.fn();
   instance.interceptors = {
     request: {
       use: jest.fn((fulfilled, rejected) => {
@@ -63,6 +64,10 @@ describe('authenticated axios refresh handling', () => {
     axios.post.mockReset();
     axios.testInstance.mockClear();
     axios.testInstance.mockImplementation((config) => Promise.resolve({ config }));
+    axios.testInstance.get.mockReset();
+    axios.testInstance.get.mockImplementation(() => Promise.resolve({
+      data: JSON.parse(localStorage.getItem('user') || '{}'),
+    }));
     axios.defaults.headers.common.Authorization = 'Bearer expired-access';
   });
 
@@ -249,6 +254,32 @@ describe('authenticated axios refresh handling', () => {
     });
 
     expect(await screen.findByText('Signed out')).toBeInTheDocument();
+  });
+
+  test('refreshes server-owned capabilities instead of trusting the cached user', async () => {
+    localStorage.setItem('token', 'current-access');
+    localStorage.setItem('user', JSON.stringify({
+      id: 1,
+      username: 'staff',
+      can_manage_mailbox_audit: true,
+    }));
+    axios.testInstance.get.mockResolvedValueOnce({
+      data: {
+        id: 1,
+        username: 'staff',
+        can_manage_mailbox_audit: false,
+      },
+    });
+
+    render(
+      <AuthProvider>
+        <AuthState />
+      </AuthProvider>
+    );
+
+    expect(await screen.findByText('Signed in: staff')).toBeInTheDocument();
+    expect(axios.testInstance.get).toHaveBeenCalledWith('/me/');
+    expect(JSON.parse(localStorage.getItem('user')).can_manage_mailbox_audit).toBe(false);
   });
 
   test('request interceptor attaches the latest stored access token', () => {

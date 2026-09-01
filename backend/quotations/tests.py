@@ -123,8 +123,8 @@ class QuotationPermissionTests(APITestCase):
         "quotation-standalone-proforma-list",
         "quotation-line-list",
         "quotation-price-history-list",
-        "quotation-audit-log-list",
     ]
+    owner_only_list_route_names = ["quotation-audit-log-list"]
 
     def setUp(self):
         self.company = Company.objects.create(name="Blocked Test Company")
@@ -132,14 +132,14 @@ class QuotationPermissionTests(APITestCase):
         self.customer = User.objects.create_user(username="customer", password="pass")
 
     def test_anonymous_users_are_blocked_from_all_list_endpoints(self):
-        for route_name in self.list_route_names:
+        for route_name in self.list_route_names + self.owner_only_list_route_names:
             with self.subTest(route=route_name):
                 response = self.client.get(reverse(route_name))
                 self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
     def test_non_staff_users_are_blocked_from_all_list_endpoints(self):
         self.client.force_authenticate(self.customer)
-        for route_name in self.list_route_names:
+        for route_name in self.list_route_names + self.owner_only_list_route_names:
             with self.subTest(route=route_name):
                 response = self.client.get(reverse(route_name))
                 self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -147,6 +147,25 @@ class QuotationPermissionTests(APITestCase):
     def test_staff_users_are_allowed_on_all_list_endpoints(self):
         self.client.force_authenticate(self.staff)
         for route_name in self.list_route_names:
+            with self.subTest(route=route_name):
+                response = self.client.get(reverse(route_name))
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_staff_users_are_blocked_from_owner_only_list_endpoints(self):
+        self.client.force_authenticate(self.staff)
+        for route_name in self.owner_only_list_route_names:
+            with self.subTest(route=route_name):
+                response = self.client.get(reverse(route_name))
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_superusers_are_allowed_on_owner_only_list_endpoints(self):
+        operator = User.objects.create_superuser(
+            username="quotation-operator",
+            email="quotation-operator@example.test",
+            password="pass",
+        )
+        self.client.force_authenticate(operator)
+        for route_name in self.owner_only_list_route_names:
             with self.subTest(route=route_name):
                 response = self.client.get(reverse(route_name))
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -452,6 +471,13 @@ class QuotationWorkflowTests(APITestCase):
             quotation=quotation,
             message="Finalized quotation.",
         )
+
+        operator = User.objects.create_superuser(
+            username="audit-log-operator",
+            email="audit-log-operator@example.test",
+            password="pass",
+        )
+        self.client.force_authenticate(operator)
 
         compact_response = self.client.get(reverse("quotation-audit-log-list"), {"important": "true"})
         full_response = self.client.get(reverse("quotation-audit-log-list"))
@@ -1216,6 +1242,12 @@ class QuotationWorkflowTests(APITestCase):
             email="pharmacy@example.com",
             is_shared=True,
         )
+        operator = User.objects.create_superuser(
+            "batch-po-audit-operator",
+            "batch-po-audit-operator@example.test",
+            "password",
+        )
+        self.client.force_authenticate(operator)
         mock_search.return_value = {"messages": []}
 
         first = self.client.post(
@@ -1265,6 +1297,12 @@ class QuotationWorkflowTests(APITestCase):
             email="pharmacy@example.com",
             is_shared=True,
         )
+        operator = User.objects.create_superuser(
+            "batch-po-chunks-operator",
+            "batch-po-chunks-operator@example.test",
+            "password",
+        )
+        self.client.force_authenticate(operator)
         mock_search.return_value = {"messages": [{"id": "gmail-1"}]}
         mock_metadata.return_value = {
             "gmail_message_id": "gmail-1",
@@ -1315,6 +1353,12 @@ class QuotationWorkflowTests(APITestCase):
             email="pharmacy@example.com",
             is_shared=True,
         )
+        operator = User.objects.create_superuser(
+            "batch-po-rescan-operator",
+            "batch-po-rescan-operator@example.test",
+            "password",
+        )
+        self.client.force_authenticate(operator)
         mock_search.return_value = {"messages": []}
 
         first = self.client.post(

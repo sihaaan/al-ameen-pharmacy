@@ -249,7 +249,9 @@ const AdminDashboard = () => {
 
         {activeTab === 'products' && <ProductManagement onUpdate={fetchStats} />}
         {activeTab === 'orders' && <OrderManagement onUpdate={fetchStats} />}
-        {activeTab === 'quotations' && <QuotationModule />}
+        {activeTab === 'quotations' && (
+          <QuotationModule canManageMailboxAudit={user?.can_manage_mailbox_audit} />
+        )}
         {activeTab === 'accounting' && canAccessAccounting && <AccountingModule />}
         {activeTab === 'accounting' && !canAccessAccounting && (
           <div className="admin-error">You do not have permission to access Accounting.</div>

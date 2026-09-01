@@ -24,16 +24,54 @@ export const AuthProvider = ({ children }) => {
 
   // Check if user is logged in on page load
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    const userData = localStorage.getItem('user');
+    let active = true;
 
-    if (token && userData) {
-      // User was previously logged in
-      setUser(JSON.parse(userData));
-      // Set default authorization header for all axios requests
+    const restoreSession = async () => {
+      const token = localStorage.getItem('token');
+      const storedUser = localStorage.getItem('user');
+      if (!token) {
+        if (active) setLoading(false);
+        return;
+      }
+
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    }
-    setLoading(false);
+      let cachedUser = null;
+      try {
+        cachedUser = storedUser ? JSON.parse(storedUser) : null;
+      } catch {
+        cachedUser = null;
+      }
+
+      try {
+        // Authorization capabilities are server-owned and may change between
+        // sessions. Refresh them instead of trusting a stale localStorage copy.
+        const response = await axiosInstance.get('/me/');
+        if (!active) return;
+        localStorage.setItem('user', JSON.stringify(response.data));
+        setUser(response.data);
+      } catch {
+        if (!active) return;
+        if (localStorage.getItem('token') !== token) {
+          setUser(null);
+        } else if (cachedUser) {
+          // Keep ordinary offline navigation available, but never retain a
+          // privileged mailbox-audit capability without server confirmation.
+          const safeCachedUser = {
+            ...cachedUser,
+            can_manage_mailbox_audit: false,
+          };
+          localStorage.setItem('user', JSON.stringify(safeCachedUser));
+          setUser(safeCachedUser);
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    restoreSession();
+    return () => {
+      active = false;
+    };
   }, []);
 
   // The API client owns automatic JWT refreshes. If it determines that the

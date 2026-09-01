@@ -9,15 +9,18 @@ from .models import (
     AIParseCache,
     CompanyPriceHistory,
     GmailInquiryImport,
+    GmailOAuthConnection,
     MailboxPOAuditFailure,
     MailboxPOAuditRun,
     MailboxPOMatchRun,
     MailboxPOMessage,
+    Quotation,
     QuotationAuditLog,
     QuotationEmailDelivery,
     QuotationEmailDeliveryAttempt,
     QuotationEmailDeliveryAttemptEvent,
     QuotationEmailOutboundSnapshot,
+    QuotationPOEvidence,
 )
 
 
@@ -30,6 +33,7 @@ READ_ONLY_ADMIN_MODELS = (
     AIParseLog,
     CompanyPriceHistory,
     QuotationAuditLog,
+    QuotationPOEvidence,
     QuotationEmailDelivery,
     QuotationEmailOutboundSnapshot,
     QuotationEmailDeliveryAttempt,
@@ -92,7 +96,7 @@ class AuditHistoryAdminReadOnlyTests(TestCase):
         entry.refresh_from_db()
         self.assertEqual(entry.message, "Immutable audit entry")
 
-    def test_view_only_staff_can_inspect_but_not_mutate_audit_history(self):
+    def test_view_only_staff_cannot_inspect_owner_audit_history(self):
         viewer = User.objects.create_user(
             username="history-viewer",
             password="test-password",
@@ -109,7 +113,8 @@ class AuditHistoryAdminReadOnlyTests(TestCase):
         request.user = viewer
         model_admin = admin.site._registry[QuotationAuditLog]
 
-        self.assertTrue(model_admin.has_view_permission(request))
+        self.assertFalse(model_admin.has_module_permission(request))
+        self.assertFalse(model_admin.has_view_permission(request))
         self.assertFalse(model_admin.has_add_permission(request))
         self.assertFalse(model_admin.has_change_permission(request))
         self.assertFalse(model_admin.has_delete_permission(request))
@@ -128,6 +133,82 @@ class AuditHistoryAdminReadOnlyTests(TestCase):
         self.assertFalse(model_admin.has_add_permission(request))
         self.assertFalse(model_admin.has_change_permission(request))
         self.assertFalse(model_admin.has_delete_permission(request))
+
+    def test_mailbox_audit_admin_is_limited_to_superusers(self):
+        owner = User.objects.create_user(
+            username="mailbox-admin-owner",
+            password="test-password",
+            is_staff=True,
+        )
+        employee = User.objects.create_user(
+            username="mailbox-admin-employee",
+            password="test-password",
+            is_staff=True,
+        )
+        GmailOAuthConnection.objects.create(
+            user=owner,
+            is_shared=True,
+            email="shared-mailbox@example.test",
+            status=GmailOAuthConnection.STATUS_CONNECTED,
+        )
+
+        mailbox_models = (
+            MailboxPOAuditRun,
+            MailboxPOAuditFailure,
+            MailboxPOMatchRun,
+            MailboxPOMessage,
+            QuotationPOEvidence,
+            QuotationAuditLog,
+        )
+        for model in mailbox_models:
+            content_type = ContentType.objects.get_for_model(model)
+            view_permission = Permission.objects.get(
+                content_type=content_type,
+                codename=f"view_{model._meta.model_name}",
+            )
+            owner.user_permissions.add(view_permission)
+            employee.user_permissions.add(view_permission)
+
+        # Refresh both users once after assigning every permission so Django's
+        # per-instance permission cache cannot retain a partial loop result.
+        owner = User.objects.get(pk=owner.pk)
+        employee = User.objects.get(pk=employee.pk)
+        for model in mailbox_models:
+            model_admin = admin.site._registry[model]
+            superuser_request = RequestFactory().get("/admin/quotations/")
+            superuser_request.user = self.superuser
+            owner_request = RequestFactory().get("/admin/quotations/")
+            owner_request.user = owner
+            employee_request = RequestFactory().get("/admin/quotations/")
+            employee_request.user = employee
+
+            with self.subTest(model=model.__name__):
+                self.assertTrue(model_admin.has_module_permission(superuser_request))
+                self.assertTrue(model_admin.has_view_permission(superuser_request))
+                self.assertFalse(model_admin.has_module_permission(owner_request))
+                self.assertFalse(model_admin.has_view_permission(owner_request))
+                self.assertFalse(model_admin.has_module_permission(employee_request))
+                self.assertFalse(model_admin.has_view_permission(employee_request))
+
+    def test_quotation_admin_hides_mailbox_scan_fields_from_non_superusers(self):
+        employee = User.objects.create_user(
+            username="quotation-admin-employee",
+            password="test-password",
+            is_staff=True,
+        )
+        model_admin = admin.site._registry[Quotation]
+        operator_request = RequestFactory().get("/admin/quotations/quotation/")
+        operator_request.user = self.superuser
+        employee_request = RequestFactory().get("/admin/quotations/quotation/")
+        employee_request.user = employee
+        audit_fields = {
+            "po_evidence_last_scanned_at",
+            "po_evidence_last_scan_count",
+            "po_evidence_last_scan_error",
+        }
+
+        self.assertTrue(audit_fields.issubset(set(model_admin.get_fields(operator_request))))
+        self.assertTrue(audit_fields.isdisjoint(set(model_admin.get_fields(employee_request))))
 
     def test_ai_parse_cache_keeps_superuser_delete_for_cache_invalidation(self):
         model_admin = admin.site._registry[AIParseCache]

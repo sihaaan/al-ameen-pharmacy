@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import QuotationList, { MAILBOX_AUDIT_REQUEST_BUDGET } from './QuotationList';
-import quotationAPI from '../../api/quotations';
+import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 
 jest.mock('./CompanySelectWithCreate', () => ({ companies = [], onChange, required, value }) => (
   <label>
@@ -69,6 +69,13 @@ const quotation = {
 describe('QuotationList PO/LPO evidence summaries', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    describeQuotationError.mockImplementation(async (error, action, endpoint) => ({
+      action,
+      endpoint,
+      status: error?.response?.status || 'Network error',
+      detail: error?.message || 'Request failed',
+    }));
+    formatQuotationError.mockImplementation(() => 'Request failed');
     quotationAPI.quotes.list.mockResolvedValue({ data: [quotation] });
     quotationAPI.companies.list.mockResolvedValue({ data: [] });
     quotationAPI.contacts.list.mockResolvedValue({ data: [] });
@@ -84,6 +91,94 @@ describe('QuotationList PO/LPO evidence summaries', () => {
     expect(screen.getByText('2 candidates')).toBeInTheDocument();
     expect(screen.getByText('2 need assignment')).toBeInTheDocument();
     expect(screen.getByText('1 parsed')).toBeInTheDocument();
+  });
+
+  test('hides mailbox-wide audit controls and diagnostics when the API denies operator access', async () => {
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit={false}
+      />
+    );
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(screen.queryByText('Mailbox-wide PO/LPO audit')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Audit New Mailbox Run' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start Full Rescan' })).not.toBeInTheDocument();
+    expect(quotationAPI.mailboxPOAudits.latest).not.toHaveBeenCalled();
+    expect(quotationAPI.mailboxPOAudits.start).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when the mailbox-audit capability is missing from cached user data', async () => {
+    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(quotationAPI.mailboxPOAudits.latest).not.toHaveBeenCalled();
+    expect(screen.queryByText('Mailbox-wide PO/LPO audit')).not.toBeInTheDocument();
+  });
+
+  test('uses an employee-safe review label instead of exposing mailbox scan diagnostics', async () => {
+    quotationAPI.quotes.list.mockResolvedValueOnce({
+      data: [{
+        ...quotation,
+        po_evidence_candidate_count: 0,
+        po_evidence_parsed_count: 0,
+        po_evidence_ambiguous_count: 0,
+        po_evidence_last_scan_error: '',
+        po_evidence_last_scanned_at: null,
+      }],
+    });
+
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit={false}
+      />
+    );
+
+    expect(await screen.findByText('Not checked')).toBeInTheDocument();
+    expect(screen.queryByText('Scan issue')).not.toBeInTheDocument();
+  });
+
+  test('keeps owner audit controls visible when loading the latest audit has a transient failure', async () => {
+    quotationAPI.mailboxPOAudits.latest.mockRejectedValueOnce({
+      message: 'Service temporarily unavailable',
+      response: { status: 503 },
+    });
+
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
+
+    expect(await screen.findByText('Mailbox-wide PO/LPO audit')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Audit New Mailbox Run' })).toBeInTheDocument();
+    expect(screen.getByText('Load mailbox-wide PO/LPO audit failed')).toBeInTheDocument();
+  });
+
+  test('hides stale owner audit controls when the API revokes access with 403', async () => {
+    quotationAPI.mailboxPOAudits.latest.mockRejectedValueOnce({
+      message: 'Forbidden',
+      response: { status: 403 },
+    });
+
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
+
+    expect(await screen.findByText('Q-0021')).toBeInTheDocument();
+    expect(quotationAPI.mailboxPOAudits.latest).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Mailbox-wide PO/LPO audit')).not.toBeInTheDocument();
+    expect(screen.queryByText('Load mailbox-wide PO/LPO audit failed')).not.toBeInTheDocument();
   });
 
   test('uses the full page width and keeps the new quotation form out of the list', async () => {
@@ -256,7 +351,13 @@ describe('QuotationList PO/LPO evidence summaries', () => {
         done: true,
       },
     });
-    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
 
     await screen.findByText('Q-0021');
     fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
@@ -289,7 +390,13 @@ describe('QuotationList PO/LPO evidence summaries', () => {
         done: true,
       },
     });
-    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
 
     await screen.findByText('Q-0021');
     fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
@@ -346,7 +453,13 @@ describe('QuotationList PO/LPO evidence summaries', () => {
       },
     });
 
-    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
 
     await screen.findByText('Q-0021');
     fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
@@ -385,7 +498,13 @@ describe('QuotationList PO/LPO evidence summaries', () => {
       },
     });
 
-    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
 
     await screen.findByText('Q-0021');
     fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
@@ -413,7 +532,13 @@ describe('QuotationList PO/LPO evidence summaries', () => {
     quotationAPI.mailboxPOAudits.start.mockResolvedValue({ data: activePayload });
     quotationAPI.mailboxPOAudits.scanPage.mockResolvedValue({ data: activePayload });
 
-    render(<QuotationList onOpenQuote={jest.fn()} onReviewOutcome={jest.fn()} />);
+    render(
+      <QuotationList
+        onOpenQuote={jest.fn()}
+        onReviewOutcome={jest.fn()}
+        canManageMailboxAudit
+      />
+    );
 
     await screen.findByText('Q-0021');
     fireEvent.click(screen.getByRole('button', { name: 'Audit New Mailbox Run' }));
