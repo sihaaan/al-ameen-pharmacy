@@ -1199,7 +1199,7 @@ class QuotationWorkflowTests(APITestCase):
         self.assertIn("PO/LPO", evidence.matching_reason)
 
     @patch("quotations.contract_intelligence._form_request")
-    def test_find_po_evidence_invalid_grant_marks_gmail_for_reconnect(self, mock_form_request):
+    def test_owner_find_po_evidence_invalid_grant_marks_gmail_for_reconnect(self, mock_form_request):
         quotation = self.create_quote()
         self.create_valid_line(quotation)
         self.client.post(reverse("quotation-finalize", args=[quotation.id]))
@@ -1217,6 +1217,12 @@ class QuotationWorkflowTests(APITestCase):
         mock_form_request.side_effect = RuntimeError(
             'Google OAuth request failed with HTTP 400: { "error": "invalid_grant" }'
         )
+        owner = User.objects.create_superuser(
+            username="mailbox-audit-owner",
+            email="owner@example.test",
+            password="pass",
+        )
+        self.client.force_authenticate(owner)
 
         response = self.client.post(reverse("quotation-find-po-evidence", args=[quotation.id]), {"limit": 5}, format="json")
 
