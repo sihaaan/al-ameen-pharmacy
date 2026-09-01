@@ -1561,6 +1561,11 @@ class MailboxPOReconciliationTests(TestCase):
 class MailboxPOAuditAPITests(TestCase):
     def setUp(self):
         self.staff = User.objects.create_user("audit-api", is_staff=True)
+        self.operator = User.objects.create_superuser(
+            "audit-api-operator",
+            "audit-api-operator@example.test",
+            "password",
+        )
         self.connection = GmailOAuthConnection.objects.create(
             user=self.staff,
             is_shared=True,
@@ -1575,7 +1580,7 @@ class MailboxPOAuditAPITests(TestCase):
             created_by=self.staff,
         )
         self.client = APIClient()
-        self.client.force_authenticate(self.staff)
+        self.client.force_authenticate(self.operator)
 
     def test_start_endpoint_creates_then_resumes_one_incomplete_run(self):
         first = self.client.post(reverse("quotation-mailbox-po-audit-list"), {}, format="json")
@@ -1585,6 +1590,21 @@ class MailboxPOAuditAPITests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.data["run"]["id"], second.data["run"]["id"])
         self.assertFalse(first.data["inventory_done"])
+
+    def test_current_user_reports_mailbox_audit_operator_capability(self):
+        self.client.force_authenticate(self.staff)
+        owner_response = self.client.get(reverse("current-user"))
+
+        ordinary_staff = User.objects.create_user("audit-capability-employee", is_staff=True)
+        self.client.force_authenticate(ordinary_staff)
+        employee_response = self.client.get(reverse("current-user"))
+
+        self.client.force_authenticate(self.operator)
+        superuser_response = self.client.get(reverse("current-user"))
+
+        self.assertFalse(owner_response.data["can_manage_mailbox_audit"])
+        self.assertFalse(employee_response.data["can_manage_mailbox_audit"])
+        self.assertTrue(superuser_response.data["can_manage_mailbox_audit"])
 
     @patch("quotations.views.scan_mailbox_po_audit_page")
     def test_scan_page_is_bounded_for_web_requests(self, scan_page):
@@ -1698,3 +1718,200 @@ class MailboxPOAuditAPITests(TestCase):
         response = self.client.post(reverse("quotation-mailbox-po-audit-list"), {}, format="json")
 
         self.assertIn(response.status_code, {401, 403})
+
+    def test_shared_gmail_owner_cannot_view_or_control_mailbox_audits(self):
+        run = MailboxPOAuditRun.objects.create(
+            gmail_connection=self.connection,
+            requested_by=self.staff,
+            earliest_quote_at=self.quote.created_at,
+            gmail_query="in:anywhere after:1 -from:me",
+        )
+        self.client.force_authenticate(self.staff)
+        run_state = MailboxPOAuditRun.objects.filter(pk=run.pk).values(
+            "status",
+            "page_token",
+            "exhausted",
+            "pages_scanned",
+            "messages_scanned",
+            "errors",
+            "updated_at",
+        ).get()
+        run_count = MailboxPOAuditRun.objects.count()
+        match_run_count = MailboxPOMatchRun.objects.count()
+
+        with (
+            patch("quotations.views.start_mailbox_po_audit") as start_audit,
+            patch("quotations.views.scan_mailbox_po_audit_page") as scan_page,
+            patch("quotations.views.repair_mailbox_po_audit_pdf_vision") as repair_page,
+            patch("quotations.views.reconcile_mailbox_po_audit_page") as reconcile_page,
+            patch("quotations.views.scan_quote_po_evidence_batch") as batch_scan,
+        ):
+            requests = [
+                self.client.get(reverse("quotation-mailbox-po-audit-list")),
+                self.client.get(reverse("quotation-mailbox-po-audit-latest")),
+                self.client.get(reverse("quotation-mailbox-po-audit-detail", args=[run.id])),
+                self.client.post(reverse("quotation-mailbox-po-audit-list"), {}, format="json"),
+                self.client.post(
+                    reverse("quotation-mailbox-po-audit-list"),
+                    {"restart": True},
+                    format="json",
+                ),
+                self.client.post(
+                    reverse("quotation-mailbox-po-audit-scan-page", args=[run.id]),
+                    {},
+                    format="json",
+                ),
+                self.client.post(
+                    reverse("quotation-mailbox-po-audit-repair-page", args=[run.id]),
+                    {},
+                    format="json",
+                ),
+                self.client.post(
+                    reverse("quotation-mailbox-po-audit-reconcile", args=[run.id]),
+                    {},
+                    format="json",
+                ),
+                self.client.post(
+                    reverse("quotation-scan-po-evidence"),
+                    {},
+                    format="json",
+                ),
+            ]
+
+            start_audit.assert_not_called()
+            scan_page.assert_not_called()
+            repair_page.assert_not_called()
+            reconcile_page.assert_not_called()
+            batch_scan.assert_not_called()
+
+        self.assertTrue(requests)
+        for response in requests:
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(MailboxPOAuditRun.objects.count(), run_count)
+        self.assertEqual(MailboxPOMatchRun.objects.count(), match_run_count)
+        self.assertEqual(
+            MailboxPOAuditRun.objects.filter(pk=run.pk).values(
+                "status",
+                "page_token",
+                "exhausted",
+                "pages_scanned",
+                "messages_scanned",
+                "errors",
+                "updated_at",
+            ).get(),
+            run_state,
+        )
+
+    @patch("quotations.views.find_quote_po_evidence")
+    def test_shared_gmail_owner_fallback_redacts_search_diagnostics(
+        self,
+        find_evidence,
+    ):
+        raw_query = "in:anywhere secret-customer@example.test private-order-9981"
+        raw_warning = "Gmail provider failed on private page token abc-123"
+        find_evidence.return_value = {
+            "evidence": [],
+            "count": 0,
+            "ambiguous_count": 0,
+            "evidence_count": 0,
+            "scan_complete": False,
+            "incomplete_queries": [raw_query],
+            "scan_warning": raw_warning,
+            "queries": [raw_query],
+        }
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.post(
+            reverse("quotation-find-po-evidence", args=[self.quote.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["queries"], [])
+        self.assertEqual(response.data["incomplete_queries"], [])
+        self.assertEqual(
+            response.data["scan_warning"],
+            "Some Gmail evidence could not be checked. Review the mailbox manually "
+            "or ask an administrator to refresh the evidence.",
+        )
+        self.assertNotIn(raw_query, str(response.data))
+        self.assertNotIn(raw_warning, str(response.data))
+
+    @patch("quotations.views.find_quote_po_evidence")
+    def test_shared_gmail_owner_fallback_redacts_search_exception(
+        self,
+        find_evidence,
+    ):
+        raw_error = "private Gmail exception for message secret-9982"
+        find_evidence.side_effect = RuntimeError(raw_error)
+        self.client.force_authenticate(self.staff)
+
+        response = self.client.post(
+            reverse("quotation-find-po-evidence", args=[self.quote.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data["detail"],
+            "Gmail PO evidence search failed. Please review the mailbox manually or ask "
+            "an administrator to refresh the evidence.",
+        )
+        self.assertNotIn(raw_error, str(response.data))
+
+    def test_ordinary_staff_can_review_quote_evidence_without_global_audit_metadata(self):
+        run = MailboxPOAuditRun.objects.create(
+            gmail_connection=self.connection,
+            requested_by=self.staff,
+            status=MailboxPOAuditRun.STATUS_COMPLETED,
+            earliest_quote_at=self.quote.created_at,
+            gmail_query="in:anywhere after:1 -from:me",
+            exhausted=True,
+            completed_at=timezone.now(),
+        )
+        MailboxPOMatchRun.objects.create(
+            audit_run=run,
+            requested_by=self.staff,
+            algorithm_version=ALGORITHM_VERSION,
+            status=MailboxPOMatchRun.STATUS_COMPLETED,
+            completed_at=timezone.now(),
+        )
+        ordinary_staff = User.objects.create_user("evidence-review-employee", is_staff=True)
+        self.client.force_authenticate(ordinary_staff)
+
+        response = self.client.post(
+            reverse("quotation-find-po-evidence", args=[self.quote.id]),
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["queries"], [])
+        self.assertNotIn("mailbox_audit_run", response.data)
+        self.assertIn("results", response.data)
+
+    def test_quote_list_redacts_mailbox_scan_error_from_ordinary_staff(self):
+        self.quote.po_evidence_last_scanned_at = timezone.now()
+        self.quote.po_evidence_last_scan_count = 7
+        self.quote.po_evidence_last_scan_error = "provider page token failed for message secret-id"
+        self.quote.save(
+            update_fields=[
+                "po_evidence_last_scanned_at",
+                "po_evidence_last_scan_count",
+                "po_evidence_last_scan_error",
+                "updated_at",
+            ]
+        )
+        ordinary_staff = User.objects.create_user("scan-warning-employee", is_staff=True)
+        self.client.force_authenticate(ordinary_staff)
+
+        response = self.client.get(reverse("quotation-list"))
+
+        self.assertEqual(response.status_code, 200)
+        quote_payload = next(item for item in response.data if item["id"] == self.quote.id)
+        self.assertEqual(quote_payload["po_evidence_last_scan_error"], "")
+        self.assertEqual(quote_payload["po_evidence_last_scan_count"], 0)
+        self.assertIsNone(quote_payload["po_evidence_last_scanned_at"])
+        self.assertNotIn("secret-id", str(quote_payload))

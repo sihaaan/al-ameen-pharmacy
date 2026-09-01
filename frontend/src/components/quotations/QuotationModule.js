@@ -26,7 +26,7 @@ const tabs = [
   { id: 'history', label: 'Price History' },
   { id: 'historical-imports', label: 'Historical Imports' },
   { id: 'contract-intelligence', label: 'Contract Intelligence' },
-  { id: 'audit', label: 'Audit Logs' },
+  { id: 'audit', label: 'Audit Logs', ownerOnly: true },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -39,7 +39,7 @@ const positiveId = (value) => {
 
 const sha256Fingerprint = (value) => /^[0-9a-f]{64}$/.test(String(value || ''));
 
-export const quotationRouteFromSearch = (search) => {
+export const quotationRouteFromSearch = (search, canManageMailboxAudit = false) => {
   const params = new URLSearchParams(search || '');
   const gmailToken = params.get('gmail_import') || '';
   const parsedGmailImportId = positiveId(params.get('gmail_import_id'));
@@ -64,17 +64,27 @@ export const quotationRouteFromSearch = (search) => {
     };
   }
   return {
-    activeTab: tabs.some((candidate) => candidate.id === requestedTab) ? requestedTab : 'dashboard',
+    activeTab: tabs.some((candidate) => (
+      candidate.id === requestedTab
+      && (!candidate.ownerOnly || canManageMailboxAudit === true)
+    )) ? requestedTab : 'dashboard',
     gmailToken: '',
     gmailImportId: '',
     quoteId: null,
   };
 };
 
-const QuotationModule = () => {
+const QuotationModule = ({ canManageMailboxAudit }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const route = useMemo(() => quotationRouteFromSearch(location.search), [location.search]);
+  const route = useMemo(
+    () => quotationRouteFromSearch(location.search, canManageMailboxAudit),
+    [canManageMailboxAudit, location.search]
+  );
+  const visibleTabs = useMemo(
+    () => tabs.filter((tab) => !tab.ownerOnly || canManageMailboxAudit === true),
+    [canManageMailboxAudit]
+  );
   const gmailReturnQuoteId = useMemo(() => positiveId(
     new URLSearchParams(location.search).get('gmail_return_quote_id')
   ), [location.search]);
@@ -159,6 +169,7 @@ const QuotationModule = () => {
   }, [refresh, updateLocation]);
 
   const selectTab = useCallback((tabId) => {
+    if (tabId === 'audit' && canManageMailboxAudit !== true) return;
     setPendingEmailReview(null);
     setActiveTab(tabId);
     setEditingQuoteId(null);
@@ -170,7 +181,7 @@ const QuotationModule = () => {
       params.delete('quote_id');
       params.delete('gmail_return_quote_id');
     });
-  }, [updateLocation]);
+  }, [canManageMailboxAudit, updateLocation]);
 
   const rememberClaimedImport = useCallback((claimedImportId) => {
     const normalizedId = positiveId(claimedImportId);
@@ -226,7 +237,7 @@ const QuotationModule = () => {
       </div>
 
       <div className="qm-tabs">
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <button
             key={tab.id}
             type="button"
@@ -277,14 +288,19 @@ const QuotationModule = () => {
               onOpenGmailImport={openGmailImport}
             />
           ) : (
-            <QuotationList key={refreshKey} onOpenQuote={openQuote} onReviewOutcome={openOutcome} />
+            <QuotationList
+              key={refreshKey}
+              onOpenQuote={openQuote}
+              onReviewOutcome={openOutcome}
+              canManageMailboxAudit={canManageMailboxAudit}
+            />
           )
         )}
         {activeTab === 'proformas' && <ProformaInvoiceManager />}
         {activeTab === 'history' && <PriceHistoryPanel />}
         {activeTab === 'historical-imports' && <HistoricalImportManager />}
         {activeTab === 'contract-intelligence' && <ContractIntelligenceManager />}
-        {activeTab === 'audit' && <AuditLogPanel />}
+        {activeTab === 'audit' && canManageMailboxAudit === true && <AuditLogPanel />}
         {activeTab === 'settings' && <QuotationSettings />}
       </div>
     </div>

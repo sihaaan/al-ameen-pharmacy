@@ -50,14 +50,19 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     """For displaying user information (without password)."""
     can_access_accounting = serializers.SerializerMethodField()
+    can_manage_mailbox_audit = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
-            'is_staff', 'is_superuser', 'can_access_accounting', 'date_joined'
+            'is_staff', 'is_superuser', 'can_access_accounting',
+            'can_manage_mailbox_audit', 'date_joined'
         ]
-        read_only_fields = ['id', 'is_staff', 'is_superuser', 'can_access_accounting', 'date_joined']
+        read_only_fields = [
+            'id', 'is_staff', 'is_superuser', 'can_access_accounting',
+            'can_manage_mailbox_audit', 'date_joined'
+        ]
 
     def get_can_access_accounting(self, obj):
         if obj.is_superuser:
@@ -67,6 +72,11 @@ class UserSerializer(serializers.ModelSerializer):
         if obj.groups.filter(name="Accounting").exists():
             return True
         return obj.has_perm("accounting.view_accounting_module")
+
+    def get_can_manage_mailbox_audit(self, obj):
+        from quotations.permissions import user_can_manage_mailbox_audit
+
+        return user_can_manage_mailbox_audit(obj)
 
 
 # ====================

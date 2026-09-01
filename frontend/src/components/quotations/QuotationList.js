@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
@@ -133,7 +133,7 @@ const mailboxScanFromResponse = (payload, overrides = {}) => {
   };
 };
 
-const poEvidenceBadges = (quote) => {
+const poEvidenceBadges = (quote, canViewAuditDiagnostics = false) => {
   const active = Number(quote.po_evidence_candidate_count || 0);
   const parsed = Number(quote.po_evidence_parsed_count || 0);
   const candidates = Math.max(0, active - parsed);
@@ -151,16 +151,19 @@ const poEvidenceBadges = (quote) => {
   }
   if (badges.length) return badges;
   if (quote.po_evidence_last_scanned_at) {
+    const scanNeedsReview = Boolean(quote.po_evidence_last_scan_error);
     return [{
       key: 'checked',
-      label: quote.po_evidence_last_scan_error ? 'Scan issue' : 'Checked',
-      className: quote.po_evidence_last_scan_error ? 'status-cancelled' : 'status-pending',
+      label: scanNeedsReview
+        ? (canViewAuditDiagnostics ? 'Scan issue' : 'Review manually')
+        : 'Checked',
+      className: scanNeedsReview ? 'status-cancelled' : 'status-pending',
     }];
   }
   return [{ key: 'unchecked', label: 'Not checked', className: 'status-pending' }];
 };
 
-const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
+const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -175,6 +178,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorInfo, setErrorInfo] = useState(null);
+  const [mailboxAuditAuthorized, setMailboxAuditAuthorized] = useState(false);
   const [poScan, setPoScan] = useState(emptyMailboxScan);
   const stopPoScanRef = useRef(false);
   const contactRequestGenerationRef = useRef(0);
@@ -183,22 +187,42 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   const createQuoteBusyRef = useRef(false);
   createQuoteBusyRef.current = saving || contactSaving;
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setErrorInfo(null);
+    setMailboxAuditAuthorized(false);
     try {
-      const [quotesRes, companiesRes, latestAuditRes] = await Promise.all([
+      const auditRequest = canManageMailboxAudit === true
+        ? quotationAPI.mailboxPOAudits.latest()
+          .then((response) => ({ response, error: null }))
+          .catch((error) => ({ response: null, error }))
+        : Promise.resolve({ response: null, error: null });
+      const [quotesRes, companiesRes, auditResult] = await Promise.all([
         quotationAPI.quotes.list(),
         quotationAPI.companies.list({ active: 'true' }),
-        quotationAPI.mailboxPOAudits.latest().catch(() => null),
+        auditRequest,
       ]);
       setQuotes(quotesRes.data);
       setCompanies(companiesRes.data);
+      const latestAuditRes = auditResult.response;
+      const auditAccessDenied = [401, 403].includes(auditResult.error?.response?.status);
+      if (canManageMailboxAudit === true && !auditAccessDenied) {
+        setMailboxAuditAuthorized(true);
+      }
       if (latestAuditRes?.data?.run) {
         setPoScan((current) => mailboxScanFromResponse(latestAuditRes.data, {
           running: current.running,
           mode: current.mode,
         }));
+      }
+      if (canManageMailboxAudit === true && auditResult.error && !auditAccessDenied) {
+        const details = await describeQuotationError(
+          auditResult.error,
+          'Load mailbox-wide PO/LPO audit',
+          'GET /quotations/mailbox-po-audits/latest/'
+        );
+        setErrorInfo(details);
+        console.error(formatQuotationError(details), auditResult.error);
       }
     } catch (error) {
       const details = await describeQuotationError(error, 'Load quotations', 'GET /quotations/quotes/ and GET /quotations/companies/');
@@ -207,11 +231,11 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [canManageMailboxAudit]);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     if (!showCreateQuote) return undefined;
@@ -339,7 +363,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
   };
 
   const runPOEvidenceScan = async ({ rescan = false } = {}) => {
-    if (poScan.running) return;
+    if (!mailboxAuditAuthorized || poScan.running) return;
     stopPoScanRef.current = false;
     setErrorInfo(null);
     setPoScan((current) => ({
@@ -460,7 +484,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
             </select>
           </div>
         </div>
-        <div className="qm-po-scan-card">
+        {mailboxAuditAuthorized && <div className="qm-po-scan-card">
           <div>
             <strong>Mailbox-wide PO/LPO audit</strong>
             <p>Inventories every incoming Gmail message since the first quotation (including Spam/Trash for completeness), reads the newest email body, and checks likely documents against quotation items, quantities, prices/totals, customer and timing. Matches remain review-only.</p>
@@ -530,7 +554,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
               </button>
             )}
           </div>
-        </div>
+        </div>}
         <div className="qm-table-wrap">
           <table className="qm-table qm-quotation-list-table" aria-label="Quotations">
             <thead>
@@ -557,7 +581,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome }) => {
                   <td><span className={`qm-badge status-${quote.outcome_status || 'pending'}`}>{outcomeLabels[quote.outcome_status] || quote.outcome_status || 'Pending'}</span></td>
                   <td>
                     <div className="qm-evidence-summary">
-                      {poEvidenceBadges(quote).map((badge) => (
+                      {poEvidenceBadges(quote, mailboxAuditAuthorized).map((badge) => (
                         <span key={badge.key} className={`qm-badge ${badge.className}`}>{badge.label}</span>
                       ))}
                     </div>

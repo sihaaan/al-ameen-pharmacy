@@ -161,7 +161,11 @@ from .models import (
 )
 from .excel import build_quotation_excel
 from .pdf import build_proforma_invoice_pdf, build_standalone_proforma_invoice_pdf, build_quotation_pdf
-from .permissions import IsQuotationStaff
+from .permissions import (
+    IsMailboxAuditOperator,
+    IsQuotationStaff,
+    user_can_manage_mailbox_audit,
+)
 from .price_reference import apply_price_reference_to_preview, parse_price_reference_source
 from .po_evidence_comparison import (
     latest_relevant_po_import,
@@ -2827,6 +2831,7 @@ def _quotation_po_evidence_page(quotation, request):
 
 
 class MailboxPOAuditRunViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsMailboxAuditOperator]
     serializer_class = MailboxPOAuditRunSerializer
     queryset = MailboxPOAuditRun.objects.select_related("gmail_connection", "requested_by")
 
@@ -3974,20 +3979,21 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             ambiguous_count = evidence_queryset.filter(status=QuotationPOEvidence.STATUS_AMBIGUOUS).count()
             evidence, evidence_pagination = _quotation_po_evidence_page(quotation, request)
             serializer = QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request})
-            return Response(
-                {
-                    "count": active_count,
-                    "ambiguous_count": ambiguous_count,
-                    "evidence_count": len(serializer.data),
-                    "scan_complete": True,
-                    "incomplete_queries": [],
-                    "scan_warning": "",
-                    "queries": [latest_audit.gmail_query],
-                    "results": serializer.data,
-                    "pagination": evidence_pagination,
-                    "mailbox_audit_run": latest_audit.id,
-                }
-            )
+            payload = {
+                "count": active_count,
+                "ambiguous_count": ambiguous_count,
+                "evidence_count": len(serializer.data),
+                "scan_complete": True,
+                "incomplete_queries": [],
+                "scan_warning": "",
+                "queries": [],
+                "results": serializer.data,
+                "pagination": evidence_pagination,
+            }
+            if user_can_manage_mailbox_audit(request.user):
+                payload["queries"] = [latest_audit.gmail_query]
+                payload["mailbox_audit_run"] = latest_audit.id
+            return Response(payload)
         try:
             result = find_quote_po_evidence(
                 quotation,
@@ -3998,25 +4004,45 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return self.handle_workflow_error(exc)
         except Exception as exc:
             logger.exception("Quotation PO evidence search failed for quote %s", quotation.pk)
+            detail = "Gmail PO evidence search failed. Please review the mailbox manually or ask an administrator to refresh the evidence."
+            if user_can_manage_mailbox_audit(request.user):
+                detail = f"Gmail PO evidence search failed. {str(exc)[:250]}"
             return Response(
-                {"detail": f"Gmail PO evidence search failed. {str(exc)[:250]}"},
+                {"detail": detail},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = QuotationPOEvidenceSerializer(result["evidence"], many=True, context={"request": request})
-        return Response(
-            {
-                "count": result["count"],
-                "ambiguous_count": result["ambiguous_count"],
-                "evidence_count": result["evidence_count"],
-                "scan_complete": result["scan_complete"],
-                "incomplete_queries": result["incomplete_queries"],
-                "scan_warning": result["scan_warning"],
-                "queries": result["queries"],
-                "results": serializer.data,
-            }
-        )
+        can_view_audit_diagnostics = user_can_manage_mailbox_audit(request.user)
+        incomplete_queries = result["incomplete_queries"]
+        scan_warning = result["scan_warning"]
+        if not can_view_audit_diagnostics:
+            incomplete_queries = []
+            scan_warning = (
+                "Some Gmail evidence could not be checked. Review the mailbox manually "
+                "or ask an administrator to refresh the evidence."
+                if result["scan_warning"] or result["incomplete_queries"]
+                else ""
+            )
+        payload = {
+            "count": result["count"],
+            "ambiguous_count": result["ambiguous_count"],
+            "evidence_count": result["evidence_count"],
+            "scan_complete": result["scan_complete"],
+            "incomplete_queries": incomplete_queries,
+            "scan_warning": scan_warning,
+            "queries": [],
+            "results": serializer.data,
+        }
+        if can_view_audit_diagnostics:
+            payload["queries"] = result["queries"]
+        return Response(payload)
 
-    @action(detail=False, methods=["post"], parser_classes=[JSONParser])
+    @action(
+        detail=False,
+        methods=["post"],
+        parser_classes=[JSONParser],
+        permission_classes=[IsMailboxAuditOperator],
+    )
     def scan_po_evidence(self, request):
         try:
             result = scan_quote_po_evidence_batch(
@@ -5731,6 +5757,7 @@ class CompanyPriceHistoryViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelVie
 
 
 class QuotationAuditLogViewSet(QuotationBaseViewSet, viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsMailboxAuditOperator]
     serializer_class = QuotationAuditLogSerializer
     queryset = QuotationAuditLog.objects.select_related("actor", "company", "quotation")
     noisy_target_types = {

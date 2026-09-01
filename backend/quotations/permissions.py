@@ -37,3 +37,21 @@ class IsQuotationStaff(BasePermission):
 
     def has_object_permission(self, request, view, obj):
         return self.has_permission(request, view)
+
+
+def user_can_manage_mailbox_audit(user):
+    """Return whether a quotation superuser may view or operate the mailbox audit."""
+
+    return bool(
+        user_has_quotation_role(user)
+        and getattr(user, "is_superuser", False)
+    )
+
+
+class IsMailboxAuditOperator(IsQuotationStaff):
+    """Limit mailbox-wide audit diagnostics and controls to superusers."""
+
+    message = "Only a superuser can access mailbox-wide audit operations."
+
+    def has_permission(self, request, view):
+        return user_can_manage_mailbox_audit(request.user)

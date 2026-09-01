@@ -633,7 +633,15 @@ class EvidencePayloadAndSharedMailboxAPITests(TestCase):
         )
         evidence = self._evidence(connection=legacy, index=999)
 
+        operator = User.objects.create_superuser(
+            "payload-audit-operator",
+            "payload-audit-operator@example.test",
+            "password",
+        )
+        self.client.force_authenticate(operator)
         run_response = self.client.get(reverse("quotation-mailbox-po-audit-detail", args=[run.id]))
+
+        self.client.force_authenticate(self.staff)
         source_response = self.client.get(reverse("quotation-po-evidence-source", args=[evidence.id]))
         attachment_response = self.client.get(
             reverse("quotation-po-evidence-attachment", args=[evidence.id]),

@@ -2834,6 +2834,9 @@ class QuotationListSerializer(serializers.ModelSerializer):
     po_evidence_candidate_count = serializers.SerializerMethodField()
     po_evidence_ambiguous_count = serializers.SerializerMethodField()
     po_evidence_parsed_count = serializers.SerializerMethodField()
+    po_evidence_last_scanned_at = serializers.SerializerMethodField()
+    po_evidence_last_scan_count = serializers.SerializerMethodField()
+    po_evidence_last_scan_error = serializers.SerializerMethodField()
 
     class Meta:
         model = Quotation
@@ -2892,6 +2895,39 @@ class QuotationListSerializer(serializers.ModelSerializer):
         if annotated is not None:
             return annotated
         return obj.po_evidence.filter(status=QuotationPOEvidence.STATUS_AMBIGUOUS).count()
+
+    def _can_view_mailbox_audit_diagnostics(self):
+        cached = getattr(self, "_mailbox_audit_diagnostics_allowed", None)
+        if cached is not None:
+            return cached
+        request = self.context.get("request")
+        if request is None:
+            allowed = False
+        else:
+            from .permissions import user_can_manage_mailbox_audit
+
+            allowed = user_can_manage_mailbox_audit(request.user)
+        self._mailbox_audit_diagnostics_allowed = allowed
+        return allowed
+
+    def get_po_evidence_last_scanned_at(self, obj):
+        if (
+            obj.po_evidence_last_scan_error
+            and not self._can_view_mailbox_audit_diagnostics()
+        ):
+            return None
+        return obj.po_evidence_last_scanned_at
+
+    def get_po_evidence_last_scan_count(self, obj):
+        if not self._can_view_mailbox_audit_diagnostics():
+            return 0
+        return obj.po_evidence_last_scan_count
+
+    def get_po_evidence_last_scan_error(self, obj):
+        error = str(obj.po_evidence_last_scan_error or "")
+        if not error or not self._can_view_mailbox_audit_diagnostics():
+            return ""
+        return error
 
     def get_po_evidence_parsed_count(self, obj):
         annotated = getattr(obj, "po_evidence_parsed_count", None)

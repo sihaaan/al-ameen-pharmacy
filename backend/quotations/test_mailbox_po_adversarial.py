@@ -485,6 +485,11 @@ class MailboxPOReconciliationAdversarialTests(TestCase):
 class MailboxPOAuditAPIAdversarialTests(TestCase):
     def setUp(self):
         self.staff = User.objects.create_user("mailbox-api-adversarial", is_staff=True)
+        self.operator = User.objects.create_superuser(
+            "mailbox-api-adversarial-operator",
+            "mailbox-api-adversarial-operator@example.test",
+            "password",
+        )
         self.connection = GmailOAuthConnection.objects.create(
             user=self.staff,
             is_shared=True,
@@ -499,7 +504,7 @@ class MailboxPOAuditAPIAdversarialTests(TestCase):
             created_by=self.staff,
         )
         self.client = APIClient()
-        self.client.force_authenticate(self.staff)
+        self.client.force_authenticate(self.operator)
 
     def completed_run(self):
         return MailboxPOAuditRun.objects.create(

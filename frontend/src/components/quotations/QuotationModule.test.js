@@ -69,12 +69,12 @@ const LocationProbe = () => {
   return <output aria-label="location">{`${location.pathname}${location.search}`}</output>;
 };
 
-const renderModule = (initialEntry) => render(
+const renderModule = (initialEntry, props = {}) => render(
   <MemoryRouter
     initialEntries={[initialEntry]}
     future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
   >
-    <QuotationModule />
+    <QuotationModule {...props} />
     <LocationProbe />
   </MemoryRouter>
 );
@@ -180,5 +180,24 @@ describe('QuotationModule Gmail deep links', () => {
       activeTab: 'history',
       quoteId: null,
     }));
+    expect(quotationRouteFromSearch('?quotation_tab=audit')).toEqual(expect.objectContaining({
+      activeTab: 'dashboard',
+    }));
+    expect(quotationRouteFromSearch('?quotation_tab=audit', true)).toEqual(expect.objectContaining({
+      activeTab: 'audit',
+    }));
+  });
+
+  test('hides Audit Logs from employees and permits the owner capability', () => {
+    const employee = renderModule('/admin?quotation_tab=audit');
+
+    expect(screen.queryByRole('button', { name: 'Audit Logs' })).not.toBeInTheDocument();
+    expect(screen.getByText('Quotation dashboard')).toBeInTheDocument();
+
+    employee.unmount();
+    renderModule('/admin?quotation_tab=audit', { canManageMailboxAudit: true });
+
+    expect(screen.getByRole('button', { name: 'Audit Logs' })).toHaveClass('active');
+    expect(screen.getByText('Audit view')).toBeInTheDocument();
   });
 });
