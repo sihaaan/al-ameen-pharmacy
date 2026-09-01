@@ -2667,6 +2667,7 @@ class QuotationSerializer(serializers.ModelSerializer):
             "show_brand_column",
             "subtotal",
             "vat_total",
+            "discount_amount",
             "total",
             "notes",
             "internal_notes",
@@ -2758,6 +2759,35 @@ class QuotationSerializer(serializers.ModelSerializer):
         contact = attrs.get("contact", getattr(self.instance, "contact", None))
         if contact and company and contact.company_id != company.id:
             raise serializers.ValidationError({"contact": "Contact must belong to the selected company."})
+        discount_amount = attrs.get(
+            "discount_amount",
+            getattr(self.instance, "discount_amount", Decimal("0.00")),
+        )
+        subtotal = getattr(self.instance, "subtotal", Decimal("0.00"))
+        vat_total = getattr(self.instance, "vat_total", Decimal("0.00"))
+        gross_total = Decimal(subtotal or 0) + Decimal(vat_total or 0)
+        currency = attrs.get(
+            "currency",
+            getattr(self.instance, "currency", "AED"),
+        )
+        if (
+            discount_amount is not None
+            and Decimal(discount_amount) > 0
+            and str(currency or "").upper() != "AED"
+        ):
+            raise serializers.ValidationError(
+                {"discount_amount": "Quotation discounts are available only in AED."}
+            )
+        if discount_amount is not None and Decimal(discount_amount) > gross_total:
+            raise serializers.ValidationError(
+                {
+                    "discount_amount": (
+                        "Discount cannot exceed the quotation total before discount "
+                        f"({getattr(self.instance, 'currency', 'AED') or 'AED'} "
+                        f"{gross_total:.2f})."
+                    )
+                }
+            )
         return attrs
 
     def create(self, validated_data):
@@ -2871,6 +2901,7 @@ class QuotationListSerializer(serializers.ModelSerializer):
             "po_evidence_last_scan_error",
             "subtotal",
             "vat_total",
+            "discount_amount",
             "total",
             "is_historical_import",
             "created_by_username",

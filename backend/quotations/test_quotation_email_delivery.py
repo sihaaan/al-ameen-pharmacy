@@ -54,6 +54,9 @@ from .gmail_workflow_metrics import (
     EVENT_SEND_LEFT_UNKNOWN,
 )
 from .quotation_email_delivery import (
+    EMAIL_PREVIEW_FINGERPRINT_CONTRACT,
+    QUOTATION_REVIEW_FINGERPRINT_CONTRACT,
+    _quotation_customer_state,
     _delivery_snapshot,
     _mark_delivery_failure,
     _record_successful_delivery,
@@ -373,20 +376,64 @@ class QuotationEmailDeliveryAPITests(APITestCase):
     def test_preview_fingerprint_tracks_customer_facing_but_not_internal_state(self):
         quotation = self.create_quote()
         baseline = self.preview_fingerprint(quotation)
+        review_baseline = self.quotation_review_fingerprint(quotation)
 
         quotation.outcome_notes = "Internal sales follow-up only"
         quotation.save(update_fields=["outcome_notes", "updated_at"])
         self.assertEqual(self.preview_fingerprint(quotation), baseline)
 
+        quotation.discount_amount = Decimal("1.00")
+        quotation.save(update_fields=["discount_amount", "updated_at"])
+        discounted = self.preview_fingerprint(quotation)
+        self.assertNotEqual(discounted, baseline)
+        self.assertNotEqual(
+            self.quotation_review_fingerprint(quotation),
+            review_baseline,
+        )
+
         self.company.billing_address = "New customer-facing billing address"
         self.company.save(update_fields=["billing_address", "updated_at"])
         company_changed = self.preview_fingerprint(quotation)
-        self.assertNotEqual(company_changed, baseline)
+        self.assertNotEqual(company_changed, discounted)
 
         settings_obj = QuotationSettings.get_solo()
         settings_obj.default_terms = "Updated customer-facing quotation terms."
         settings_obj.save(update_fields=["default_terms", "updated_at"])
         self.assertNotEqual(self.preview_fingerprint(quotation), company_changed)
+
+    def test_discount_is_in_v2_customer_state_and_projected_after_vat(self):
+        quotation = self.create_quote()
+        quotation.discount_amount = Decimal("3.00")
+        quotation.subtotal = Decimal("999.00")
+        quotation.vat_total = Decimal("999.00")
+        quotation.total = Decimal("1998.00")
+        quotation.save(
+            update_fields=[
+                "discount_amount",
+                "subtotal",
+                "vat_total",
+                "total",
+                "updated_at",
+            ]
+        )
+
+        projected = _quotation_customer_state(
+            quotation,
+            project_for_send=True,
+        )["quotation"]
+
+        self.assertEqual(
+            EMAIL_PREVIEW_FINGERPRINT_CONTRACT,
+            "quotation_email_preview_v2",
+        )
+        self.assertEqual(
+            QUOTATION_REVIEW_FINGERPRINT_CONTRACT,
+            "quotation_editor_review_v2",
+        )
+        self.assertEqual(projected["subtotal"], Decimal("20.00"))
+        self.assertEqual(projected["vat_total"], Decimal("1.00"))
+        self.assertEqual(projected["discount_amount"], Decimal("3.00"))
+        self.assertEqual(projected["total"], Decimal("18.00"))
 
     def test_preview_rejects_a_quotation_revision_not_shown_in_the_editor(self):
         quotation = self.create_quote()
@@ -477,10 +524,19 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.product.brand = brand
         self.product.save(update_fields=["brand", "updated_at"])
         quotation = self.create_quote()
+        quotation.discount_amount = Decimal("3.00")
         quotation.subtotal = Decimal("999.00")
         quotation.vat_total = Decimal("999.00")
         quotation.total = Decimal("1998.00")
-        quotation.save(update_fields=["subtotal", "vat_total", "total", "updated_at"])
+        quotation.save(
+            update_fields=[
+                "discount_amount",
+                "subtotal",
+                "vat_total",
+                "total",
+                "updated_at",
+            ]
+        )
 
         rendered = {}
 
@@ -491,6 +547,7 @@ class QuotationEmailDeliveryAPITests(APITestCase):
                 status=current.status,
                 brand=line.brand_name_snapshot,
                 subtotal=current.subtotal,
+                discount_amount=current.discount_amount,
                 total=current.total,
                 sender=config.company_name,
             )
@@ -510,7 +567,8 @@ class QuotationEmailDeliveryAPITests(APITestCase):
         self.assertEqual(rendered["status"], Quotation.STATUS_FINALIZED)
         self.assertEqual(rendered["brand"], "Projected Brand")
         self.assertEqual(rendered["subtotal"], Decimal("20.00"))
-        self.assertEqual(rendered["total"], Decimal("21.00"))
+        self.assertEqual(rendered["discount_amount"], Decimal("3.00"))
+        self.assertEqual(rendered["total"], Decimal("18.00"))
         self.assertTrue(rendered["sender"])
         send.assert_called_once()
 

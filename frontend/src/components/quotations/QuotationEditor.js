@@ -9,6 +9,7 @@ import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
 const UNSAVED_LINES_FINALIZE_ISSUE = 'Save all line changes before finalizing.';
+const UNSAVED_DISCOUNT_FINALIZE_ISSUE = 'Save the final discount before finalizing.';
 
 const gmailChainedActionsEnabled = (quote = {}) => (
   quote?.workflow_features?.gmail_chained_actions === true
@@ -168,6 +169,93 @@ const termsDraftFromQuote = (quote = {}) => ({
   show_brand_column: !!quote.show_brand_column,
 });
 
+const discountDraftFromQuote = (quote = {}) => String(quote.discount_amount ?? '0.00');
+
+const discountDraftsMatch = (left, right) => {
+  const leftText = String(left ?? '').trim();
+  const rightText = String(right ?? '').trim();
+  const leftNumber = leftText === '' ? 0 : Number(leftText);
+  const rightNumber = rightText === '' ? 0 : Number(rightText);
+  if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+    return leftNumber === rightNumber;
+  }
+  return leftText === rightText;
+};
+
+const BIGINT_ZERO = window.BigInt(0);
+const BIGINT_ONE = window.BigInt(1);
+const BIGINT_TWO = window.BigInt(2);
+const BIGINT_TEN = window.BigInt(10);
+const BIGINT_ONE_HUNDRED = window.BigInt(100);
+
+const decimalParts = (value) => {
+  const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(
+    String(value ?? '').trim(),
+  );
+  if (!match) return null;
+  const exponent = Number(match[5] || 0);
+  // Model fields permit only modest fixed precision. This bound accepts every
+  // representable value while avoiding unbounded powers from malformed input.
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100) return null;
+  const whole = match[2] || '0';
+  const fraction = match[2] === undefined ? (match[4] || '') : (match[3] || '');
+  let coefficient = window.BigInt(`${whole}${fraction}` || '0')
+    * (match[1] === '-' ? -BIGINT_ONE : BIGINT_ONE);
+  let scale = fraction.length - exponent;
+  if (scale < 0) {
+    coefficient *= decimalPower(-scale);
+    scale = 0;
+  }
+  return { coefficient, scale };
+};
+
+const decimalPower = (exponent) => BIGINT_TEN ** window.BigInt(exponent);
+
+// Django Decimal.quantize uses ROUND_HALF_EVEN. Keep the editor preview on
+// the same fixed-point rule so cent boundaries cannot disagree with saves.
+const divideRoundHalfEven = (numerator, denominator) => {
+  if (denominator <= BIGINT_ZERO) return BIGINT_ZERO;
+  const negative = numerator < BIGINT_ZERO;
+  const absolute = negative ? -numerator : numerator;
+  let quotient = absolute / denominator;
+  const remainder = absolute % denominator;
+  const twiceRemainder = remainder * BIGINT_TWO;
+  if (
+    twiceRemainder > denominator
+    || (twiceRemainder === denominator && quotient % BIGINT_TWO === BIGINT_ONE)
+  ) {
+    quotient += BIGINT_ONE;
+  }
+  return negative ? -quotient : quotient;
+};
+
+const quantizedDecimalProduct = (values, targetScale, extraDivisorScale = 0) => {
+  const parsedValues = values.map(decimalParts);
+  if (parsedValues.some((value) => value === null)) return BIGINT_ZERO;
+  const coefficient = parsedValues.reduce(
+    (product, value) => product * value.coefficient,
+    BIGINT_ONE,
+  );
+  const sourceScale = parsedValues.reduce((sum, value) => sum + value.scale, 0)
+    + extraDivisorScale;
+  const scaleDifference = sourceScale - targetScale;
+  if (scaleDifference <= 0) return coefficient * decimalPower(-scaleDifference);
+  return divideRoundHalfEven(coefficient, decimalPower(scaleDifference));
+};
+
+const decimalToScaledInteger = (value, targetScale) => (
+  quantizedDecimalProduct([value], targetScale)
+);
+
+const formatMoneyCents = (value) => {
+  const cents = typeof value === 'bigint' ? value : window.BigInt(value || 0);
+  const negative = cents < BIGINT_ZERO;
+  const absolute = negative ? -cents : cents;
+  const whole = absolute / BIGINT_ONE_HUNDRED;
+  const fraction = String(absolute % BIGINT_ONE_HUNDRED).padStart(2, '0');
+  return `${negative ? '-' : ''}${whole}.${fraction}`;
+};
+
 const partyDraftFromQuote = (quote = {}) => ({
   company: quote.company || '',
   contact: quote.contact || '',
@@ -318,6 +406,8 @@ const QuotationEditor = ({
   const [savedQuotePartyDraft, setSavedQuotePartyDraft] = useState(partyDraftFromQuote());
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
+  const [discountDraft, setDiscountDraft] = useState(discountDraftFromQuote());
+  const [savedDiscountDraft, setSavedDiscountDraft] = useState(discountDraftFromQuote());
   const [items, setItems] = useState([]);
   const [companyItems, setCompanyItems] = useState([]);
   const [lineForm, setLineForm] = useState(emptyLine);
@@ -390,11 +480,15 @@ const QuotationEditor = ({
   const quotePartyDraftRef = useRef(quotePartyDraft);
   const quoteTermsDraftRef = useRef(quoteTermsDraft);
   const savedQuoteTermsDraftRef = useRef(savedQuoteTermsDraft);
+  const discountDraftRef = useRef(discountDraft);
+  const savedDiscountDraftRef = useRef(savedDiscountDraft);
   const lineDraftsRef = useRef(lineDrafts);
   const savedLineDraftsRef = useRef(savedLineDrafts);
   quotePartyDraftRef.current = quotePartyDraft;
   quoteTermsDraftRef.current = quoteTermsDraft;
   savedQuoteTermsDraftRef.current = savedQuoteTermsDraft;
+  discountDraftRef.current = discountDraft;
+  savedDiscountDraftRef.current = savedDiscountDraft;
   lineDraftsRef.current = lineDrafts;
   savedLineDraftsRef.current = savedLineDrafts;
 
@@ -403,6 +497,10 @@ const QuotationEditor = ({
     const preserveTermsDraft = isSameQuote && !termsDraftsMatch(
       quoteTermsDraftRef.current,
       savedQuoteTermsDraftRef.current,
+    );
+    const preserveDiscountDraft = isSameQuote && !discountDraftsMatch(
+      discountDraftRef.current,
+      savedDiscountDraftRef.current,
     );
     quoteRef.current = quoteData;
     setQuote(quoteData);
@@ -416,6 +514,14 @@ const QuotationEditor = ({
     savedQuoteTermsDraftRef.current = nextTermsDraft;
     setQuoteTermsDraft(displayedTermsDraft);
     setSavedQuoteTermsDraft(nextTermsDraft);
+    const nextDiscountDraft = discountDraftFromQuote(quoteData);
+    const displayedDiscountDraft = preserveDiscountDraft
+      ? discountDraftRef.current
+      : nextDiscountDraft;
+    discountDraftRef.current = displayedDiscountDraft;
+    savedDiscountDraftRef.current = nextDiscountDraft;
+    setDiscountDraft(displayedDiscountDraft);
+    setSavedDiscountDraft(nextDiscountDraft);
     const savedDrafts = Object.fromEntries((quoteData.lines || []).map((line) => [line.id, draftFromLine(line)]));
     const displayedDrafts = Object.fromEntries((quoteData.lines || []).map((line) => {
       const currentDraft = lineDraftsRef.current[line.id];
@@ -819,7 +925,14 @@ const QuotationEditor = ({
   const hasUnsavedLines = changedLineIds.length > 0;
   const hasUnsavedQuoteParty = !partyDraftsMatch(quotePartyDraft, savedQuotePartyDraft);
   const hasUnsavedQuoteTerms = !termsDraftsMatch(quoteTermsDraft, savedQuoteTermsDraft);
-  const hasUnsavedCustomerDocument = hasUnsavedLines || hasUnsavedQuoteParty || hasUnsavedQuoteTerms;
+  const discountCurrencySupported = String(quote?.currency || '').toUpperCase() === 'AED';
+  const hasUnsavedDiscount = discountCurrencySupported
+    && !discountDraftsMatch(discountDraft, savedDiscountDraft);
+  const hasUnsavedLineOrDiscount = hasUnsavedLines || hasUnsavedDiscount;
+  const hasUnsavedCustomerDocument = hasUnsavedLines
+    || hasUnsavedQuoteParty
+    || hasUnsavedQuoteTerms
+    || hasUnsavedDiscount;
   const datasetStatus = (key) => supportingDatasetStates[key]?.status || 'idle';
   const productCatalogueLoading = progressiveLoadEnabled && datasetStatus('items') === 'loading';
   const companyDirectoryLoading = progressiveLoadEnabled && datasetStatus('companies') === 'loading';
@@ -996,16 +1109,54 @@ const QuotationEditor = ({
     );
   };
 
-  const lineTotalForDraft = (draft = {}) => {
-    if (draft.match_status === 'ignored') return 0;
-    const quantity = Number(draft.quantity || 0);
-    const unitPrice = Number(draft.unit_price || 0);
-    const vatRate = Number(draft.vat_rate || 0);
-    const subtotal = quantity * unitPrice;
-    return Number.isFinite(subtotal) ? subtotal * (1 + (Number.isFinite(vatRate) ? vatRate : 0) / 100) : 0;
+  const lineMoneyForDraft = (draft = {}) => {
+    if (draft.match_status === 'ignored') {
+      return { subtotalCents: BIGINT_ZERO, vatCents: BIGINT_ZERO, totalCents: BIGINT_ZERO };
+    }
+    const quantity = draft.quantity || '0';
+    const unitPrice = draft.unit_price || '0';
+    const vatRate = draft.vat_rate || '0';
+    const subtotalCents = quantizedDecimalProduct([quantity, unitPrice], 2);
+    // The backend quantizes VAT from the raw quantity x unit-price product,
+    // independently of the already-quantized line subtotal.
+    const vatCents = quantizedDecimalProduct([quantity, unitPrice, vatRate], 2, 2);
+    return {
+      subtotalCents,
+      vatCents,
+      totalCents: subtotalCents + vatCents,
+    };
   };
   const liveLineDraftFor = (line) => ({ ...line, ...(lineDrafts[line.id] || {}) });
-  const liveQuoteTotal = activeLines.reduce((sum, line) => sum + lineTotalForDraft(liveLineDraftFor(line)), 0);
+  const liveQuoteSubtotalCents = activeLines.reduce(
+    (sum, line) => sum + lineMoneyForDraft(liveLineDraftFor(line)).subtotalCents,
+    BIGINT_ZERO,
+  );
+  const liveQuoteVatCents = activeLines.reduce(
+    (sum, line) => sum + lineMoneyForDraft(liveLineDraftFor(line)).vatCents,
+    BIGINT_ZERO,
+  );
+  const liveTotalBeforeDiscountCents = liveQuoteSubtotalCents + liveQuoteVatCents;
+  const discountText = String(discountDraft ?? '').trim();
+  const parsedDiscount = discountText === '' ? 0 : Number(discountText);
+  const discountFormatInvalid = discountText !== '' && !/^\d+(?:\.\d{0,2})?$/.test(discountText);
+  const parsedDiscountCents = discountFormatInvalid
+    ? BIGINT_ZERO
+    : decimalToScaledInteger(discountText || '0', 2);
+  const discountError = !discountCurrencySupported
+    ? ''
+    : !Number.isFinite(parsedDiscount)
+      ? 'Enter a valid final discount amount.'
+      : parsedDiscount < 0
+        ? 'Final discount cannot be negative.'
+        : discountFormatInvalid
+          ? 'Final discount can have no more than two decimal places.'
+          : parsedDiscountCents > liveTotalBeforeDiscountCents
+            ? `Final discount cannot exceed ${quote?.currency || 'AED'} ${formatMoneyCents(liveTotalBeforeDiscountCents)}.`
+            : '';
+  const liveDiscountCents = discountError ? BIGINT_ZERO : parsedDiscountCents;
+  const liveFinalTotalCents = liveDiscountCents >= liveTotalBeforeDiscountCents
+    ? BIGINT_ZERO
+    : liveTotalBeforeDiscountCents - liveDiscountCents;
 
   const derivedLineStatus = (line) => {
     const draft = lineDrafts[line.id] || {};
@@ -1070,6 +1221,8 @@ const QuotationEditor = ({
     if (hasUnsavedQuoteParty) issues.push('Save customer/contact before finalizing.');
     if (hasUnsavedQuoteTerms) issues.push('Save quotation terms and layout before finalizing.');
     if (hasUnsavedLines) issues.push(UNSAVED_LINES_FINALIZE_ISSUE);
+    if (discountError) issues.push(discountError);
+    else if (hasUnsavedDiscount) issues.push(UNSAVED_DISCOUNT_FINALIZE_ISSUE);
     (quote.lines || []).forEach((line, index) => {
       const draft = lineDrafts[line.id] || {};
       const name = draft.item_name_snapshot || `Line ${index + 1}`;
@@ -1082,7 +1235,10 @@ const QuotationEditor = ({
     return issues;
   })();
   const reviewEmailIssues = chainedActionsEnabled
-    ? finalizeIssues.filter((issue) => issue !== UNSAVED_LINES_FINALIZE_ISSUE)
+    ? finalizeIssues.filter((issue) => ![
+        UNSAVED_LINES_FINALIZE_ISSUE,
+        UNSAVED_DISCOUNT_FINALIZE_ISSUE,
+      ].includes(issue))
     : finalizeIssues;
   const primaryEmailActionIssues = chainedActionsEnabled
     ? reviewEmailIssues
@@ -1114,7 +1270,17 @@ const QuotationEditor = ({
 
   const updateQuoteTermDraft = (patch) => {
     setLineFeedback(null);
-    setQuoteTermsDraft((current) => ({ ...current, ...patch }));
+    setQuoteTermsDraft((current) => {
+      const next = { ...current, ...patch };
+      quoteTermsDraftRef.current = next;
+      return next;
+    });
+  };
+
+  const updateDiscountDraft = (value) => {
+    setLineFeedback(null);
+    discountDraftRef.current = value;
+    setDiscountDraft(value);
   };
 
   const updateQuotePartyDraft = (patch) => {
@@ -1319,8 +1485,24 @@ const QuotationEditor = ({
     return quoteData;
   };
 
+  const mergeSavedDiscount = (quoteData, preserveCurrentDraft = false) => {
+    const nextSavedDiscount = discountDraftFromQuote(quoteData);
+    const nextDisplayedDiscount = preserveCurrentDraft
+      ? discountDraftRef.current
+      : nextSavedDiscount;
+    discountDraftRef.current = nextDisplayedDiscount;
+    savedDiscountDraftRef.current = nextSavedDiscount;
+    setDiscountDraft(nextDisplayedDiscount);
+    setSavedDiscountDraft(nextSavedDiscount);
+  };
+
+  const discountAmountForPayload = () => {
+    const value = String(discountDraftRef.current ?? '').trim();
+    return value === '' ? '0.00' : value;
+  };
+
   const saveLine = async (lineId) => {
-    if (saving || actionInFlight) return;
+    if (saving || actionInFlight || discountError) return;
     const currentQuote = quoteRef.current || quote;
     const expectedQuoteId = String(currentQuote?.id || '');
     const expectedLoadGeneration = loadGenerationRef.current;
@@ -1331,6 +1513,7 @@ const QuotationEditor = ({
       && String(quoteRef.current?.id || '') === expectedQuoteId
     );
     const draftsAtSaveStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
+    const discountAtSaveStart = discountDraftRef.current;
     const payloadDraft = { ...(lineDraftsRef.current[lineId] || {}) };
     setSaving(true);
     setLineFeedback(null);
@@ -1338,22 +1521,30 @@ const QuotationEditor = ({
     try {
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
         lines: [{ id: lineId, ...payloadForLine(payloadDraft) }],
+        discount_amount: discountAmountForPayload(),
+        quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
       if (!requestIsCurrent()) return;
       const draftsChangedDuringSave = Object.entries(draftsAtSaveStart)
         .filter(([savedLineId, expected]) => !draftsMatch(lineDraftsRef.current[savedLineId], expected))
         .map(([savedLineId]) => savedLineId);
       const newerEditsRemain = draftsChangedDuringSave.length > 0;
+      const newerDiscountEditRemains = !discountDraftsMatch(
+        discountDraftRef.current,
+        discountAtSaveStart,
+      );
       mergeSavedQuote(
         response.data.quotation,
         [lineId],
         draftsChangedDuringSave,
       );
-      setLineFeedback(newerEditsRemain
+      mergeSavedDiscount(response.data.quotation, newerDiscountEditRemains);
+      setLineFeedback(newerEditsRemain || newerDiscountEditRemains
         ? { type: 'warning', message: 'Saved the submitted changes; newer edits remain unsaved.' }
         : { type: 'success', message: 'Line saved.' });
     } catch (error) {
       if (!requestIsCurrent()) return;
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(error, 'Save quote line', `PATCH /quotations/quote-lines/${lineId}/`);
       if (!requestIsCurrent()) return;
       setErrorInfo(details);
@@ -1364,7 +1555,7 @@ const QuotationEditor = ({
   };
 
   const saveAllLines = async () => {
-    if (saving || actionInFlight || !changedLineIds.length) return;
+    if (saving || actionInFlight || !hasUnsavedLineOrDiscount || discountError) return;
     const currentQuote = quoteRef.current || quote;
     const expectedQuoteId = String(currentQuote?.id || '');
     const expectedLoadGeneration = loadGenerationRef.current;
@@ -1376,6 +1567,7 @@ const QuotationEditor = ({
     );
     const lineIdsToSave = [...changedLineIds];
     const draftsAtSaveStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
+    const discountAtSaveStart = discountDraftRef.current;
     const payloadDrafts = Object.fromEntries(
       lineIdsToSave.map((lineId) => [lineId, { ...(lineDraftsRef.current[lineId] || {}) }])
     );
@@ -1385,26 +1577,39 @@ const QuotationEditor = ({
     try {
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
         lines: lineIdsToSave.map((lineId) => ({ id: lineId, ...payloadForLine(payloadDrafts[lineId]) })),
+        discount_amount: discountAmountForPayload(),
+        quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
       if (!requestIsCurrent()) return;
       const draftsChangedDuringSave = Object.entries(draftsAtSaveStart)
         .filter(([lineId, expected]) => !draftsMatch(lineDraftsRef.current[lineId], expected))
         .map(([lineId]) => lineId);
       const newerEditsRemain = draftsChangedDuringSave.length > 0;
+      const newerDiscountEditRemains = !discountDraftsMatch(
+        discountDraftRef.current,
+        discountAtSaveStart,
+      );
       mergeSavedQuote(
         response.data.quotation,
         lineIdsToSave,
         draftsChangedDuringSave,
       );
-      setLineFeedback(newerEditsRemain
+      mergeSavedDiscount(response.data.quotation, newerDiscountEditRemains);
+      const savedMessage = lineIdsToSave.length && hasUnsavedDiscount
+        ? `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'} and the final discount.`
+        : lineIdsToSave.length
+          ? `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}.`
+          : 'Final discount saved.';
+      setLineFeedback(newerEditsRemain || newerDiscountEditRemains
         ? { type: 'warning', message: 'Saved the submitted changes; newer edits remain unsaved.' }
-        : { type: 'success', message: `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}.` });
+        : { type: 'success', message: savedMessage });
     } catch (error) {
       if (!requestIsCurrent()) return;
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(error, 'Save all quote lines', 'PATCH /quotations/quote-lines/{id}/');
       if (!requestIsCurrent()) return;
       setErrorInfo(details);
-      setLineFeedback({ type: 'error', message: 'Some line changes could not be saved.' });
+      setLineFeedback({ type: 'error', message: 'The quotation changes could not be saved.' });
       console.error(formatQuotationError(details), error);
     } finally {
       if (requestIsCurrent()) setSaving(false);
@@ -1413,21 +1618,28 @@ const QuotationEditor = ({
 
   const saveQuoteTerms = async () => {
     if (saving || actionInFlight || !hasUnsavedQuoteTerms) return;
+    const currentQuote = quoteRef.current || quote;
+    const termsAtSaveStart = { ...quoteTermsDraftRef.current };
     setSaving(true);
     setLineFeedback(null);
     setErrorInfo(null);
     try {
       const response = await quotationAPI.quotes.update(quote.id, {
-        payment_terms: quoteTermsDraft.payment_terms || 'as_per_agreement',
-        valid_until: quoteTermsDraft.valid_until || null,
-        show_brand_column: !!quoteTermsDraft.show_brand_column,
+        payment_terms: termsAtSaveStart.payment_terms || 'as_per_agreement',
+        valid_until: termsAtSaveStart.valid_until || null,
+        show_brand_column: !!termsAtSaveStart.show_brand_column,
+        quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
-      setQuote(response.data);
-      const nextTermsDraft = termsDraftFromQuote(response.data);
-      setQuoteTermsDraft(nextTermsDraft);
-      setSavedQuoteTermsDraft(nextTermsDraft);
-      setLineFeedback({ type: 'success', message: 'Quotation terms and layout saved.' });
+      const newerTermsRemain = !termsDraftsMatch(
+        quoteTermsDraftRef.current,
+        termsAtSaveStart,
+      );
+      setLoadedQuote(response.data);
+      setLineFeedback(newerTermsRemain
+        ? { type: 'warning', message: 'Quotation terms and layout saved; newer edits remain unsaved.' }
+        : { type: 'success', message: 'Quotation terms and layout saved.' });
     } catch (error) {
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(error, 'Save quotation terms and layout', `PATCH /quotations/quotes/${quote.id}/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -1619,7 +1831,9 @@ const QuotationEditor = ({
   };
 
   const linkCandidateFromCreateModal = async (lineId, candidate) => {
-    if (!candidate?.product_id || saving || actionInFlight) return;
+    if (!candidate?.product_id || saving || actionInFlight || discountError) return;
+    const currentQuote = quoteRef.current || quote;
+    const discountAtSaveStart = discountDraftRef.current;
     const currentDraft = lineDrafts[lineId] || {};
     const hasSnapshotName = String(currentDraft.item_name_snapshot || '').trim().length > 0;
     const selectedProduct = items.find((item) => String(item.id) === String(candidate.product_id));
@@ -1646,8 +1860,14 @@ const QuotationEditor = ({
       }
       const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
         lines: [linePayload],
+        discount_amount: discountAmountForPayload(),
+        quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
       mergeSavedQuote(response.data.quotation, [lineId]);
+      mergeSavedDiscount(
+        response.data.quotation,
+        !discountDraftsMatch(discountDraftRef.current, discountAtSaveStart),
+      );
       rememberProductsInList([{
         id: candidate.product_id,
         name: candidate.product_name,
@@ -1668,6 +1888,7 @@ const QuotationEditor = ({
       setSelectedLineIds((current) => current.filter((id) => id !== lineId));
       setLineFeedback({ type: 'success', message: `Linked the row to existing Product '${candidate.product_name}'.` });
     } catch (error) {
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(error, 'Link existing Product to quote line', `POST /quotations/quotes/${quote.id}/bulk_update_lines/`);
       setProductCreateError(details);
       console.error(formatQuotationError(details), error);
@@ -1884,7 +2105,7 @@ const QuotationEditor = ({
       setEmailSendError(null);
       setLineFeedback({
         type: 'warning',
-        message: 'Quotation lines changed while the email review was being prepared. Review the changes, then click Review Email again.',
+        message: 'The quotation changed while the email review was being prepared. Review the changes, then click Review Email again.',
       });
       return true;
     };
@@ -1963,6 +2184,7 @@ const QuotationEditor = ({
       quote: quotationReviewDisplaySignature(loadedQuote),
       party: quotePartyDraftRef.current,
       terms: quoteTermsDraftRef.current,
+      discount: discountDraftRef.current,
       lines: snapshotLineDrafts(loadedQuote, lineDraftsRef.current),
     });
     const isStillCurrent = () => {
@@ -1975,6 +2197,7 @@ const QuotationEditor = ({
           quote: quotationReviewDisplaySignature(currentQuote),
           party: quotePartyDraftRef.current,
           terms: quoteTermsDraftRef.current,
+          discount: discountDraftRef.current,
           lines: snapshotLineDrafts(currentQuote, lineDraftsRef.current),
         }) === localStateAtHandoff
       );
@@ -2000,6 +2223,7 @@ const QuotationEditor = ({
       || saving
       || actionInFlight
       || reviewEmailIssues.length > 0
+      || discountError
     ) return;
 
     const currentQuote = quoteRef.current || quote;
@@ -2008,7 +2232,9 @@ const QuotationEditor = ({
     );
     const lineIdsToSave = [...changedLineIds];
     const draftsAtActionStart = snapshotLineDrafts(currentQuote, lineDraftsRef.current);
-    if (lineIdsToSave.length && !currentFingerprint) {
+    const discountAtActionStart = discountDraftRef.current;
+    const shouldSaveBeforeReview = lineIdsToSave.length > 0 || hasUnsavedDiscount;
+    if (shouldSaveBeforeReview && !currentFingerprint) {
       setLineFeedback({
         type: 'warning',
         message: 'Reload the quotation before saving and reviewing its email.',
@@ -2019,15 +2245,16 @@ const QuotationEditor = ({
     reviewEmailInFlightRef.current = true;
     const actionGeneration = ++reviewEmailGenerationRef.current;
     setActionInFlight('Review Email');
-    if (lineIdsToSave.length) setSaving(true);
+    if (shouldSaveBeforeReview) setSaving(true);
     setLineFeedback(null);
     setErrorInfo(null);
 
     try {
       let savedQuote = currentQuote;
-      if (lineIdsToSave.length) {
+      if (shouldSaveBeforeReview) {
         const response = await quotationAPI.quotes.bulkUpdateLines(quote.id, {
           quotation_review_fingerprint: currentFingerprint,
+          discount_amount: discountAmountForPayload(),
           lines: lineIdsToSave.map((lineId) => ({
             id: lineId,
             ...payloadForLine(lineDraftsRef.current[lineId] || {}),
@@ -2044,18 +2271,30 @@ const QuotationEditor = ({
             'The quotation was saved, but the server did not return a current review fingerprint.'
           );
         }
-        if (!lineDraftSnapshotMatches(draftsAtActionStart, lineDraftsRef.current)) {
+        const lineDraftsChangedDuringSave = !lineDraftSnapshotMatches(
+          draftsAtActionStart,
+          lineDraftsRef.current,
+        );
+        const discountChangedDuringSave = !discountDraftsMatch(
+          discountDraftRef.current,
+          discountAtActionStart,
+        );
+        if (lineDraftsChangedDuringSave || discountChangedDuringSave) {
           mergeSavedQuote(savedQuote, lineIdsToSave, true);
+          mergeSavedDiscount(savedQuote, discountChangedDuringSave);
           setLineFeedback({
             type: 'warning',
-            message: 'Quotation lines changed while saving. The saved response was applied without discarding your newer edits; click Review Email again after checking them.',
+            message: 'The quotation changed while saving. The saved response was applied without discarding your newer edits; click Review Email again after checking them.',
           });
           return;
         }
         mergeSavedQuote(savedQuote, lineIdsToSave);
+        mergeSavedDiscount(savedQuote);
         setLineFeedback({
           type: 'success',
-          message: `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}. Opening the email review...`,
+          message: lineIdsToSave.length
+            ? `Saved ${lineIdsToSave.length} line${lineIdsToSave.length === 1 ? '' : 's'}${hasUnsavedDiscount ? ' and the final discount' : ''}. Opening the email review...`
+            : 'Saved the final discount. Opening the email review...',
         });
       }
 
@@ -2063,9 +2302,11 @@ const QuotationEditor = ({
       // A save response is an authoritative locked server snapshot. With no
       // changes, retain the existing retrieve-and-compare gate before preview.
       const draftsBeforePreview = snapshotLineDrafts(savedQuote, lineDraftsRef.current);
+      const discountBeforePreview = discountDraftRef.current;
       await requestEmailPreview(
-        lineIdsToSave.length ? savedQuote : null,
-        () => lineDraftSnapshotMatches(draftsBeforePreview, lineDraftsRef.current),
+        shouldSaveBeforeReview ? savedQuote : null,
+        () => lineDraftSnapshotMatches(draftsBeforePreview, lineDraftsRef.current)
+          && discountDraftsMatch(discountDraftRef.current, discountBeforePreview),
       );
     } catch (error) {
       if (reviewEmailGenerationRef.current !== actionGeneration) return;
@@ -2781,7 +3022,7 @@ const QuotationEditor = ({
             type="button"
             className="qm-secondary"
             disabled={downloadLoading || saving || Boolean(actionInFlight) || hasUnsavedCustomerDocument}
-            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes before downloading.' : ''}
+            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes, including the final discount, before downloading.' : ''}
             onClick={downloadPdf}
           >
             {downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}
@@ -2790,7 +3031,7 @@ const QuotationEditor = ({
             type="button"
             className="qm-secondary"
             disabled={excelDownloadLoading || saving || Boolean(actionInFlight) || hasUnsavedCustomerDocument}
-            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes before downloading.' : ''}
+            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes, including the final discount, before downloading.' : ''}
             onClick={downloadExcel}
           >
             {excelDownloadLoading ? 'Preparing Excel...' : 'Download Excel'}
@@ -2849,7 +3090,7 @@ const QuotationEditor = ({
       {!isEditable && (
         <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
       )}
-      <div className="qm-helper">PDF and Excel use the latest saved customer, terms, layout, and line data. Save any changes before downloading or finalizing.</div>
+      <div className="qm-helper">PDF and Excel use the latest saved customer, terms, layout, final discount, and line data. Save any changes before downloading or finalizing.</div>
       {priceContextError && (
         <div className="qm-feedback warning" role="status">
           <div>
@@ -3099,16 +3340,59 @@ const QuotationEditor = ({
             <h3>Step 4: Edit Quotation Lines</h3>
             <p>Each active line needs a Product decision, quantity, unit price, and VAT before finalization. Create draft/internal Products directly from unmatched lines.</p>
           </div>
-          <div className="qm-total">
-            <span>Subtotal {quote.currency} {parseFloat(quote.subtotal).toFixed(2)}</span>
-            <strong>Total {quote.currency} {parseFloat(quote.total).toFixed(2)}</strong>
+          <div className="qm-final-total-area">
+            <label className="qm-discount-field" htmlFor={`quotation-discount-${quote.id}`}>
+              <span>Final discount ({quote.currency})</span>
+              <input
+                id={`quotation-discount-${quote.id}`}
+                type="number"
+                min="0"
+                max={formatMoneyCents(liveTotalBeforeDiscountCents)}
+                step="0.01"
+                inputMode="decimal"
+                aria-label={`Final discount (${quote.currency})`}
+                disabled={!isEditable || !discountCurrencySupported || saving || Boolean(actionInFlight)}
+                value={discountDraft}
+                aria-invalid={Boolean(discountError)}
+                aria-describedby={`quotation-discount-help-${quote.id}${discountError ? ` quotation-discount-error-${quote.id}` : ''}`}
+                onWheel={releaseNumberWheelFocus}
+                onChange={(event) => updateDiscountDraft(event.target.value)}
+              />
+              <small id={`quotation-discount-help-${quote.id}`}>
+                {discountCurrencySupported
+                  ? 'Optional amount deducted after VAT.'
+                  : 'Final discounts are available only for AED quotations. This saved value is read-only.'}
+              </small>
+              {discountError && (
+                <small id={`quotation-discount-error-${quote.id}`} className="qm-field-warning" role="alert">
+                  {discountError}
+                </small>
+              )}
+            </label>
+            <div className="qm-total qm-total-breakdown" role="status" aria-live="polite" aria-atomic="true">
+              <span>Subtotal {quote.currency} {formatMoneyCents(liveQuoteSubtotalCents)}</span>
+              <span>VAT {quote.currency} {formatMoneyCents(liveQuoteVatCents)}</span>
+              <span>Total before discount {quote.currency} {formatMoneyCents(liveTotalBeforeDiscountCents)}</span>
+              {liveDiscountCents > BIGINT_ZERO && (
+                <span>Discount {quote.currency} -{formatMoneyCents(liveDiscountCents)}</span>
+              )}
+              <strong>Final total {quote.currency} {formatMoneyCents(liveFinalTotalCents)}</strong>
+            </div>
           </div>
         </div>
         {isEditable && (
           <div className="qm-save-row sticky-line-actions">
-            <span className={hasUnsavedLines ? 'qm-unsaved' : 'qm-saved'}>{hasUnsavedLines ? `${changedLineIds.length} unsaved line change(s)` : 'All line changes saved'}</span>
+            <span className={hasUnsavedLineOrDiscount ? 'qm-unsaved' : 'qm-saved'}>
+              {hasUnsavedLines && hasUnsavedDiscount
+                ? `${changedLineIds.length} unsaved line change(s) and an unsaved discount`
+                : hasUnsavedLines
+                  ? `${changedLineIds.length} unsaved line change(s)`
+                  : hasUnsavedDiscount
+                    ? 'Final discount is unsaved'
+                    : 'All line changes saved'}
+            </span>
             <span className="qm-sticky-total">
-              Total <strong>{quote.currency} {liveQuoteTotal.toFixed(2)}</strong>
+              Final total <strong>{quote.currency} {formatMoneyCents(liveFinalTotalCents)}</strong>
             </span>
             <select className="qm-input compact" value={lineFilter} onChange={(event) => setLineFilter(event.target.value)}>
               <option value="active">Active lines</option>
@@ -3120,8 +3404,12 @@ const QuotationEditor = ({
             </select>
             <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked} onClick={selectVisibleUnmatched}>Select visible unmatched</button>
             <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked || !selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
-            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLines} onClick={saveAllLines}>
-              {saving && hasUnsavedLines ? 'Saving...' : 'Save All Lines'}
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLineOrDiscount || Boolean(discountError)} onClick={saveAllLines}>
+              {saving && hasUnsavedLineOrDiscount
+                ? 'Saving...'
+                : hasUnsavedDiscount
+                  ? 'Save Quotation Changes'
+                  : 'Save All Lines'}
             </button>
             <span className="qm-sticky-action-divider" aria-hidden="true" />
             {renderDraftCompletionActions()}
@@ -3241,10 +3529,10 @@ const QuotationEditor = ({
                       </select>
                     </td>
                     <td className="qm-line-status-cell"><span className={`qm-line-status ${statusInfo.id}`}>{statusInfo.label}</span></td>
-                    <td className="qm-line-total-cell">{quote.currency} {lineTotalForDraft(draft).toFixed(2)}</td>
+                    <td className="qm-line-total-cell">{quote.currency} {formatMoneyCents(lineMoneyForDraft(draft).totalCents)}</td>
                     <td className="qm-row-actions qm-line-actions-cell">
                       <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
-                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty} onClick={() => saveLine(line.id)}>Save</button>
+                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty || Boolean(discountError)} onClick={() => saveLine(line.id)}>Save</button>
                       <div className="qm-line-image-tools">
                         <label className={`qm-line-image-toggle ${draft.include_product_image ? 'enabled' : ''}`}>
                           <input

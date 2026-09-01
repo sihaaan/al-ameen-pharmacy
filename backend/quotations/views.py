@@ -247,6 +247,7 @@ from .services import (
     learn_confirmed_inquiry_line_alias,
     learn_confirmed_quotation_line_alias,
     outcome_summary_for_quotation,
+    quotation_line_outcome_analytics,
     _quotation_lines_for_update,
     _quotations_for_update,
     quotation_line_source_wording,
@@ -1150,16 +1151,45 @@ class QuotationAnalysisDashboardView(APIView):
         lines = list(
             line_queryset.select_related("quotation", "quotation__company", "quotation__created_by", "product", "quote_item")
         )
-        quoted_value = sum((line.line_total or Decimal("0.00")) for line in lines)
-        accepted_value = sum((line.accepted_total or Decimal("0.00")) for line in lines)
-        lost_value = sum((line.lost_value or Decimal("0.00")) for line in lines)
+        quotations = list(queryset)
+        active_lines_by_quotation = {quotation.pk: [] for quotation in quotations}
+        all_active_lines = QuotationLine.objects.filter(
+            quotation_id__in=active_lines_by_quotation
+        ).exclude(match_status=QuotationLine.MATCH_IGNORED)
+        for line in all_active_lines.order_by("quotation_id", "sort_order", "id"):
+            active_lines_by_quotation[line.quotation_id].append(line)
+
+        line_analytics = {}
+        for quotation in quotations:
+            line_analytics.update(
+                quotation_line_outcome_analytics(
+                    quotation,
+                    active_lines_by_quotation[quotation.pk],
+                )
+            )
+        quoted_value = sum(
+            (line_analytics[line.pk]["quoted_value"] for line in lines),
+            Decimal("0.00"),
+        )
+        accepted_value = sum(
+            (line_analytics[line.pk]["accepted_value"] for line in lines),
+            Decimal("0.00"),
+        )
+        lost_value = sum(
+            (line_analytics[line.pk]["lost_value"] for line in lines),
+            Decimal("0.00"),
+        )
         pending_value = sum(
             (quote.total or Decimal("0.00"))
-            for quote in queryset
+            for quote in quotations
             if quote.outcome_status == Quotation.OUTCOME_PENDING
         )
-        accepted_lines = sum(1 for line in lines if (line.accepted_total or 0) > 0)
-        closed_quotes = [quote for quote in queryset if quote.outcome_closed_at]
+        accepted_lines = sum(
+            1
+            for line in lines
+            if line_analytics[line.pk]["accepted_value"] > 0
+        )
+        closed_quotes = [quote for quote in quotations if quote.outcome_closed_at]
         avg_days_to_close = None
         close_durations = []
         for quote in closed_quotes:
@@ -1182,7 +1212,12 @@ class QuotationAnalysisDashboardView(APIView):
                 return line.quote_item.name
             return line.item_name_snapshot
 
-        def grouped_lines(filter_fn, label_fn, value_fn=lambda line: line.lost_value or Decimal("0.00"), limit=10):
+        def grouped_lines(
+            filter_fn,
+            label_fn,
+            value_fn=lambda line: line_analytics[line.pk]["lost_value"],
+            limit=10,
+        ):
             buckets = {}
             for line in lines:
                 if not filter_fn(line):
@@ -1198,8 +1233,11 @@ class QuotationAnalysisDashboardView(APIView):
 
         customers = {}
         staff = {}
-        for quote in queryset:
-            summary = outcome_summary_for_quotation(quote)
+        for quote in quotations:
+            summary = outcome_summary_for_quotation(
+                quote,
+                lines=active_lines_by_quotation[quote.pk],
+            )
             customer_entry = customers.setdefault(
                 quote.company.name,
                 {"label": quote.company.name, "quoted": Decimal("0.00"), "accepted": Decimal("0.00"), "lost": Decimal("0.00")},
@@ -1243,7 +1281,7 @@ class QuotationAnalysisDashboardView(APIView):
                 },
             )
             entry["lines"] += 1
-            entry["lost_value"] += Decimal(line.lost_value or 0)
+            entry["lost_value"] += line_analytics[line.pk]["lost_value"]
         lost_by_reason = [
             {**entry, "lost_value": _decimal_response(entry["lost_value"])}
             for entry in sorted(reason_buckets.values(), key=lambda item: (item["lost_value"], item["lines"]), reverse=True)[:10]
@@ -3320,16 +3358,50 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             quotation = _quotations_for_update().get(pk=serializer.instance.pk)
             ensure_quotation_editable(quotation)
             serializer.instance = quotation
+            discount_before = quotation.discount_amount
+            total_before = quotation.total
+            discount_supplied = "discount_amount" in serializer.validated_data
             quotation = serializer.save()
             recalculate_quotation_totals(quotation)
+            changes = {}
+            if discount_supplied:
+                changes = {
+                    "discount_amount": {
+                        "before": str(discount_before),
+                        "after": str(quotation.discount_amount),
+                    },
+                    "total": {
+                        "before": str(total_before),
+                        "after": str(quotation.total),
+                    },
+                }
             audit_log(
                 self.request.user,
                 QuotationAuditLog.ACTION_UPDATED,
                 quotation,
                 message="Updated quotation.",
+                changes=changes,
             )
 
     def update(self, request, *args, **kwargs):
+        if "discount_amount" in request.data:
+            return Response(
+                {
+                    "discount_amount": [
+                        "Save the quotation discount through the line-review Save All endpoint."
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        has_review_fingerprint = (
+            hasattr(request.data, "get")
+            and "quotation_review_fingerprint" in request.data
+        )
+        review_fingerprint = (
+            request.data.get("quotation_review_fingerprint")
+            if has_review_fingerprint
+            else None
+        )
         try:
             # DRF normally validates before perform_update(). Take the workflow
             # lock first so company/contact and any future instance-dependent
@@ -3337,12 +3409,23 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             with transaction.atomic():
                 quotation = self.get_object()
                 try:
-                    _quotations_for_update().get(pk=quotation.pk)
+                    quotation = _quotations_for_update().get(pk=quotation.pk)
                 except Quotation.DoesNotExist as exc:
                     # A concurrent DELETE can remove the row between the
                     # initial permission-aware lookup and lock acquisition.
                     raise Http404 from exc
+                if has_review_fingerprint:
+                    # Current editors bind terms/layout saves to the exact
+                    # quotation snapshot the employee reviewed. Older API
+                    # clients remain compatible when they omit the token.
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
                 return super().update(request, *args, **kwargs)
+        except QuotationEmailError as exc:
+            return self._quotation_email_error_response(exc)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
 
@@ -3543,9 +3626,9 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 },
                 "contract_versions": {
                     "email_preview": payload.get("email_preview_contract")
-                    or "quotation_email_preview_v1",
+                    or "quotation_email_preview_v2",
                     "quotation_review": payload.get("quotation_review_contract")
-                    or "quotation_editor_review_v1",
+                    or "quotation_editor_review_v2",
                 },
             },
         )
@@ -4326,10 +4409,14 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
         price_before = None
         serialized_quotation = None
+        discount_supplied = "discount_amount" in request.data
         review_fingerprint = request.data.get("quotation_review_fingerprint")
         stale_bound_save = bool(
-            gmail_chained_actions_enabled()
-            and review_fingerprint not in (None, "")
+            discount_supplied
+            or (
+                gmail_chained_actions_enabled()
+                and review_fingerprint not in (None, "")
+            )
         )
         if stale_bound_save:
             try:
@@ -4349,10 +4436,16 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         review_fingerprint,
                     )
                     price_before = pricing_snapshot(quotation)
+                    update_kwargs = {}
+                    if discount_supplied:
+                        update_kwargs["discount_amount"] = request.data.get(
+                            "discount_amount"
+                        )
                     quotation, updated_lines = bulk_update_quotation_lines(
                         quotation,
                         submitted_rows,
                         request.user,
+                        **update_kwargs,
                     )
                     quotation.refresh_from_db()
                     lock_quotation_review_dependencies(quotation)
@@ -4364,10 +4457,16 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         else:
             price_before = pricing_snapshot(quotation)
             try:
+                update_kwargs = {}
+                if discount_supplied:
+                    update_kwargs["discount_amount"] = request.data.get(
+                        "discount_amount"
+                    )
                 quotation, updated_lines = bulk_update_quotation_lines(
                     quotation,
                     submitted_rows,
                     request.user,
+                    **update_kwargs,
                 )
             except DjangoValidationError as exc:
                 return self.handle_workflow_error(exc)
@@ -4400,7 +4499,15 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             {
                 "quotation": serialized_quotation,
                 "updated_line_ids": [line.id for line in updated_lines],
-                "message": f"Saved {len(updated_lines)} line(s).",
+                "message": (
+                    f"Saved {len(updated_lines)} line(s) and quotation discount."
+                    if discount_supplied and updated_lines
+                    else (
+                        "Saved quotation discount."
+                        if discount_supplied
+                        else f"Saved {len(updated_lines)} line(s)."
+                    )
+                ),
             }
         )
 
@@ -4915,7 +5022,7 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     source_wording=source_wording if restore_source_snapshot else "",
                     explicit_confirmation=True,
                 )
-            recalculate_quotation_totals(line.quotation)
+            recalculate_quotation_totals(quotation)
             audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, line, message="Updated quotation line.")
 
     def create(self, request, *args, **kwargs):
@@ -4938,30 +5045,30 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         line = self.get_object()
-        with transaction.atomic():
-            quotation = _quotations_for_update().get(pk=line.quotation_id)
-            try:
+        try:
+            with transaction.atomic():
+                quotation = _quotations_for_update().get(pk=line.quotation_id)
                 ensure_quotation_editable(quotation)
-            except DjangoValidationError as exc:
-                return self.handle_workflow_error(exc)
-            try:
-                locked_line = _quotation_lines_for_update().get(
-                    pk=line.pk,
-                    quotation=quotation,
+                try:
+                    locked_line = _quotation_lines_for_update().get(
+                        pk=line.pk,
+                        quotation=quotation,
+                    )
+                except QuotationLine.DoesNotExist as exc:
+                    # A concurrent delete can remove the line while this request
+                    # waits for the quotation lock. Preserve normal DELETE
+                    # semantics instead of leaking an internal server error.
+                    raise Http404 from exc
+                audit_log(
+                    request.user,
+                    QuotationAuditLog.ACTION_DELETED,
+                    locked_line,
+                    message="Deleted quotation line.",
                 )
-            except QuotationLine.DoesNotExist as exc:
-                # A concurrent delete can remove the line while this request
-                # waits for the quotation lock. Preserve normal DELETE
-                # semantics instead of leaking an internal server error.
-                raise Http404 from exc
-            audit_log(
-                request.user,
-                QuotationAuditLog.ACTION_DELETED,
-                locked_line,
-                message="Deleted quotation line.",
-            )
-            locked_line.delete()
-            recalculate_quotation_totals(quotation)
+                locked_line.delete()
+                recalculate_quotation_totals(quotation)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])

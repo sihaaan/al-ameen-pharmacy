@@ -1838,6 +1838,13 @@ class Quotation(models.Model):
     show_brand_column = models.BooleanField(default=False)
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    discount_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        db_default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
     total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     notes = models.TextField(blank=True)
     internal_notes = models.TextField(blank=True)
@@ -1905,6 +1912,12 @@ class Quotation(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(discount_amount__gte=0),
+                name="quotation_discount_amount_nonnegative",
+            ),
+        ]
         indexes = [
             models.Index(fields=["quotation_number"]),
             models.Index(fields=["company", "status"]),

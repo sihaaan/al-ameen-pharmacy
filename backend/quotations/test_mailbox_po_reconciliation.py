@@ -82,6 +82,25 @@ class MailboxPOReconciliationTests(TestCase):
         self.assertTrue(queryset.query.select_for_update)
         self.assertEqual(queryset.query.select_for_update_of, ("self",))
 
+    def test_eligible_quote_uses_authoritative_discounted_grand_total(self):
+        self.quote.vat_total = Decimal("7.50")
+        self.quote.discount_amount = Decimal("12.50")
+        self.quote.total = Decimal("145.00")
+        self.quote.save(
+            update_fields=[
+                "vat_total",
+                "discount_amount",
+                "total",
+                "updated_at",
+            ]
+        )
+
+        eligible = next(
+            item for item in eligible_quotations() if item.quote_id == self.quote.id
+        )
+
+        self.assertEqual(eligible.grand_total, Decimal("145.00"))
+
     def message(self, message_id, *, rows=None, subject="Purchase Order attached", body="Please proceed", labels=None, attachment=True):
         manifest = []
         if attachment:

@@ -67,10 +67,10 @@ from .services import (
 THREAD_SELECTION_MAX_AGE = 30 * 60
 MAX_TO_ADDRESSES = 10
 MAX_CC_ADDRESSES = 10
-EMAIL_PREVIEW_FINGERPRINT_CONTRACT = "quotation_email_preview_v1"
-EMAIL_PREVIEW_FINGERPRINT_SALT = "quotations.email-preview-fingerprint.v1"
-QUOTATION_REVIEW_FINGERPRINT_CONTRACT = "quotation_editor_review_v1"
-QUOTATION_REVIEW_FINGERPRINT_SALT = "quotations.editor-review-fingerprint.v1"
+EMAIL_PREVIEW_FINGERPRINT_CONTRACT = "quotation_email_preview_v2"
+EMAIL_PREVIEW_FINGERPRINT_SALT = "quotations.email-preview-fingerprint.v2"
+QUOTATION_REVIEW_FINGERPRINT_CONTRACT = "quotation_editor_review_v2"
+QUOTATION_REVIEW_FINGERPRINT_SALT = "quotations.editor-review-fingerprint.v2"
 GMAIL_REPLY_SENDER_VALIDATION_CONTRACT = "gmail_reply_sender_identity_v1"
 MAX_OUTBOUND_MIME_BYTES = 35 * 1024 * 1024
 
@@ -191,6 +191,7 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
     projected_subtotal = Decimal("0.00")
     projected_vat_total = Decimal("0.00")
     projected_total = Decimal("0.00")
+    discount_amount = quotation.discount_amount or Decimal("0.00")
     for line in lines:
         selected_image = None
         if line.include_product_image:
@@ -234,6 +235,11 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
             }
         )
 
+    # Discounts are quotation-level fixed AED amounts applied after VAT. Keep
+    # this projection aligned with finalization so a reviewed draft preview
+    # remains valid through the draft -> finalized transition.
+    projected_total -= discount_amount
+
     resolved_pdf_config = pdf_config or get_quotation_pdf_config(quotation=quotation)
     pdf_settings = QuotationSettings.objects.filter(pk=1).first()
     rendered_status = quotation.status
@@ -259,6 +265,7 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
             "show_brand_column": quotation.show_brand_column,
             "subtotal": projected_subtotal if project_for_send else quotation.subtotal,
             "vat_total": projected_vat_total if project_for_send else quotation.vat_total,
+            "discount_amount": discount_amount,
             "total": projected_total if project_for_send else quotation.total,
             "notes": quotation.notes,
         },

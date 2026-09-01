@@ -1632,8 +1632,7 @@ def eligible_quotations():
                 company_name=quote.company.name,
                 customer_emails=tuple(sorted(email for email in emails if email)),
                 lines=lines,
-                grand_total=(quote.subtotal or Decimal("0"))
-                + (quote.vat_total or Decimal("0")),
+                grand_total=quote.total or Decimal("0"),
             )
         )
     return tuple(canonical)

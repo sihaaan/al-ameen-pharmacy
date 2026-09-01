@@ -160,8 +160,11 @@ def build_quotation_excel(quotation):
     totals = [
         ("Subtotal", _safe_number(quotation.subtotal)),
         ("VAT", _safe_number(quotation.vat_total)),
-        ("Grand Total", _safe_number(quotation.total)),
     ]
+    discount_amount = getattr(quotation, "discount_amount", 0) or 0
+    if discount_amount > 0:
+        totals.append(("Discount", -_safe_number(discount_amount)))
+    totals.append(("Grand Total", _safe_number(quotation.total)))
     totals_label_column = column_numbers["vat_amount"]
     totals_value_column = column_numbers["line_total"]
     for row_offset, (label, value) in enumerate(totals, start=totals_start):

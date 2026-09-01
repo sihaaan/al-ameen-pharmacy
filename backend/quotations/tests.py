@@ -69,7 +69,7 @@ from .models import (
 from .pdf_config import get_quotation_pdf_config
 from .matching import apply_match_to_preview_line, suggest_product_for_text
 from .ocr import OCRProviderUnavailable, get_ocr_provider
-from .services import recalculate_quotation_totals
+from .services import outcome_summary_for_quotation, recalculate_quotation_totals
 
 
 def make_png_bytes(color=(15, 118, 110, 255)):
@@ -591,6 +591,315 @@ class QuotationWorkflowTests(APITestCase):
             unit_price=Decimal("10.00"),
             match_status=QuotationLine.MATCH_CONFIRMED,
         )
+
+    def test_quotation_discount_defaults_to_zero_and_discount_only_save_updates_net_total(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        line.vat_rate = Decimal("5.00")
+        line.save(update_fields=["vat_rate", "line_subtotal", "vat_amount", "line_total", "updated_at"])
+        recalculate_quotation_totals(quotation)
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.discount_amount, Decimal("0.00"))
+        self.assertEqual(quotation.total, Decimal("21.00"))
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [],
+                "discount_amount": "5.00",
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["updated_line_ids"], [])
+        self.assertEqual(
+            Decimal(response.data["quotation"]["discount_amount"]),
+            Decimal("5.00"),
+        )
+        self.assertEqual(
+            Decimal(response.data["quotation"]["total"]),
+            Decimal("16.00"),
+        )
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.subtotal, Decimal("20.00"))
+        self.assertEqual(quotation.vat_total, Decimal("1.00"))
+        self.assertEqual(quotation.discount_amount, Decimal("5.00"))
+        self.assertEqual(quotation.total, Decimal("16.00"))
+        list_response = self.client.get(reverse("quotation-list"))
+        listed = next(row for row in list_response.data if row["id"] == quotation.id)
+        self.assertEqual(Decimal(listed["discount_amount"]), Decimal("5.00"))
+        audit = QuotationAuditLog.objects.filter(
+            quotation=quotation,
+            action=QuotationAuditLog.ACTION_UPDATED,
+        ).latest("id")
+        self.assertEqual(
+            audit.changes["discount_amount"],
+            {"before": "0.00", "after": "5.00"},
+        )
+        self.assertEqual(
+            audit.changes["total"],
+            {"before": "21.00", "after": "16.00"},
+        )
+
+    def test_combined_line_and_discount_save_is_atomic_and_uses_updated_gross(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [{"id": line.id, "unit_price": "12.00"}],
+                "discount_amount": "4.00",
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        line.refresh_from_db()
+        quotation.refresh_from_db()
+        self.assertEqual(line.unit_price, Decimal("12.00"))
+        self.assertEqual(quotation.subtotal, Decimal("24.00"))
+        self.assertEqual(quotation.discount_amount, Decimal("4.00"))
+        self.assertEqual(quotation.total, Decimal("20.00"))
+
+    def test_discount_above_combined_gross_rolls_back_line_and_discount_changes(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [{"id": line.id, "unit_price": "4.00"}],
+                "discount_amount": "10.00",
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cannot exceed", str(response.data["discount_amount"][0]))
+        line.refresh_from_db()
+        quotation.refresh_from_db()
+        self.assertEqual(line.unit_price, Decimal("10.00"))
+        self.assertEqual(line.line_total, Decimal("20.00"))
+        self.assertEqual(quotation.discount_amount, Decimal("0.00"))
+        self.assertEqual(quotation.total, Decimal("20.00"))
+
+    def test_line_delete_that_would_exceed_saved_discount_rolls_back(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        discounted = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [],
+                "discount_amount": "5.00",
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(discounted.status_code, status.HTTP_200_OK)
+
+        response = self.client.delete(
+            reverse("quotation-line-detail", args=[line.id])
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cannot exceed", str(response.data["discount_amount"][0]))
+        self.assertTrue(QuotationLine.objects.filter(pk=line.id).exists())
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.discount_amount, Decimal("5.00"))
+        self.assertEqual(quotation.total, Decimal("15.00"))
+
+    def test_discount_rejects_negative_and_requires_a_current_review_fingerprint(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+
+        direct_update = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {"discount_amount": "1.00"},
+            format="json",
+        )
+        self.assertEqual(direct_update.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Save All", str(direct_update.data["discount_amount"][0]))
+
+        missing_review = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {"lines": [], "discount_amount": "1.00"},
+            format="json",
+        )
+        self.assertEqual(missing_review.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(missing_review.data["code"], "quotation_review_required")
+
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        negative = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [],
+                "discount_amount": "-1.00",
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(negative.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cannot be negative", str(negative.data["discount_amount"][0]))
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.discount_amount, Decimal("0.00"))
+        self.assertEqual(quotation.total, Decimal("20.00"))
+
+    def test_discount_rejects_a_stale_review_without_mutating_the_quote(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        stale_fingerprint = detail.data["quotation_review_fingerprint"]
+        changed = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {"notes": "Changed elsewhere"},
+            format="json",
+        )
+        self.assertEqual(changed.status_code, status.HTTP_200_OK)
+
+        response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [],
+                "discount_amount": "3.00",
+                "quotation_review_fingerprint": stale_fingerprint,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "stale_quotation_review")
+        self.assertTrue(response.data["refresh_quote"])
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.discount_amount, Decimal("0.00"))
+        self.assertEqual(quotation.total, Decimal("20.00"))
+
+    def test_terms_update_rejects_a_supplied_stale_review_fingerprint(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        stale_fingerprint = detail.data["quotation_review_fingerprint"]
+
+        changed_elsewhere = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {"notes": "Changed elsewhere"},
+            format="json",
+        )
+        self.assertEqual(changed_elsewhere.status_code, status.HTTP_200_OK)
+
+        stale_save = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {
+                "payment_terms": Quotation.PAYMENT_CASH,
+                "show_brand_column": True,
+                "quotation_review_fingerprint": stale_fingerprint,
+            },
+            format="json",
+        )
+
+        self.assertEqual(stale_save.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(stale_save.data["code"], "stale_quotation_review")
+        quotation.refresh_from_db()
+        self.assertEqual(
+            quotation.payment_terms,
+            Quotation.PAYMENT_AS_PER_AGREEMENT,
+        )
+        self.assertFalse(quotation.show_brand_column)
+
+        current_detail = self.client.get(
+            reverse("quotation-detail", args=[quotation.id])
+        )
+        current_save = self.client.patch(
+            reverse("quotation-detail", args=[quotation.id]),
+            {
+                "payment_terms": Quotation.PAYMENT_CASH,
+                "show_brand_column": True,
+                "quotation_review_fingerprint": current_detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(current_save.status_code, status.HTTP_200_OK)
+        self.assertEqual(current_save.data["payment_terms"], Quotation.PAYMENT_CASH)
+        self.assertTrue(current_save.data["show_brand_column"])
+        self.assertNotEqual(
+            current_save.data["quotation_review_fingerprint"],
+            current_detail.data["quotation_review_fingerprint"],
+        )
+
+    def test_revision_copies_discount_and_finalized_quote_discount_is_locked(self):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        recalculate_quotation_totals(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        discount_response = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [],
+                "discount_amount": "2.50",
+                "quotation_review_fingerprint": detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(discount_response.status_code, status.HTTP_200_OK)
+        finalized = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
+        self.assertEqual(finalized.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(finalized.data["total"]), Decimal("17.50"))
+
+        finalized_detail = self.client.get(
+            reverse("quotation-detail", args=[quotation.id])
+        )
+        locked = self.client.post(
+            reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {
+                "lines": [],
+                "discount_amount": "1.00",
+                "quotation_review_fingerprint": finalized_detail.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(locked.status_code, status.HTTP_400_BAD_REQUEST)
+
+        revision_response = self.client.post(
+            reverse("quotation-revise", args=[quotation.id])
+        )
+        self.assertEqual(revision_response.status_code, status.HTTP_201_CREATED)
+        revision = Quotation.objects.get(pk=revision_response.data["id"])
+        self.assertEqual(revision.discount_amount, Decimal("2.50"))
+        self.assertEqual(revision.total, Decimal("17.50"))
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.discount_amount, Decimal("2.50"))
+        self.assertEqual(quotation.total, Decimal("17.50"))
 
     def test_upload_lpo_records_reviewable_lpo_without_changing_outcome(self):
         quotation = self.create_quote()
@@ -1504,6 +1813,199 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(analysis.data["tables"]["lost_value_by_reason"][0]["reason"], QuotationLine.REASON_PRICE_TOO_HIGH)
         self.assertEqual(followups.status_code, status.HTTP_200_OK)
         self.assertEqual(followups.data["overdue"][0]["id"], pending_quote.id)
+
+    def test_outcome_summary_allocates_discount_once_across_revenue_and_profit(self):
+        quotation = self.create_quote()
+        first_line = self.create_valid_line(quotation)
+        first_line.quantity = Decimal("1.000")
+        first_line.save(update_fields=[
+            "quantity",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "updated_at",
+        ])
+        second_product = Product.objects.create(
+            name="Second Analytics Product",
+            price=Decimal("1.00"),
+            pack_size="box",
+            status="draft",
+        )
+        second_line = QuotationLine.objects.create(
+            quotation=quotation,
+            product=second_product,
+            item_name_snapshot=second_product.name,
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("20.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+            sort_order=1,
+        )
+        for line, profit in [
+            (first_line, Decimal("6.00")),
+            (second_line, Decimal("12.00")),
+        ]:
+            line.outcome_status = QuotationLine.OUTCOME_ACCEPTED
+            line.accepted_quantity = line.quantity
+            line.accepted_unit_price = line.unit_price
+            line.accepted_total = line.line_total
+            line.lost_value = Decimal("0.00")
+            line.quoted_gross_profit = profit
+            line.accepted_gross_profit = profit
+            line.lost_gross_profit = Decimal("0.00")
+            line.save(update_fields=[
+                "outcome_status",
+                "accepted_quantity",
+                "accepted_unit_price",
+                "accepted_total",
+                "lost_value",
+                "quoted_gross_profit",
+                "accepted_gross_profit",
+                "lost_gross_profit",
+                "line_subtotal",
+                "vat_amount",
+                "line_total",
+                "updated_at",
+            ])
+        quotation.discount_amount = Decimal("5.00")
+        recalculate_quotation_totals(quotation)
+
+        summary = outcome_summary_for_quotation(quotation)
+
+        self.assertEqual(summary["quoted_value"], Decimal("25.00"))
+        self.assertEqual(summary["accepted_value"], Decimal("25.00"))
+        self.assertEqual(summary["lost_value"], Decimal("0.00"))
+        self.assertEqual(summary["value_win_rate"], 100.0)
+        self.assertEqual(summary["quoted_gross_profit"], Decimal("13.00"))
+        self.assertEqual(summary["accepted_gross_profit"], Decimal("13.00"))
+        self.assertEqual(summary["lost_gross_profit"], Decimal("0.00"))
+        self.assertEqual(summary["gross_profit_win_rate"], 100.0)
+
+    def test_analysis_dashboard_uses_deterministic_discount_shares_for_filtered_lines(self):
+        quotation = self.create_quote()
+        first_line = self.create_valid_line(quotation)
+        first_line.quantity = Decimal("1.000")
+        first_line.save(update_fields=[
+            "quantity",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "updated_at",
+        ])
+        second_product = Product.objects.create(
+            name="Filtered Analytics Product",
+            price=Decimal("1.00"),
+            pack_size="box",
+            status="draft",
+        )
+        second_line = QuotationLine.objects.create(
+            quotation=quotation,
+            product=second_product,
+            item_name_snapshot=second_product.name,
+            quantity=Decimal("1.000"),
+            unit="box",
+            unit_price=Decimal("20.00"),
+            match_status=QuotationLine.MATCH_CONFIRMED,
+            sort_order=1,
+        )
+        first_line.outcome_status = QuotationLine.OUTCOME_REJECTED
+        first_line.outcome_reason = QuotationLine.REASON_PRICE_TOO_HIGH
+        first_line.accepted_total = Decimal("0.00")
+        first_line.lost_value = first_line.line_total
+        first_line.save(update_fields=[
+            "outcome_status",
+            "outcome_reason",
+            "accepted_total",
+            "lost_value",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "updated_at",
+        ])
+        second_line.outcome_status = QuotationLine.OUTCOME_ACCEPTED
+        second_line.accepted_quantity = second_line.quantity
+        second_line.accepted_unit_price = second_line.unit_price
+        second_line.accepted_total = second_line.line_total
+        second_line.lost_value = Decimal("0.00")
+        second_line.save(update_fields=[
+            "outcome_status",
+            "accepted_quantity",
+            "accepted_unit_price",
+            "accepted_total",
+            "lost_value",
+            "line_subtotal",
+            "vat_amount",
+            "line_total",
+            "updated_at",
+        ])
+        quotation.discount_amount = Decimal("5.00")
+        recalculate_quotation_totals(quotation)
+        quotation.status = Quotation.STATUS_FINALIZED
+        quotation.save(update_fields=["status", "updated_at"])
+
+        full = self.client.get(reverse("quotation-analysis-dashboard"))
+        first_product = self.client.get(
+            reverse("quotation-analysis-dashboard"),
+            {"product": self.product.id},
+        )
+        second_product_only = self.client.get(
+            reverse("quotation-analysis-dashboard"),
+            {"product": second_product.id},
+        )
+        price_reason_only = self.client.get(
+            reverse("quotation-analysis-dashboard"),
+            {"reason": QuotationLine.REASON_PRICE_TOO_HIGH},
+        )
+
+        self.assertEqual(full.status_code, status.HTTP_200_OK)
+        self.assertEqual(first_product.status_code, status.HTTP_200_OK)
+        self.assertEqual(second_product_only.status_code, status.HTTP_200_OK)
+        self.assertEqual(price_reason_only.status_code, status.HTTP_200_OK)
+        self.assertEqual(full.data["cards"]["total_quoted_value"], "25.00")
+        self.assertEqual(full.data["cards"]["accepted_value"], "16.67")
+        self.assertEqual(full.data["cards"]["lost_value"], "8.33")
+        self.assertEqual(
+            first_product.data["cards"]["total_quoted_value"],
+            "8.33",
+        )
+        self.assertEqual(
+            second_product_only.data["cards"]["total_quoted_value"],
+            "16.67",
+        )
+        self.assertEqual(
+            second_product_only.data["cards"]["accepted_value"],
+            "16.67",
+        )
+        self.assertEqual(
+            second_product_only.data["cards"]["lost_value"],
+            "0.00",
+        )
+        self.assertEqual(
+            first_product.data["cards"]["accepted_value"],
+            "0.00",
+        )
+        self.assertEqual(
+            first_product.data["cards"]["lost_value"],
+            "8.33",
+        )
+        self.assertEqual(
+            price_reason_only.data["cards"]["total_quoted_value"],
+            "8.33",
+        )
+        self.assertEqual(
+            price_reason_only.data["cards"]["lost_value"],
+            "8.33",
+        )
+        self.assertEqual(
+            price_reason_only.data["tables"]["lost_value_by_reason"][0][
+                "lost_value"
+            ],
+            "8.33",
+        )
+        self.assertEqual(
+            full.data["tables"]["pending_value_by_customer"][0]["value"],
+            "25.00",
+        )
 
     def test_quotation_number_generation_retries_after_collision(self):
         Quotation.objects.create(company=self.company, created_by=self.staff, quotation_number="QT-COLLIDE")

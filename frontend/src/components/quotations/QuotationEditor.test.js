@@ -60,6 +60,9 @@ const quote = {
   valid_until: '2026-08-01',
   show_brand_column: false,
   subtotal: '0.00',
+  vat_total: '0.00',
+  total_before_discount: '0.00',
+  discount_amount: '0.00',
   total: '0.00',
   lines: [{
     id: 31,
@@ -80,6 +83,9 @@ const quote = {
 const readyQuote = {
   ...quote,
   subtotal: '10.00',
+  vat_total: '0.00',
+  total_before_discount: '10.00',
+  discount_amount: '0.00',
   total: '10.00',
   lines: [{
     ...quote.lines[0],
@@ -425,7 +431,7 @@ describe('QuotationEditor Product price context', () => {
       await refreshRequest.promise;
     });
 
-    expect(await screen.findByText(/quotation lines changed while the email review was being prepared/i)).toBeInTheDocument();
+    expect(await screen.findByText(/the quotation changed while the email review was being prepared/i)).toBeInTheDocument();
     expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
     expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
   });
@@ -461,8 +467,354 @@ describe('QuotationEditor Product price context', () => {
       payment_terms: 'as_per_agreement',
       valid_until: '2026-08-01',
       show_brand_column: true,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
     }));
     expect(await screen.findByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled();
+  });
+
+  test('edits and saves a fixed final discount after VAT with an immediate totals breakdown', async () => {
+    const pricedQuote = {
+      ...readyQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      subtotal: '100.00',
+      vat_total: '5.00',
+      total_before_discount: '105.00',
+      discount_amount: '5.00',
+      total: '100.00',
+      lines: [{
+        ...readyQuote.lines[0],
+        quantity: '2.000',
+        unit_price: '50.00',
+        vat_rate: '5.00',
+      }],
+    };
+    const savedQuote = {
+      ...pricedQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      discount_amount: '10.00',
+      total: '95.00',
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: pricedQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({
+      data: { quotation: savedQuote },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const discountInput = await screen.findByLabelText('Final discount (AED)');
+    expect(discountInput).toHaveValue(5);
+    expect(screen.getByText('Subtotal AED 100.00')).toBeInTheDocument();
+    expect(screen.getByText('VAT AED 5.00')).toBeInTheDocument();
+    expect(screen.getByText('Total before discount AED 105.00')).toBeInTheDocument();
+    expect(screen.getByText('Discount AED -5.00')).toBeInTheDocument();
+    expect(screen.getAllByText('Final total AED 100.00').length).toBeGreaterThan(0);
+
+    fireEvent.change(discountInput, { target: { value: '10.00' } });
+
+    expect(screen.getByText('Final discount is unsaved')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download Draft PDF' })).toBeDisabled();
+    expect(screen.getAllByText('Final total AED 95.00').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Save Quotation Changes' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      lines: [],
+      discount_amount: '10.00',
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+    }));
+    await waitFor(() => expect(discountInput).toHaveValue(10));
+    expect(screen.getByText('All line changes saved')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download Draft PDF' })).toBeEnabled();
+  });
+
+  test('matches backend per-line half-even money rounding and enforces the exact discount maximum', async () => {
+    const parityQuote = {
+      ...readyQuote,
+      subtotal: '1.10',
+      vat_total: '0.00',
+      total_before_discount: '1.10',
+      total: '1.10',
+      lines: [
+        {
+          ...readyQuote.lines[0],
+          id: 31,
+          quantity: '0.500',
+          unit_price: '2.010',
+          vat_rate: '0.00',
+        },
+        {
+          ...readyQuote.lines[0],
+          id: 32,
+          product: 12,
+          product_name: 'Gloves B',
+          item_name_snapshot: 'Imported gloves B',
+          quantity: '0.400',
+          unit_price: '0.250',
+          vat_rate: '5.00',
+        },
+      ],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: parityQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({
+      data: {
+        quotation: {
+          ...parityQuote,
+          quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+          discount_amount: '1.10',
+          total: '0.00',
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const discountInput = await screen.findByLabelText('Final discount (AED)');
+    expect(screen.getByText('Subtotal AED 1.10')).toBeInTheDocument();
+    expect(screen.getByText('VAT AED 0.00')).toBeInTheDocument();
+    expect(screen.getByText('Total before discount AED 1.10')).toBeInTheDocument();
+    expect(screen.getByText('AED 1.00')).toBeInTheDocument();
+    expect(screen.getByText('AED 0.10')).toBeInTheDocument();
+
+    fireEvent.change(discountInput, { target: { value: '1.11' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Final discount cannot exceed AED 1.10.');
+
+    fireEvent.change(discountInput, { target: { value: '1.10' } });
+    expect(screen.queryByText(/Final discount cannot exceed/)).not.toBeInTheDocument();
+    expect(screen.getAllByText('Final total AED 0.00').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Save Quotation Changes' }));
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      lines: [],
+      discount_amount: '1.10',
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+    }));
+  });
+
+  test('keeps live totals aligned for exponent and leading-decimal number input forms', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...readyQuote,
+        subtotal: '2.00',
+        vat_total: '0.05',
+        total: '2.05',
+        lines: [
+          {
+            ...readyQuote.lines[0],
+            id: 31,
+            quantity: '1e-2',
+            unit_price: '1e2',
+            vat_rate: '0',
+          },
+          {
+            ...readyQuote.lines[0],
+            id: 32,
+            product: 12,
+            product_name: 'Gloves B',
+            item_name_snapshot: 'Imported gloves B',
+            quantity: '.5',
+            unit_price: '2',
+            vat_rate: '5',
+          },
+        ],
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    expect(await screen.findByText('Subtotal AED 2.00')).toBeInTheDocument();
+    expect(screen.getByText('VAT AED 0.05')).toBeInTheDocument();
+    expect(screen.getByText('Total before discount AED 2.05')).toBeInTheDocument();
+    expect(screen.getAllByText('Final total AED 2.05').length).toBeGreaterThan(0);
+  });
+
+  test.each([
+    ['zero', '0.00', '10.00'],
+    ['positive', '2.00', '8.00'],
+  ])('keeps a %s saved discount read-only for a non-AED quotation', async (_label, discountAmount, total) => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...readyQuote,
+        currency: 'USD',
+        discount_amount: discountAmount,
+        total,
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const discountInput = await screen.findByLabelText('Final discount (USD)');
+    expect(discountInput).toHaveValue(Number(discountAmount));
+    expect(discountInput).toBeDisabled();
+    expect(discountInput).toHaveAccessibleDescription(
+      'Final discounts are available only for AED quotations. This saved value is read-only.'
+    );
+    if (Number(discountAmount) > 0) {
+      expect(screen.getByText(`Discount USD -${discountAmount}`)).toBeInTheDocument();
+    } else {
+      expect(screen.queryByText(/Discount USD -/)).not.toBeInTheDocument();
+    }
+  });
+
+  test('blocks saving, finalization, and email review for an invalid final discount', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText('Final discount (AED)'), {
+      target: { value: '10.01' },
+    });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Final discount cannot exceed AED 10.00.');
+    expect(screen.getByRole('button', { name: 'Save Quotation Changes' })).toBeDisabled();
+    screen.getAllByRole('button', { name: 'Finalize' }).forEach((button) => expect(button).toBeDisabled());
+    screen.getAllByRole('button', { name: 'Review Email' }).forEach((button) => expect(button).toBeDisabled());
+    expect(quotationAPI.quotes.bulkUpdateLines).not.toHaveBeenCalled();
+  });
+
+  test('uses the fingerprint returned by a terms save for the next email review', async () => {
+    const initialQuote = withGmailChainedActions(readyQuote);
+    const updatedQuote = {
+      ...initialQuote,
+      show_brand_column: true,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    };
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: initialQuote })
+      .mockResolvedValueOnce({ data: updatedQuote });
+    quotationAPI.quotes.update.mockResolvedValueOnce({ data: updatedQuote });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show Brand column' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Review Email' })[0]);
+
+    await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.update).toHaveBeenCalledWith(21, expect.objectContaining({
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+    }));
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+    expect(screen.queryByText(/changed in another session/i)).not.toBeInTheDocument();
+  });
+
+  test('keeps a newer discount edit unsaved when an older save response arrives', async () => {
+    const saveRequest = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockReturnValueOnce(saveRequest.promise);
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const discountInput = await screen.findByLabelText('Final discount (AED)');
+    fireEvent.change(discountInput, { target: { value: '2.00' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Quotation Changes' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1));
+    fireEvent.change(discountInput, { target: { value: '3.00' } });
+
+    await act(async () => {
+      saveRequest.resolve({
+        data: {
+          quotation: {
+            ...readyQuote,
+            quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+            discount_amount: '2.00',
+            total: '8.00',
+          },
+        },
+      });
+      await saveRequest.promise;
+    });
+
+    expect(discountInput).toHaveValue(3);
+    expect(screen.getByText('Final discount is unsaved')).toBeInTheDocument();
+    expect(screen.getByText('Saved the submitted changes; newer edits remain unsaved.')).toBeInTheDocument();
+  });
+
+  test('chained Review Email saves a discount-only change before previewing the returned fingerprint', async () => {
+    const initialQuote = withGmailChainedActions(readyQuote);
+    const savedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      discount_amount: '2.00',
+      total: '8.00',
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({
+      data: { quotation: savedQuote },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText('Final discount (AED)'), {
+      target: { value: '2.00' },
+    });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Review Email' })[0]);
+
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      discount_amount: '2.00',
+      lines: [],
+    }));
+    await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
+    expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+    });
+  });
+
+  test('keeps a local discount for review when its chained save detects a stale quotation', async () => {
+    const initialQuote = withGmailChainedActions(readyQuote);
+    const refreshedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      discount_amount: '1.00',
+      total: '9.00',
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: initialQuote });
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed in another session.',
+          quote: refreshedQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const discountInput = await screen.findByLabelText('Final discount (AED)');
+    fireEvent.change(discountInput, { target: { value: '2.00' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Review Email' })[0]);
+
+    expect(await screen.findByText('The quotation changed in another session.')).toBeInTheDocument();
+    expect(discountInput).toHaveValue(2);
+    expect(screen.getByText('Final discount is unsaved')).toBeInTheDocument();
+    expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
+  });
+
+  test('shows a saved final discount as read-only on a locked quotation', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({
+      data: {
+        ...readyQuote,
+        status: 'finalized',
+        status_display: 'Finalized',
+        discount_amount: '2.00',
+        total_before_discount: '10.00',
+        total: '8.00',
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    const discountInput = await screen.findByLabelText('Final discount (AED)');
+    expect(discountInput).toHaveValue(2);
+    expect(discountInput).toBeDisabled();
+    expect(screen.getByText('Discount AED -2.00')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Quotation Changes' })).not.toBeInTheDocument();
   });
 
   test('preserves an unsaved Brand layout choice when adding a line refreshes the quote', async () => {
@@ -548,6 +900,8 @@ describe('QuotationEditor Product price context', () => {
     fireEvent.click(within(row).getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      discount_amount: '0.00',
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       lines: [expect.objectContaining({
         id: 31,
         item_name_snapshot: 'Imported gloves',
@@ -583,6 +937,8 @@ describe('QuotationEditor Product price context', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save All Lines' }));
 
     await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      discount_amount: '0.00',
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       lines: [expect.objectContaining({
         id: 31,
         item_name_snapshot: editedSnapshot,
@@ -1135,6 +1491,7 @@ describe('QuotationEditor Product price context', () => {
 
     await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
       quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      discount_amount: '0.00',
       lines: [expect.objectContaining({
         id: 31,
         product: 11,
@@ -1215,7 +1572,7 @@ describe('QuotationEditor Product price context', () => {
       await previewRequest.promise;
     });
 
-    expect(await screen.findByText(/lines changed while the email review was being prepared/i)).toBeInTheDocument();
+    expect(await screen.findByText(/the quotation changed while the email review was being prepared/i)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument());
     expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
     expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
@@ -2255,6 +2612,8 @@ describe('QuotationEditor Product price context', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Use Gloves A/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
+      discount_amount: '0.00',
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       lines: [expect.objectContaining({
         id: 31,
         product: '11',
