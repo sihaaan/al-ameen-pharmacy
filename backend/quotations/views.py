@@ -509,6 +509,39 @@ def _recalculate_proforma_totals(proforma):
 class QuotationBaseViewSet:
     permission_classes = [IsQuotationStaff]
 
+    def serialize_locked_quotation_review(self, quotation):
+        """Materialize a complete quotation and review token under one lock."""
+
+        if not transaction.get_connection().in_atomic_block:
+            raise RuntimeError(
+                "Quotation review responses must be serialized inside a transaction."
+            )
+        quotation = _quotations_for_update().get(pk=quotation.pk)
+        lock_quotation_review_dependencies(quotation)
+        return QuotationSerializer(
+            quotation,
+            context=self.get_serializer_context(),
+        ).data
+
+    def quotation_review_error_response(self, exc, quotation):
+        """Return the latest complete review snapshot after a stale mutation."""
+
+        with transaction.atomic():
+            quote_payload = self.serialize_locked_quotation_review(quotation)
+        return Response(
+            {
+                "detail": exc.message,
+                "code": exc.code,
+                "quote_finalized": exc.quote_finalized,
+                "retryable": exc.retryable,
+                "refresh_preview": False,
+                "refresh_quote": exc.code == "stale_quotation_review",
+                "quote": quote_payload,
+                "delivery": None,
+            },
+            status=exc.http_status,
+        )
+
     def handle_workflow_error(self, exc):
         return Response(serializer_error_from_django_validation(exc), status=status.HTTP_400_BAD_REQUEST)
 
@@ -3544,8 +3577,9 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         return Response(payload)
 
     def _quotation_email_error_response(self, exc):
-        quotation = self.get_object()
-        quotation.refresh_from_db()
+        with transaction.atomic():
+            quotation = self.get_object()
+            quote_payload = self.serialize_locked_quotation_review(quotation)
         delivery_payload = (
             quotation_email_delivery_payload(exc.delivery)
             if exc.delivery is not None
@@ -3570,7 +3604,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     )
                 ),
                 "refresh_quote": exc.code == "stale_quotation_review",
-                "quote": self.get_serializer(quotation).data,
+                "quote": quote_payload,
                 "delivery": delivery_payload,
             },
             status=exc.http_status,
@@ -4515,20 +4549,48 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     def bulk_create_products_for_lines(self, request, pk=None):
         quotation = self.get_object()
         try:
-            line_ids = _request_int_list(request.data, "line_ids")
-            summary = bulk_create_products_from_quotation_lines(
-                quotation,
-                line_ids,
-                request.user,
-                names_by_id=request.data.get("names") or {},
-                confirm_create_line_ids=_request_int_list(request.data, "confirm_create_line_ids"),
-            )
+            with transaction.atomic():
+                quotation = _quotations_for_update().get(pk=quotation.pk)
+                has_review_fingerprint = (
+                    "quotation_review_fingerprint" in request.data
+                )
+                review_fingerprint = request.data.get(
+                    "quotation_review_fingerprint",
+                    "",
+                )
+                if has_review_fingerprint:
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
+                line_ids = _request_int_list(request.data, "line_ids")
+                summary = bulk_create_products_from_quotation_lines(
+                    quotation,
+                    line_ids,
+                    request.user,
+                    names_by_id=request.data.get("names") or {},
+                    confirm_create_line_ids=_request_int_list(
+                        request.data,
+                        "confirm_create_line_ids",
+                    ),
+                )
+                line_payload = QuotationLineSerializer(
+                    summary["updated_lines"],
+                    many=True,
+                    context={"request": request},
+                ).data
+                quotation_payload = self.serialize_locked_quotation_review(
+                    quotation
+                )
+        except QuotationEmailError as exc:
+            return self.quotation_review_error_response(exc, quotation)
         except Exception as exc:
             return self.handle_safe_workflow_exception(exc, "Create Products from quote lines failed. Check selected line IDs and Product names.")
-        line_serializer = QuotationLineSerializer(summary["updated_lines"], many=True, context={"request": request})
         return Response(
             {
-                "updated_lines": line_serializer.data,
+                "updated_lines": line_payload,
+                "quotation": quotation_payload,
                 "created_products": summary["created_products"],
                 "reused_products": summary["reused_products"],
                 "unique_products": summary["unique_products"],
@@ -5081,13 +5143,46 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def create_product(self, request, pk=None):
+        requested_line = self.get_object()
+        quotation = requested_line.quotation
         try:
-            line, resolution = create_product_from_quotation_line(
-                self.get_object(),
-                request.user,
-                product_name=request.data.get("product_name") or "",
-                confirm_create=str(request.data.get("confirm_create") or "").lower() in {"1", "true", "yes", "on"},
-            )
+            with transaction.atomic():
+                quotation = _quotations_for_update().get(
+                    pk=requested_line.quotation_id
+                )
+                has_review_fingerprint = (
+                    "quotation_review_fingerprint" in request.data
+                )
+                review_fingerprint = request.data.get(
+                    "quotation_review_fingerprint",
+                    "",
+                )
+                if has_review_fingerprint:
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
+                line, resolution = create_product_from_quotation_line(
+                    requested_line,
+                    request.user,
+                    product_name=request.data.get("product_name") or "",
+                    confirm_create=str(
+                        request.data.get("confirm_create") or ""
+                    ).lower()
+                    in {"1", "true", "yes", "on"},
+                )
+                line_payload = QuotationLineSerializer(
+                    line,
+                    context={"request": request},
+                ).data
+                quotation_payload = (
+                    None
+                    if resolution.requires_confirmation
+                    else self.serialize_locked_quotation_review(line.quotation)
+                )
+        except QuotationEmailError as exc:
+            return self.quotation_review_error_response(exc, quotation)
         except Exception as exc:
             return self.handle_safe_workflow_exception(exc, "Create Product from quote line failed. Check the Product name and line status.")
         if resolution.requires_confirmation:
@@ -5095,7 +5190,7 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 {
                     "detail": resolution.warning,
                     **resolution.as_dict(),
-                    "line": QuotationLineSerializer(line, context={"request": request}).data,
+                    "line": line_payload,
                 },
                 status=status.HTTP_409_CONFLICT,
             )
@@ -5103,7 +5198,8 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         created = resolution.created
         return Response(
             {
-                "line": QuotationLineSerializer(line, context={"request": request}).data,
+                "line": line_payload,
+                "quotation": quotation_payload,
                 "product": QuoteItemSerializer(product, context={"request": request}).data,
                 "created": created,
                 **resolution.as_dict(),
@@ -5119,9 +5215,23 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], parser_classes=[MultiPartParser, FormParser])
     def upload_product_image(self, request, pk=None):
         line = self.get_object()
+        quotation = line.quotation
         try:
             with transaction.atomic():
                 quotation = _quotations_for_update().get(pk=line.quotation_id)
+                has_review_fingerprint = (
+                    "quotation_review_fingerprint" in request.data
+                )
+                review_fingerprint = request.data.get(
+                    "quotation_review_fingerprint",
+                    "",
+                )
+                if has_review_fingerprint:
+                    lock_quotation_review_dependencies(quotation)
+                    require_current_quotation_review(
+                        quotation,
+                        review_fingerprint,
+                    )
                 ensure_quotation_editable(quotation)
                 line = (
                     _quotation_lines_for_update()
@@ -5164,13 +5274,23 @@ class QuotationLineViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     line,
                     message="Uploaded Product image from quotation line.",
                 )
+                line_payload = QuotationLineSerializer(
+                    line,
+                    context={"request": request},
+                ).data
+                quotation_payload = self.serialize_locked_quotation_review(
+                    quotation
+                )
         except (Quotation.DoesNotExist, QuotationLine.DoesNotExist) as exc:
             raise Http404 from exc
+        except QuotationEmailError as exc:
+            return self.quotation_review_error_response(exc, quotation)
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         return Response(
             {
-                "line": QuotationLineSerializer(line, context={"request": request}).data,
+                "line": line_payload,
+                "quotation": quotation_payload,
                 "image": {
                     "id": product_image.id,
                     "image_url": request.build_absolute_uri(product_image.image.url),

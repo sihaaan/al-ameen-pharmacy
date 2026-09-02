@@ -1121,16 +1121,22 @@ describe('QuotationEditor Product price context', () => {
       ...quote,
       show_brand_column: true,
     };
+    const linkedLine = {
+      ...quote.lines[0],
+      product: 13,
+      product_name: 'Imported gloves',
+      brand_name_snapshot: '',
+      match_status: 'confirmed',
+    };
     quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: quoteWithBrandColumn });
     quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({
       data: {
-        updated_lines: [{
-          ...quote.lines[0],
-          product: 13,
-          product_name: 'Imported gloves',
-          brand_name_snapshot: '',
-          match_status: 'confirmed',
-        }],
+        updated_lines: [linkedLine],
+        quotation: {
+          ...quoteWithBrandColumn,
+          quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+          lines: [linkedLine],
+        },
         confirmation_required: [],
         message: 'Created and linked one Product.',
       },
@@ -1148,6 +1154,41 @@ describe('QuotationEditor Product price context', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
     expect(screen.getByLabelText('Brand for Imported gloves')).toHaveValue('Customer Contract Brand');
     expect(within(brandInput.closest('tr')).getByText('Unsaved')).toBeInTheDocument();
+  });
+
+  test('closes a stale Product creation modal before refreshed decisions can be replayed', async () => {
+    const latestQuote = {
+      ...quote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...quote.lines[0],
+        item_name_snapshot: 'Product request changed in another session',
+      }],
+    };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: quote });
+    quotationAPI.quotes.bulkCreateProductsForLines.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed in another session.',
+          refresh_quote: true,
+          quote: latestQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create Products from quotation lines' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue('Product request changed in another session')).toBeInTheDocument();
+    expect(screen.getByText('The quotation changed in another session.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenCalledTimes(1);
   });
 
   test('disables Brand layout and line editing on a finalized quotation', async () => {
@@ -1213,7 +1254,7 @@ describe('QuotationEditor Product price context', () => {
     };
     const originalCreateObjectURL = window.URL.createObjectURL;
     const originalRevokeObjectURL = window.URL.revokeObjectURL;
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirmSpy = jest.spyOn(window, 'confirm');
     const anchorClickSpy = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     window.URL.createObjectURL = jest.fn(() => 'blob:finalized-quotation');
     window.URL.revokeObjectURL = jest.fn();
@@ -1236,13 +1277,112 @@ describe('QuotationEditor Product price context', () => {
       await waitFor(() => expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
         quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       }));
-      expect(confirmSpy).toHaveBeenCalledWith('Finalize this quotation without sending an email?');
+      expect(confirmSpy).not.toHaveBeenCalled();
       await waitFor(() => expect(quotationAPI.quotes.pdf).toHaveBeenCalledWith(21));
       expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
       expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
       expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
       expect(await screen.findByRole('button', { name: 'Email Quotation' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+      anchorClickSpy.mockRestore();
+      window.URL.createObjectURL = originalCreateObjectURL;
+      window.URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+  });
+
+  test('finalizes once with the fresh review token returned after bulk Product creation', async () => {
+    const secondLine = {
+      ...quote.lines[0],
+      id: 32,
+      product: 12,
+      product_name: 'Gloves B',
+      item_name_snapshot: 'Masks before concurrent edit',
+      unit_price: '20.00',
+      match_status: 'confirmed',
+    };
+    const initialQuote = withGmailChainedActions({
+      ...quote,
+      subtotal: '30.00',
+      vat_total: '0.00',
+      total_before_discount: '30.00',
+      total: '30.00',
+      lines: [{ ...quote.lines[0], unit_price: '10.00' }, secondLine],
+    });
+    const linkedLine = {
+      ...initialQuote.lines[0],
+      product: 13,
+      product_name: 'Imported gloves',
+      match_status: 'confirmed',
+    };
+    const remotelyUpdatedSecondLine = {
+      ...secondLine,
+      item_name_snapshot: 'Masks updated in another session',
+      unit_price: '25.00',
+    };
+    const linkedQuote = {
+      ...initialQuote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      payment_terms: 'credit_30_days',
+      discount_amount: '2.00',
+      subtotal: '35.00',
+      total_before_discount: '35.00',
+      total: '33.00',
+      lines: [linkedLine, remotelyUpdatedSecondLine],
+    };
+    const finalizedQuote = {
+      ...linkedQuote,
+      status: 'finalized',
+      status_display: 'Finalized',
+    };
+    const originalCreateObjectURL = window.URL.createObjectURL;
+    const originalRevokeObjectURL = window.URL.revokeObjectURL;
+    const confirmSpy = jest.spyOn(window, 'confirm');
+    const anchorClickSpy = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    window.URL.createObjectURL = jest.fn(() => 'blob:finalized-after-product-create');
+    window.URL.revokeObjectURL = jest.fn();
+    quotationAPI.quotes.retrieve
+      .mockReset()
+      .mockResolvedValueOnce({ data: initialQuote })
+      .mockResolvedValueOnce({ data: finalizedQuote });
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({
+      data: {
+        updated_lines: [linkedLine],
+        quotation: linkedQuote,
+        confirmation_required: [],
+        message: 'Created and linked one Product.',
+      },
+    });
+    quotationAPI.quotes.finalize.mockResolvedValueOnce({ data: finalizedQuote });
+
+    try {
+      render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Select visible unmatched' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+      const dialog = await screen.findByRole('dialog', { name: 'Create Products from quotation lines' });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+
+      expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenCalledWith(21, expect.objectContaining({
+        quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+      }));
+      expect(screen.getByDisplayValue('Masks updated in another session')).toBeInTheDocument();
+      expect(screen.getByLabelText('Payment terms')).toHaveValue('credit_30_days');
+      expect(screen.getByLabelText('Final discount (AED)')).toHaveValue(2);
+
+      const finalizeButtons = screen.getAllByRole('button', { name: 'Finalize' });
+      finalizeButtons.forEach((button) => expect(button).toBeEnabled());
+      fireEvent.click(finalizeButtons[0]);
+
+      await waitFor(() => expect(quotationAPI.quotes.finalize).toHaveBeenCalledTimes(1));
+      expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+        quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      });
+      expect(confirmSpy).not.toHaveBeenCalled();
+      await waitFor(() => expect(quotationAPI.quotes.pdf).toHaveBeenCalledWith(21));
+      expect(screen.queryByText(/changed in another session/i)).not.toBeInTheDocument();
     } finally {
       confirmSpy.mockRestore();
       anchorClickSpy.mockRestore();
@@ -1260,7 +1400,7 @@ describe('QuotationEditor Product price context', () => {
         item_name_snapshot: 'Gloves changed by another employee',
       }],
     });
-    const confirmSpy = jest.spyOn(window, 'confirm').mockReturnValue(true);
+    const confirmSpy = jest.spyOn(window, 'confirm');
     quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withGmailChainedActions() });
     quotationAPI.quotes.finalize.mockRejectedValueOnce({
       response: {
@@ -1288,6 +1428,7 @@ describe('QuotationEditor Product price context', () => {
       expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
       expect(quotationAPI.quotes.finalizeAndSend).not.toHaveBeenCalled();
       expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
+      expect(confirmSpy).not.toHaveBeenCalled();
     } finally {
       confirmSpy.mockRestore();
     }
@@ -2570,6 +2711,7 @@ describe('QuotationEditor Product price context', () => {
       line_ids: [31],
       names: { 31: 'Imported gloves' },
       confirm_create_line_ids: [31],
+      quotation_review_fingerprint: 'quotation-review-fingerprint-1',
     }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
   });
@@ -2624,6 +2766,54 @@ describe('QuotationEditor Product price context', () => {
     expect(quotationAPI.lines.rememberAlias).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
     expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
+  });
+
+  test('closes a stale suggested-Product modal before its candidate can be replayed', async () => {
+    const latestQuote = {
+      ...quote,
+      quotation_review_fingerprint: 'quotation-review-fingerprint-2',
+      lines: [{
+        ...quote.lines[0],
+        item_name_snapshot: 'Candidate request changed in another session',
+      }],
+    };
+    quotationAPI.lines.createProduct.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          detail: 'A similar Product exists.',
+          warning: 'A similar Product exists.',
+          requires_confirmation: true,
+          creation_blocked: false,
+          candidates: [{
+            product_id: 11,
+            product_name: 'Gloves A',
+            confidence: 0.92,
+            pack_size: 'box',
+          }],
+        },
+      },
+    });
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          code: 'stale_quotation_review',
+          detail: 'The quotation changed in another session.',
+          refresh_quote: true,
+          quote: latestQuote,
+        },
+      },
+    });
+
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Use Gloves A/i }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue('Candidate request changed in another session')).toBeInTheDocument();
+    expect(screen.getByText('The quotation changed in another session.')).toBeInTheDocument();
+    expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1);
   });
 
   test('shows bulk Product creation errors inside the open modal', async () => {
