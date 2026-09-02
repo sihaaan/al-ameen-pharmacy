@@ -2517,6 +2517,9 @@ class QuotationWorkflowTests(APITestCase):
     def test_quotation_line_can_upload_and_include_product_image(self):
         quotation = self.create_quote()
         line = self.create_valid_line(quotation)
+        before_upload = self.client.get(
+            reverse("quotation-detail", args=[quotation.id])
+        )
         storage_settings = {
             "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
             "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
@@ -2525,7 +2528,12 @@ class QuotationWorkflowTests(APITestCase):
             with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
                 response = self.client.post(
                     reverse("quotation-line-upload-product-image", args=[line.id]),
-                    {"image": make_png_upload("bandage.png")},
+                    {
+                        "image": make_png_upload("bandage.png"),
+                        "quotation_review_fingerprint": before_upload.data[
+                            "quotation_review_fingerprint"
+                        ],
+                    },
                     format="multipart",
                 )
 
@@ -2535,6 +2543,15 @@ class QuotationWorkflowTests(APITestCase):
                 self.assertIsNotNone(line.product_image)
                 self.assertEqual(line.product_image.product, self.product)
                 self.assertEqual(ProductImage.objects.filter(product=self.product).count(), 1)
+                self.assertEqual(response.data["quotation"]["id"], quotation.id)
+                self.assertNotEqual(
+                    response.data["quotation"]["quotation_review_fingerprint"],
+                    before_upload.data["quotation_review_fingerprint"],
+                )
+                self.assertEqual(
+                    response.data["quotation"]["lines"][0]["product_image"],
+                    line.product_image_id,
+                )
 
                 pdf_response = self.client.get(reverse("quotation-pdf", args=[quotation.id]))
                 self.assertEqual(pdf_response.status_code, status.HTTP_200_OK)
@@ -2632,10 +2649,19 @@ class QuotationWorkflowTests(APITestCase):
             unit_price=Decimal("3.00"),
             match_status=QuotationLine.MATCH_UNRESOLVED,
         )
+        before_create = self.client.get(
+            reverse("quotation-detail", args=[quotation.id])
+        )
 
         response = self.client.post(
             reverse("quotation-bulk-create-products-for-lines", args=[quotation.id]),
-            {"line_ids": [first.id, second.id], "names": {str(first.id): "ENO", str(second.id): "ENO"}},
+            {
+                "line_ids": [first.id, second.id],
+                "names": {str(first.id): "ENO", str(second.id): "ENO"},
+                "quotation_review_fingerprint": before_create.data[
+                    "quotation_review_fingerprint"
+                ],
+            },
             format="json",
         )
 
@@ -2647,6 +2673,23 @@ class QuotationWorkflowTests(APITestCase):
         self.assertEqual(first.product, product)
         self.assertEqual(second.product, product)
         self.assertEqual(response.data["unique_products"], 1)
+        self.assertEqual(response.data["quotation"]["id"], quotation.id)
+        self.assertNotEqual(
+            response.data["quotation"]["quotation_review_fingerprint"],
+            before_create.data["quotation_review_fingerprint"],
+        )
+
+        finalized = self.client.post(
+            reverse("quotation-finalize", args=[quotation.id]),
+            {
+                "quotation_review_fingerprint": response.data["quotation"][
+                    "quotation_review_fingerprint"
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(finalized.status_code, status.HTTP_200_OK)
+        self.assertEqual(finalized.data["status"], Quotation.STATUS_FINALIZED)
 
     def test_create_product_reuses_same_slug_product_instead_of_duplicate(self):
         quotation = self.create_quote()
@@ -2665,14 +2708,136 @@ class QuotationWorkflowTests(APITestCase):
             unit_price=Decimal("2.75"),
             match_status=QuotationLine.MATCH_UNRESOLVED,
         )
+        before_create = self.client.get(
+            reverse("quotation-detail", args=[quotation.id])
+        )
 
-        response = self.client.post(reverse("quotation-line-create-product", args=[line.id]), format="json")
+        response = self.client.post(
+            reverse("quotation-line-create-product", args=[line.id]),
+            {
+                "quotation_review_fingerprint": before_create.data[
+                    "quotation_review_fingerprint"
+                ]
+            },
+            format="json",
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         line.refresh_from_db()
         self.assertEqual(line.product, existing)
         self.assertEqual(line.brand_name_snapshot, "Linked Product Brand")
         self.assertEqual(Product.objects.filter(name__icontains="Alcohol Detector").count(), 1)
+        self.assertEqual(response.data["quotation"]["id"], quotation.id)
+        self.assertNotEqual(
+            response.data["quotation"]["quotation_review_fingerprint"],
+            before_create.data["quotation_review_fingerprint"],
+        )
+
+    def test_product_creation_actions_reject_stale_review_without_mutating(self):
+        quotation = self.create_quote()
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="STALE PRODUCT REQUEST",
+            quantity=Decimal("1.000"),
+            unit="PCS",
+            unit_price=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+        reviewed = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        stale_token = reviewed.data["quotation_review_fingerprint"]
+        Quotation.objects.filter(pk=quotation.pk).update(
+            payment_terms=Quotation.PAYMENT_CREDIT_30
+        )
+
+        create_response = self.client.post(
+            reverse("quotation-line-create-product", args=[line.id]),
+            {
+                "product_name": "Stale Product Request",
+                "quotation_review_fingerprint": stale_token,
+            },
+            format="json",
+        )
+        bulk_response = self.client.post(
+            reverse("quotation-bulk-create-products-for-lines", args=[quotation.id]),
+            {
+                "line_ids": [line.id],
+                "names": {str(line.id): "Stale Product Request"},
+                "quotation_review_fingerprint": stale_token,
+            },
+            format="json",
+        )
+
+        for response in (create_response, bulk_response):
+            self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(response.data["code"], "stale_quotation_review")
+            self.assertTrue(response.data["refresh_quote"])
+            self.assertEqual(response.data["quote"]["payment_terms"], Quotation.PAYMENT_CREDIT_30)
+        line.refresh_from_db()
+        self.assertIsNone(line.product_id)
+        self.assertFalse(Product.objects.filter(name="Stale Product Request").exists())
+
+    def test_product_creation_rejects_explicit_empty_review_token(self):
+        quotation = self.create_quote()
+        line = QuotationLine.objects.create(
+            quotation=quotation,
+            item_name_snapshot="MISSING REVIEW TOKEN PRODUCT",
+            quantity=Decimal("1.000"),
+            unit="PCS",
+            unit_price=Decimal("5.00"),
+            match_status=QuotationLine.MATCH_UNRESOLVED,
+        )
+
+        response = self.client.post(
+            reverse("quotation-line-create-product", args=[line.id]),
+            {
+                "product_name": "Missing Review Token Product",
+                "quotation_review_fingerprint": "",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "quotation_review_required")
+        line.refresh_from_db()
+        self.assertIsNone(line.product_id)
+        self.assertFalse(
+            Product.objects.filter(name="Missing Review Token Product").exists()
+        )
+
+    def test_product_image_upload_rejects_stale_review_without_storing_image(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        reviewed = self.client.get(reverse("quotation-detail", args=[quotation.id]))
+        stale_token = reviewed.data["quotation_review_fingerprint"]
+        QuotationLine.objects.filter(pk=line.pk).update(
+            item_name_snapshot="Changed in another session"
+        )
+        storage_settings = {
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root, STORAGES=storage_settings):
+                response = self.client.post(
+                    reverse("quotation-line-upload-product-image", args=[line.id]),
+                    {
+                        "image": make_png_upload("stale-bandage.png"),
+                        "quotation_review_fingerprint": stale_token,
+                    },
+                    format="multipart",
+                )
+
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.data["code"], "stale_quotation_review")
+        self.assertEqual(
+            response.data["quote"]["lines"][0]["item_name_snapshot"],
+            "Changed in another session",
+        )
+        self.assertFalse(ProductImage.objects.filter(product=self.product).exists())
+        line.refresh_from_db()
+        self.assertIsNone(line.product_image_id)
+        self.assertFalse(line.include_product_image)
 
     def test_bulk_create_products_returns_json_error_for_invalid_selection(self):
         quotation = self.create_quote()

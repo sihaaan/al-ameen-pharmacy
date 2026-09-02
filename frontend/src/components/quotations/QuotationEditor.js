@@ -138,6 +138,19 @@ const normalizeDraft = (draft = {}) => ({
 
 const draftsMatch = (left, right) => JSON.stringify(normalizeDraft(left)) === JSON.stringify(normalizeDraft(right));
 
+const mergeUnsavedLineDraft = (authoritativeDraft, currentDraft, savedDraft) => {
+  if (!currentDraft || !savedDraft) return authoritativeDraft;
+  const currentNormalized = normalizeDraft(currentDraft);
+  const savedNormalized = normalizeDraft(savedDraft);
+  const merged = { ...authoritativeDraft };
+  Object.keys(currentNormalized).forEach((field) => {
+    if (currentNormalized[field] !== savedNormalized[field]) {
+      merged[field] = currentDraft[field];
+    }
+  });
+  return merged;
+};
+
 const snapshotLineDrafts = (sourceQuote = {}, drafts = {}) => Object.fromEntries(
   (sourceQuote.lines || []).map((line) => [line.id, normalizeDraft(drafts[line.id])])
 );
@@ -478,6 +491,7 @@ const QuotationEditor = ({
   const initialPriceFocusQuoteRef = useRef('');
   const quoteRef = useRef(null);
   const quotePartyDraftRef = useRef(quotePartyDraft);
+  const savedQuotePartyDraftRef = useRef(savedQuotePartyDraft);
   const quoteTermsDraftRef = useRef(quoteTermsDraft);
   const savedQuoteTermsDraftRef = useRef(savedQuoteTermsDraft);
   const discountDraftRef = useRef(discountDraft);
@@ -485,6 +499,7 @@ const QuotationEditor = ({
   const lineDraftsRef = useRef(lineDrafts);
   const savedLineDraftsRef = useRef(savedLineDrafts);
   quotePartyDraftRef.current = quotePartyDraft;
+  savedQuotePartyDraftRef.current = savedQuotePartyDraft;
   quoteTermsDraftRef.current = quoteTermsDraft;
   savedQuoteTermsDraftRef.current = savedQuoteTermsDraft;
   discountDraftRef.current = discountDraft;
@@ -494,10 +509,10 @@ const QuotationEditor = ({
 
   const setLoadedQuote = useCallback((quoteData) => {
     const isSameQuote = String(quoteRef.current?.id || '') === String(quoteData?.id || '');
-    const preserveTermsDraft = isSameQuote && !termsDraftsMatch(
-      quoteTermsDraftRef.current,
-      savedQuoteTermsDraftRef.current,
-    );
+    const currentPartyDraft = quotePartyDraftRef.current;
+    const previousSavedPartyDraft = savedQuotePartyDraftRef.current;
+    const currentTermsDraft = quoteTermsDraftRef.current;
+    const previousSavedTermsDraft = savedQuoteTermsDraftRef.current;
     const preserveDiscountDraft = isSameQuote && !discountDraftsMatch(
       discountDraftRef.current,
       savedDiscountDraftRef.current,
@@ -505,11 +520,34 @@ const QuotationEditor = ({
     quoteRef.current = quoteData;
     setQuote(quoteData);
     const nextPartyDraft = partyDraftFromQuote(quoteData);
-    quotePartyDraftRef.current = nextPartyDraft;
-    setQuotePartyDraft(nextPartyDraft);
+    const displayedPartyDraft = isSameQuote
+      ? {
+        company: String(currentPartyDraft.company || '') !== String(previousSavedPartyDraft.company || '')
+          ? currentPartyDraft.company
+          : nextPartyDraft.company,
+        contact: String(currentPartyDraft.contact || '') !== String(previousSavedPartyDraft.contact || '')
+          ? currentPartyDraft.contact
+          : nextPartyDraft.contact,
+      }
+      : nextPartyDraft;
+    quotePartyDraftRef.current = displayedPartyDraft;
+    savedQuotePartyDraftRef.current = nextPartyDraft;
+    setQuotePartyDraft(displayedPartyDraft);
     setSavedQuotePartyDraft(nextPartyDraft);
     const nextTermsDraft = termsDraftFromQuote(quoteData);
-    const displayedTermsDraft = preserveTermsDraft ? quoteTermsDraftRef.current : nextTermsDraft;
+    const displayedTermsDraft = isSameQuote
+      ? {
+        payment_terms: String(currentTermsDraft.payment_terms || '') !== String(previousSavedTermsDraft.payment_terms || '')
+          ? currentTermsDraft.payment_terms
+          : nextTermsDraft.payment_terms,
+        valid_until: String(currentTermsDraft.valid_until || '') !== String(previousSavedTermsDraft.valid_until || '')
+          ? currentTermsDraft.valid_until
+          : nextTermsDraft.valid_until,
+        show_brand_column: !!currentTermsDraft.show_brand_column !== !!previousSavedTermsDraft.show_brand_column
+          ? currentTermsDraft.show_brand_column
+          : nextTermsDraft.show_brand_column,
+      }
+      : nextTermsDraft;
     quoteTermsDraftRef.current = displayedTermsDraft;
     savedQuoteTermsDraftRef.current = nextTermsDraft;
     setQuoteTermsDraft(displayedTermsDraft);
@@ -530,7 +568,12 @@ const QuotationEditor = ({
         && currentDraft
         && previousSavedDraft
         && !draftsMatch(currentDraft, previousSavedDraft);
-      return [line.id, preserveCurrentDraft ? currentDraft : savedDrafts[line.id]];
+      return [
+        line.id,
+        preserveCurrentDraft
+          ? mergeUnsavedLineDraft(savedDrafts[line.id], currentDraft, previousSavedDraft)
+          : savedDrafts[line.id],
+      ];
     }));
     lineDraftsRef.current = displayedDrafts;
     savedLineDraftsRef.current = savedDrafts;
@@ -1774,6 +1817,7 @@ const QuotationEditor = ({
 
   const confirmCreateProducts = async (forceCreate = false) => {
     if (!productCreateModal || saving || actionInFlight) return;
+    const currentQuote = quoteRef.current || quote;
     setSaving(true);
     setErrorInfo(null);
     setProductCreateError(null);
@@ -1788,10 +1832,11 @@ const QuotationEditor = ({
             return warning && !warning.creation_blocked;
           })
           : [],
+        quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
       const updatedLines = response.data.updated_lines || [];
       const confirmationRequired = response.data.confirmation_required || [];
-      applyUpdatedLines(updatedLines);
+      applyUpdatedLines(updatedLines, response.data.quotation);
       setItems((current) => {
         const additions = updatedLines
           .filter((line) => line.product && line.product_name)
@@ -1822,6 +1867,10 @@ const QuotationEditor = ({
         setLineFeedback({ type: 'success', message: response.data.message || 'Products created/linked.' });
       }
     } catch (error) {
+      if (replaceStaleQuotationReview(error)) {
+        closeCreateProductModal();
+        return;
+      }
       const details = await describeQuotationError(error, 'Create Products from quote lines', `POST /quotations/quotes/${quote.id}/bulk_create_products_for_lines/`);
       setProductCreateError(details);
       console.error(formatQuotationError(details), error);
@@ -1888,7 +1937,10 @@ const QuotationEditor = ({
       setSelectedLineIds((current) => current.filter((id) => id !== lineId));
       setLineFeedback({ type: 'success', message: `Linked the row to existing Product '${candidate.product_name}'.` });
     } catch (error) {
-      if (replaceStaleQuotationReview(error)) return;
+      if (replaceStaleQuotationReview(error)) {
+        closeCreateProductModal();
+        return;
+      }
       const details = await describeQuotationError(error, 'Link existing Product to quote line', `POST /quotations/quotes/${quote.id}/bulk_update_lines/`);
       setProductCreateError(details);
       console.error(formatQuotationError(details), error);
@@ -1897,36 +1949,38 @@ const QuotationEditor = ({
     }
   };
 
-  const applyUpdatedLines = (updatedLines = []) => {
+  const applyUpdatedLines = (updatedLines = [], authoritativeQuote = null) => {
+    if (authoritativeQuote?.id) {
+      setLoadedQuote(authoritativeQuote);
+      return;
+    }
     const updatedById = Object.fromEntries(updatedLines.map((line) => [line.id, line]));
-    setQuote((current) => ({
-      ...current,
-      lines: (current.lines || []).map((line) => updatedById[line.id] || line),
-    }));
-    setLineDrafts((current) => ({
-      ...current,
-      ...Object.fromEntries(updatedLines.map((line) => {
-        const nextDraft = draftFromLine(line);
-        const currentDraft = current[line.id] || {};
-        const savedDraft = savedLineDrafts[line.id] || {};
-        return [line.id, {
-          ...nextDraft,
-          quantity: currentDraft.quantity !== savedDraft.quantity ? currentDraft.quantity : nextDraft.quantity,
-          unit: currentDraft.unit !== savedDraft.unit ? currentDraft.unit : nextDraft.unit,
-          unit_price: currentDraft.unit_price !== savedDraft.unit_price ? currentDraft.unit_price : nextDraft.unit_price,
-          vat_rate: currentDraft.vat_rate !== savedDraft.vat_rate ? currentDraft.vat_rate : nextDraft.vat_rate,
-          brand_name_snapshot: currentDraft.brand_name_snapshot !== savedDraft.brand_name_snapshot
-            ? currentDraft.brand_name_snapshot
-            : nextDraft.brand_name_snapshot,
-          description: currentDraft.description !== savedDraft.description ? currentDraft.description : nextDraft.description,
-          notes: currentDraft.notes !== savedDraft.notes ? currentDraft.notes : nextDraft.notes,
-        }];
-      })),
-    }));
-    setSavedLineDrafts((current) => ({
-      ...current,
-      ...Object.fromEntries(updatedLines.map((line) => [line.id, draftFromLine(line)])),
-    }));
+    const currentQuote = quoteRef.current || quote || {};
+    const currentDrafts = lineDraftsRef.current || {};
+    const currentSavedDrafts = savedLineDraftsRef.current || {};
+    const nextDrafts = { ...currentDrafts };
+    const nextSavedDrafts = { ...currentSavedDrafts };
+    updatedLines.forEach((line) => {
+      const nextDraft = draftFromLine(line);
+      const currentDraft = currentDrafts[line.id] || {};
+      const savedDraft = currentSavedDrafts[line.id] || {};
+      nextDrafts[line.id] = mergeUnsavedLineDraft(nextDraft, currentDraft, savedDraft);
+      nextSavedDrafts[line.id] = nextDraft;
+    });
+    const nextQuote = {
+      ...currentQuote,
+      // A partial legacy response cannot provide a current review token.
+      // Fail closed until the editor is reloaded instead of submitting a
+      // fingerprint that predates this line mutation.
+      quotation_review_fingerprint: '',
+      lines: (currentQuote.lines || []).map((line) => updatedById[line.id] || line),
+    };
+    quoteRef.current = nextQuote;
+    lineDraftsRef.current = nextDrafts;
+    savedLineDraftsRef.current = nextSavedDrafts;
+    setQuote(nextQuote);
+    setLineDrafts(nextDrafts);
+    setSavedLineDrafts(nextSavedDrafts);
   };
 
   const rememberProductsInList = (products = []) => {
@@ -1947,12 +2001,16 @@ const QuotationEditor = ({
     setLineFeedback(null);
     try {
       const draft = lineDrafts[lineId] || {};
-      const response = await quotationAPI.lines.createProduct(lineId, { product_name: draft.item_name_snapshot || '' });
-      applyUpdatedLines([response.data.line]);
+      const response = await quotationAPI.lines.createProduct(lineId, {
+        product_name: draft.item_name_snapshot || '',
+        quotation_review_fingerprint: quoteRef.current?.quotation_review_fingerprint || '',
+      });
+      applyUpdatedLines([response.data.line], response.data.quotation);
       rememberProductsInList([response.data.product]);
       setSelectedLineIds((current) => current.filter((id) => id !== lineId));
       setLineFeedback({ type: 'success', message: response.data.message || 'Created Product and linked row.' });
     } catch (error) {
+      if (replaceStaleQuotationReview(error)) return;
       const warning = error?.response?.data;
       if (error?.response?.status === 409 && warning?.requires_confirmation) {
         const draft = lineDrafts[lineId] || {};
@@ -1987,11 +2045,16 @@ const QuotationEditor = ({
     setLineFeedback(null);
     const formData = new FormData();
     formData.append('image', file);
+    formData.append(
+      'quotation_review_fingerprint',
+      quoteRef.current?.quotation_review_fingerprint || '',
+    );
     try {
       const response = await quotationAPI.lines.uploadProductImage(lineId, formData);
-      applyUpdatedLines([response.data.line]);
+      applyUpdatedLines([response.data.line], response.data.quotation);
       setLineFeedback({ type: 'success', message: response.data.message || 'Image saved for this Product.' });
     } catch (error) {
+      if (replaceStaleQuotationReview(error)) return;
       const details = await describeQuotationError(error, 'Upload quotation line image', `POST /quotations/quote-lines/${lineId}/upload_product_image/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -2676,10 +2739,6 @@ const QuotationEditor = ({
   const runAction = async (label, action) => {
     if (saving || actionInFlight) return;
     if (label === 'Finalize' && finalizeIssues.length > 0) return;
-    if (
-      label === 'Finalize'
-      && !window.confirm('Finalize this quotation without sending an email?')
-    ) return;
     if (label === 'Cancel' && !window.confirm('Cancel this quotation?')) return;
     setSaving(true);
     setActionInFlight(label);

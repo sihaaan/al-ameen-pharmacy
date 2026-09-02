@@ -825,6 +825,204 @@ class QuotationConcurrencyTests(TransactionTestCase):
         self.assertEqual(stale.status_code, status.HTTP_409_CONFLICT, stale.data)
         self.assertEqual(stale.data["code"], "stale_quotation_review")
 
+    def test_product_create_rejects_review_that_changes_while_waiting_for_lock(self):
+        quotation, line = self.create_quote()
+        line.product = None
+        line.match_status = QuotationLine.MATCH_UNRESOLVED
+        line.item_name_snapshot = "Concurrent new product"
+        line.save(
+            update_fields=["product", "match_status", "item_name_snapshot", "updated_at"]
+        )
+        initial_client = APIClient()
+        initial_client.force_authenticate(self.staff)
+        initial = initial_client.get(reverse("quotation-detail", args=[quotation.pk]))
+        self.assertEqual(initial.status_code, status.HTTP_200_OK, initial.data)
+        starting_fingerprint = initial.data["quotation_review_fingerprint"]
+        product_count_before = Product.objects.count()
+
+        mutation_locked = Event()
+        release_mutation = Event()
+        results = Queue()
+
+        def mutate_terms():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    locked_quote = Quotation.objects.select_for_update().get(
+                        pk=quotation.pk
+                    )
+                    locked_quote.payment_terms = Quotation.PAYMENT_CREDIT_30
+                    locked_quote.save(update_fields=["payment_terms", "updated_at"])
+                    mutation_locked.set()
+                    if not release_mutation.wait(timeout=10):
+                        raise AssertionError("Timed out waiting to release quotation mutation.")
+                results.put(("mutation", "updated"))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("mutation", "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        mutation_worker = Thread(target=mutate_terms, daemon=True)
+        create_worker = Thread(
+            target=self._api_worker,
+            args=(
+                results,
+                "create",
+                "post",
+                reverse("quotation-line-create-product", args=[line.pk]),
+                {
+                    "product_name": "Concurrent new product",
+                    "quotation_review_fingerprint": starting_fingerprint,
+                },
+            ),
+            daemon=True,
+        )
+        try:
+            mutation_worker.start()
+            self.assertTrue(mutation_locked.wait(timeout=10))
+            create_worker.start()
+            self.assertEqual(
+                results.qsize(),
+                0,
+                "Product creation returned before the quotation mutation committed.",
+            )
+        finally:
+            release_mutation.set()
+            mutation_worker.join(timeout=10)
+            if create_worker.ident is not None:
+                create_worker.join(timeout=10)
+
+        self.assertFalse(mutation_worker.is_alive() or create_worker.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        self.assertIn(("mutation", "updated"), outcomes)
+        self.assertIn(
+            (
+                "create",
+                "response",
+                status.HTTP_409_CONFLICT,
+                "stale_quotation_review",
+            ),
+            outcomes,
+        )
+        line.refresh_from_db()
+        self.assertIsNone(line.product_id)
+        self.assertEqual(Product.objects.count(), product_count_before)
+
+    def test_stale_finalize_error_quote_and_token_are_one_locked_snapshot(self):
+        quotation, line = self.create_quote()
+        initial_client = APIClient()
+        initial_client.force_authenticate(self.staff)
+        initial = initial_client.get(reverse("quotation-detail", args=[quotation.pk]))
+        self.assertEqual(initial.status_code, status.HTTP_200_OK, initial.data)
+        stale_fingerprint = initial.data["quotation_review_fingerprint"]
+        Quotation.objects.filter(pk=quotation.pk).update(
+            payment_terms=Quotation.PAYMENT_CREDIT_30
+        )
+
+        fingerprint_started = Event()
+        release_response = Event()
+        mutation_finished = Event()
+        results = Queue()
+        original_fingerprint = QuotationSerializer.get_quotation_review_fingerprint
+
+        def paused_fingerprint(serializer, instance):
+            if current_thread().name == "stale-finalize-response":
+                fingerprint_started.set()
+                if not release_response.wait(timeout=10):
+                    raise AssertionError("Timed out waiting to release stale response.")
+            return original_fingerprint(serializer, instance)
+
+        def finalize_stale_review():
+            close_old_connections()
+            try:
+                staff = User.objects.get(pk=self.staff.pk)
+                client = APIClient()
+                client.force_authenticate(staff)
+                response = client.post(
+                    reverse("quotation-finalize", args=[quotation.pk]),
+                    {"quotation_review_fingerprint": stale_fingerprint},
+                    format="json",
+                )
+                results.put(("finalize", response.status_code, response.data))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("finalize", "error", repr(exc)))
+            finally:
+                connections.close_all()
+
+        def mutate_line():
+            close_old_connections()
+            try:
+                QuotationLine.objects.filter(pk=line.pk).update(
+                    item_name_snapshot="Changed after stale response snapshot"
+                )
+                results.put(("line", "updated"))
+            except Exception as exc:  # pragma: no cover - PostgreSQL diagnostic
+                results.put(("line", "error", repr(exc)))
+            finally:
+                mutation_finished.set()
+                connections.close_all()
+
+        finalize_worker = Thread(
+            target=finalize_stale_review,
+            name="stale-finalize-response",
+            daemon=True,
+        )
+        mutation_worker = Thread(target=mutate_line, daemon=True)
+        with patch.object(
+            QuotationSerializer,
+            "get_quotation_review_fingerprint",
+            paused_fingerprint,
+        ):
+            try:
+                finalize_worker.start()
+                self.assertTrue(fingerprint_started.wait(timeout=10))
+                mutation_worker.start()
+                self.assertFalse(
+                    mutation_finished.wait(timeout=1),
+                    "A quotation line changed while the stale response was serialized.",
+                )
+            finally:
+                release_response.set()
+                finalize_worker.join(timeout=10)
+                if mutation_worker.ident is not None:
+                    mutation_worker.join(timeout=10)
+
+        self.assertFalse(finalize_worker.is_alive() or mutation_worker.is_alive())
+        self.assertEqual(results.qsize(), 2)
+        outcomes = [results.get_nowait() for _ in range(2)]
+        self.assertFalse(
+            [outcome for outcome in outcomes if outcome[1] == "error"],
+            outcomes,
+        )
+        finalize_outcome = next(row for row in outcomes if row[0] == "finalize")
+        self.assertEqual(finalize_outcome[1], status.HTTP_409_CONFLICT)
+        response_payload = finalize_outcome[2]
+        self.assertEqual(response_payload["code"], "stale_quotation_review")
+        self.assertEqual(
+            response_payload["quote"]["lines"][0]["item_name_snapshot"],
+            self.product.name,
+        )
+        self.assertTrue(response_payload["quote"]["quotation_review_fingerprint"])
+        self.assertIn(("line", "updated"), outcomes)
+
+        preview_client = APIClient()
+        preview_client.force_authenticate(self.staff)
+        stale_again = preview_client.get(
+            reverse("quotation-email-preview", args=[quotation.pk]),
+            {
+                "quotation_review_fingerprint": response_payload["quote"][
+                    "quotation_review_fingerprint"
+                ]
+            },
+        )
+        self.assertEqual(stale_again.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(stale_again.data["code"], "stale_quotation_review")
+
     @override_settings(
         QUOTATION_GMAIL_REVIEW_UI_V2_ENABLED=True,
         QUOTATION_GMAIL_CHAINED_ACTIONS_ENABLED=True,
