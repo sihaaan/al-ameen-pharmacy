@@ -14,9 +14,11 @@ If 10 units were issued and the customer received 6, the remaining 4 become avai
 
 ### Approve an uploaded LPO and prepare a DO
 
-In **Review Outcome → PO Assistant**, upload a PDF or Excel LPO, or paste its text. **Parse PO** uses AI cleanup when available and stages suggested matches for review. Parsing does not save acceptance or issue a delivery note. Review which quoted items were ordered and edit their accepted quantities, prices and outcomes.
+The **Review Outcome** action opens **Review customer order**, arranged in three steps: choose the LPO, review the items, and approve the order. Upload a PDF or Excel LPO, paste its text, expand the Gmail suggestions, or choose **Enter order manually**. **Read LPO & review items** uses AI cleanup when available and stages suggested matches for review. Parsing does not save acceptance or issue a delivery note. Search the item list or filter **Needs review**, then edit the accepted quantities, prices, decisions and optional item notes. Filtering does not discard edits.
 
 Choose **Approve & prepare DO** to save those decisions and open a delivery draft containing the quantities still available to deliver. Edit this delivery's quantities or remove items before issuing it. For example, approve an LPO for 10 boxes and issue a DO for 6: the accepted order remains 10, with 4 left for a later delivery. Approval saves first; if preparing the draft fails, the UI explains that acceptance was saved and lets staff retry.
+
+**Save review** saves decisions without preparing a delivery note. Follow-up fields and saved results are in an optional expandable section. Review links retain the selected quotation and review page when refreshed; refresh does not save unsaved edits.
 
 This approval is the staff member's confirmation that the customer accepted the selected items. Creating or downloading an unapproved draft alone does not establish acceptance. Issuing a DO means those accepted quantities are being dispatched; only confirming receipt completes delivery. New or replacement products that were not quoted need review in the quotation workflow before they can be included in a linked DO; the AI does not rewrite the sent quotation.
 

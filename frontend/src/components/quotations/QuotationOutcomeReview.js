@@ -898,6 +898,18 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
   const [notice, setNotice] = useState(null);
   const [errorInfo, setErrorInfo] = useState(null);
   const lineOutcomesRef = useRef(null);
+  const sourceRef = useRef(null);
+  const approvalRef = useRef(null);
+  const gmailSourceRef = useRef(null);
+  const uploadRef = useRef(null);
+  const [reviewStep, setReviewStep] = useState('source');
+  const [itemSearch, setItemSearch] = useState('');
+  const [itemFilter, setItemFilter] = useState('all');
+  const goToReviewStep = (step) => {
+    setReviewStep(step);
+    const target = { source: sourceRef, items: lineOutcomesRef, approval: approvalRef }[step];
+    target?.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
   const mutationLockRef = useRef(false);
 
   const setLoaded = useCallback((data) => {
@@ -1208,11 +1220,14 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
     });
     setPoResult(result);
     setPoResultEvidenceId(evidenceId);
+    setReviewStep('items');
+    setItemFilter('all');
+    setItemSearch('');
     setSelectedSuggestions(stagedIds);
     if (scroll) {
       window.setTimeout(() => {
         if (typeof lineOutcomesRef.current?.scrollIntoView === 'function') {
-          lineOutcomesRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          goToReviewStep('items');
         }
       }, 0);
     }
@@ -1597,46 +1612,60 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
     );
   }
 
+  const reviewRows = (quote.lines || []).filter((line) => line.match_status !== 'ignored').map((line) => {
+    const draft = lineDrafts[line.id] || draftFromLine(line);
+    const accepted = ['accepted', 'quantity_changed'].includes(draft.outcome_status);
+    const quantity = numberOrNull(draft.accepted_quantity);
+    const price = numberOrNull(draft.accepted_unit_price);
+    const needsReview = draft.outcome_status === 'pending' || (accepted && (quantity === null || quantity <= 0 || price === null || price < 0));
+    return { line, draft, state: needsReview ? 'review' : accepted ? 'accepted' : 'not_ordered' };
+  });
+  const reviewCounts = reviewRows.reduce((counts, row) => ({ ...counts, [row.state]: counts[row.state] + 1 }), { accepted: 0, review: 0, not_ordered: 0 });
+  const visibleReviewRows = reviewRows.filter(({ line, state }) => (itemFilter === 'all' || state === itemFilter)
+    && `${line.item_name_snapshot} ${line.product_name || ''}`.toLowerCase().includes(itemSearch.trim().toLowerCase()));
+  const updateReviewDecision = (line, outcomeStatus) => {
+    const draft = lineDrafts[line.id] || draftFromLine(line);
+    const patch = { outcome_status: outcomeStatus };
+    if (['accepted', 'quantity_changed'].includes(outcomeStatus)) {
+      patch.accepted_quantity = Number(draft.accepted_quantity) > 0 ? draft.accepted_quantity : String(line.quantity ?? '');
+      patch.accepted_unit_price = draft.accepted_unit_price === '' ? String(line.unit_price ?? '') : draft.accepted_unit_price;
+    }
+    updateLineDraft(line.id, patch);
+  };
+
   return (
-    <div className="qm-section qm-outcome">
+    <div className="qm-section qm-outcome qm-order-review">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
-      <div className="qm-editor-header">
-        <div>
-          <button type="button" className="qm-secondary small" onClick={onBack}>Back to Quotations</button>
-          <h3>Review Outcome: {quote.quotation_number}</h3>
-          <p>{quote.company_name} - {quote.status_display}</p>
-        </div>
-        <div className="qm-action-row">
-          <span className={`qm-badge status-${quote.outcome_status}`}>{quoteOutcomeLabels[quote.outcome_status] || quote.outcome_status}</span>
-          <button type="button" className="qm-primary" disabled={outcomeMutationInProgress} onClick={saveLineDrafts}>
-            {saving ? 'Saving...' : 'Save Line Outcomes'}
-          </button>
-          {onDeliveryNoteCreated && <button type="button" className="qm-primary" disabled={outcomeMutationInProgress || !(quote.lines || []).some((line) => {
-            const draft = lineDrafts[line.id] || draftFromLine(line);
-            return line.match_status !== 'ignored' && ['accepted', 'quantity_changed'].includes(draft.outcome_status)
-              && Number(draft.accepted_quantity === '' ? line.quantity : draft.accepted_quantity) > 0;
-          })} onClick={() => saveLineDrafts({ prepareDelivery: true })}>Approve & prepare DO</button>}
-        </div>
-      </div>
-
+      <header className="qm-review-header">
+        <div><button type="button" className="qm-review-back" disabled={outcomeMutationInProgress} onClick={onBack}>← Back to quotations</button><h3>Review customer order</h3><p>{quote.company_name} <span>·</span> {quote.quotation_number}</p></div>
+        <span className={`qm-badge status-${quote.outcome_status}`}>{quoteOutcomeLabels[quote.outcome_status] || quote.outcome_status}</span>
+      </header>
+      <nav className="qm-review-steps" aria-label="Order review steps">
+        {[['source', 'Choose the LPO', 'Upload, email or manual'], ['items', 'Review the items', 'Confirm quantities & prices'], ['approval', 'Approve the order', 'Save or prepare delivery']].map(([step, title, description], index) => <button type="button" key={step} aria-current={reviewStep === step ? 'step' : undefined} disabled={outcomeMutationInProgress} onClick={() => goToReviewStep(step)}><span className="qm-review-step-number">{index + 1}</span><span><strong>{title}</strong><small>{description}</small></span><span className="qm-review-step-arrow" aria-hidden="true">→</span></button>)}
+      </nav>
       {notice && <div className={`qm-feedback ${notice.type}`} aria-live="polite">{notice.message}</div>}
-      {onDeliveryNoteCreated && <p className="qm-help-text">Review the LPO suggestions and edit the accepted quantities, prices and item outcomes below. Approve & prepare DO saves your acceptance and opens a delivery draft. Adjust today's dispatch quantities there; the remaining accepted items stay on the order.</p>}
 
-      <div className="qm-stat-grid">
-        <div className="qm-stat"><span>{money(summary.quoted_value, quote.currency)}</span><p>Quoted value</p></div>
-        <div className="qm-stat success"><span>{money(summary.accepted_value, quote.currency)}</span><p>Accepted value</p></div>
-        <div className="qm-stat warning"><span>{money(summary.lost_value, quote.currency)}</span><p>Lost value</p></div>
-        <div className="qm-stat"><span>{percent(summary.value_win_rate)}</span><p>Value win rate</p></div>
-        <div className="qm-stat"><span>{percent(summary.line_win_rate)}</span><p>Line win rate</p></div>
-        <div className="qm-stat"><span>{summary.pending_lines}</span><p>Pending lines</p></div>
-      </div>
-
+      <section className="qm-panel qm-review-source" ref={sourceRef} aria-labelledby="qm-review-source-title">
+        <div className="qm-review-section-heading"><span className="qm-review-step-number">1</span><div><h3 id="qm-review-source-title">Start with the customer’s LPO</h3><p>Read the order, then check the suggested items before approving anything.</p></div></div>
+        <div className="qm-review-source-grid">
+          <div className="qm-review-upload">
+            <label className={`qm-review-file-picker ${poFile ? 'has-file' : ''}`}><span className="qm-review-document-icon" aria-hidden="true">↥</span><strong>{poFile ? poFile.name : 'Choose an LPO file'}</strong><span>{poFile ? `${formatFileSize(poFile.size)} · Ready to read` : 'PDF or Excel · Select a file from your computer'}</span><input ref={uploadRef} type="file" aria-label="Or upload PO file" disabled={outcomeMutationInProgress} accept=".xlsx,.xls,.xlsb,.pdf" onChange={(event) => setPoFile(event.target.files?.[0] || null)} /></label>
+            {poFile && <button type="button" className="qm-review-text-button" disabled={outcomeMutationInProgress} onClick={() => { setPoFile(null); if (uploadRef.current) uploadRef.current.value = ''; }}>Remove file</button>}
+            <details className="qm-review-paste"><summary>Paste LPO text instead</summary><label>Paste PO text<textarea rows="4" disabled={outcomeMutationInProgress} value={poText} onChange={(event) => setPoText(event.target.value)} placeholder="Paste the items, quantities and prices from the customer’s order…" /></label>{poFile && <small>The selected file will be read. Remove it to use the pasted text.</small>}</details>
+            <div className="qm-review-upload-actions"><label className="qm-checkbox"><input type="checkbox" disabled={outcomeMutationInProgress} checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />Use AI cleanup when available</label><button type="button" className="qm-primary" disabled={outcomeMutationInProgress || (!poText.trim() && !poFile)} onClick={parsePo}>{poLoading ? 'Reading LPO…' : 'Read LPO & review items'}</button></div>
+          </div>
+          <div className="qm-review-alternatives">
+            <div><span className="qm-review-source-label">FROM YOUR INBOX</span><h4>Find an LPO in Gmail</h4><p>{activeEvidence.length ? `${activeEvidence.length} suggested email${activeEvidence.length === 1 ? '' : 's'} available for this quotation.` : 'Look for the customer’s order in the connected mailbox.'}</p><button type="button" className="qm-secondary" disabled={outcomeMutationInProgress} onClick={() => { if (gmailSourceRef.current) { gmailSourceRef.current.open = true; gmailSourceRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'start' }); } }}>Choose an email ↓</button></div>
+            <div><span className="qm-review-source-label">NO DOCUMENT?</span><h4>Enter the order yourself</h4><p>Use this for an order confirmed by phone, WhatsApp or in person.</p><button type="button" className="qm-review-text-button" disabled={outcomeMutationInProgress} onClick={() => goToReviewStep('items')}>Enter order manually →</button></div>
+          </div>
+        </div>
+        <details className="qm-review-email-disclosure" ref={gmailSourceRef}><summary>Gmail LPO suggestions <span>{activeEvidence.length} available</span></summary>
       <div className="qm-panel qm-evidence-panel">
         <div className="qm-panel-heading">
           <div>
             <span className="qm-step-kicker">Gmail evidence</span>
-            <h3>Review Gmail PO/LPO evidence</h3>
-            <p>Gmail evidence compares source attachments or the newest email body with quotation items, quantities, prices/totals, customer and timing. A staff member must still inspect and approve each link before parsing.</p>
+            <h3>Choose the customer’s LPO email</h3>
+            <p>Open a suggested email, check the customer and attachment, then approve the link to read its LPO.</p>
           </div>
           <div className="qm-evidence-controls">
             <label className="qm-checkbox">
@@ -1673,7 +1702,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
           <div className="qm-empty subtle">
             {archivedEvidence.length
               ? 'No active Gmail evidence. Archived scan history is available below.'
-              : 'No Gmail evidence candidates yet. Refresh this review later to check for new evidence.'}
+              : 'No matching LPO emails yet. Refresh the search, upload a file, or enter the order manually.'}
           </div>
         )}
         {archivedEvidence.length > 0 && (
@@ -1718,7 +1747,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
               <div>
                 <span className="qm-step-kicker">Selected LPO review</span>
                 <h3 id={`qm-evidence-review-title-${selectedEvidence.id}`}>{selectedEvidenceComparison.companyName} - {selectedEvidence.subject || 'Untitled email'}</h3>
-                <p>{evidenceStatusInfo(selectedEvidence).description} The item-by-item comparison is shown in Line Outcomes below.</p>
+                <p>{evidenceStatusInfo(selectedEvidence).description} Review the item quantities in step 2.</p>
               </div>
               <div className="qm-action-row">
                 <button
@@ -1729,7 +1758,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
                       lineOutcomesRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     }
                   }}
-                >View Line Outcomes</button>
+                >Review items</button>
                 <button type="button" className="qm-secondary small" onClick={() => setEvidenceReviewExpanded(false)}>Hide details</button>
               </div>
             </div>
@@ -1966,26 +1995,16 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
             {activeParsedPOResult && (
               <div className="qm-evidence-detail-section qm-parsed-comparison-section" aria-live="polite">
                 <div className="qm-evidence-section-heading">
-                  <strong>Parsed LPO loaded into Line Outcomes</strong>
+                  <strong>LPO suggestions ready to review</strong>
                   <span>{selectedSuggestions.length} unsaved decision(s) staged</span>
                 </div>
                 <p className="qm-evidence-comparison-help">
-                  Safe deterministic quantity and price matches are filled as drafts. Not-ordered rows stay pending until you explicitly include them; uncertain or price-missing rows remain manual review items.
+                  Matched quantities and prices are ready to check. Uncertain matches, missing prices and omitted items still need your decision.
                 </p>
                 {!!parsedPOComparison.warnings.length && (
                   <div className="qm-notice warning">{parsedPOComparison.warnings.join(' ')}</div>
                 )}
-                <div className="qm-action-row qm-parsed-comparison-actions">
-                  <button
-                    type="button"
-                    className="qm-primary"
-                    disabled={!selectedSuggestions.length || outcomeMutationInProgress}
-                    onClick={saveLineDrafts}
-                  >
-                    {saving ? 'Saving decisions...' : 'Save staged LPO decisions'}
-                  </button>
-                  <small>Nothing is saved until this button or Save Line Outcomes is pressed.</small>
-                </div>
+                <button type="button" className="qm-secondary" onClick={() => goToReviewStep('items')}>Review the suggested items</button>
               </div>
             )}
             <div className="qm-action-row">
@@ -2039,29 +2058,34 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
           </section>
       )}
 
-      <div className="qm-panel qm-line-outcomes-panel" ref={lineOutcomesRef}>
-        <div className="qm-panel-heading">
-          <div>
-            <span className="qm-step-kicker">Quote-to-LPO reconciliation</span>
-            <h3>Line Outcomes</h3>
-            <p>Compare our quoted quantity and price with the selected customer LPO, then review the final outcome in the same row.</p>
-          </div>
-          <div className="qm-action-row">
-            {selectedSuggestions.length > 0 && <span className="qm-badge status-pending">{selectedSuggestions.length} LPO decision(s) staged</span>}
-            <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress} onClick={() => setSelectedLines(lineIds)}>Select all</button>
-            <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress} onClick={() => setSelectedLines([])}>Clear</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={() => runBulk('mark_selected_accepted', selectedActiveLines, 'Selected lines marked accepted.')}>Mark accepted</button>
-            <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={() => runBulk('mark_selected_rejected', selectedActiveLines, 'Selected lines marked rejected.')}>Mark rejected</button>
-            <button type="button" className="qm-primary" disabled={outcomeMutationInProgress} onClick={saveLineDrafts}>
-              {saving ? 'Saving...' : 'Save Line Outcomes'}
-            </button>
+        </details>
+      </section>
+
+      <section className="qm-panel qm-line-outcomes-panel qm-review-items" ref={lineOutcomesRef} aria-labelledby="qm-review-items-title">
+        <div className="qm-review-section-heading">
+          <span className="qm-review-step-number">2</span>
+          <div><h3 id="qm-review-items-title">Check what the customer ordered</h3><p>Compare the LPO with your quotation. Set the final accepted quantity and price for each item.</p></div>
+          <button type="button" className="qm-secondary" disabled={outcomeMutationInProgress} onClick={() => goToReviewStep('approval')}>Continue to approval →</button>
+        </div>
+        <div className="qm-review-item-toolbar">
+          <label className="qm-review-search"><span>Find an item</span><input type="search" value={itemSearch} onChange={(event) => setItemSearch(event.target.value)} placeholder="Search item name…" /></label>
+          <div className="qm-review-filter-group" role="group" aria-label="Filter order items">
+            <button type="button" aria-pressed={itemFilter === 'all'} onClick={() => setItemFilter('all')}>All items <span>{reviewRows.length}</span></button>
+            <button type="button" aria-pressed={itemFilter === 'review'} onClick={() => setItemFilter('review')}>Needs review <span>{reviewCounts.review}</span></button>
+            <button type="button" aria-pressed={itemFilter === 'accepted'} onClick={() => setItemFilter('accepted')}>Accepted <span>{reviewCounts.accepted}</span></button>
           </div>
         </div>
-
+        <div className="qm-review-bulk-actions">
+          <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress} onClick={() => setSelectedLines(visibleReviewRows.map(({ line }) => line.id))}>Select shown</button>
+          <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress || !selectedActiveLines.length} onClick={() => setSelectedLines([])}>Clear selection</button>
+          <span>{selectedActiveLines.length ? `${selectedActiveLines.length} selected` : 'Select items to accept or reject together'}</span>
+          <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={() => runBulk('mark_selected_accepted', selectedActiveLines, 'Selected items accepted at the quoted quantities and prices.')}>Mark accepted</button>
+          <button type="button" className="qm-secondary small" disabled={!selectedActiveLines.length || outcomeMutationInProgress || hasUnsavedLineChanges} aria-describedby={hasUnsavedLineChanges ? 'qm-unsaved-line-changes' : undefined} onClick={() => runBulk('mark_selected_rejected', selectedActiveLines, 'Selected items marked not ordered.')}>Mark rejected</button>
+        </div>
         {hasUnsavedLineChanges && (
           <div id="qm-unsaved-line-changes" className="qm-notice warning qm-unsaved-line-notice" role="status" aria-live="polite">
             <strong>Unsaved line outcome changes</strong>
-            <span>Save Line Outcomes before running bulk actions or saving follow-up and final-outcome details.</span>
+            <span>Save review before running bulk actions or saving follow-up and final-outcome details.</span>
           </div>
         )}
 
@@ -2086,25 +2110,22 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
             </div>
           </div>
         ) : (
-          <div className="qm-empty subtle">Select “Review here” on an LPO candidate above, or parse an uploaded PO, to add customer values beside these quotation lines.</div>
+          <div className="qm-empty subtle">No LPO loaded. You can still enter the customer’s confirmed order manually using the accepted quantity and price fields.</div>
         )}
 
-        <div className="qm-table-wrap qm-reconciliation-wrap">
-          <table className="qm-table qm-outcome-reconciliation-table">
+        <div className="qm-table-wrap qm-review-table-wrap">
+          <table className="qm-table qm-review-items-table">
             <caption className="qm-sr-only">Quotation lines compared with the selected customer LPO and editable final outcomes</caption>
             <thead>
               <tr>
                 <th scope="col">Select</th>
-                <th scope="col">#</th>
                 <th scope="col">Our quotation</th>
                 <th scope="col">Customer LPO</th>
-                <th scope="col">Detected decision</th>
-                <th scope="col">Final outcome</th>
-                <th scope="col">Saved value</th>
+                <th scope="col">Your approved order</th>
               </tr>
             </thead>
             <tbody>
-              {(quote.lines || []).map((line, index) => {
+              {visibleReviewRows.map(({ line }) => {
                 const draft = lineDrafts[line.id] || draftFromLine(line);
                 const comparisonLine = activeComparisonRowsByLineId.get(String(line.id));
                 const comparisonStatus = comparisonLine ? normalizeComparisonStatus(comparisonLine) : null;
@@ -2128,10 +2149,9 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
                         onChange={() => setSelectedLines((current) => current.includes(line.id) ? current.filter((id) => id !== line.id) : [...current, line.id])}
                       />
                     </td>
-                    <td data-label="Line">{index + 1}</td>
                     <th scope="row" data-label="Our quotation" className="qm-reconciliation-source-cell">
                       <strong>{line.item_name_snapshot}</strong>
-                      <small>{line.product_name || 'No Product'}</small>
+                      {line.product_name && line.product_name.toLowerCase() !== line.item_name_snapshot.toLowerCase() && <small>{line.product_name}</small>}
                       <span>{optionalQuantity(line.quantity, line.unit)} × {optionalUnitMoney(line.unit_price, quote.currency)}</span>
                       <b>{optionalMoney(line.line_total, quote.currency)}</b>
                     </th>
@@ -2149,8 +2169,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
                       ) : (
                         <span className="qm-muted">{activeOutcomeComparison ? 'No matched LPO row' : 'No LPO selected'}</span>
                       )}
-                    </td>
-                    <td data-label="Detected decision" className="qm-reconciliation-decision-cell">
+                      <div className="qm-review-match">
                       {statusInfo ? (
                         <>
                           <span className={`qm-commercial-status ${statusInfo.className}`}>{statusInfo.label}</span>
@@ -2172,17 +2191,18 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
                           )}
                         </>
                       ) : (
-                        <span className="qm-muted">Waiting for a parsed LPO comparison</span>
+                        <span className="qm-muted">Enter the confirmed order in the next column.</span>
                       )}
+                      </div>
                     </td>
-                    <td data-label="Final outcome">
+                    <td data-label="Your approved order">
                       <div className="qm-final-outcome-controls">
-                        <label className="span-two">Outcome
+                        <label className="span-two">Customer decision
                           <select
                             aria-label={`Outcome for ${line.item_name_snapshot}`}
                             disabled={outcomeMutationInProgress}
                             value={draft.outcome_status}
-                            onChange={(event) => updateLineDraft(line.id, { outcome_status: event.target.value })}
+                            onChange={(event) => updateReviewDecision(line, event.target.value)}
                           >
                             {Object.entries(lineStatusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                           </select>
@@ -2211,6 +2231,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
                             onChange={(event) => updateLineDraft(line.id, { accepted_unit_price: event.target.value })}
                           />
                         </label>
+                        <details className="qm-review-line-reason span-two"><summary>Reason / notes</summary>
                         <label className="span-two">Reason
                           <select
                             aria-label={`Outcome reason for ${line.item_name_snapshot}`}
@@ -2222,17 +2243,15 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
                             {Object.entries(reasonLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                           </select>
                         </label>
+                        <label>Item notes<textarea aria-label={`Outcome notes for ${line.item_name_snapshot}`} rows="2" disabled={outcomeMutationInProgress} value={draft.outcome_notes} onChange={(event) => updateLineDraft(line.id, { outcome_notes: event.target.value })} /></label>
+                        </details>
                       </div>
                     </td>
-                    <td data-label="Saved value" className="qm-reconciliation-value-cell">
-                      <span>Accepted</span>
-                      <strong>{money(line.accepted_total, quote.currency)}</strong>
-                      <span>Lost</span>
-                      <strong>{money(line.lost_value, quote.currency)}</strong>
-                    </td>
+
                   </tr>
                 );
               })}
+              {!visibleReviewRows.length && <tr><td colSpan="4" className="qm-review-empty">No items match this filter. Try another item name or choose All items.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2250,9 +2269,18 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
             </div>
           </div>
         )}
-      </div>
+      </section>
 
-      <div className="qm-grid-two">
+      <section className="qm-panel qm-review-approval" ref={approvalRef} aria-labelledby="qm-review-approval-title">
+        <div className="qm-review-section-heading"><span className="qm-review-step-number">3</span><div><h3 id="qm-review-approval-title">Approve the customer’s final order</h3><p>These are the quantities the customer accepted. You can choose how much to dispatch in the delivery note.</p></div></div>
+        <div className="qm-review-order-counts"><div><strong>{reviewCounts.accepted}</strong><span>Accepted items</span></div><div><strong>{reviewCounts.not_ordered}</strong><span>Not ordered / unavailable</span></div><div className={reviewCounts.review ? 'needs-review' : ''}><strong>{reviewCounts.review}</strong><span>Still to review</span></div></div>
+        {(reviewCounts.review > 0 || unmatchedActiveLPORows.length > 0) && <p className="qm-review-approval-note">{reviewCounts.review > 0 && `${reviewCounts.review} quoted item(s) still need a decision. `}{unmatchedActiveLPORows.length > 0 && `${unmatchedActiveLPORows.length} LPO item(s) have not been matched. `}Preparing a DO includes only accepted items; the other items are not automatically accepted or rejected.</p>}
+        <div className="qm-review-approval-actions"><div><strong>{hasUnsavedLineChanges ? 'Your changes are ready to save' : 'Review before preparing delivery'}</strong><p>For an LPO reduced from 10 to 6, approve 6. Delivery is complete when those 6 are received.</p></div><div className="qm-action-row"><button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || !hasUnsavedLineChanges} onClick={saveLineDrafts}>{saving ? 'Saving…' : 'Save review'}</button>{onDeliveryNoteCreated && <button type="button" className="qm-primary" disabled={outcomeMutationInProgress || !reviewCounts.accepted} onClick={() => saveLineDrafts({ prepareDelivery: true })}>Approve & prepare DO</button>}</div></div>
+        {onDeliveryNoteCreated && !reviewCounts.accepted && <p className="qm-review-help">Accept at least one item with a quantity and price to prepare a DO. You can save the review without creating a delivery note.</p>}
+      </section>
+
+      <details className="qm-review-extra"><summary>Follow-up & saved results <span>Optional</span></summary>
+        <div className="qm-review-extra-grid">
         <div className="qm-panel">
           <div className="qm-panel-heading">
             <div>
@@ -2286,31 +2314,6 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
           </div>
         </div>
 
-        <div className="qm-panel">
-          <div className="qm-panel-heading">
-            <div>
-              <h3>PO Assistant</h3>
-              <p>Upload or paste a PO. Suggestions are review-only until applied.</p>
-            </div>
-            <button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || (!poText.trim() && !poFile)} onClick={parsePo}>
-              {poLoading ? 'Parsing...' : 'Parse PO'}
-            </button>
-          </div>
-          <div className="qm-outcome-form-grid">
-            <label className="span-two">Paste PO text
-              <textarea rows="4" disabled={outcomeMutationInProgress} value={poText} onChange={(event) => setPoText(event.target.value)} placeholder="Paste accepted PO lines here..." />
-            </label>
-            <label className="span-two">Or upload PO file
-              <input type="file" disabled={outcomeMutationInProgress} accept=".xlsx,.xls,.xlsb,.pdf" onChange={(event) => setPoFile(event.target.files?.[0] || null)} />
-            </label>
-            <label className="qm-checkbox span-two">
-              <input type="checkbox" disabled={outcomeMutationInProgress} checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />
-              Use AI cleanup when available
-            </label>
-          </div>
-        </div>
-      </div>
-
       <div className="qm-panel">
         <div className="qm-panel-heading">
           <div>
@@ -2331,6 +2334,9 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
           </label>
         </div>
       </div>
+        </div>
+        <div className="qm-review-saved-stats"><span>Saved quotation: <strong>{money(summary.quoted_value, quote.currency)}</strong></span><span>Saved accepted value: <strong>{money(summary.accepted_value, quote.currency)}</strong></span><span>Value win rate: <strong>{percent(summary.value_win_rate)}</strong></span><span>Line win rate: <strong>{percent(summary.line_win_rate)}</strong></span></div>
+      </details>
     </div>
   );
 };

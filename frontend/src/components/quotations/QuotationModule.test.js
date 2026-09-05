@@ -93,6 +93,12 @@ describe('QuotationModule Gmail deep links', () => {
     expect(screen.queryByText('Delivery workspace DN-90')).not.toBeInTheDocument();
   });
 
+  test('a review link opens the order review directly after refresh', () => {
+    renderModule('/admin?quotation_tab=quotes&quote_id=21&quotation_mode=review');
+    expect(screen.getByText('Outcome review')).toBeInTheDocument();
+    expect(screen.queryByText('Quotation editor 21')).not.toBeInTheDocument();
+  });
+
   test('gives Gmail handoffs precedence and makes a claimed import resumable', async () => {
     renderModule('/admin?gmail_import=opaque-token');
 

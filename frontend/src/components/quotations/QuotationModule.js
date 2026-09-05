@@ -16,6 +16,7 @@ import QuotationSettings from './QuotationSettings';
 import HistoricalImportManager from './HistoricalImportManager';
 import ContractIntelligenceManager from './ContractIntelligenceManager';
 import './QuotationModule.css';
+import './QuotationOutcomeReview.css';
 
 const tabs = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -90,9 +91,10 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
   const gmailReturnQuoteId = useMemo(() => positiveId(
     new URLSearchParams(location.search).get('gmail_return_quote_id')
   ), [location.search]);
+  const isReviewRoute = Boolean(route.quoteId && new URLSearchParams(location.search).get('quotation_mode') === 'review');
   const [activeTab, setActiveTab] = useState(route.activeTab);
-  const [editingQuoteId, setEditingQuoteId] = useState(route.quoteId);
-  const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
+  const [editingQuoteId, setEditingQuoteId] = useState(isReviewRoute ? null : route.quoteId);
+  const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(isReviewRoute ? route.quoteId : null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [pendingEmailReview, setPendingEmailReview] = useState(null);
   const [preparedDeliveryNote, setPreparedDeliveryNote] = useState(null);
@@ -100,8 +102,8 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
   useEffect(() => {
     setActiveTab(route.activeTab);
     if (route.quoteId) {
-      setEditingQuoteId(route.quoteId);
-      setReviewingOutcomeQuoteId(null);
+      setEditingQuoteId(isReviewRoute ? null : route.quoteId);
+      setReviewingOutcomeQuoteId(isReviewRoute ? route.quoteId : null);
       setPendingEmailReview((current) => (
         current && Number(current.quoteId) === Number(route.quoteId) ? current : null
       ));
@@ -115,6 +117,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
     route.gmailImportId,
     route.gmailToken,
     route.quoteId,
+    isReviewRoute,
   ]);
 
   const updateLocation = useCallback((mutate, { replace = false } = {}) => {
@@ -146,6 +149,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
     updateLocation((params) => {
       params.set('quotation_tab', 'quotes');
       params.set('quote_id', String(exactQuoteId));
+      params.delete('quotation_mode');
       params.delete('gmail_import');
       params.delete('gmail_import_id');
       params.delete('gmail_return_quote_id');
@@ -153,11 +157,21 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
   }, [updateLocation]);
 
   const openOutcome = useCallback((quoteId) => {
+    const exactQuoteId = positiveId(quoteId);
+    if (!exactQuoteId) return;
     setPendingEmailReview(null);
-    setReviewingOutcomeQuoteId(quoteId);
+    setReviewingOutcomeQuoteId(exactQuoteId);
     setEditingQuoteId(null);
     setActiveTab('quotes');
-  }, []);
+    updateLocation((params) => {
+      params.set('quotation_tab', 'quotes');
+      params.set('quote_id', String(exactQuoteId));
+      params.set('quotation_mode', 'review');
+      params.delete('gmail_import');
+      params.delete('gmail_import_id');
+      params.delete('gmail_return_quote_id');
+    });
+  }, [updateLocation]);
 
   const closeQuote = useCallback(() => {
     setPendingEmailReview(null);
@@ -167,6 +181,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
     updateLocation((params) => {
       params.set('quotation_tab', 'quotes');
       params.delete('quote_id');
+      params.delete('quotation_mode');
       params.delete('gmail_return_quote_id');
     }, { replace: true });
   }, [refresh, updateLocation]);
@@ -183,6 +198,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
       params.delete('gmail_import');
       params.delete('gmail_import_id');
       params.delete('quote_id');
+      params.delete('quotation_mode');
       params.delete('gmail_return_quote_id');
     });
   }, [canManageMailboxAudit, updateLocation]);
@@ -200,6 +216,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
       params.set('gmail_import_id', String(normalizedId));
       params.delete('gmail_import');
       params.delete('quote_id');
+      params.delete('quotation_mode');
     }, { replace: true });
   }, [updateLocation]);
 
@@ -217,6 +234,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
       else params.delete('gmail_return_quote_id');
       params.delete('gmail_import');
       params.delete('quote_id');
+      params.delete('quotation_mode');
     });
   }, [editingQuoteId, updateLocation]);
 
@@ -232,6 +250,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
       params.delete('gmail_import');
       params.delete('gmail_import_id');
       params.delete('quote_id');
+      params.delete('quotation_mode');
       params.delete('gmail_return_quote_id');
     }, { replace: true });
   }, [gmailReturnQuoteId, openQuote, updateLocation]);

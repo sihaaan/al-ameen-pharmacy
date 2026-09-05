@@ -105,6 +105,53 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     );
   });
 
+  test('manual review keeps edited quantities and notes when searching, filtering and moving to approval', async () => {
+    const reviewPayload = { ...outcomePayload, po_evidence: [], quotation: {
+      ...outcomePayload.quotation, company_name: 'Harbour Hospitality LLC', quotation_number: 'QT-20260905-0021', lines: [
+        { id: 501, item_name_snapshot: 'Examination gloves · powder free', quantity: '10', unit: 'Box', unit_price: '28.50', line_total: '299.25', outcome_status: 'pending' },
+        { id: 502, item_name_snapshot: 'Sterile gauze swabs · 10 × 10 cm', quantity: '12', unit: 'Pack', unit_price: '8.75', line_total: '110.25', outcome_status: 'accepted', accepted_quantity: '8', accepted_unit_price: '8.75' },
+        { id: 503, item_name_snapshot: 'Digital thermometer', quantity: '4', unit: 'Each', unit_price: '32.00', line_total: '134.40', outcome_status: 'rejected' },
+      ],
+    } };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({ data: reviewPayload });
+    quotationAPI.quotes.updateOutcome.mockResolvedValueOnce({ data: reviewPayload });
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} onDeliveryNoteCreated={jest.fn()} />);
+    await screen.findByRole('heading', { name: 'Review customer order' });
+    fireEvent.click(screen.getByRole('button', { name: /enter order manually/i }));
+    const decision = screen.getByLabelText('Outcome for Examination gloves · powder free');
+    fireEvent.change(decision, { target: { value: 'accepted' } });
+    expect(screen.getByLabelText('Accepted quantity for Examination gloves · powder free')).toHaveValue(10);
+    expect(screen.getByLabelText('Accepted unit price for Examination gloves · powder free')).toHaveValue(28.5);
+    fireEvent.change(screen.getByLabelText('Accepted quantity for Examination gloves · powder free'), { target: { value: '6' } });
+    fireEvent.change(screen.getByLabelText('Outcome notes for Examination gloves · powder free'), { target: { value: 'Customer confirmed six boxes.' } });
+    fireEvent.change(screen.getByLabelText('Find an item'), { target: { value: 'gauze' } });
+    expect(screen.queryByLabelText('Accepted quantity for Examination gloves · powder free')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Find an item'), { target: { value: '' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Filter order items' })).getByRole('button', { name: /accepted/i }));
+    expect(screen.getByLabelText('Accepted quantity for Examination gloves · powder free')).toHaveValue(6);
+    expect(screen.queryByLabelText('Outcome for Digital thermometer')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /continue to approval/i }));
+    expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /^save review$/i }));
+    await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, expect.objectContaining({ line_updates: [expect.objectContaining({
+      id: 501, accepted_quantity: '6', accepted_unit_price: '28.50', outcome_notes: 'Customer confirmed six boxes.',
+    })] })));
+  });
+
+  test('approval stays unavailable for an accepted item with incomplete quantities or price', async () => {
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({ data: { ...outcomePayload, quotation: { ...outcomePayload.quotation, lines: [
+      { id: 501, item_name_snapshot: 'Gloves', quantity: '10', unit_price: '28.50', outcome_status: 'accepted', accepted_quantity: '10', accepted_unit_price: '' },
+    ] } } });
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} onDeliveryNoteCreated={jest.fn()} />);
+    const approve = await screen.findByRole('button', { name: 'Approve & prepare DO' });
+    expect(approve).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Accepted unit price for Gloves'), { target: { value: '28.50' } });
+    expect(approve).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('Accepted quantity for Gloves'), { target: { value: '0' } });
+    expect(approve).toBeDisabled();
+    expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
+  });
+
   test('uploads an LPO for editable AI suggestions and prepares only remaining quantities after approval', async () => {
     const line = { id: 501, item_name_snapshot: 'Bandage Pack', quantity: '10', unit: 'pack', unit_price: '12', outcome_status: 'pending' };
     const loaded = { ...outcomePayload, quotation: { ...outcomePayload.quotation, lines: [line] } };
@@ -125,7 +172,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     const upload = await screen.findByLabelText(/or upload po file/i);
     const file = new File(['LPO sample'], 'LPO-7781.pdf', { type: 'application/pdf' });
     fireEvent.change(upload, { target: { files: [file] } });
-    fireEvent.click(screen.getByRole('button', { name: /^parse po$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^read lpo & review items$/i }));
     await waitFor(() => expect(screen.getByLabelText('Accepted quantity for Bandage Pack')).toHaveValue(10));
     const [, formData, multipart] = quotationAPI.quotes.parseOutcomePO.mock.calls[0];
     expect(formData.get('file')).toBe(file);
@@ -234,7 +281,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'Call purchasing tomorrow.' } });
     fireEvent.change(screen.getByRole('combobox', { name: /override status/i }), { target: { value: 'lost' } });
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole('button', { name: /save staged lpo decisions/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^save review$/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
@@ -296,11 +343,11 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.change(screen.getByRole('textbox', { name: /paste po text/i }), {
       target: { value: 'Replacement customer PO text' },
     });
-    fireEvent.click(screen.getByRole('button', { name: /^parse po$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^read lpo & review items$/i }));
     await waitFor(() => expect(quotationAPI.quotes.parseOutcomePO).toHaveBeenCalled());
 
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(10);
-    const saveStaged = screen.getByRole('button', { name: /save staged lpo decisions/i });
+    const saveStaged = screen.getByRole('button', { name: /^save review$/i });
     await waitFor(() => expect(saveStaged).toBeEnabled());
     fireEvent.click(saveStaged);
 
@@ -424,7 +471,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.click(immutableButton);
 
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(10);
-    expect(screen.getByRole('button', { name: /save staged lpo decisions/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^save review$/i })).toBeEnabled();
     expect(screen.getByRole('region', { name: /customer a - lpo for q-0021/i })).toBeInTheDocument();
     expect(quotationAPI.quotes.markPOEvidenceNotRelevant).not.toHaveBeenCalled();
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
@@ -542,7 +589,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.click(await screen.findByRole('button', { name: /populate line outcomes from this lpo/i }));
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(8.75);
 
-    fireEvent.click(screen.getByRole('button', { name: /save staged lpo decisions/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^save review$/i }));
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
         id: 501,
@@ -867,7 +914,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.click(screen.getByRole('button', { name: /review evidence/i }));
     fireEvent.click(screen.getByRole('button', { name: /approve this email link & parse/i }));
 
-    expect(await screen.findByText('Parsed LPO loaded into Line Outcomes')).toBeInTheDocument();
+    expect(await screen.findByText('LPO suggestions ready to review')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /reparse approved email/i })).toBeInTheDocument();
 
@@ -890,7 +937,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(screen.getAllByText('PO-7781').length).toBeGreaterThanOrEqual(1);
 
     fireEvent.click(omittedCheckbox);
-    fireEvent.click(screen.getByRole('button', { name: /save staged lpo decisions/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^save review$/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
@@ -913,7 +960,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     }));
     expect(await screen.findByText(/selected lpo decisions and line outcomes saved/i)).toBeInTheDocument();
     await waitFor(() => expect(
-      screen.getByRole('button', { name: /save staged lpo decisions/i })
+      screen.getByRole('button', { name: /^save review$/i })
     ).toBeDisabled());
   });
 
@@ -962,7 +1009,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect((await within(bandageRow).findAllByText('Accepted - price not stated')).length).toBeGreaterThanOrEqual(1);
     expect(within(bandageRow).queryByRole('checkbox', { name: /use these lpo values/i })).not.toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(null);
-    expect(screen.getByRole('button', { name: /save staged lpo decisions/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^save review$/i })).toBeDisabled();
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
   });
 
@@ -1005,7 +1052,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /select bandage pack for bulk outcome action/i }));
 
     expect(screen.getByRole('status')).toHaveTextContent('Unsaved line outcome changes');
-    expect(screen.getByRole('status')).toHaveTextContent(/save line outcomes before running bulk actions/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/save review before running bulk actions/i);
     expect(screen.getByRole('button', { name: /save follow-up/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /save follow-up/i })).toHaveAttribute('aria-describedby', 'qm-unsaved-line-changes');
     expect(screen.getByRole('button', { name: /save final outcome/i })).toBeDisabled();
@@ -1013,7 +1060,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(screen.getByRole('button', { name: /mark accepted/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /mark accepted/i })).toHaveAttribute('aria-describedby', 'qm-unsaved-line-changes');
     expect(screen.getByRole('button', { name: /mark rejected/i })).toBeDisabled();
-    expect(screen.getAllByRole('button', { name: /save line outcomes/i }).every((button) => !button.disabled)).toBe(true);
+    expect(screen.getAllByRole('button', { name: /^save review$/i }).every((button) => !button.disabled)).toBe(true);
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
   });
 
@@ -1086,7 +1133,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
 
     const acceptedQuantity = await screen.findByRole('spinbutton', { name: /accepted quantity for bandage pack/i });
     fireEvent.change(acceptedQuantity, { target: { value: '1' } });
-    fireEvent.click(screen.getAllByRole('button', { name: /save line outcomes/i })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /^save review$/i })[0]);
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledTimes(1));
     expect(acceptedQuantity).toBeDisabled();
