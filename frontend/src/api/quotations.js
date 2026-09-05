@@ -268,6 +268,20 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/lpos/${id}/`, data),
     delete: (id) => axiosInstance.delete(`/quotations/lpos/${id}/`),
   },
+  deliveryOrders: {
+    list: (params = {}) => axiosInstance.get('/quotations/delivery-orders/', { params }),
+    retrieve: (id) => axiosInstance.get(`/quotations/delivery-orders/${id}/`),
+  },
+  deliveryNotes: {
+    list: (params = {}) => axiosInstance.get('/quotations/delivery-notes/', { params }),
+    retrieve: (id) => axiosInstance.get(`/quotations/delivery-notes/${id}/`),
+    create: (data) => axiosInstance.post('/quotations/delivery-notes/', data),
+    update: (id, data) => axiosInstance.patch(`/quotations/delivery-notes/${id}/`, data),
+    issue: (id) => axiosInstance.post(`/quotations/delivery-notes/${id}/issue/`),
+    confirmReceipt: (id, data) => axiosInstance.post(`/quotations/delivery-notes/${id}/confirm-receipt/`, data),
+    cancel: (id, data) => axiosInstance.post(`/quotations/delivery-notes/${id}/cancel/`, data),
+    pdf: (id) => axiosInstance.get(`/quotations/delivery-notes/${id}/pdf/`, { responseType: 'blob' }),
+  },
   proformas: {
     list: (params = {}) => axiosInstance.get('/quotations/proformas/', { params }),
     retrieve: (id) => axiosInstance.get(`/quotations/proformas/${id}/`),

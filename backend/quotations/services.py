@@ -336,6 +336,8 @@ def recalculate_line_outcome(line, *, save=True):
         ) from exc
 
     if save:
+        from .delivery import assert_accepted_quantity_covers_deliveries
+        assert_accepted_quantity_covers_deliveries(line)
         line.save(
             update_fields=[
                 "outcome_status",
@@ -3150,6 +3152,8 @@ def models_parent_or_self(root):
 def transition_quotation_status(quotation, actor, target_status):
     quotation = Quotation.objects.select_for_update().get(pk=quotation.pk)
     _assert_no_unresolved_email_delivery(quotation)
+    if target_status == Quotation.STATUS_CANCELLED and quotation.delivery_notes.filter(status__in=["issued", "delivered"]).exists():
+        raise ValidationError("Cancel the active delivery notes before cancelling this quotation so delivery history stays consistent.")
     old_status = quotation.status
 
     allowed = {

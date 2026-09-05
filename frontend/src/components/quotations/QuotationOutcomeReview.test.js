@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import QuotationOutcomeReview from './QuotationOutcomeReview';
-import quotationAPI from '../../api/quotations';
+import quotationAPI, { describeQuotationError } from '../../api/quotations';
 
 jest.mock('../../api/quotations', () => ({
   __esModule: true,
@@ -16,6 +16,8 @@ jest.mock('../../api/quotations', () => ({
       updateOutcome: jest.fn(),
       parseOutcomePO: jest.fn(),
     },
+    deliveryOrders: { retrieve: jest.fn() },
+    deliveryNotes: { create: jest.fn() },
   },
   describeQuotationError: jest.fn(async (error, action, endpoint) => ({
     action,
@@ -72,6 +74,9 @@ const outcomePayload = {
 describe('QuotationOutcomeReview Gmail approval', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    describeQuotationError.mockImplementation(async (error, action, endpoint) => ({
+      action, endpoint, status: error?.response?.status || 'Network error', detail: error?.message || 'Request failed',
+    }));
     quotationAPI.quotes.outcome.mockResolvedValue({ data: outcomePayload });
     quotationAPI.quotes.poEvidence.mockResolvedValue({ data: { results: [{ ...evidence, status: 'parsed' }] } });
     quotationAPI.quotes.poEvidenceSource.mockImplementation(() => new Promise(() => {}));
@@ -98,6 +103,62 @@ describe('QuotationOutcomeReview Gmail approval', () => {
       'accept',
       '.xlsx,.xls,.xlsb,.pdf',
     );
+  });
+
+  test('uploads an LPO for editable AI suggestions and prepares only remaining quantities after approval', async () => {
+    const line = { id: 501, item_name_snapshot: 'Bandage Pack', quantity: '10', unit: 'pack', unit_price: '12', outcome_status: 'pending' };
+    const loaded = { ...outcomePayload, quotation: { ...outcomePayload.quotation, lines: [line] } };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({ data: loaded });
+    quotationAPI.quotes.parseOutcomePO.mockResolvedValueOnce({ data: {
+      id: 77, suggestions: [{ quotation_line_id: 501, po_item_name: 'Bandage Pack', po_quantity: '10', po_unit_price: '11', suggested_outcome_status: 'accepted' }],
+      unmatched_po_rows: [], missing_quote_line_ids: [],
+    } });
+    quotationAPI.quotes.updateOutcome.mockResolvedValueOnce({ data: loaded });
+    quotationAPI.deliveryOrders.retrieve.mockResolvedValueOnce({ data: { lines: [
+      { id: 501, accepted_quantity: '8', delivered_quantity: '2', available_quantity: '6' },
+      { id: 502, accepted_quantity: '4', available_quantity: '0' },
+    ] } });
+    const draft = { id: 90, status: 'draft', quotation: 21 };
+    quotationAPI.deliveryNotes.create.mockResolvedValueOnce({ data: draft });
+    const onDeliveryNoteCreated = jest.fn();
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} onDeliveryNoteCreated={onDeliveryNoteCreated} />);
+    const upload = await screen.findByLabelText(/or upload po file/i);
+    const file = new File(['LPO sample'], 'LPO-7781.pdf', { type: 'application/pdf' });
+    fireEvent.change(upload, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: /^parse po$/i }));
+    await waitFor(() => expect(screen.getByLabelText('Accepted quantity for Bandage Pack')).toHaveValue(10));
+    const [, formData, multipart] = quotationAPI.quotes.parseOutcomePO.mock.calls[0];
+    expect(formData.get('file')).toBe(file);
+    expect(formData.get('use_ai')).toBe('1');
+    expect(multipart).toBe(true);
+    expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
+    expect(quotationAPI.deliveryNotes.create).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Accepted quantity for Bandage Pack'), { target: { value: '8' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve & prepare DO' }));
+    await waitFor(() => expect(onDeliveryNoteCreated).toHaveBeenCalledWith(draft));
+    expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, expect.objectContaining({
+      line_updates: [expect.objectContaining({ id: 501, accepted_quantity: '8', accepted_unit_price: '11' })],
+    }));
+    expect(quotationAPI.deliveryNotes.create).toHaveBeenCalledWith({ quotation: 21, lines: [{ quotation_line: 501, quantity: '6' }] });
+    expect(quotationAPI.quotes.updateOutcome.mock.invocationCallOrder[0]).toBeLessThan(quotationAPI.deliveryOrders.retrieve.mock.invocationCallOrder[0]);
+  });
+
+  test.each([false, true])('keeps approval failures separate from delivery preparation failures (acceptance saved: %s)', async (acceptanceSaved) => {
+    const loaded = { ...outcomePayload, quotation: { ...outcomePayload.quotation, lines: [
+      { id: 501, item_name_snapshot: 'Bandage Pack', quantity: '10', accepted_quantity: '10', accepted_unit_price: '12', outcome_status: 'accepted' },
+    ] } };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({ data: loaded });
+    if (acceptanceSaved) quotationAPI.quotes.updateOutcome.mockResolvedValueOnce({ data: loaded });
+    else quotationAPI.quotes.updateOutcome.mockRejectedValueOnce(new Error('Acceptance could not be saved'));
+    quotationAPI.deliveryOrders.retrieve.mockResolvedValue({ data: { lines: [{ id: 501, available_quantity: '10' }] } });
+    if (acceptanceSaved) quotationAPI.deliveryNotes.create.mockRejectedValueOnce(new Error('Delivery service unavailable'));
+    const onDeliveryNoteCreated = jest.fn();
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} onDeliveryNoteCreated={onDeliveryNoteCreated} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve & prepare DO' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(acceptanceSaved
+      ? 'Acceptance was saved, but the delivery note could not be prepared.' : 'Acceptance could not be saved');
+    expect(quotationAPI.deliveryNotes.create).toHaveBeenCalledTimes(acceptanceSaved ? 1 : 0);
+    expect(onDeliveryNoteCreated).not.toHaveBeenCalled();
   });
 
   test('requires review and sends explicit approval before parsing an email link', async () => {

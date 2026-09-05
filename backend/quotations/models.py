@@ -3093,6 +3093,88 @@ class ProformaInvoiceLine(models.Model):
         super().save(*args, **kwargs)
 
 
+class DeliveryNote(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_ISSUED = "issued"
+    STATUS_DELIVERED = "delivered"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_ISSUED, "Issued / awaiting receipt"),
+        (STATUS_DELIVERED, "Delivery confirmed"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="delivery_notes")
+    quotation = models.ForeignKey(
+        Quotation, on_delete=models.PROTECT, null=True, blank=True, related_name="delivery_notes",
+    )
+    # The primary key supplies a unique sequence; the number is set in the same transaction.
+    delivery_number = models.CharField(max_length=50, unique=True, null=True, blank=True, editable=False)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT, db_index=True)
+    delivery_date = models.DateField(default=timezone.localdate)
+    lpo_number = models.CharField(max_length=120, blank=True, db_index=True)
+    invoice_number = models.CharField(max_length=120, blank=True, db_index=True)
+    customer_name = models.CharField(max_length=255)
+    customer_address = models.TextField(blank=True)
+    customer_trn = models.CharField(max_length=100, blank=True)
+    delivery_address = models.TextField(blank=True)
+    attention = models.CharField(max_length=255, blank=True)
+    contact_phone = models.CharField(max_length=100, blank=True)
+    notes = models.TextField(blank=True)
+    received_by = models.CharField(max_length=255, blank=True)
+    received_date = models.DateField(null=True, blank=True)
+    receipt_reference = models.CharField(max_length=255, blank=True)
+    receipt_notes = models.TextField(blank=True)
+    cancellation_reason = models.TextField(blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="created_delivery_notes")
+    issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="issued_delivery_notes")
+    confirmed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="confirmed_delivery_notes")
+    issued_at = models.DateTimeField(null=True, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["quotation", "status"])]
+
+    def __str__(self):
+        return self.delivery_number or "Delivery note"
+
+    def save(self, *args, **kwargs):
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            if not self.delivery_number:
+                self.delivery_number = f"DN-{timezone.localdate():%Y%m%d}-{self.pk:05d}"
+                type(self).objects.filter(pk=self.pk).update(delivery_number=self.delivery_number)
+
+
+class DeliveryNoteLine(models.Model):
+    delivery_note = models.ForeignKey(DeliveryNote, on_delete=models.CASCADE, related_name="lines")
+    quotation_line = models.ForeignKey(
+        QuotationLine, on_delete=models.PROTECT, null=True, blank=True, related_name="delivery_note_lines",
+    )
+    item_name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    unit = models.CharField(max_length=50, blank=True)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0.001"))])
+    received_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True, validators=[MinValueValidator(Decimal("0"))])
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(quantity__gt=0), name="delivery_note_positive_quantity"),
+            models.CheckConstraint(
+                condition=models.Q(received_quantity__isnull=True) | models.Q(received_quantity__gte=0, received_quantity__lte=models.F("quantity")),
+                name="delivery_note_received_within_sent",
+            ),
+            models.UniqueConstraint(fields=["delivery_note", "quotation_line"], name="delivery_note_unique_quote_line"),
+        ]
+
+
 class CompanyPriceHistory(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="price_history")
     quote_item = models.ForeignKey(

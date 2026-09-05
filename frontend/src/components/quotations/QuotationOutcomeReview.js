@@ -859,7 +859,7 @@ const draftFromLine = (line) => ({
   outcome_notes: line.outcome_notes || '',
 });
 
-const QuotationOutcomeReview = ({ quoteId, onBack }) => {
+const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
   const [quote, setQuote] = useState(null);
   const [summary, setSummary] = useState(null);
   const [lineDrafts, setLineDrafts] = useState({});
@@ -1264,7 +1264,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
   const patchOutcome = async (
     payload,
     message,
-    { preserveFollowup = false, preserveManualOutcome = false } = {}
+    { preserveFollowup = false, preserveManualOutcome = false, prepareDelivery = false } = {}
   ) => {
     if (!acquireMutationLock()) return false;
     const followupBeforeSave = followupDraft;
@@ -1272,16 +1272,32 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     setSaving(true);
     setNotice(null);
     setErrorInfo(null);
+    let outcomeSaved = false;
     try {
       const response = await quotationAPI.quotes.updateOutcome(quoteId, payload);
+      outcomeSaved = true;
       setLoaded(response.data);
       if (preserveFollowup) setFollowupDraft(followupBeforeSave);
       if (preserveManualOutcome) setManualOutcome(manualOutcomeBeforeSave);
       setSelectedLines([]);
       setNotice({ type: 'success', message });
+      if (prepareDelivery) {
+        const { data: order } = await quotationAPI.deliveryOrders.retrieve(quoteId);
+        const lines = order.lines.filter((line) => Number(line.available_quantity) > 0)
+          .map((line) => ({ quotation_line: line.id, quantity: line.available_quantity }));
+        if (!lines.length) {
+          setNotice({ type: 'warning', message: 'Acceptance saved. No accepted quantities remain available for a new DO. Check existing deliveries or review the accepted items.' });
+          return true;
+        }
+        const { data: note } = await quotationAPI.deliveryNotes.create({ quotation: quoteId, lines });
+        onDeliveryNoteCreated(note);
+      }
       return true;
     } catch (error) {
-      const details = await describeQuotationError(error, 'Save quotation outcome', `PATCH /quotations/quotes/${quoteId}/outcome/`);
+      const details = await describeQuotationError(error,
+        outcomeSaved ? 'Prepare delivery note' : 'Save quotation outcome',
+        outcomeSaved ? 'Orders & delivery notes' : `PATCH /quotations/quotes/${quoteId}/outcome/`);
+      if (outcomeSaved) details.detail = `Acceptance was saved, but the delivery note could not be prepared. ${details.detail}`;
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
       return false;
@@ -1291,7 +1307,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
     }
   };
 
-  const saveLineDrafts = async () => {
+  const saveLineDrafts = async ({ prepareDelivery = false } = {}) => {
     const changedLineIds = uniqueLineIds([...dirtyLineIds, ...selectedSuggestions]);
     const lineUpdates = changedLineIds.length
       ? changedLineIds.map((lineId) => lineDrafts[lineId]).filter(Boolean)
@@ -1319,7 +1335,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
       selectedSuggestions.length
         ? 'Selected LPO decisions and line outcomes saved.'
         : 'Outcome lines saved.',
-      { preserveFollowup: true, preserveManualOutcome: true }
+      { preserveFollowup: true, preserveManualOutcome: true, prepareDelivery }
     );
     if (saved) setSelectedSuggestions([]);
   };
@@ -1595,10 +1611,16 @@ const QuotationOutcomeReview = ({ quoteId, onBack }) => {
           <button type="button" className="qm-primary" disabled={outcomeMutationInProgress} onClick={saveLineDrafts}>
             {saving ? 'Saving...' : 'Save Line Outcomes'}
           </button>
+          {onDeliveryNoteCreated && <button type="button" className="qm-primary" disabled={outcomeMutationInProgress || !(quote.lines || []).some((line) => {
+            const draft = lineDrafts[line.id] || draftFromLine(line);
+            return line.match_status !== 'ignored' && ['accepted', 'quantity_changed'].includes(draft.outcome_status)
+              && Number(draft.accepted_quantity === '' ? line.quantity : draft.accepted_quantity) > 0;
+          })} onClick={() => saveLineDrafts({ prepareDelivery: true })}>Approve & prepare DO</button>}
         </div>
       </div>
 
       {notice && <div className={`qm-feedback ${notice.type}`} aria-live="polite">{notice.message}</div>}
+      {onDeliveryNoteCreated && <p className="qm-help-text">Review the LPO suggestions and edit the accepted quantities, prices and item outcomes below. Approve & prepare DO saves your acceptance and opens a delivery draft. Adjust today's dispatch quantities there; the remaining accepted items stay on the order.</p>}
 
       <div className="qm-stat-grid">
         <div className="qm-stat"><span>{money(summary.quoted_value, quote.currency)}</span><p>Quoted value</p></div>

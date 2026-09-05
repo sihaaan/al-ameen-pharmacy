@@ -6,6 +6,8 @@ from .models import (
     Company,
     CompanyContact,
     CompanyPriceHistory,
+    DeliveryNote,
+    DeliveryNoteLine,
     AIParseCache,
     AIParseLog,
     HistoricalImportAISuggestion,
@@ -55,6 +57,19 @@ class ReadOnlyHistoryAdminMixin:
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(DeliveryNote)
+class DeliveryNoteAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["delivery_number", "customer_name", "status", "delivery_date", "quotation"]
+    list_filter = ["status"]
+    search_fields = ["delivery_number", "customer_name", "lpo_number", "invoice_number"]
+
+
+@admin.register(DeliveryNoteLine)
+class DeliveryNoteLineAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["delivery_note", "item_name", "quantity", "received_quantity", "unit"]
+    search_fields = ["delivery_note__delivery_number", "item_name"]
 
 
 class MailboxAuditOperatorAdminMixin(ReadOnlyHistoryAdminMixin):

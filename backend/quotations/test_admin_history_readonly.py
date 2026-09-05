@@ -8,6 +8,8 @@ from .models import (
     AIParseLog,
     AIParseCache,
     CompanyPriceHistory,
+    DeliveryNote,
+    DeliveryNoteLine,
     GmailInquiryImport,
     GmailOAuthConnection,
     MailboxPOAuditFailure,
@@ -25,6 +27,8 @@ from .models import (
 
 
 READ_ONLY_ADMIN_MODELS = (
+    DeliveryNote,
+    DeliveryNoteLine,
     GmailInquiryImport,
     MailboxPOAuditRun,
     MailboxPOAuditFailure,

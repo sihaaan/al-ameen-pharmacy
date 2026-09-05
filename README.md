@@ -26,6 +26,7 @@ A full-stack e-commerce platform for [Al Ameen Pharmacy](https://www.ameenpharma
 
 ### Admin
 - **Quotation Module** - Staff-only quotation workflow in `Admin Dashboard -> Quotations` for companies, product-backed internal/public items, aliases, Gmail/manual inquiries, evidence review, optional AI cleanup, price history, finalization, protected PDFs, and reviewed Gmail delivery
+- **Orders & Delivery Notes** - In `Admin Dashboard -> Quotations -> Orders & Delivery Notes`, create branded, price-free delivery PDFs from accepted quotation quantities or enter a standalone note. Record LPO/invoice references and actual customer receipts, including shortages. The order view distinguishes accepted, awaiting receipt, partially delivered, and completed orders. Downloading a PDF does not complete an order. See [the delivery workflow](DELIVERY_NOTES.md).
 - **Gmail Quotation Assistant** - HTTP add-on for current/selected/AI-assisted messages inside the open thread; the website still requires employee review and keeps selling prices blank
 - **Accounting Module** - Accounting-permission-only overdue statement workflow in `Admin Dashboard -> Accounting` for monthly POS agewise outstanding imports, due-customer review, persistent customer emails/categories, protected statement PDFs, and ZIP downloads. V1 prepares files only and does not send emails.
 - **Product Management UI** — React-based CRUD with image upload, brand/category dropdowns, inline creation

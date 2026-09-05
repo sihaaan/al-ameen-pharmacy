@@ -2086,3 +2086,50 @@ class GmailBackgroundJobConcurrencyTests(TransactionTestCase):
             GmailInquiryImport.STATUS_ANALYZING,
         )
         self.assertEqual(self.gmail_import.analysis, {})
+
+
+@skipUnless(connection.vendor == "postgresql", "PostgreSQL row-lock semantics are required.")
+class DeliveryNoteConcurrencyTests(TransactionTestCase):
+    def test_two_notes_cannot_issue_more_than_the_accepted_quantity(self):
+        from django.core.exceptions import ValidationError
+        from .delivery import issue_delivery_note
+        from .models import DeliveryNote, DeliveryNoteLine
+
+        staff = User.objects.create_user(username="dispatch-concurrency", is_staff=True)
+        company = Company.objects.create(name="Dispatch concurrency customer")
+        quotation = Quotation.objects.create(company=company, status="finalized", outcome_status="won")
+        source = QuotationLine.objects.create(
+            quotation=quotation, item_name_snapshot="Gloves", quantity=10, unit_price=1,
+            accepted_quantity=10, accepted_unit_price=1, match_status="confirmed", outcome_status="accepted",
+        )
+        notes = []
+        for _ in range(2):
+            note = DeliveryNote.objects.create(company=company, quotation=quotation, customer_name=company.name, created_by=staff)
+            DeliveryNoteLine.objects.create(delivery_note=note, quotation_line=source, item_name="Gloves", quantity=7)
+            notes.append(note)
+        barrier = Barrier(2)
+        results = Queue()
+
+        def worker(note_id):
+            close_old_connections()
+            try:
+                note = DeliveryNote.objects.get(pk=note_id)
+                actor = User.objects.get(pk=staff.pk)
+                barrier.wait(timeout=10)
+                issue_delivery_note(note, actor)
+                results.put("issued")
+            except ValidationError:
+                results.put("rejected")
+            except Exception as exc:
+                results.put(repr(exc))
+            finally:
+                connections.close_all()
+
+        threads = [Thread(target=worker, args=(note.pk,), daemon=True) for note in notes]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+            self.assertFalse(thread.is_alive(), "Dispatch worker did not finish.")
+        self.assertEqual(sorted(results.get_nowait() for _ in threads), ["issued", "rejected"])
+        self.assertEqual(DeliveryNote.objects.filter(status="issued").count(), 1)

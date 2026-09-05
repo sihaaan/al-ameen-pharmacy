@@ -9,6 +9,7 @@ import QuotationEditor from './QuotationEditor';
 import QuotationOutcomeReview from './QuotationOutcomeReview';
 import QuotationDashboard from './QuotationDashboard';
 import ProformaInvoiceManager from './ProformaInvoiceManager';
+import DeliveryNoteManager from './DeliveryNoteManager';
 import PriceHistoryPanel from './PriceHistoryPanel';
 import AuditLogPanel from './AuditLogPanel';
 import QuotationSettings from './QuotationSettings';
@@ -23,6 +24,7 @@ const tabs = [
   { id: 'inquiries', label: 'Inquiries' },
   { id: 'quotes', label: 'Quotations' },
   { id: 'proformas', label: 'Proforma Tax Invoices' },
+  { id: 'deliveries', label: 'Orders & Delivery Notes' },
   { id: 'history', label: 'Price History' },
   { id: 'historical-imports', label: 'Historical Imports' },
   { id: 'contract-intelligence', label: 'Contract Intelligence' },
@@ -93,6 +95,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
   const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [pendingEmailReview, setPendingEmailReview] = useState(null);
+  const [preparedDeliveryNote, setPreparedDeliveryNote] = useState(null);
 
   useEffect(() => {
     setActiveTab(route.activeTab);
@@ -171,6 +174,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
   const selectTab = useCallback((tabId) => {
     if (tabId === 'audit' && canManageMailboxAudit !== true) return;
     setPendingEmailReview(null);
+    setPreparedDeliveryNote(null);
     setActiveTab(tabId);
     setEditingQuoteId(null);
     setReviewingOutcomeQuoteId(null);
@@ -182,6 +186,11 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
       params.delete('gmail_return_quote_id');
     });
   }, [canManageMailboxAudit, updateLocation]);
+
+  const openPreparedDeliveryNote = useCallback((note) => {
+    selectTab('deliveries');
+    setPreparedDeliveryNote(note);
+  }, [selectTab]);
 
   const rememberClaimedImport = useCallback((claimedImportId) => {
     const normalizedId = positiveId(claimedImportId);
@@ -267,7 +276,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
               initialShowEvidence={Boolean(gmailReturnQuoteId)}
             />
           ) : reviewingOutcomeQuoteId ? (
-            <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} />
+            <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} onDeliveryNoteCreated={openPreparedDeliveryNote} />
           ) : editingQuoteId ? (
             <QuotationEditor
               quoteId={editingQuoteId}
@@ -297,6 +306,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
           )
         )}
         {activeTab === 'proformas' && <ProformaInvoiceManager />}
+        {activeTab === 'deliveries' && <DeliveryNoteManager onReviewOutcome={openOutcome} initialNote={preparedDeliveryNote} />}
         {activeTab === 'history' && <PriceHistoryPanel />}
         {activeTab === 'historical-imports' && <HistoricalImportManager />}
         {activeTab === 'contract-intelligence' && <ContractIntelligenceManager />}

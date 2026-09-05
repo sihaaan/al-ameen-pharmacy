@@ -5,8 +5,9 @@ import QuotationModule, { quotationRouteFromSearch } from './QuotationModule';
 jest.mock('./CompanyManager', () => () => <div>Companies view</div>);
 jest.mock('./QuoteItemManager', () => () => <div>Items view</div>);
 jest.mock('./InquiryManager', () => () => <div>Regular inquiry view</div>);
-jest.mock('./QuotationList', () => () => <div>Quotation list</div>);
-jest.mock('./QuotationOutcomeReview', () => () => <div>Outcome review</div>);
+jest.mock('./QuotationList', () => ({ onReviewOutcome }) => <div>Quotation list<button onClick={() => onReviewOutcome(21)}>Review accepted order</button></div>);
+jest.mock('./QuotationOutcomeReview', () => ({ onDeliveryNoteCreated }) => <div>Outcome review<button onClick={() => onDeliveryNoteCreated({ id: 90, delivery_number: 'DN-90' })}>Approve & prepare DO</button></div>);
+jest.mock('./DeliveryNoteManager', () => ({ initialNote }) => <div>Delivery workspace {initialNote?.delivery_number || ''}</div>);
 jest.mock('./QuotationDashboard', () => () => <div>Quotation dashboard</div>);
 jest.mock('./ProformaInvoiceManager', () => () => <div>Proformas view</div>);
 jest.mock('./PriceHistoryPanel', () => () => <div>Price history view</div>);
@@ -80,6 +81,18 @@ const renderModule = (initialEntry, props = {}) => render(
 );
 
 describe('QuotationModule Gmail deep links', () => {
+  test('opens the prepared delivery note after outcome approval and clears it when leaving', async () => {
+    renderModule('/admin?quotation_tab=quotes');
+    fireEvent.click(screen.getByRole('button', { name: 'Review accepted order' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve & prepare DO' }));
+    expect(await screen.findByText('Delivery workspace DN-90')).toBeInTheDocument();
+    expect(screen.getByLabelText('location')).toHaveTextContent('quotation_tab=deliveries');
+    fireEvent.click(screen.getByRole('button', { name: 'Quotations', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Orders & Delivery Notes', exact: true }));
+    expect(screen.getByText('Delivery workspace')).toBeInTheDocument();
+    expect(screen.queryByText('Delivery workspace DN-90')).not.toBeInTheDocument();
+  });
+
   test('gives Gmail handoffs precedence and makes a claimed import resumable', async () => {
     renderModule('/admin?gmail_import=opaque-token');
 

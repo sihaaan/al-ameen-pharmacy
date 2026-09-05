@@ -2,6 +2,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from . import gmail_addon, views
+from .delivery_views import DeliveryNoteViewSet, DeliveryOrderViewSet
 
 router = DefaultRouter()
 router.register(r"companies", views.CompanyViewSet, basename="quotation-company")
@@ -23,6 +24,8 @@ router.register(r"po-evidence", views.QuotationPOEvidenceViewSet, basename="quot
 router.register(r"quotes", views.QuotationViewSet, basename="quotation")
 router.register(r"lpos", views.QuotationLPOViewSet, basename="quotation-lpo")
 router.register(r"proformas", views.ProformaInvoiceViewSet, basename="quotation-standalone-proforma")
+router.register(r"delivery-notes", DeliveryNoteViewSet, basename="quotation-delivery-note")
+router.register(r"delivery-orders", DeliveryOrderViewSet, basename="quotation-delivery-order")
 router.register(r"quote-lines", views.QuotationLineViewSet, basename="quotation-line")
 router.register(r"price-history", views.CompanyPriceHistoryViewSet, basename="quotation-price-history")
 router.register(r"audit-logs", views.QuotationAuditLogViewSet, basename="quotation-audit-log")
