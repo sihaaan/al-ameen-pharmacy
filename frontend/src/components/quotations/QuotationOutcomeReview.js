@@ -2118,7 +2118,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
             <caption className="qm-sr-only">Quotation lines compared with the selected customer LPO and editable final outcomes</caption>
             <thead>
               <tr>
-                <th scope="col">Select</th>
+                <th scope="col"><span className="qm-sr-only">Select</span></th>
                 <th scope="col">Our quotation</th>
                 <th scope="col">Customer LPO</th>
                 <th scope="col">Your approved order</th>

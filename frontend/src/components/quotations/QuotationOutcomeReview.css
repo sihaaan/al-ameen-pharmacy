@@ -72,9 +72,9 @@
 .qm-order-review .qm-review-bulk-actions .qm-secondary { min-height: 30px; padding: 6px 9px; font-size: 11px; }
 .qm-review-table-wrap { border: 1px solid var(--review-border); border-radius: 9px; margin-top: 16px; }
 .qm-order-review .qm-review-items-table { width: 100%; min-width: 0; table-layout: fixed; }
-.qm-order-review .qm-review-items-table th:first-child { width: 42px; }
-.qm-order-review .qm-review-items-table th:nth-child(2) { width: 30%; }
-.qm-order-review .qm-review-items-table th:nth-child(3) { width: 28%; }
+.qm-order-review .qm-review-items-table thead th:first-child { width: 42px; }
+.qm-order-review .qm-review-items-table thead th:nth-child(2) { width: 30%; }
+.qm-order-review .qm-review-items-table thead th:nth-child(3) { width: 28%; }
 .qm-order-review .qm-review-items-table thead th { padding: 13px 14px; background: #f0f6f3; color: #537169; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; white-space: normal; }
 .qm-order-review .qm-review-items-table tbody td, .qm-order-review .qm-review-items-table tbody th { padding: 18px 14px; text-align: left; vertical-align: top; background: white; border-bottom: 1px solid var(--review-border); overflow-wrap: anywhere; }
 .qm-order-review .qm-review-items-table tbody tr:last-child > * { border-bottom: 0; }
@@ -135,6 +135,7 @@
   .qm-order-review .qm-review-items-table tbody tr { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 15px 12px 12px 35px; border-bottom: 1px solid var(--review-border); }
   .qm-order-review .qm-review-items-table tbody tr:last-child { border-bottom: 0; }
   .qm-order-review .qm-review-items-table tbody tr > td, .qm-order-review .qm-review-items-table tbody tr > th { display: block; width: auto; padding: 8px; border: 0; }
+  .qm-order-review .qm-review-items-table tbody [data-label="Our quotation"], .qm-order-review .qm-review-items-table tbody [data-label="Customer LPO"] { grid-column: 1 / -1; }
   .qm-order-review .qm-review-items-table tbody td:first-child:not([colspan]) { position: absolute; left: 5px; top: 16px; }
   .qm-order-review .qm-review-items-table tbody td[data-label="Your approved order"] { grid-column: 1 / -1; margin-top: 7px; background: #f5faf7; border-radius: 7px; }
   .qm-order-review .qm-review-items-table tbody [data-label="Our quotation"]::before, .qm-order-review .qm-review-items-table tbody [data-label="Customer LPO"]::before { content: attr(data-label); display: block; margin-bottom: 10px; color: var(--review-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
