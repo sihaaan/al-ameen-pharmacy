@@ -167,6 +167,37 @@ class CompanyPricingTests(APITestCase):
         resolution = create_or_reuse_product(name=self.product.name, confirm_create=True)
         self.assertFalse(resolution.created); self.assertTrue(resolution.creation_blocked)
 
+    def test_device_and_its_strips_cannot_share_an_identity_or_price(self):
+        strips = Product.objects.create(name="Glucometer Strips", price=1, pack_size="BOX")
+        self.assertIsNone(suggest_product_for_text("Glucometer").product)
+        self.assertEqual(suggest_product_for_text("Strips Glucometer").product, strips)
+        source = self.history(product=strips)
+        self.assertFalse(recommend_price(self.quote, strips, "box", source_wording="Glucometer")["eligible"])
+        source.quotation_line.item_name_snapshot = "Glucometer"
+        source.quotation_line.save()
+        self.assertFalse(recommend_price(self.quote, strips, "box")["eligible"])
+        strips.name = "Glucometer 50 Strips"
+        strips.save()
+        self.assertFalse(recommend_price(self.quote, strips, "box")["eligible"])
+
+    def test_owner_report_and_consolidation_preserve_accessory_role(self):
+        device = Product.objects.create(name="Glucometer", price=1)
+        strips = Product.objects.create(name="Glucometer Strips", price=1, pack_size="BOX")
+        report = identity_report()
+        row = next(row for row in report["results"] if row["id"] == device.pk)
+        self.assertFalse(next(c for c in row["candidates"] if c["id"] == strips.pk)["compatible"])
+        with self.assertRaises(ValidationError):
+            review_identity(device.pk, {"updated_at": device.updated_at.isoformat(), "canonical_product_id": strips.pk}, self.owner)
+
+    @patch("quotations.ai_parsing.get_ai_parse_provider")
+    @patch("quotations.ai_parsing.get_ai_parse_availability", return_value={"provider": "openai", "text_model": "configured"})
+    @patch("quotations.ai_parsing.settings_ai_status", return_value={"status": "ai_available"})
+    def test_ai_cannot_drop_an_accessory_word(self, _status, _availability, provider):
+        provider.return_value.clean_rows.return_value = ({"standard_name": "Glucometer", "candidate_ids": []}, {})
+        result = identity_preview("Glucometer Strips")
+        self.assertEqual(result["standard_name"], "Glucometer Strips")
+        self.assertEqual(result["ai_status"], "unsupported_change_rejected")
+
     @patch("quotations.catalogue_identity.identity_preview", return_value={"standard_name": "New Syringe", "ai_status": "review_ready"})
     def test_new_items_are_provisional_across_shared_creation_service(self, _preview):
         result = create_or_reuse_product(name="Syringe New")
