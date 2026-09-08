@@ -262,6 +262,15 @@ const ProductFormModal = ({
     if (saving) return;
     setSaving(true);
 
+    let proposedName = formData.name;
+    if (!editingProduct) {
+      try {
+        const preview = await axiosInstance.post('/quotations/items/identity_preview/', { name: formData.name });
+        proposedName = preview.data?.standard_name || formData.name;
+      } catch {
+        // Matching and the provisional gate still run on the server if AI is unavailable.
+      }
+    }
     const data = new FormData();
     const fieldsToSend = [
       'name', 'short_description', 'detailed_description',
@@ -271,7 +280,7 @@ const ProductFormModal = ({
     ];
 
     fieldsToSend.forEach((key) => {
-      const value = formData[key];
+      const value = key === 'name' ? proposedName : formData[key];
       if (value !== null && value !== '' && value !== undefined) {
         data.append(key, typeof value === 'boolean' ? value.toString() : value);
       }

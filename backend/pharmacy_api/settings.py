@@ -725,3 +725,6 @@ LOGGING = {
         },
     },
 }
+
+# Independent rollback switch for accepted-first company price recommendations.
+QUOTATION_COMPANY_PRICE_AUTOFILL_ENABLED = os.environ.get("QUOTATION_COMPANY_PRICE_AUTOFILL_ENABLED", "0").lower() in {"1", "true", "yes"}

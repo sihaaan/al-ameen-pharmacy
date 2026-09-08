@@ -100,6 +100,12 @@ class Category(models.Model):
 
 
 class Product(models.Model):
+    identity_review_state = models.CharField(
+        max_length=20, choices=[("verified", "Verified"), ("provisional", "Needs identity review")],
+        default="verified", db_default="verified", db_index=True,
+    )
+    identity_notes = models.JSONField(default=dict, db_default={}, blank=True)
+    canonical_product = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="identity_variants")
     """
     Core product model for pharmacy e-commerce.
     Supports pharmacy-specific fields, SEO, and multi-image via ProductImage.

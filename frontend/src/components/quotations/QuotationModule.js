@@ -1,22 +1,23 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import CompanyManager from './CompanyManager';
-import QuoteItemManager from './QuoteItemManager';
-import InquiryManager from './InquiryManager';
-import GmailInquiryReview from './GmailInquiryReview';
-import QuotationList from './QuotationList';
-import QuotationEditor from './QuotationEditor';
-import QuotationOutcomeReview from './QuotationOutcomeReview';
-import QuotationDashboard from './QuotationDashboard';
-import ProformaInvoiceManager from './ProformaInvoiceManager';
-import DeliveryNoteManager from './DeliveryNoteManager';
-import PriceHistoryPanel from './PriceHistoryPanel';
-import AuditLogPanel from './AuditLogPanel';
-import QuotationSettings from './QuotationSettings';
-import HistoricalImportManager from './HistoricalImportManager';
-import ContractIntelligenceManager from './ContractIntelligenceManager';
 import './QuotationModule.css';
 import './QuotationOutcomeReview.css';
+
+const CompanyManager = lazy(() => import('./CompanyManager'));
+const QuoteItemManager = lazy(() => import('./QuoteItemManager'));
+const InquiryManager = lazy(() => import('./InquiryManager'));
+const GmailInquiryReview = lazy(() => import('./GmailInquiryReview'));
+const QuotationList = lazy(() => import('./QuotationList'));
+const QuotationEditor = lazy(() => import('./QuotationEditor'));
+const QuotationOutcomeReview = lazy(() => import('./QuotationOutcomeReview'));
+const QuotationDashboard = lazy(() => import('./QuotationDashboard'));
+const ProformaInvoiceManager = lazy(() => import('./ProformaInvoiceManager'));
+const DeliveryNoteManager = lazy(() => import('./DeliveryNoteManager'));
+const PriceHistoryPanel = lazy(() => import('./PriceHistoryPanel'));
+const AuditLogPanel = lazy(() => import('./AuditLogPanel'));
+const QuotationSettings = lazy(() => import('./QuotationSettings'));
+const HistoricalImportManager = lazy(() => import('./HistoricalImportManager'));
+const ContractIntelligenceManager = lazy(() => import('./ContractIntelligenceManager'));
 
 const tabs = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -278,6 +279,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
       </div>
 
       <div className="qm-body">
+        <Suspense fallback={<p role="status">Loading quotation workspace…</p>}>
         {activeTab === 'dashboard' && <QuotationDashboard key={refreshKey} onOpenQuotes={() => selectTab('quotes')} />}
         {activeTab === 'companies' && <CompanyManager />}
         {activeTab === 'items' && <QuoteItemManager />}
@@ -331,6 +333,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
         {activeTab === 'contract-intelligence' && <ContractIntelligenceManager />}
         {activeTab === 'audit' && canManageMailboxAudit === true && <AuditLogPanel />}
         {activeTab === 'settings' && <QuotationSettings />}
+        </Suspense>
       </div>
     </div>
   );

@@ -571,7 +571,7 @@ class ProductMatchingReworkTests(APITestCase):
             history_context=history_context,
         )
 
-        self.assertEqual(live_identity.product, preferred)
+        self.assertIsNone(live_identity.product)
         self.assertEqual(live_identifier.product, older)
         self.assertEqual(
             preloaded_identity.as_preview(),
@@ -670,7 +670,7 @@ class ProductMatchingReworkTests(APITestCase):
         self.assertTrue(confirmed.override_used)
         self.assertEqual(confirmed.product.name, "Pulse Oximtre")
 
-    def test_duplicate_canonical_products_reuse_one_instead_of_creating_another(self):
+    def test_duplicate_canonical_products_require_selection_instead_of_creating_another(self):
         first = self.product("Alcohol Detector Mouth-Piece")
         self.product("Alcohol Detector Mouth Piece")
         before = Product.objects.count()
@@ -678,7 +678,8 @@ class ProductMatchingReworkTests(APITestCase):
         resolution = create_or_reuse_product(name="ALCOHOL-DETECTOR MOUTH PIECE", confirm_create=True)
 
         self.assertFalse(resolution.created)
-        self.assertEqual(resolution.product, first)
+        self.assertIsNone(resolution.product)
+        self.assertTrue(resolution.creation_blocked)
         self.assertEqual(Product.objects.count(), before)
 
     def test_exact_fingerprint_is_reused_when_same_name_has_other_variants(self):

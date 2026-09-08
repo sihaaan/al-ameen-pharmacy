@@ -361,6 +361,11 @@ class QuotationWorkflowTests(APITestCase):
         line.refresh_from_db()
         self.assertEqual(line.brand_name_snapshot, "")
 
+        self.assertTrue(line.price_review_required)
+        review = self.client.post(reverse("quotation-bulk-update-lines", args=[quotation.id]),
+            {"lines": [{"id": line.id, "price_reviewed": True}]}, format="json")
+        self.assertEqual(review.status_code, status.HTTP_200_OK)
+
         finalize_response = self.client.post(reverse("quotation-finalize", args=[quotation.id]))
         self.assertEqual(finalize_response.status_code, status.HTTP_200_OK)
         line.refresh_from_db()

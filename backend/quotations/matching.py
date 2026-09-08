@@ -6,7 +6,8 @@ from difflib import SequenceMatcher
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Q
+from django.db.models import F, Q, Window
+from django.db.models.functions import RowNumber
 
 from api.models import Product
 
@@ -30,7 +31,12 @@ _COUNT_FORM_RE = re.compile(
 )
 _X_COUNT_RE = re.compile(r"(?<![a-z0-9])(?:pack|box|packet|pkt|strip)?\s*x\s*(\d+)(?![a-z0-9])", re.IGNORECASE)
 
+_DIMENSION_RE = re.compile(r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(mm|cm|fr|gauge|inches?|inch)(?![a-z])", re.IGNORECASE)
+_BOX_OF_RE = re.compile(r"\b(?:box|pack|packet)\s+of\s+(\d+)\b", re.IGNORECASE)
+
 _TOKEN_ALIASES = {
+    "gloves": "glove", "needles": "needle", "syringes": "syringe",
+    "bandages": "bandage", "dressings": "dressing", "swabs": "swab",
     "ug": "mcg",
     "gm": "g",
     "ltr": "l",
@@ -143,6 +149,8 @@ def _extract_pack_counts(value):
         counts.add((int(number), form))
     for number in _X_COUNT_RE.findall(str(value or "")):
         counts.add((int(number), ""))
+    for number in _BOX_OF_RE.findall(str(value or "")):
+        counts.add((int(number), ""))
     return tuple(sorted(counts))
 
 
@@ -155,12 +163,13 @@ def _core_name(value):
     text = _MEASUREMENT_RE.sub(" ", str(value or ""))
     text = _COUNT_FORM_RE.sub(" ", text)
     text = _X_COUNT_RE.sub(" ", text)
+    text = _BOX_OF_RE.sub(" ", text)
     tokens = [
         token
         for token in normalize_item_text(text).split()
         if token not in _IDENTITY_NOISE and token != "x"
     ]
-    return " ".join(tokens)
+    return " ".join(sorted(tokens))
 
 
 @dataclass(frozen=True)
@@ -172,10 +181,11 @@ class ItemIdentity:
     pack_counts: tuple[tuple[int, str], ...]
     dosage_forms: tuple[str, ...]
     pack_forms: tuple[str, ...]
+    dimensions: tuple[str, ...] = ()
 
     @property
     def fingerprint(self):
-        return (self.core_name, self.strengths, self.pack_counts, self.dosage_forms, self.pack_forms)
+        return (self.core_name, self.strengths, self.pack_counts, self.dosage_forms, self.pack_forms, self.dimensions)
 
 
 def item_identity(name, *, dosage="", pack_size="", unit=""):
@@ -188,6 +198,7 @@ def item_identity(name, *, dosage="", pack_size="", unit=""):
     return ItemIdentity(
         normalized_text=normalize_item_text(" ".join(part for part in [name, dosage, pack_size] if part)),
         core_name=_core_name(name),
+        dimensions=tuple(sorted({f"{_canonical_number(number)}{dimension.lower()}" for number, dimension in _DIMENSION_RE.findall(" ".join([name, dosage, pack_size]))})),
         core_tokens=tuple(_core_name(name).split()),
         strengths=_extract_measurements(" ".join(part for part in [name, dosage] if part)),
         pack_counts=_extract_pack_counts(" ".join(part for part in [name, pack_size] if part)),
@@ -205,6 +216,22 @@ def product_identity(product):
 
 
 def identities_compatible(requested, candidate):
+    if requested.dimensions and candidate.dimensions and requested.dimensions != candidate.dimensions:
+        return False
+    # Multiple ingredient strengths or ratios cannot be matched as unordered
+    # numbers: swapping which ingredient owns a strength changes the product.
+    if len(requested.strengths) > 1 and len(candidate.strengths) > 1 and requested.normalized_text != candidate.normalized_text:
+        return False
+    for group in ({"small", "medium", "large", "xl", "xs", "xxl"}, {"latex", "nitrile", "vinyl"}):
+        left, right = set(requested.core_tokens) & group, set(candidate.core_tokens) & group
+        if left and right and left != right:
+            return False
+    for marker in ("sterile", "powder"):
+        left, right = set(requested.core_tokens), set(candidate.core_tokens)
+        if marker in left and marker in right:
+            qualifiers = {"non", "free"}
+            if left & qualifiers != right & qualifiers:
+                return False
     if requested.strengths and candidate.strengths and requested.strengths != candidate.strengths:
         return False
     if requested.dosage_forms and candidate.dosage_forms:
@@ -315,7 +342,7 @@ class CompanyHistoryMatchContext:
 
 
 def product_catalog_queryset():
-    return Product.objects.exclude(status="archived").select_related("brand", "category")
+    return Product.objects.exclude(status="archived").filter(canonical_product__isnull=True).select_related("brand", "category")
 
 
 def _candidate(product, score, method, reason):
@@ -486,6 +513,8 @@ def _alias_match(raw_text, company, scope_label):
         return None
     products = {}
     for alias in aliases:
+        if alias.product.canonical_product_id:
+            alias.product = alias.product.canonical_product
         products.setdefault(alias.product_id, alias)
     if len(products) > 1:
         candidates = [
@@ -506,6 +535,8 @@ def _alias_match(raw_text, company, scope_label):
             True,
         )
     alias = aliases[0]
+    if not identities_compatible(item_identity(raw_text), product_identity(alias.product)):
+        return None
     method = "company_alias" if company else "global_alias"
     label = "company" if company else "global"
     score = 0.99 if company else 0.97
@@ -516,13 +547,15 @@ def _alias_match(raw_text, company, scope_label):
 def _company_history_queryset(company):
     return (
         CompanyPriceHistory.objects.filter(company=company)
-        .select_related("product")
-        .order_by("-quoted_at", "-id")[:1000]
+        .select_related("product", "quotation_line")
+        .annotate(identity_rank=Window(expression=RowNumber(), partition_by=[F("product_id")], order_by=[F("quoted_at").desc(), F("id").desc()]))
+        .filter(identity_rank=1)
+        .order_by("-quoted_at", "-id")
     )
 
 
 def preload_company_history_match_context(company):
-    """Evaluate the normal latest-1000 history window once for one request."""
+    """Evaluate the normal distinct-product history snapshot once for one request."""
 
     if not company:
         return CompanyHistoryMatchContext(company_id=None)
@@ -553,17 +586,19 @@ def _company_history_product_match(
         )
         else _company_history_queryset(company)
     )
+    matches = {}
     for history in history_entries:
         product = history.product
-        if not product or product.id in seen or product.status == "archived":
+        if not product or product.id in seen or product.status == "archived" or product.identity_review_state != "verified" or product.canonical_product_id:
             continue
         seen.add(product.id)
         if identifiers.intersection({(product.sku or "").strip().lower(), (product.barcode or "").strip().lower()}) - {""}:
-            return product
-        identity = product_identity(product)
-        if requested.core_name and requested.core_name == identity.core_name and identities_compatible(requested, identity):
-            return product
-    return None
+            matches[product.pk] = product
+            continue
+        identities = [product_identity(product), item_identity(history.quotation_line.item_name_snapshot, unit=history.unit)]
+        if any(equivalent_identity(requested, identity) for identity in identities) and identities_compatible(requested, product_identity(product)):
+            matches[product.pk] = product
+    return next(iter(matches.values())) if len(matches) == 1 else None
 
 
 def _identifier_match(raw_text, *, sku="", barcode=""):
@@ -616,6 +651,19 @@ def _fuzzy_score(requested, candidate):
     return min(score, 0.89)
 
 
+def equivalent_identity(requested, candidate):
+    # Multiple dimensions stay reviewable when wording changes: ordered
+    # measurements can encode different roles (for example diameter vs length).
+    if len(requested.dimensions) > 1 and requested.normalized_text != candidate.normalized_text:
+        return False
+    # Equality in identifying attributes, not a lower similarity threshold.
+    counts = lambda identity: {count for count, form in identity.pack_counts}
+    return bool(requested.core_name and requested.core_name == candidate.core_name
+        and requested.strengths == candidate.strengths and counts(requested) == counts(candidate)
+        and requested.dosage_forms == candidate.dosage_forms
+        and identities_compatible(requested, candidate))
+
+
 def _rank_catalog_candidates(raw_text, requested, limit=MAX_MATCH_CANDIDATES):
     exact = []
     fuzzy = []
@@ -623,7 +671,7 @@ def _rank_catalog_candidates(raw_text, requested, limit=MAX_MATCH_CANDIDATES):
         identity = product_identity(product)
         if not identities_compatible(requested, identity):
             continue
-        if requested.core_name and requested.core_name == identity.core_name:
+        if equivalent_identity(requested, identity) and product.identity_review_state == "verified":
             exact.append(_candidate(product, 0.92, "canonical_name", "Matched canonical product identity."))
             continue
         score = _fuzzy_score(requested, identity)
@@ -642,40 +690,29 @@ def _rank_catalog_candidates(raw_text, requested, limit=MAX_MATCH_CANDIDATES):
 
 
 def _select_canonical_match(exact_candidates, requested):
-    if not exact_candidates:
-        return None
-    if len(exact_candidates) == 1:
-        return exact_candidates[0]
-    exact_fingerprint_matches = [
-        candidate
-        for candidate in exact_candidates
-        if product_identity(candidate.product).fingerprint == requested.fingerprint
-    ]
-    if exact_fingerprint_matches:
-        return min(exact_fingerprint_matches, key=lambda candidate: candidate.product.id)
-    fingerprints = {product_identity(candidate.product).fingerprint for candidate in exact_candidates}
-    if len(fingerprints) == 1:
-        return min(exact_candidates, key=lambda candidate: candidate.product.id)
-    fully_specified = bool(requested.strengths or requested.pack_counts or requested.dosage_forms or requested.pack_forms)
-    if fully_specified:
-        matching_fingerprints = [
-            candidate
-            for candidate in exact_candidates
-            if all(
-                [
-                    not requested.strengths or requested.strengths == product_identity(candidate.product).strengths,
-                    not requested.pack_counts or requested.pack_counts == product_identity(candidate.product).pack_counts,
-                    not requested.dosage_forms or bool(set(requested.dosage_forms) & set(product_identity(candidate.product).dosage_forms)),
-                    not requested.pack_forms or bool(set(requested.pack_forms) & set(product_identity(candidate.product).pack_forms)),
-                ]
-            )
-        ]
-        if len(matching_fingerprints) == 1:
-            return matching_fingerprints[0]
-    return None
+    # Duplicate IDs can own different price histories. Never choose one by ID.
+    return exact_candidates[0] if len(exact_candidates) == 1 else None
 
 
-def suggest_product_for_text(
+def rejected_product_ids(raw_text, company):
+    if not company:
+        return set()
+    from .models import QuotationPriceFeedback
+    normalized = normalize_item_text(raw_text)
+    return {row["product_id"] for row in QuotationPriceFeedback.objects.filter(company=company, kind="wrong_product").values("product_id", "source_wording")
+            if normalize_item_text(row["source_wording"]) == normalized}
+
+
+def suggest_product_for_text(raw_text, company=None, **kwargs):
+    result = _suggest_product_for_text(raw_text, company, **kwargs)
+    rejected = rejected_product_ids(raw_text, company)
+    if result.product and result.product.pk in rejected:
+        return ProductMatch(None, 0, "product_correction_review", "This wording previously linked the wrong product; confirm its identity.",
+                            [c for c in result.candidates if c.product.pk not in rejected], True)
+    return result
+
+
+def _suggest_product_for_text(
     raw_text,
     company=None,
     *,
@@ -698,7 +735,7 @@ def suggest_product_for_text(
 
     if company:
         alias_match = _alias_match(raw_text, company, "company")
-        if alias_match:
+        if alias_match and (not alias_match.product or alias_match.product.identity_review_state == "verified"):
             return alias_match
 
         history_product = _company_history_product_match(
@@ -715,7 +752,7 @@ def suggest_product_for_text(
             return ProductMatch(history_product, candidate.score, candidate.method, reason, [candidate])
 
     alias_match = _alias_match(raw_text, None, "global")
-    if alias_match:
+    if alias_match and (not alias_match.product or alias_match.product.identity_review_state == "verified"):
         return alias_match
 
     identifier_products, identifier_method = _identifier_match(raw_text, sku=sku, barcode=barcode)
@@ -724,7 +761,7 @@ def suggest_product_for_text(
             _candidate(product, 0.99, identifier_method, "Matched exact SKU or barcode.")
             for product in identifier_products[:limit]
         ]
-        if len(identifier_products) == 1:
+        if len(identifier_products) == 1 and identifier_products[0].identity_review_state == "verified":
             return ProductMatch(identifier_products[0], 0.99, identifier_method, candidates[0].reason, candidates)
         return ProductMatch(
             None,
@@ -1028,9 +1065,14 @@ def create_or_reuse_product(
         pack_size=requested_pack_size,
         unit=unit,
     )
+    if not match.product:
+        provisional = [p for p in product_catalog_queryset().filter(identity_review_state="provisional", name__iexact=cleaned_name)
+                       if equivalent_identity(item_identity(cleaned_name, dosage=dosage, pack_size=requested_pack_size), product_identity(p))]
+        if len(provisional) == 1:
+            return ProductCreationResult(product=provisional[0], created=False, match=match)
     if match.product:
         return ProductCreationResult(product=match.product, created=False, match=match)
-    if match.method in {"identifier_conflict", "alias_conflict"}:
+    if match.method in {"identifier_conflict", "alias_conflict", "canonical_name_conflict"}:
         return ProductCreationResult(
             product=None,
             created=False,
@@ -1048,6 +1090,9 @@ def create_or_reuse_product(
             warning=match.reason,
         )
 
+    from .catalogue_identity import identity_preview
+    normalisation = identity_preview(cleaned_name, company, use_ai=False)
+    standard_name = normalisation["standard_name"]
     product_values = {
         "name": cleaned_name,
         "price": Decimal("0.01"),
@@ -1059,11 +1104,14 @@ def create_or_reuse_product(
     }
     product_values.update(
         {
-            "name": cleaned_name,
+            "name": standard_name,
             "sku": sku,
             "barcode": barcode,
             "dosage": dosage,
             "pack_size": stored_pack_size,
+            "identity_review_state": "provisional",
+            "identity_notes": {"original_name": cleaned_name, "ai_status": normalisation["ai_status"], "duplicate_override": bool(confirm_create and match.candidates),
+                               "candidate_ids": [candidate.product.pk for candidate in match.candidates]},
         }
     )
     product = Product.objects.create(**product_values)

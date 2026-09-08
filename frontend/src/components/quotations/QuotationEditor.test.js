@@ -2746,7 +2746,9 @@ describe('QuotationEditor Product price context', () => {
 
     expect(await screen.findByText('Likely existing Product found')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Use Gloves A/i })).toBeInTheDocument();
-    const override = screen.getByRole('button', { name: /Create new Product anyway/i });
+    const override = screen.getByRole('button', { name: /Create reviewed provisional items/i });
+    expect(override).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /I checked these candidates/i }));
     await waitFor(() => expect(override).toBeEnabled());
     fireEvent.click(override);
 
@@ -3468,4 +3470,66 @@ describe('QuotationEditor Product price context', () => {
     expect(companyBContactAttempts).toBe(2);
     consoleError.mockRestore();
   });
+  const acceptedRecommendation = { eligible: true, amount: '18.000', basis: 'accepted', history_id: 51,
+    company_id: 7, product_id: 11, quotation_number: 'QT-HISTORY', date: '2026-06-01', unit: 'box', currency: 'AED', quantity: '5' };
+  const pricingQuote = (price = '') => ({ ...withProgressiveLoad(readyQuote),
+    workflow_features: { quotation_editor_progressive_load: true, company_price_autofill: true },
+    lines: [{ ...readyQuote.lines[0], unit_price: price }] });
+
+  test('fills a blank confirmed line from accepted history in progressive mode with a compact accessible source', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: pricingQuote() });
+    quotationAPI.quotes.productPrices.mockResolvedValue({ data: { results: { 11: { product: 11, recommendations_by_unit: { box: acceptedRecommendation } } } } });
+    render(<QuotationEditor quoteId={21} />);
+    await waitFor(() => expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(18));
+    expect(screen.getByLabelText('Filled from last accepted company price')).toBeInTheDocument();
+    expect(screen.queryByText('Autofilled')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Filled from last accepted company price'));
+    expect(screen.getByText(/QT-HISTORY/)).toBeVisible();
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), { target: { value: '22' } });
+    expect(screen.getByLabelText('Manually entered price')).toBeInTheDocument();
+  });
+
+  test('a late batch cannot replace a manual edit, including intentional zero', async () => {
+    const pending = deferred();
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: pricingQuote() });
+    quotationAPI.quotes.productPrices.mockReturnValue(pending.promise);
+    render(<QuotationEditor quoteId={21} />);
+    const input = await screen.findByLabelText('Unit price for Imported gloves');
+    fireEvent.change(input, { target: { value: '0' } });
+    await act(async () => pending.resolve({ data: { results: { 11: { product: 11, recommendations_by_unit: { box: acceptedRecommendation } } } } }));
+    expect(input).toHaveValue(0);
+  });
+
+  test('reopened provenance is visible and wrong product clears a derived price', async () => {
+    const current = pricingQuote('18');
+    current.lines[0].price_provenance = { kind: 'history', ...acceptedRecommendation };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: current });
+    render(<QuotationEditor quoteId={21} />);
+    fireEvent.click(await screen.findByLabelText('Filled from last accepted company price'));
+    fireEvent.click(screen.getByRole('button', { name: 'Wrong product' }));
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(null);
+    expect(screen.getByLabelText('Price needs review')).toBeInTheDocument();
+  });
+
+  test('a wrong-product correction keeps a manual price visibly pending review', async () => {
+    const current = pricingQuote('22');
+    current.lines[0].price_provenance = { kind: 'manual', previous_source: acceptedRecommendation };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: current });
+    render(<QuotationEditor quoteId={21} />);
+    fireEvent.click(await screen.findByLabelText('Manually entered price'));
+    fireEvent.click(screen.getByRole('button', { name: 'Wrong product' }));
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(22);
+    expect(screen.getByLabelText('Price needs review')).toBeInTheDocument();
+  });
+
+  test('unit mismatch leaves a blank with a specific explanation', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: pricingQuote() });
+    quotationAPI.quotes.productPrices.mockResolvedValue({ data: { results: { 11: { product: 11, recommendations_by_unit: {
+      box: { eligible: false, reason: 'No eligible price for this unit/currency' },
+    } } } } });
+    render(<QuotationEditor quoteId={21} />);
+    expect(await screen.findByLabelText('No eligible price for this unit/currency')).toBeInTheDocument();
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(null);
+  });
+
 });

@@ -1,14 +1,15 @@
 // frontend/src/pages/AdminDashboard.js
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { lazy, Suspense, useCallback, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation, useNavigate } from 'react-router-dom';
 import axiosInstance from '../utils/axios';
 import { internalPathOrHome } from '../utils/internalRedirect';
-import ProductManagement from '../components/ProductManagement';
-import OrderManagement from '../components/OrderManagement';
-import QuotationModule from '../components/quotations/QuotationModule';
-import AccountingModule from '../components/accounting/AccountingModule';
 import '../styles/Dashboard.css';
+
+const ProductManagement = lazy(() => import('../components/ProductManagement'));
+const OrderManagement = lazy(() => import('../components/OrderManagement'));
+const QuotationModule = lazy(() => import('../components/quotations/QuotationModule'));
+const AccountingModule = lazy(() => import('../components/accounting/AccountingModule'));
 
 const ADMIN_TABS = new Set(['overview', 'products', 'orders', 'quotations', 'accounting']);
 
@@ -101,8 +102,8 @@ const AdminDashboard = () => {
   }, [user, loading, navigate, location.pathname, location.search]);
 
   useEffect(() => {
-    if (!loading && user?.is_staff) fetchStats();
-  }, [fetchStats, loading, user?.id, user?.is_staff]);
+    if (!loading && user?.is_staff && activeTab === 'overview') fetchStats();
+  }, [fetchStats, loading, user?.id, user?.is_staff, activeTab]);
 
   if (loading) {
     return (
@@ -172,6 +173,7 @@ const AdminDashboard = () => {
       </div>
 
       <div className="admin-content">
+        <Suspense fallback={<p role="status">Loading workspace…</p>}>
         {activeTab === 'overview' && (
           <div className="overview-section">
             {statsError && <div className="admin-error">{statsError}</div>}
@@ -256,6 +258,7 @@ const AdminDashboard = () => {
         {activeTab === 'accounting' && !canAccessAccounting && (
           <div className="admin-error">You do not have permission to access Accounting.</div>
         )}
+        </Suspense>
       </div>
     </div>
   );

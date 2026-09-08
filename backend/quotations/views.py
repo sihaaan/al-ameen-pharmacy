@@ -1,3 +1,4 @@
+from .pricing import recommendation_context, recommend_price, pricing_unit, invalidate_quotation_prices
 import json
 import logging
 import re
@@ -1636,7 +1637,8 @@ def _product_price_context_payload(quotation, product, history_entries, latest_a
 
 
 def _build_product_price_context(quotation, product, history_limit):
-    history_queryset = _price_context_queryset(quotation).filter(product=product)
+    source_ids = [product.pk, *Product.objects.filter(canonical_product=product).values_list("pk", flat=True)]
+    history_queryset = _price_context_queryset(quotation).filter(product_id__in=source_ids)
     history_entries = list(history_queryset.order_by("-quoted_at", "-id")[:history_limit])
     latest_accepted_entry = (
         history_queryset.filter(
@@ -1825,6 +1827,30 @@ class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         if self.action == "list":
             return QuoteItemListSerializer
         return QuoteItemSerializer
+
+    @action(detail=False, methods=["post"])
+    def identity_preview(self, request):
+        from .catalogue_identity import identity_preview
+        name = str(request.data.get("name", "")).strip()[:200]
+        if not name:
+            return Response({"detail": "Enter an item description."}, status=400)
+        company_id = _positive_pk(request.data.get("company"))
+        company = Company.objects.filter(pk=company_id).first() if company_id else None
+        return Response(identity_preview(name, company))
+
+    @action(detail=False, methods=["get"])
+    def identity_report(self, request):
+        from .catalogue_identity import identity_report
+        return Response(identity_report(after=_positive_pk(request.query_params.get("after")) or 0))
+
+    @action(detail=True, methods=["post"])
+    def review_identity(self, request, pk=None):
+        from .catalogue_identity import review_identity
+        try:
+            product = review_identity(self.get_object().pk, request.data, request.user)
+            return Response(QuoteItemSerializer(product, context={"request": request}).data)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -3394,7 +3420,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             discount_before = quotation.discount_amount
             total_before = quotation.total
             discount_supplied = "discount_amount" in serializer.validated_data
+            price_context_before = (quotation.company_id, quotation.currency)
             quotation = serializer.save()
+            if price_context_before != (quotation.company_id, quotation.currency):
+                invalidate_quotation_prices(quotation, self.request.user)
             recalculate_quotation_totals(quotation)
             changes = {}
             if discount_supplied:
@@ -3854,12 +3883,15 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         if not product_id:
             return Response({"detail": "Select a Product before requesting a price."}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            product = Product.objects.get(pk=product_id)
+            product = Product.objects.select_related("brand").get(pk=product_id)
         except (Product.DoesNotExist, ValueError):
             return Response({"detail": "Selected Product was not found."}, status=status.HTTP_404_NOT_FOUND)
 
         history_limit = _price_context_history_limit(request.query_params.get("history_limit"))
-        return Response(_build_product_price_context(quotation, product, history_limit))
+        payload = _build_product_price_context(quotation, product, history_limit)
+        if getattr(settings, "QUOTATION_COMPANY_PRICE_AUTOFILL_ENABLED", False):
+            payload["recommendation"] = recommend_price(quotation, product, request.query_params.get("unit", product.pack_size), source_wording=request.query_params.get("wording", ""))
+        return Response(payload)
 
     @action(detail=True, methods=["get"])
     def product_prices(self, request, pk=None):
@@ -3890,7 +3922,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        products_by_id = Product.objects.in_bulk(product_ids)
+        products_by_id = Product.objects.select_related("brand").in_bulk(product_ids)
         missing_product_ids = [product_id for product_id in product_ids if product_id not in products_by_id]
         if missing_product_ids:
             return Response(
@@ -3902,14 +3934,25 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
 
         history_limit = _price_context_history_limit(request.query_params.get("history_limit"))
+        results = _build_product_price_contexts(quotation, products_by_id, product_ids, history_limit)
+        pricing_context = recommendation_context(quotation, product_ids)
+        units = {product_id: {product.pack_size} for product_id, product in products_by_id.items()}
+        for line in quotation.lines.all():
+            if line.product_id in units:
+                units[line.product_id].add(line.unit)
+        for product_id, product in products_by_id.items():
+            results[str(product_id)]["recommendations_by_unit"] = {
+                unit: recommend_price(quotation, product, unit, context=pricing_context) for unit in units[product_id]
+            }
+            results[str(product_id)]["line_recommendations"] = {}
+        for line in quotation.lines.all():
+            if line.product_id in products_by_id:
+                results[str(line.product_id)]["line_recommendations"][str(line.pk)] = recommend_price(
+                    quotation, products_by_id[line.product_id], line.unit, context=pricing_context,
+                    source_wording=line.item_name_snapshot)
         return Response(
             {
-                "results": _build_product_price_contexts(
-                    quotation,
-                    products_by_id,
-                    product_ids,
-                    history_limit,
-                )
+                "results": results
             }
         )
 

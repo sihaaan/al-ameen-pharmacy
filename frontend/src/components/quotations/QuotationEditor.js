@@ -6,6 +6,7 @@ import AuditLogPanel from './AuditLogPanel';
 import QuotationErrorNotice from './QuotationErrorNotice';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
+import CompanyPriceField, { historyPricePatch, isBlankPrice } from './CompanyPriceField';
 import ProductSelect, { buildProductCatalogue } from './ProductSelect';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
@@ -129,7 +130,12 @@ const normalizeDraft = (draft = {}) => ({
   description: String(draft.description || ''),
   quantity: String(draft.quantity || ''),
   unit: String(draft.unit || ''),
-  unit_price: String(draft.unit_price || ''),
+  unit_price: String(draft.unit_price ?? ''),
+  price_source_history: draft.price_source_history || null,
+  price_original_history: draft.price_original_history || null,
+  price_reviewed: !!draft.price_reviewed,
+  price_context_changed: !!draft.price_context_changed,
+  price_feedback: draft.price_feedback || '',
   vat_rate: normalizeVatRate(draft.vat_rate),
   match_status: String(draft.match_status || 'unresolved'),
   include_product_image: !!draft.include_product_image,
@@ -167,7 +173,9 @@ const draftFromLine = (line) => ({
   description: line.description || '',
   quantity: line.quantity || '1',
   unit: line.unit || '',
-  unit_price: line.unit_price || '',
+  unit_price: line.unit_price ?? '',
+  price_provenance: line.price_provenance || {},
+  price_review_required: !!line.price_review_required,
   vat_rate: normalizeVatRate(line.vat_rate),
   match_status: line.match_status || 'unresolved',
   include_product_image: !!line.include_product_image,
@@ -742,6 +750,28 @@ const QuotationEditor = ({
             ));
           }
 
+          if (quoteData.workflow_features?.company_price_autofill === true && editableStatuses.has(quoteData.status)) {
+            setLineDrafts((current) => {
+              const next = { ...current };
+              (quoteData.lines || []).forEach((line) => {
+                const draft = current[line.id];
+                const state = requestedLinePriceStates[line.id];
+                const recommendation = nextPriceContexts[String(line.product)]?.line_recommendations?.[line.id] || nextPriceContexts[String(line.product)]?.recommendations_by_unit?.[draft?.unit];
+                if (draft?.price_provenance?.kind === 'history' && state && recommendation
+                    && (linePriceVersionRef.current[line.id] || 0) === state.version
+                    && (!recommendation.eligible || recommendation.history_id !== draft.price_provenance.history_id)) {
+                  next[line.id] = { ...draft, price_review_required: true, price_reviewed: false };
+                }
+                if (draft && state && draft.match_status === 'confirmed' && isBlankPrice(draft.unit_price)
+                    && !draft.price_review_required && recommendation?.eligible
+                    && (linePriceVersionRef.current[line.id] || 0) === state.version
+                    && String(draft.product) === state.product) {
+                  next[line.id] = { ...draft, ...historyPricePatch(recommendation) };
+                }
+              });
+              return next;
+            });
+          }
           const failedResult = results.find((result) => result.status === 'rejected');
           if (failedResult) {
             const details = await describeQuotationError(
@@ -1159,7 +1189,7 @@ const QuotationEditor = ({
     const draft = lineDrafts[line.id] || {};
     if (draft.match_status === 'ignored') return { id: 'skipped', label: 'Skipped' };
     if (!draft.product) return { id: 'unmatched', label: 'Unmatched' };
-    if (!draft.quantity || Number(draft.quantity) <= 0 || !draft.unit_price || Number(draft.unit_price) <= 0) {
+    if ((draft.price_review_required && !draft.price_reviewed) || !draft.quantity || Number(draft.quantity) <= 0 || !draft.unit_price || Number(draft.unit_price) <= 0) {
       return { id: 'needs_review', label: 'Needs review' };
     }
     return { id: 'ready', label: 'Ready' };
@@ -1211,6 +1241,9 @@ const QuotationEditor = ({
   const selectedLines = activeLines.filter((line) => selectedLineIds.includes(line.id));
   const selectedUnmatchedLines = selectedLines.filter((line) => derivedLineStatus(line).id === 'unmatched');
 
+  const companyPricingEnabled = quote?.workflow_features?.company_price_autofill === true;
+  const companyPricingVisible = companyPricingEnabled || (quote?.lines || []).some((line) => line.price_review_required || line.price_provenance?.kind);
+
   const finalizeIssues = (() => {
     if (!quote || !['draft', 'pending_review', 'approved'].includes(quote.status)) return [];
     const issues = [];
@@ -1224,6 +1257,7 @@ const QuotationEditor = ({
       const draft = lineDrafts[line.id] || {};
       const name = draft.item_name_snapshot || `Line ${index + 1}`;
       if (draft.match_status !== 'ignored') {
+        if (draft.price_review_required && !draft.price_reviewed) issues.push(`${name}: review the product and price.`);
         if (!draft.product) issues.push(`${name}: select or create a Product.`);
         if (!draft.quantity || Number(draft.quantity) <= 0) issues.push(`${name}: enter a valid quantity.`);
         if (!draft.unit_price || Number(draft.unit_price) <= 0) issues.push(`${name}: enter a valid unit price.`);
@@ -1246,7 +1280,12 @@ const QuotationEditor = ({
 
   const updateLineDraft = (lineId, patch) => {
     setLineFeedback(null);
-    const affectsPriceRequest = Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'product');
+    if (companyPricingEnabled && Object.prototype.hasOwnProperty.call(patch, 'item_name_snapshot')
+        && !Object.prototype.hasOwnProperty.call(patch, 'product')) {
+      patch = { ...patch, price_source_history: null, price_original_history: null, price_review_required: true, price_reviewed: false };
+      linePriceVersionRef.current[lineId] = (linePriceVersionRef.current[lineId] || 0) + 1;
+    }
+    const affectsPriceRequest = Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'product') || Object.prototype.hasOwnProperty.call(patch, 'unit');
     if (affectsPriceRequest) {
       linePriceVersionRef.current[lineId] = (linePriceVersionRef.current[lineId] || 0) + 1;
       setLinePriceHints((current) => {
@@ -1282,6 +1321,22 @@ const QuotationEditor = ({
 
   const updateQuotePartyDraft = (patch) => {
     setLineFeedback(null);
+    if (companyPricingEnabled && patch.company && String(patch.company) !== String(quotePartyDraftRef.current.company)) {
+      priceContextGenerationRef.current += 1;
+      setPriceContexts({}); setLinePriceHints({});
+      lineFormPriceVersionRef.current += 1;
+      setLineForm((current) => ({ ...current,
+        unit_price: current.price_provenance?.kind === 'history' ? '' : current.unit_price,
+        price_provenance: {}, price_source_history: null, price_original_history: null, price_reviewed: false,
+        price_context_changed: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history',
+        price_review_required: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history',
+      }));
+      setLineDrafts((current) => Object.fromEntries(Object.entries(current).map(([id, draft]) => [id, {
+        ...draft, unit_price: draft.price_provenance?.kind === 'history' ? '' : draft.unit_price,
+        price_provenance: {}, price_source_history: null, price_original_history: null, price_reviewed: false,
+        price_review_required: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
+      }])));
+    }
     setQuotePartyDraft((current) => {
       const next = { ...current, ...patch };
       quotePartyDraftRef.current = next;
@@ -1306,7 +1361,16 @@ const QuotationEditor = ({
   const productPatch = (draft, productId) => {
     const item = items.find((candidate) => String(candidate.id) === String(productId));
     const hasSnapshotName = String(draft.item_name_snapshot || '').trim().length > 0;
+    const changed = String(draft.product || '') !== String(productId || '');
     return {
+      ...(changed && companyPricingVisible ? {
+        unit_price: draft.price_provenance?.kind === 'history' ? '' : draft.unit_price,
+        price_provenance: draft.price_provenance?.kind === 'history' ? {} : draft.price_provenance,
+        price_source_history: null, price_original_history: null,
+        price_review_required: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
+        price_context_changed: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
+        price_reviewed: false,
+      } : {}),
       product: productId,
       item_name_snapshot: hasSnapshotName ? draft.item_name_snapshot : (item?.name || ''),
       brand_name_snapshot: productId ? (item?.brand_name || '') : '',
@@ -1319,7 +1383,7 @@ const QuotationEditor = ({
     };
   };
 
-  const priceShouldAutofill = (draft) => !draft.unit_price || Number(draft.unit_price) <= 0;
+  const priceShouldAutofill = (draft) => isBlankPrice(draft.unit_price) && !draft.price_review_required;
 
   const setPriceHintForLine = (lineId, suggestion, mode) => {
     setLinePriceHints((current) => ({
@@ -1331,7 +1395,7 @@ const QuotationEditor = ({
     }));
   };
 
-  const maybeFetchProductPrice = async (productId) => {
+  const maybeFetchProductPrice = async (productId, unit = '', wording = '', force = false) => {
     if (!quote?.id || !productId) return null;
     const expectedQuoteId = String(quote.id);
     const expectedContextGeneration = priceContextGenerationRef.current;
@@ -1339,12 +1403,13 @@ const QuotationEditor = ({
       String(quoteRef.current?.id || '') === expectedQuoteId
       && priceContextGenerationRef.current === expectedContextGeneration
     );
-    const cached = priceContexts[String(productId)];
-    if (cached) return cached;
+    const cacheKey = companyPricingEnabled ? `${productId}:${unit}:${wording}` : String(productId);
+    const cached = priceContexts[cacheKey];
+    if (cached && !force) return cached;
     try {
-      const response = await quotationAPI.quotes.productPrice(quote.id, { product: productId });
+      const response = await quotationAPI.quotes.productPrice(quote.id, { product: productId, ...(companyPricingEnabled ? { unit, wording } : {}) });
       if (!requestIsCurrent()) return null;
-      setPriceContexts((current) => ({ ...current, [String(productId)]: response.data }));
+      setPriceContexts((current) => ({ ...current, [cacheKey]: response.data }));
       return response.data;
     } catch (error) {
       if (!requestIsCurrent()) return null;
@@ -1381,9 +1446,16 @@ const QuotationEditor = ({
     const requestGeneration = priceContextGenerationRef.current;
     if (!productId) return;
 
-    const suggestion = await maybeFetchProductPrice(productId);
+    const suggestion = await maybeFetchProductPrice(productId, patch.unit, currentDraft.item_name_snapshot);
     if (!suggestion) return;
     if (priceContextGenerationRef.current !== requestGeneration || lineSelectedProductRef.current[line.id] !== String(productId)) return;
+    if (companyPricingEnabled) {
+      setPriceHintForLine(line.id, suggestion, 'history_found');
+      if (linePriceVersionRef.current[line.id] === requestVersion && suggestion.recommendation?.eligible && priceShouldAutofill({ ...currentDraft, ...patch })) {
+        updateLineDraft(line.id, historyPricePatch(suggestion.recommendation));
+      }
+      return;
+    }
     if (progressiveLoadEnabled) {
       setPriceHintForLine(
         line.id,
@@ -1422,9 +1494,15 @@ const QuotationEditor = ({
     lineFormSelectedProductRef.current = String(productId || '');
     setLineForm((current) => ({ ...current, ...patch }));
     if (!productId) return;
-    if (progressiveLoadEnabled) return;
-    const suggestion = await maybeFetchProductPrice(productId);
+    if (progressiveLoadEnabled && !companyPricingEnabled) return;
+    const suggestion = await maybeFetchProductPrice(productId, patch.unit, lineForm.item_name_snapshot);
     if (!suggestion || priceContextGenerationRef.current !== requestGeneration || lineFormSelectedProductRef.current !== String(productId)) return;
+    if (companyPricingEnabled) {
+      setLineForm((current) => ({ ...current, price_recommendation: suggestion.recommendation,
+        ...(lineFormPriceVersionRef.current === requestVersion && priceShouldAutofill(current) && suggestion.recommendation?.eligible
+          ? historyPricePatch(suggestion.recommendation) : {}) }));
+      return;
+    }
     setPriceHistoryDialog({
       productId,
       productName: suggestion.product_name || items.find((item) => String(item.id) === String(productId))?.name || '',
@@ -1439,12 +1517,40 @@ const QuotationEditor = ({
     }));
   };
 
+  const refreshLinePrice = async (line, draftOverride) => {
+    const draft = draftOverride || lineDraftsRef.current[line.id];
+    if (!draft?.product || hasUnsavedQuoteParty) return;
+    const version = linePriceVersionRef.current[line.id] || 0;
+    const generation = priceContextGenerationRef.current;
+    setPriceHintForLine(line.id, {}, 'loading');
+    const context = await maybeFetchProductPrice(draft.product, draft.unit, draft.item_name_snapshot, true);
+    if (generation !== priceContextGenerationRef.current || version !== (linePriceVersionRef.current[line.id] || 0)) return;
+    setPriceHintForLine(line.id, context || {}, context ? 'history_found' : 'error');
+    if (context?.recommendation?.eligible && priceShouldAutofill(draft)) updateLineDraft(line.id, historyPricePatch(context.recommendation));
+  };
+
+  const changeLineUnit = (line, unit) => {
+    const draft = lineDraftsRef.current[line.id];
+    updateLineDraft(line.id, { unit, ...(companyPricingEnabled ? {
+      unit_price: draft.price_provenance?.kind === 'history' ? '' : draft.unit_price,
+      price_source_history: null, price_original_history: null, price_provenance: draft.price_provenance?.kind === 'history' ? {} : draft.price_provenance,
+      price_review_required: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history', price_reviewed: false,
+    } : {}) });
+  };
+
+  const wrongProduct = (line, draft) => updateLineDraft(line.id, {
+    ...productPatch(draft, ''), price_feedback: 'wrong_product', price_reviewed: false,
+    unit_price: draft.price_provenance?.kind === 'history' ? '' : draft.unit_price,
+    price_source_history: null, price_original_history: null, price_review_required: true,
+  });
+
   const payloadForLine = (draft) => ({
     ...draft,
     product: draft.product || null,
     product_image: draft.product_image || null,
     include_product_image: !!draft.include_product_image,
-    unit_price: draft.unit_price || null,
+    unit_price: isBlankPrice(draft.unit_price) ? null : draft.unit_price,
+    price_source_history: draft.price_source_history || null,
     match_status: draft.product && draft.match_status === 'unresolved' ? 'confirmed' : draft.match_status,
   });
 
@@ -1777,13 +1883,26 @@ const QuotationEditor = ({
     setProductCreateError(null);
     setLineFeedback(null);
     try {
+      const names = { ...productCreateModal.names };
+      if (!forceCreate && companyPricingEnabled) {
+        // Small batches keep AI preflight outside the quotation's save lock.
+        for (let offset = 0; offset < productCreateModal.lineIds.length; offset += 3) {
+          await Promise.all(productCreateModal.lineIds.slice(offset, offset + 3).map(async (id) => {
+            try {
+              const preview = (await quotationAPI.items.identityPreview({ name: names[id], company: quote.company })).data;
+              names[id] = preview.standard_name || names[id];
+            } catch { /* Original wording still passes deterministic matching. */ }
+          }));
+        }
+        setProductCreateModal((current) => current ? { ...current, names } : current);
+      }
       const response = await quotationAPI.quotes.bulkCreateProductsForLines(quote.id, {
         line_ids: productCreateModal.lineIds,
-        names: productCreateModal.names,
+        names,
         confirm_create_line_ids: forceCreate
           ? productCreateModal.lineIds.filter((lineId) => {
             const warning = productCreateModal.confirmations?.[lineId];
-            return warning && !warning.creation_blocked;
+            return warning && !warning.creation_blocked && productCreateModal.reviewed?.[lineId];
           })
           : [],
         quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
@@ -2897,7 +3016,7 @@ const QuotationEditor = ({
     : [];
   const productCreationWarnings = productCreateModal ? Object.values(productCreateModal.confirmations || {}) : [];
   const hasProductCreationWarnings = productCreationWarnings.length > 0;
-  const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked);
+  const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked) && productCreateModal?.lineIds?.every((id) => productCreateModal.confirmations?.[id]?.creation_blocked || productCreateModal.reviewed?.[id]);
   const gmailSource = quote.gmail_source && typeof quote.gmail_source === 'object'
     ? quote.gmail_source
     : null;
@@ -3438,6 +3557,7 @@ const QuotationEditor = ({
           <datalist id="quotation-unit-suggestions">
             {unitSuggestions.map((unit) => <option key={unit} value={unit} />)}
           </datalist>
+          {companyPricingVisible && <div className="qm-price-legend"><span className="history">◷ Historical price</span><span>✎ Manual price</span><span className="review">△ Needs review</span><span>Click the icon for details</span></div>}
           <table className={`qm-table line-table${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
             <thead>
               <tr>
@@ -3524,10 +3644,24 @@ const QuotationEditor = ({
                         placeholder="Enter unit"
                         value={draft.unit || ''}
                         onKeyDown={preventUnitNumberKey}
-                        onChange={(event) => updateLineDraft(line.id, { unit: sanitizeUnitText(event.target.value) })}
+                        onChange={(event) => changeLineUnit(line, sanitizeUnitText(event.target.value))}
+                        onBlur={() => companyPricingEnabled && refreshLinePrice(line)}
                       />
                     </td>
                     <td className="qm-price-cell">
+                      {companyPricingVisible ? <CompanyPriceField
+                        draft={draft}
+                        recommendation={priceHint?.recommendation || priceHistoryContext?.line_recommendations?.[line.id] || priceHistoryContext?.recommendations_by_unit?.[draft.unit]}
+                        loading={priceHistoryLoading || priceHint?.mode === 'loading'}
+                        failed={Boolean(priceContextError) || priceHint?.mode === 'error'}
+                        onRetry={() => refreshLinePrice(line)} onPatch={(patch) => updateLineDraft(line.id, patch)}
+                        onWrongProduct={() => wrongProduct(line, draft)}
+                        onHistory={() => setPriceHistoryDialog({ productId: draft.product, productName: line.product_name || priceHint?.product_name || '' })}
+                        inputRef={(node) => assignPriceInputRef(line.id, node)}
+                        aria-label={`Unit price for ${lineLabel(line, draft)}`} disabled={!isEditable}
+                        type="number" min="0" step="0.001" onWheel={releaseNumberWheelFocus}
+                        onKeyDown={(event) => moveToNextBlankPrice(event, line.id)}
+                      /> : <>
                       <input
                         ref={(node) => assignPriceInputRef(line.id, node)}
                         aria-label={`Unit price for ${lineLabel(line, draft)}`}
@@ -3550,6 +3684,7 @@ const QuotationEditor = ({
                           })}>View price history</button>
                         </span>
                       )}
+                      </>}
                     </td>
                     <td className="qm-vat-cell">
                       <select className="qm-vat-select" disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
@@ -3627,12 +3762,31 @@ const QuotationEditor = ({
               inputMode="text"
               value={lineForm.unit}
               onKeyDown={preventUnitNumberKey}
-              onChange={(event) => setLineForm({ ...lineForm, unit: sanitizeUnitText(event.target.value) })}
+              onChange={(event) => {
+                lineFormPriceVersionRef.current += 1;
+                setLineForm((current) => ({ ...current, unit: sanitizeUnitText(event.target.value),
+                  ...(companyPricingEnabled ? { unit_price: current.price_provenance?.kind === 'history' ? '' : current.unit_price,
+                    price_source_history: null, price_original_history: null, price_provenance: {}, price_reviewed: false,
+                    price_context_changed: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history',
+                    price_review_required: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history' } : {}) }));
+              }}
+              onBlur={async () => {
+                if (!companyPricingEnabled || !lineForm.product || hasUnsavedQuoteParty) return;
+                const version = lineFormPriceVersionRef.current;
+                const generation = priceContextGenerationRef.current;
+                const context = await maybeFetchProductPrice(lineForm.product, lineForm.unit, lineForm.item_name_snapshot, true);
+                if (generation !== priceContextGenerationRef.current || version !== lineFormPriceVersionRef.current) return;
+                setLineForm((current) => ({ ...current, price_recommendation: context?.recommendation,
+                  ...(context?.recommendation?.eligible && priceShouldAutofill(current) ? historyPricePatch(context.recommendation) : {}) }));
+              }}
             />
-            <input type="number" min="0" step="0.001" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => {
+            {companyPricingVisible ? <CompanyPriceField draft={lineForm} recommendation={lineForm.price_recommendation}
+              type="number" min="0" step="0.001" placeholder="Price" aria-label="Price"
+              onPatch={(patch) => { lineFormPriceVersionRef.current += 1; setLineForm((current) => ({ ...current, ...patch })); }}
+            /> : <input type="number" min="0" step="0.001" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => {
               lineFormPriceVersionRef.current += 1;
               setLineForm({ ...lineForm, unit_price: event.target.value });
-            }} />
+            }} />}
             <select value={lineForm.vat_rate} onChange={(event) => setLineForm({ ...lineForm, vat_rate: event.target.value })}>
               <option value="0">VAT 0%</option>
               <option value="5">VAT 5%</option>
@@ -3685,7 +3839,7 @@ const QuotationEditor = ({
                           />
                           {warning && (
                             <div className={`qm-product-match-warning ${warning.creation_blocked ? 'blocked' : ''}`}>
-                              <strong>{warning.creation_blocked ? 'Identifier conflict — a new Product cannot be created' : 'Likely existing Product found'}</strong>
+                              <strong>{warning.creation_blocked ? 'Existing identity conflict — select a Product' : 'Likely existing Product found'}</strong>
                               <p>{warning.warning || warning.match_reason}</p>
                               {(warning.candidates || []).length > 0 && (
                                 <div className="qm-product-candidate-list">
@@ -3707,7 +3861,7 @@ const QuotationEditor = ({
                                   ))}
                                 </div>
                               )}
-                              {!warning.creation_blocked && <small>Only choose “Create anyway” if none of these Products is actually the same item.</small>}
+                              {!warning.creation_blocked && <label><input type="checkbox" checked={!!productCreateModal.reviewed?.[lineId]} onChange={(event) => setProductCreateModal((current) => ({ ...current, reviewed: { ...current.reviewed, [lineId]: event.target.checked } }))} /> I checked these candidates; this is a different item. Create it provisionally for owner review.</label>}
                             </div>
                           )}
                         </td>
@@ -3724,7 +3878,7 @@ const QuotationEditor = ({
                 disabled={saving || (hasProductCreationWarnings && !canOverrideProductCreationWarning)}
                 onClick={() => confirmCreateProducts(hasProductCreationWarnings)}
               >
-                {saving ? 'Checking catalog...' : hasProductCreationWarnings ? 'Create new Product anyway' : 'Check catalog and continue'}
+                {saving ? 'Checking catalog...' : hasProductCreationWarnings ? 'Create reviewed provisional items' : 'Check catalog and continue'}
               </button>
               <button type="button" className="qm-secondary" disabled={saving} onClick={closeCreateProductModal}>Cancel</button>
             </div>

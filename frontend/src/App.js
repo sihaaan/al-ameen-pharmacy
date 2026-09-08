@@ -1,5 +1,5 @@
 // frontend/src/App.js
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { CartProvider } from "./context/CartContext";
 import { AuthProvider } from "./context/AuthContext";
@@ -12,12 +12,49 @@ import Register from "./pages/Register";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import About from "./pages/About";
-import AdminDashboard from "./pages/AdminDashboard";
 import ProductDetail from "./pages/ProductDetail";
 import Checkout from "./pages/Checkout";
 import OrderConfirmation from "./pages/OrderConfirmation";
 import Profile from "./pages/Profile";
 import "./App.css";
+
+const AdminDashboard = lazy(() => {
+  const dashboard = import("./pages/AdminDashboard");
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get('admin_tab');
+  const pending = [];
+  if (tab === 'products') pending.push(import('./components/ProductManagement'));
+  if (tab === 'orders') pending.push(import('./components/OrderManagement'));
+  if (tab === 'accounting') pending.push(import('./components/accounting/AccountingModule'));
+  const quotationLink = tab === 'quotations' || (!tab && ['quotation_tab', 'quote_id', 'gmail_import', 'gmail_import_id'].some((key) => params.has(key)));
+  if (quotationLink) {
+    pending.push(import('./components/quotations/QuotationModule'));
+    if (params.has('gmail_import') || params.has('gmail_import_id')) {
+      pending.push(import('./components/quotations/GmailInquiryReview'));
+    } else if (params.has('quote_id')) {
+      pending.push(params.get('quotation_mode') === 'review'
+        ? import('./components/quotations/QuotationOutcomeReview')
+        : import('./components/quotations/QuotationEditor'));
+    } else if (params.get('quotation_tab') === 'quotes') {
+      pending.push(import('./components/quotations/QuotationList'));
+    } else if (!params.has('quotation_tab') || params.get('quotation_tab') === 'dashboard') {
+      pending.push(import('./components/quotations/QuotationDashboard'));
+    }
+  }
+  // Download the selected workspace concurrently. Components and their requests
+  // still mount only after the dashboard's authentication/permission gates.
+  void Promise.allSettled(pending);
+  return dashboard;
+});
+
+class AdminLoadBoundary extends React.Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (this.state.failed) return <div role="alert" className="admin-dashboard"><p>Could not load this workspace.</p><button type="button" onClick={() => window.location.reload()}>Reload workspace</button></div>;
+    return this.props.children;
+  }
+}
 
 function App() {
   return (
@@ -35,7 +72,7 @@ function App() {
               <Route path="/register" element={<Register />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password/:token" element={<ResetPassword />} />
-              <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/admin" element={<AdminLoadBoundary><Suspense fallback={<div role="status" className="admin-dashboard">Loading admin workspace…</div>}><AdminDashboard /></Suspense></AdminLoadBoundary>} />
               <Route path="/profile" element={<Profile />} />
               <Route path="/product/:id" element={<ProductDetail />} />
               <Route path="/checkout" element={<Checkout />} />

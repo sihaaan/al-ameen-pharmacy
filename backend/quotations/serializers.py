@@ -1392,11 +1392,11 @@ class QuoteItemSerializer(serializers.ModelSerializer):
             "active_ingredient",
             "status",
             "show_price",
-            "is_active",
+            "is_active", "identity_review_state", "identity_notes", "canonical_product",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "slug", "brand_name", "category_name", "is_active", "created_at", "updated_at"]
+        read_only_fields = ["identity_review_state", "identity_notes", "canonical_product", "id", "slug", "brand_name", "category_name", "is_active", "created_at", "updated_at"]
         extra_kwargs = {
             "price": {"required": False},
             "stock_quantity": {"required": False},
@@ -1408,6 +1408,12 @@ class QuoteItemSerializer(serializers.ModelSerializer):
         return obj.status != "archived"
 
     def validate(self, attrs):
+        if self.instance:
+            from .catalogue_identity import validate_identity_edit
+            try:
+                return validate_identity_edit(self.instance, attrs)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError(exc.messages)
         if self.instance is None:
             attrs.setdefault("price", Decimal("0.01"))
             attrs.setdefault("stock_quantity", 0)
@@ -1438,7 +1444,7 @@ class QuoteItemListSerializer(serializers.ModelSerializer):
             "unit",
             "active_ingredient",
             "status",
-            "is_active",
+            "is_active", "identity_review_state", "identity_notes", "canonical_product",
         ]
         read_only_fields = fields
 
@@ -2453,6 +2459,20 @@ class HistoricalImportAISuggestionSerializer(serializers.ModelSerializer):
 
 
 class QuotationLineSerializer(serializers.ModelSerializer):
+    price_source_history = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    price_original_history = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    price_reviewed = serializers.BooleanField(write_only=True, required=False)
+    price_context_changed = serializers.BooleanField(write_only=True, required=False)
+    price_feedback = serializers.ChoiceField(choices=["", "one_off", "outdated", "wrong_product"], write_only=True, required=False)
+
+    def create(self, validated_data):
+        from .pricing import update_line_pricing
+        actions = {key: validated_data.pop(key) for key in ("price_source_history", "price_original_history", "price_reviewed", "price_context_changed", "price_feedback") if key in validated_data}
+        instance = super().create(validated_data)
+        update_line_pricing(instance, None, actions, getattr(self.context.get("request"), "user", None))
+        instance.save()
+        return instance
+
     quote_item_name = serializers.CharField(source="quote_item.name", read_only=True, allow_null=True)
     product_name = serializers.CharField(source="product.name", read_only=True, allow_null=True)
     inquiry_line_raw_name = serializers.CharField(source="inquiry_line.raw_name", read_only=True, allow_null=True)
@@ -2490,6 +2510,7 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "quantity",
             "unit",
             "unit_price",
+            "price_provenance", "price_review_required", "price_source_history", "price_original_history", "price_reviewed", "price_context_changed", "price_feedback",
             "vat_rate",
             "line_subtotal",
             "vat_amount",
@@ -2513,6 +2534,7 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = [
+            "price_provenance", "price_review_required",
             "id",
             "inquiry_line_raw_name",
             "quote_item_name",
@@ -2607,6 +2629,9 @@ class QuotationLineSerializer(serializers.ModelSerializer):
         return bool(obj.product_image_id or (obj.product_id and obj.product.primary_image))
 
     def update(self, instance, validated_data):
+        from .pricing import line_price_snapshot, update_line_pricing
+        before = line_price_snapshot(instance)
+        actions = {key: validated_data.pop(key) for key in ("price_source_history", "price_original_history", "price_reviewed", "price_context_changed", "price_feedback") if key in validated_data}
         if "product" in validated_data and validated_data.get("product") != instance.product:
             validated_data.setdefault("match_reason", "Selected manually by staff.")
             selected_image = validated_data.get("product_image", instance.product_image)
@@ -2614,7 +2639,10 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             if selected_image and next_product and selected_image.product_id != next_product.id:
                 validated_data["product_image"] = None
                 validated_data["include_product_image"] = False
-        return super().update(instance, validated_data)
+        instance = super().update(instance, validated_data)
+        update_line_pricing(instance, before, actions, getattr(self.context.get("request"), "user", None))
+        instance.save()
+        return instance
 
 
 class QuotationSerializer(serializers.ModelSerializer):
