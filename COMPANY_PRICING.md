@@ -30,4 +30,6 @@ Migrations: API `0004` and `0005`, quotations `0045`. New non-null fields retain
 
 Admin route and tab modules now load on demand. Quotation deep links no longer request the product summary and full retail-order list for the unused overview. The production build's initial main bundle fell from approximately 263 KB to 111 KB gzipped; including their additional chunks, the quotation list needs approximately 127 KB (52% less) and the editor 156 KB (41% less). The comparison also rebuilds the same source with eager imports to isolate the code-splitting effect. This is a payload measurement, not an end-to-end page-load timing claim.
 
+Products / Items displays 50 catalogue rows per page. Search still covers the full loaded catalogue, including products outside the visible page, and returns to page one when changed. This bounds rendering work independently of the catalogue size; it does not reduce the catalogue API response size.
+
 Regression coverage includes accepted-first/fallback selection, customer/unit/currency isolation, source persistence, edits before first save, late-response protection, manual-price preservation, wrong-product recovery, retirement of old recommendations, owner permissions, provisional creation, reviewed consolidation and rejection of unsupported AI attributes.

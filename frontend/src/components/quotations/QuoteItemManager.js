@@ -4,12 +4,15 @@ import QuotationErrorNotice from './QuotationErrorNotice';
 import ProductFormModal from '../ProductFormModal';
 import CatalogueIdentityReview from './CatalogueIdentityReview';
 
+const PAGE_SIZE = 50;
+
 const QuoteItemManager = () => {
   const [items, setItems] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
   const [editingProduct, setEditingProduct] = useState(null);
   const [showProductModal, setShowProductModal] = useState(false);
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(null);
@@ -38,7 +41,7 @@ const QuoteItemManager = () => {
   }, []);
 
   const filteredItems = useMemo(() => {
-    const term = search.toLowerCase();
+    const term = search.trim().toLowerCase();
     return items.filter((item) =>
       item.name.toLowerCase().includes(term) ||
       (item.sku || '').toLowerCase().includes(term) ||
@@ -46,6 +49,15 @@ const QuoteItemManager = () => {
       (item.active_ingredient || '').toLowerCase().includes(term)
     );
   }, [items, search]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const firstItem = (currentPage - 1) * PAGE_SIZE;
+  const visibleItems = filteredItems.slice(firstItem, firstItem + PAGE_SIZE);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount));
+  }, [pageCount]);
 
   const openNewProduct = () => {
     setEditingProduct(null);
@@ -106,13 +118,20 @@ const QuoteItemManager = () => {
           <div className="qm-panel-heading">
             <h3>Products / Items</h3>
             <div className="qm-controls">
-              <input className="qm-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product items" />
+              <input className="qm-input" aria-label="Search product items" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search product items" />
               <button type="button" className="qm-primary" onClick={openNewProduct}>Add Internal Product</button>
             </div>
           </div>
           {loading ? (
             <div className="qm-loading">Loading products...</div>
           ) : (
+            <>
+            <nav className="qm-controls" aria-label="Product pages">
+              <span role="status">{filteredItems.length ? `${firstItem + 1}–${firstItem + visibleItems.length} of ${filteredItems.length} products` : 'No products match your search'}</span>
+              <button type="button" className="qm-secondary small" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>Previous</button>
+              <span>Page {currentPage} of {pageCount}</span>
+              <button type="button" className="qm-secondary small" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>Next</button>
+            </nav>
             <div className="qm-table-wrap">
               <table className="qm-table">
                 <thead>
@@ -126,7 +145,7 @@ const QuoteItemManager = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredItems.map((item) => (
+                  {visibleItems.map((item) => (
                     <tr key={item.id} className={selectedItem?.id === item.id ? 'selected' : ''} onClick={() => setSelectedItem(item)}>
                       <td>{item.name}</td>
                       <td>{item.sku || '-'}</td>
@@ -142,6 +161,7 @@ const QuoteItemManager = () => {
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </div>
 
