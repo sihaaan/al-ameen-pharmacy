@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axiosInstance from '../utils/axios';
 import { releaseNumberWheelFocus } from '../utils/numberInput';
 
@@ -54,6 +54,9 @@ const ProductFormModal = ({
   const [saving, setSaving] = useState(false);
   const [loadingProduct, setLoadingProduct] = useState(false);
   const [duplicateWarning, setDuplicateWarning] = useState(null);
+  const [creationReview, setCreationReview] = useState(null);
+  const currentForm = useRef(null);
+  currentForm.current = { data: formData, isOpen };
 
   const resetProductForm = () => {
     setEditingProduct(null);
@@ -66,6 +69,7 @@ const ProductFormModal = ({
     setNewCategoryName('');
     setCategoryError('');
     setDuplicateWarning(null);
+    setCreationReview(null);
   };
 
   const closeModal = () => {
@@ -151,6 +155,7 @@ const ProductFormModal = ({
   const handleInputChange = (event) => {
     const { name, value, type, checked } = event.target;
     setDuplicateWarning(null);
+    setCreationReview(null);
     setFormData((current) => ({
       ...current,
       [name]: type === 'checkbox' ? checked : value,
@@ -263,13 +268,21 @@ const ProductFormModal = ({
     setSaving(true);
 
     let proposedName = formData.name;
-    if (!editingProduct) {
+    if (!editingProduct && !confirmCreate) {
       try {
-        const preview = await axiosInstance.post('/quotations/items/identity_preview/', { name: formData.name });
-        proposedName = preview.data?.standard_name || formData.name;
+        const response = await axiosInstance.post('/quotations/items/creation_review/', {
+          rows: [{ id: 'product', name: formData.name, dosage: formData.dosage, pack_size: formData.pack_size,
+            brand: formData.brand }],
+        });
+        const preview = response.data?.results?.[0];
+        if (!currentForm.current.isOpen || currentForm.current.data !== formData) { setSaving(false); return; }
+        proposedName = preview?.standard_name || formData.name;
+        setCreationReview(preview || { reason: 'AI check unavailable; catalogue checks still apply.' });
+        setFormData((current) => ({ ...current, name: proposedName }));
       } catch {
-        // Matching and the provisional gate still run on the server if AI is unavailable.
+        setCreationReview({ reason: 'AI check unavailable; catalogue checks still apply.' });
       }
+      if (!currentForm.current.isOpen || currentForm.current.data !== formData) { setSaving(false); return; }
     }
     const data = new FormData();
     const fieldsToSend = [
@@ -320,7 +333,7 @@ const ProductFormModal = ({
         productId = response.data.id;
       }
 
-      const additionalImages = primaryNewImage
+      const additionalImages = savedProduct.reused ? [] : primaryNewImage
         ? newImages.filter((image) => !image.isPrimary)
         : newImages.slice(1);
 
@@ -573,6 +586,7 @@ const ProductFormModal = ({
               <div className={`pm-duplicate-warning ${duplicateWarning.creation_blocked ? 'blocked' : ''}`} role="alert">
                 <h3>{duplicateWarning.creation_blocked ? 'Existing identifier conflict' : 'Check likely existing Products'}</h3>
                 <p>{duplicateWarning.warning || duplicateWarning.detail || duplicateWarning.match_reason}</p>
+                {creationReview?.reason && <p role="status">{creationReview.reason}</p>}
                 {(duplicateWarning.candidates || []).length > 0 && (
                   <div className="pm-duplicate-candidates">
                     {(duplicateWarning.candidates || []).map((candidate) => (

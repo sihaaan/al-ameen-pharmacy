@@ -4,7 +4,7 @@ Customer acceptance is deliberately owned by the outcome workflow, never by
 these draft-edit operations. Historical rows and issued documents are immutable.
 """
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -12,6 +12,23 @@ from django.utils import timezone
 from .matching import identities_compatible, item_identity, normalize_item_text, product_identity
 from .models import (CompanyPriceHistory, PriceRecommendationRetirement, ProductAlias,
                      QuotationLine, QuotationPriceFeedback)
+
+
+LARGE_PRICE_CHANGE = Decimal("0.50")
+
+
+def price_change_is_large(original, entered):
+    try:
+        original, entered = Decimal(str(original)), Decimal(str(entered))
+        return (original.is_finite() and entered.is_finite() and original > 0 and entered > 0
+                and abs(entered - original) / original >= LARGE_PRICE_CHANGE)
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+
+
+def pending_match_checks(company_id):
+    return QuotationLine.objects.filter(quotation__company_id=company_id,
+        price_provenance__match_check__status="pending", product__isnull=False)
 
 
 def pricing_unit(value):
@@ -38,6 +55,8 @@ def recommendation_context(quotation, product_ids):
     rejected = defaultdict(set)
     for row in QuotationPriceFeedback.objects.filter(company_id=quotation.company_id, kind="wrong_product", product_id__in=source_ids).values("product_id", "source_wording"):
         rejected[normalize_item_text(row["source_wording"])].add(related.get(row["product_id"], row["product_id"]))
+    for row in pending_match_checks(quotation.company_id).filter(product_id__in=source_ids).values("product_id", "item_name_snapshot"):
+        rejected[normalize_item_text(row["item_name_snapshot"])].add(related.get(row["product_id"], row["product_id"]))
     return entries, retirements, rejected
 
 
@@ -50,7 +69,7 @@ def recommend_price(quotation, product, unit, *, context=None, source_wording=""
         return _unavailable("Product identity needs catalogue review; enter a price manually", unit, currency)
     entries, retirements, rejected = context or recommendation_context(quotation, [product.pk])
     if source_wording and product.pk in rejected.get(normalize_item_text(source_wording), set()):
-        return _unavailable("This wording has a recorded wrong-product correction; review and enter the price manually", unit, currency)
+        return _unavailable("This wording has a product-match concern; check the item before reusing a price", unit, currency)
     history = entries.get(product.pk, [])
     if not history:
         return _unavailable("No previous company price", unit, currency)
@@ -166,6 +185,28 @@ def update_line_pricing(line, before, payload, actor, *, context=None):
                 "previous_source": previous.get("previous_source", previous) if previous else {}}
         else:
             line.price_provenance = {}
+    historical = previous if previous.get("kind") == "history" else previous.get("previous_source", {})
+    prior_check = previous.get("match_check", {})
+    large_change = False
+    same_context = (not context_changed and feedback != "wrong_product" and line.product_id
+        and historical.get("history_id") and historical.get("product_id") == line.product_id
+        and historical.get("company_id") == line.quotation.company_id
+        and pricing_unit(historical.get("unit")) == pricing_unit(line.unit)
+        and historical.get("currency") == line.quotation.currency)
+    if same_context and not source_id and (changed or prior_check):
+        baseline = prior_check.get("entered_amount") if prior_check.get("status") == "confirmed" else historical.get("amount")
+        large_change = price_change_is_large(baseline, line.unit_price)
+        if large_change or (prior_check.get("status") == "pending" and not changed):
+            confirmed = payload.get("price_reviewed") is True or feedback in {"one_off", "outdated"}
+            check = {"status": "confirmed" if confirmed else "pending", "reason": "large_price_change",
+                     "original_amount": historical["amount"], "entered_amount": str(line.unit_price)}
+            line.price_provenance = {**line.price_provenance, "match_check": check}
+            line.price_review_required = not confirmed
+        elif prior_check:
+            line.price_provenance = {**line.price_provenance, "match_check": {
+                **prior_check, "status": "confirmed", "entered_amount": str(line.unit_price)}}
+            if prior_check.get("status") == "pending" and not payload.get("price_context_changed"):
+                line.price_review_required = False
     if payload.get("price_reviewed") is True:
         if not line.product_id or line.match_status != QuotationLine.MATCH_CONFIRMED or not line.unit_price or line.unit_price <= 0:
             raise ValidationError("Confirm the product and enter a valid price before marking it reviewed.")
@@ -186,20 +227,21 @@ def update_line_pricing(line, before, payload, actor, *, context=None):
             company_id=line.quotation.company_id, product_id=line.product_id,
             unit=pricing_unit(line.unit), currency=line.quotation.currency.upper(),
             defaults={"retired_before": timezone.now(), "actor": actor})
-        line.price_provenance = {"kind": "manual", "previous_source": source}
+        line.price_provenance = {**line.price_provenance, "kind": "manual", "previous_source": source}
     if line.pk and (changed or context_changed or feedback or payload.get("price_reviewed")):
         from .services import audit_log
         from .models import QuotationAuditLog
         audit_log(actor, QuotationAuditLog.ACTION_UPDATED, line, quotation=line.quotation,
             message="Reviewed quotation pricing." if payload.get("price_reviewed") else "Recorded a quotation price decision.",
             changes={"pricing": {"before": before, "entered_price": str(line.unit_price) if line.unit_price is not None else None,
-                                  "reason": feedback or "price_edit", "review_required": line.price_review_required}})
+                                  "reason": feedback or ("large_price_change" if large_change else "price_edit"),
+                                  "match_check": line.price_provenance.get("match_check"), "review_required": line.price_review_required}})
 
         QuotationPriceFeedback.objects.create(line=line, company_id=line.quotation.company_id,
             product_id=before["product_id"] or line.product_id,
             replacement_product_id=line.product_id if context_changed else None,
             source_wording=before.get("wording", line.item_name_snapshot),
-            kind=feedback or ("product_correction" if context_changed and before["product_id"] else "price_edit"),
+            kind=feedback or ("large_price_change" if large_change else "product_correction" if context_changed and before["product_id"] else "price_edit"),
             previous=before, entered_price=line.unit_price, actor=actor)
 
 

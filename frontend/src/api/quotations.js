@@ -81,6 +81,7 @@ const quotationAPI = {
   },
   items: {
     identityPreview: (data) => axiosInstance.post('/quotations/items/identity_preview/', data),
+    creationReview: (data) => axiosInstance.post('/quotations/items/creation_review/', data),
     identityReport: (params = {}) => axiosInstance.get('/quotations/items/identity_report/', { params }),
     reviewIdentity: (id, data) => axiosInstance.post(`/quotations/items/${id}/review_identity/`, data),
     list: (params = {}) => axiosInstance.get('/quotations/items/', { params }),

@@ -11,12 +11,32 @@ export const historyPricePatch = (recommendation) => ({
   price_review_required: false,
   price_reviewed: false,
 });
-export const manualPricePatch = (draft, value) => ({
-  unit_price: value, price_source_history: null,
-  price_original_history: draft.price_original_history || null,
-  price_provenance: { kind: 'manual', previous_source: draft.price_provenance?.kind === 'history'
-    ? draft.price_provenance : draft.price_provenance?.previous_source },
-});
+export const priceChangeIsLarge = (original, entered) => {
+  const baseline = Number(original), value = Number(entered);
+  return Number.isFinite(baseline) && Number.isFinite(value) && baseline > 0 && value > 0
+    && Math.abs(value - baseline) / baseline >= 0.5;
+};
+export const manualPricePatch = (draft, value) => {
+  const previous = draft.price_provenance || {};
+  const original = previous.kind === 'history' ? previous : previous.previous_source;
+  const priorCheck = previous.match_check;
+  const baseline = priorCheck?.status === 'confirmed' ? priorCheck.entered_amount : original?.amount;
+  const sameProduct = original?.history_id && String(original.product_id) === String(draft.product)
+    && !draft.price_context_changed
+    && String(original.unit || '').trim().toLowerCase() === String(draft.unit || '').trim().toLowerCase();
+  const large = sameProduct && priceChangeIsLarge(baseline, value);
+  const changed = String(draft.unit_price ?? '') !== String(value ?? '');
+  const check = large ? { status: 'pending', reason: 'large_price_change', original_amount: original.amount, entered_amount: value }
+    : priorCheck ? { ...priorCheck, status: 'confirmed', entered_amount: value } : undefined;
+  return {
+    unit_price: value, price_source_history: null,
+    price_original_history: draft.price_original_history || null,
+    price_provenance: { kind: 'manual', previous_source: original, ...(check ? { match_check: check } : {}) },
+    price_review_required: !!large || !!draft.price_context_changed || (!!draft.price_review_required && (!priorCheck || !sameProduct)),
+    price_reviewed: changed ? false : !!draft.price_reviewed,
+    price_feedback: changed ? '' : (draft.price_feedback || ''),
+  };
+};
 
 export default function CompanyPriceField({ draft, recommendation, loading, failed, onRetry, onPatch,
   onWrongProduct, onHistory, inputRef, ...inputProps }) {
@@ -41,8 +61,9 @@ export default function CompanyPriceField({ draft, recommendation, loading, fail
   }, [open]);
   const source = draft.price_provenance || {};
   const needsReview = draft.price_review_required && !draft.price_reviewed;
+  const matchConcern = needsReview && source.match_check?.status === 'pending';
   const kind = needsReview ? 'review' : source.kind === 'history' ? 'history' : isBlankPrice(draft.unit_price) ? 'empty' : 'manual';
-  const label = needsReview ? 'Price needs review' : kind === 'history' ? `Filled from last ${source.basis} company price`
+  const label = matchConcern ? 'Large price change: check product match' : needsReview ? 'Price needs review' : kind === 'history' ? `Filled from last ${source.basis} company price`
     : kind === 'manual' ? 'Manually entered price' : loading ? 'Loading price history' : failed ? 'Price lookup failed'
       : !draft.product ? 'Confirm a product to find its price' : recommendation?.reason || 'Look up company price';
   const original = source.kind === 'history' ? source : source.previous_source;
@@ -63,12 +84,13 @@ export default function CompanyPriceField({ draft, recommendation, loading, fail
       </button>
       {open && createPortal(<div className="qm-price-popover" id={panelId} ref={panel} tabIndex={-1} role="dialog" aria-label="Company price details" style={position}>
         <strong>{label}</strong>
+        {matchConcern && <p>The entered price differs by 50% or more from the previous price. This may be a different product or pack. Your price is kept; confirm the item or choose Wrong product.</p>}
         {original?.history_id && <p>{original.currency} {original.amount} / {original.unit} · {original.quotation_number} · {original.date}<br/>Historical quantity: {original.quantity}</p>}
         {recommendation?.reason && <p>{recommendation.reason}</p>}
         {failed && <p>Could not retrieve history. Your entered price has been kept.</p>}
         {!inputProps.disabled && <>
           {onRetry && <button type="button" onClick={onRetry}>{failed ? 'Retry price lookup' : 'Refresh company price'}</button>}
-          {needsReview && draft.product && !isBlankPrice(draft.unit_price) && <button type="button" onClick={() => onPatch({ ...manualPricePatch(draft, draft.unit_price), price_reviewed: true, price_review_required: false })}>I checked this product and price</button>}
+          {needsReview && draft.product && !isBlankPrice(draft.unit_price) && <button type="button" onClick={() => onPatch({ ...manualPricePatch(draft, draft.unit_price), price_reviewed: true, price_review_required: false })}>{matchConcern ? 'Same product, new price' : 'I checked this product and price'}</button>}
           {original?.history_id && <button type="button" onClick={() => {
             if (window.confirm('Stop recommending this and all older prices for this company, product, unit and currency after saving? Historical documents stay available.')) {
               onPatch({ ...manualPricePatch(draft, draft.unit_price), price_feedback: 'outdated' });

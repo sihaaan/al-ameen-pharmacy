@@ -105,6 +105,76 @@ class CompanyPricingTests(APITestCase):
         finalize_quotation(self.quote, self.staff)
         self.assertEqual(CompanyPriceHistory.objects.get(quotation_line=line).unit_price, 22)
 
+    def test_large_price_edit_flags_match_without_erasing_price_or_learning_wrong_product(self):
+        source = self.history()
+        line = self.draft()
+        self.save(line, unit_price="20", price_source_history=source.pk)
+        self.save(line, unit_price="5")
+        self.assertEqual(line.product, self.product)
+        self.assertEqual(line.unit_price, 5)
+        self.assertTrue(line.price_review_required)
+        self.assertEqual(line.price_provenance["match_check"]["status"], "pending")
+        self.assertTrue(QuotationPriceFeedback.objects.filter(line=line, kind="large_price_change").exists())
+        self.assertFalse(QuotationPriceFeedback.objects.filter(line=line, kind="wrong_product").exists())
+        self.assertIsNone(suggest_product_for_text(self.product.name, self.company).product)
+        self.assertFalse(recommend_price(self.quote, self.product, "box", source_wording=self.product.name)["eligible"])
+        with self.assertRaises(ValidationError):
+            finalize_quotation(self.quote, self.staff)
+        self.save(line, price_reviewed=True)
+        self.assertFalse(line.price_review_required)
+        self.assertEqual(line.price_provenance["match_check"]["status"], "confirmed")
+        self.assertEqual(suggest_product_for_text(self.product.name, self.company).product, self.product)
+        finalize_quotation(self.quote, self.staff)
+
+    def test_large_edit_before_first_save_is_detected_by_server(self):
+        source = self.history()
+        line = self.draft()
+        self.save(line, unit_price="100", price_original_history=source.pk)
+        self.assertTrue(line.price_review_required)
+        self.assertEqual(line.unit_price, 100)
+        self.assertEqual(line.price_provenance["match_check"]["original_amount"], "20.000")
+
+    def test_small_discount_and_manual_only_price_do_not_suspect_product(self):
+        source = self.history()
+        line = self.draft()
+        self.save(line, unit_price="20", price_source_history=source.pk)
+        self.save(line, unit_price="18")
+        self.assertFalse(line.price_review_required)
+        manual = self.draft(unit_price=20)
+        self.save(manual, unit_price="100")
+        self.assertFalse(manual.price_review_required)
+
+    def test_explicit_price_reason_does_not_train_a_false_wrong_product(self):
+        source = self.history()
+        line = self.draft()
+        self.save(line, unit_price="20", price_source_history=source.pk)
+        self.save(line, unit_price="5", price_feedback="one_off")
+        self.assertFalse(line.price_review_required)
+        self.assertEqual(suggest_product_for_text(self.product.name, self.company).product, self.product)
+
+    def test_reverting_large_edit_clears_concern_and_confirmed_edits_do_not_rewarn(self):
+        source = self.history()
+        line = self.draft()
+        self.save(line, unit_price="20", price_source_history=source.pk)
+        self.save(line, unit_price="5")
+        self.save(line, unit_price="19")
+        self.assertFalse(line.price_review_required)
+        self.save(line, unit_price="5", price_reviewed=True)
+        self.save(line, unit_price="6")
+        self.assertFalse(line.price_review_required)
+        self.save(line, unit_price="100")
+        self.assertTrue(line.price_review_required)
+
+    def test_wrong_product_after_large_edit_preserves_manually_corrected_price(self):
+        source = self.history()
+        line = self.draft()
+        self.save(line, unit_price="20", price_source_history=source.pk)
+        self.save(line, unit_price="5")
+        self.save(line, price_feedback="wrong_product")
+        self.assertIsNone(line.product_id)
+        self.assertEqual(line.unit_price, 5)
+        self.assertIsNone(suggest_product_for_text(self.product.name, self.company).product)
+
     def test_outdated_does_not_resurrect_older_accepted_prices(self):
         self.history(accepted="16")
         source = self.history(accepted="18")
