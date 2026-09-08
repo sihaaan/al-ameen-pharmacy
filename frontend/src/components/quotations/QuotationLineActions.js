@@ -2,7 +2,7 @@ import React, { useLayoutEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 export default function QuotationLineActions({ label, isDirty, canSave, canEditImage, canUpload, canDelete,
-  includeImage, onSave, onToggleImage, onUpload, onDelete }) {
+  hasImage, includeImage, onSave, onToggleImage, onUpload, onDelete }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({});
   const trigger = useRef(null);
@@ -82,8 +82,8 @@ export default function QuotationLineActions({ label, isDirty, canSave, canEditI
       }} />
     {open && createPortal(<div className="qm-line-menu" style={position} ref={menu} id={menuId}
       role="menu" tabIndex={-1} aria-label={`Actions for ${label}`} onKeyDown={navigateMenu}>
-      <button type="button" role="menuitemcheckbox" aria-checked={includeImage} disabled={!canEditImage}
-        onClick={onToggleImage}><span className="qm-menu-check" aria-hidden="true">{includeImage ? '✓' : ''}</span>Include product photo in PDF</button>
+      {hasImage && <button type="button" role="menuitemcheckbox" aria-checked={includeImage} disabled={!canEditImage}
+        onClick={onToggleImage}><span className="qm-menu-check" aria-hidden="true">{includeImage ? '✓' : ''}</span>Include product photo in PDF</button>}
       <button type="button" role="menuitem" disabled={!canUpload}
         onClick={() => { close(true); fileInput.current?.click(); }}>Upload image</button>
       <button type="button" role="menuitem" className="danger" disabled={!canDelete}

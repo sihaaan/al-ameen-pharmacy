@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import QuotationLineActions from './QuotationLineActions';
 
 const props = { label: 'Gloves', isDirty: false, canSave: true, canEditImage: true, canUpload: true, canDelete: true,
-  includeImage: false, onSave: jest.fn(), onToggleImage: jest.fn(), onUpload: jest.fn(), onDelete: jest.fn() };
+  hasImage: true, includeImage: false, onSave: jest.fn(), onToggleImage: jest.fn(), onUpload: jest.fn(), onDelete: jest.fn() };
 beforeEach(() => jest.clearAllMocks());
 
 test('keeps saved rows compact and exposes keyboard accessible image and delete actions', () => {
