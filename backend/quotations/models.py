@@ -3242,6 +3242,22 @@ class PriceRecommendationRetirement(models.Model):
         )]
 
 
+class CompanyProductIdentityMatch(models.Model):
+    """A company-scoped AI identity decision, invalidated when either item changes."""
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE)
+    product = models.ForeignKey("api.Product", on_delete=models.CASCADE, related_name="company_identity_matches")
+    historical_product = models.ForeignKey("api.Product", on_delete=models.CASCADE, related_name="historical_identity_matches")
+    fingerprint = models.CharField(max_length=64)
+    same_product = models.BooleanField(default=False)
+    reason = models.CharField(max_length=300, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["company", "product", "historical_product"],
+                                              name="unique_company_product_identity")]
+
+
 class QuotationPriceFeedback(models.Model):
     line = models.ForeignKey(QuotationLine, null=True, on_delete=models.SET_NULL, related_name="price_feedback")
     company = models.ForeignKey(Company, on_delete=models.PROTECT)

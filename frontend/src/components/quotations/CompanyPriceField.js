@@ -3,6 +3,12 @@ import { createPortal } from 'react-dom';
 import './CompanyPriceField.css';
 
 export const isBlankPrice = (value) => value === '' || value === null || value === undefined;
+export const normalizedPricingUnit = (unit) => {
+  const text = String(unit || '').trim().toLowerCase();
+  const compact = text.replace(/[\s.]/g, '');
+  return ['no', 'nos', 'number', 'numbers', 'pc', 'pcs', 'piece', 'pieces', 'each', 'ea', 'unit', 'units'].includes(compact)
+    ? 'piece' : ({ boxes: 'box', bottles: 'bottle', btl: 'bottle', btls: 'bottle' }[text] || text);
+};
 export const historyPricePatch = (recommendation) => ({
   unit_price: recommendation.amount,
   price_source_history: recommendation.history_id,
@@ -23,7 +29,7 @@ export const manualPricePatch = (draft, value) => {
   const baseline = priorCheck?.status === 'confirmed' ? priorCheck.entered_amount : original?.amount;
   const sameProduct = original?.history_id && String(original.product_id) === String(draft.product)
     && !draft.price_context_changed
-    && String(original.unit || '').trim().toLowerCase() === String(draft.unit || '').trim().toLowerCase();
+    && normalizedPricingUnit(original.pricing_unit || original.unit) === normalizedPricingUnit(draft.unit);
   const large = sameProduct && priceChangeIsLarge(baseline, value);
   const changed = String(draft.unit_price ?? '') !== String(value ?? '');
   const check = large ? { status: 'pending', reason: 'large_price_change', original_amount: original.amount, entered_amount: value }
@@ -91,7 +97,8 @@ export default function CompanyPriceField({ draft, recommendation, loading, fail
         <strong>{label}</strong>
         {matchConcern && <p>The entered price differs by 50% or more from the previous price. This may be a different product or pack. Your price is kept; confirm the item or choose Wrong product.</p>}
         {original?.history_id && <p>{original.currency} {original.amount} / {original.unit} · {original.quotation_number} · {original.date}<br/>Historical quantity: {original.quantity}</p>}
-        {recommendation?.reason && <p>{recommendation.reason}</p>}
+        {original?.matched_duplicate && <p>Matched company history under “{original.source_product_name}”.</p>}
+        {recommendation?.reason && recommendation.reason !== label && <p>{recommendation.reason}</p>}
         {failed && <p>Could not retrieve history. Your entered price has been kept.</p>}
         {!inputProps.disabled && <>
           {onRetry && <button type="button" onClick={onRetry}>{failed ? 'Retry price lookup' : 'Refresh company price'}</button>}

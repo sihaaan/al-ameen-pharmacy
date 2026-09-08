@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationErrorNotice from './QuotationErrorNotice';
@@ -163,7 +163,7 @@ const poEvidenceBadges = (quote, canViewAuditDiagnostics = false) => {
   return [{ key: 'unchecked', label: 'Not checked', className: 'status-pending' }];
 };
 
-const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) => {
+const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit, viewState, onViewStateChange }) => {
   const [quotes, setQuotes] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
@@ -172,8 +172,8 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) 
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
   const [contactSaving, setContactSaving] = useState(false);
-  const [statusFilter, setStatusFilter] = useState('');
-  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState(viewState?.statusFilter || '');
+  const [search, setSearch] = useState(viewState?.search || '');
   const [loading, setLoading] = useState(true);
   const [loadingContacts, setLoadingContacts] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -185,7 +185,19 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) 
   const createQuoteButtonRef = useRef(null);
   const createQuoteDialogRef = useRef(null);
   const createQuoteBusyRef = useRef(false);
+  const returnScrollRef = useRef(viewState?.scrollY);
+  const scrollRestoredRef = useRef(false);
   createQuoteBusyRef.current = saving || contactSaving;
+
+  useLayoutEffect(() => {
+    if (loading || scrollRestoredRef.current) return;
+    scrollRestoredRef.current = true;
+    if (returnScrollRef.current !== undefined) window.scrollTo({ top: returnScrollRef.current, behavior: 'instant' });
+  }, [loading]);
+
+  const rememberList = () => onViewStateChange?.({ search, statusFilter, scrollY: window.scrollY });
+  const openQuoteFromList = (id) => { rememberList(); onOpenQuote?.(id); };
+  const reviewOutcomeFromList = (id) => { rememberList(); onReviewOutcome?.(id); };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -338,7 +350,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) 
       setShowCreateQuote(false);
       contactRequestGenerationRef.current += 1;
       if (onOpenQuote) {
-        onOpenQuote(response.data.id);
+        openQuoteFromList(response.data.id);
       } else {
         await load();
       }
@@ -573,7 +585,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) 
             </thead>
             <tbody>
               {filteredQuotes.map((quote) => (
-                <tr key={quote.id} onClick={() => onOpenQuote(quote.id)}>
+                <tr key={quote.id} onClick={() => openQuoteFromList(quote.id)}>
                   <td><strong>{quote.quotation_number}</strong></td>
                   <td>{quote.company_name}</td>
                   <td>{quote.created_by_username || '-'}</td>
@@ -596,7 +608,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) 
                         className="qm-secondary small"
                         onClick={(event) => {
                           event.stopPropagation();
-                          onReviewOutcome(quote.id);
+                          reviewOutcomeFromList(quote.id);
                         }}
                       >
                         Review Outcome

@@ -67,6 +67,30 @@ const quotation = {
 };
 
 describe('QuotationList PO/LPO evidence summaries', () => {
+  test('returning from a quotation restores its list filters and scroll position', async () => {
+    quotationAPI.quotes.list.mockResolvedValue({ data: [quotation] });
+    quotationAPI.companies.list.mockResolvedValue({ data: [] });
+    const scrollTo = jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const onViewStateChange = jest.fn(), onOpenQuote = jest.fn();
+    const props = { onOpenQuote, onViewStateChange };
+    const first = render(<QuotationList {...props} />);
+    await screen.findByText('Q-0021');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search quotes' }), { target: { value: 'Customer' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Quotation status' }), { target: { value: 'sent' } });
+    Object.defineProperty(window, 'scrollY', { value: 650, configurable: true });
+    fireEvent.click(screen.getByText('Q-0021'));
+    expect(onViewStateChange).toHaveBeenCalledWith({ search: 'Customer', statusFilter: 'sent', scrollY: 650 });
+    expect(onOpenQuote).toHaveBeenCalledWith(21);
+    first.unmount();
+    render(<QuotationList {...props} viewState={onViewStateChange.mock.calls[0][0]} />);
+    await screen.findByText('Q-0021');
+    expect(screen.getByRole('textbox', { name: 'Search quotes' })).toHaveValue('Customer');
+    expect(screen.getByRole('combobox', { name: 'Quotation status' })).toHaveValue('sent');
+    expect(scrollTo).toHaveBeenCalledWith({ top: 650, behavior: 'instant' });
+    Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
+    scrollTo.mockRestore();
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     describeQuotationError.mockImplementation(async (error, action, endpoint) => ({

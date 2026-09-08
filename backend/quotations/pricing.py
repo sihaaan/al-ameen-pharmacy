@@ -5,6 +5,7 @@ these draft-edit operations. Historical rows and issued documents are immutable.
 """
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+import re
 
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -33,6 +34,9 @@ def pending_match_checks(company_id):
 
 def pricing_unit(value):
     # Equivalent spelling only; never infer a conversion between packs/pieces.
+    compact = re.sub(r"[\s.]", "", str(value or "").casefold())
+    if compact in {"no", "nos", "number", "numbers", "pc", "pcs", "piece", "pieces", "each", "ea", "unit", "units"}:
+        return "piece"
     normalized = normalize_item_text(value)
     return {"each": "piece", "ea": "piece", "pc": "piece", "unit": "piece", "units": "piece", "btl": "bottle", "btls": "bottle"}.get(normalized, normalized)
 
@@ -43,20 +47,30 @@ def _unavailable(reason, unit, currency):
 
 def recommendation_context(quotation, product_ids):
     from api.models import Product
-    related = dict(Product.objects.filter(canonical_product_id__in=product_ids).values_list("pk", "canonical_product_id"))
-    source_ids = set(product_ids) | set(related)
+    from .price_identity import equivalent_product_ids
+    products = list(Product.objects.filter(pk__in=product_ids).select_related("brand"))
+    equivalents = equivalent_product_ids(quotation.company_id, products)
+    related = defaultdict(set)
+    for product_id, ids in equivalents.items():
+        for source_id in ids:
+            related[source_id].add(product_id)
+    source_ids = set(related)
     entries = defaultdict(list)
     for entry in (CompanyPriceHistory.objects.filter(company_id=quotation.company_id,
             product_id__in=source_ids).exclude(quotation_id=quotation.pk)
-            .select_related("quotation", "quotation_line").order_by("-quoted_at", "-id")):
-        entries[related.get(entry.product_id, entry.product_id)].append(entry)
-    retirements = {(r.product_id, r.unit, r.currency): r.retired_before for r in
-        PriceRecommendationRetirement.objects.filter(company_id=quotation.company_id, product_id__in=product_ids)}
+            .select_related("quotation", "quotation_line", "product").order_by("-quoted_at", "-id")):
+        for product_id in related[entry.product_id]:
+            entries[product_id].append(entry)
+    retirements = {}
+    for row in PriceRecommendationRetirement.objects.filter(company_id=quotation.company_id, product_id__in=source_ids):
+        for product_id in related[row.product_id]:
+            key = (product_id, pricing_unit(row.unit), row.currency.upper())
+            retirements[key] = max(retirements.get(key, row.retired_before), row.retired_before)
     rejected = defaultdict(set)
     for row in QuotationPriceFeedback.objects.filter(company_id=quotation.company_id, kind="wrong_product", product_id__in=source_ids).values("product_id", "source_wording"):
-        rejected[normalize_item_text(row["source_wording"])].add(related.get(row["product_id"], row["product_id"]))
+        rejected[normalize_item_text(row["source_wording"])].update(related[row["product_id"]])
     for row in pending_match_checks(quotation.company_id).filter(product_id__in=source_ids).values("product_id", "item_name_snapshot"):
-        rejected[normalize_item_text(row["item_name_snapshot"])].add(related.get(row["product_id"], row["product_id"]))
+        rejected[normalize_item_text(row["item_name_snapshot"])].update(related[row["product_id"]])
     return entries, retirements, rejected
 
 
@@ -75,27 +89,42 @@ def recommend_price(quotation, product, unit, *, context=None, source_wording=""
         return _unavailable("No previous company price", unit, currency)
     retired = retirements.get((product.pk, key, currency))
     eligible = []
+    reasons = set()
     for entry in history:
         if entry.quotation.status not in {"finalized", "sent"}:
+            reasons.add(f"source quotation {entry.quotation.quotation_number} is {entry.quotation.get_status_display().lower()}")
             continue
-        if entry.currency.upper() != currency or pricing_unit(entry.unit) != key:
+        if entry.currency.upper() != currency:
+            reasons.add(f"historical currency is {entry.currency}, but this quotation uses {currency}")
+            continue
+        if pricing_unit(entry.unit) != key:
+            reasons.add(f"historical unit is {entry.unit or '(blank)'}, but this line uses {unit}")
             continue
         if retired and entry.quoted_at <= retired:
+            reasons.add("previous prices were marked outdated")
             continue
         historical_brand = normalize_item_text(entry.quotation_line.brand_name_snapshot)
         current_brand = normalize_item_text(product.brand.name) if product.brand_id else ""
         if historical_brand and current_brand and historical_brand != current_brand:
+            reasons.add("historical brand differs from the selected product")
             continue
         historical_identity = item_identity(entry.quotation_line.item_name_snapshot, unit=entry.unit)
         if not identities_compatible(historical_identity, product_identity(product)):
+            reasons.add("historical product details differ in strength, size, pack or type")
             continue
         if source_wording and not identities_compatible(item_identity(source_wording, unit=unit), historical_identity):
+            reasons.add("inquiry wording differs from the historical product's strength, size, pack or type")
             continue
         if entry.quotation_line.price_review_required:
+            reasons.add("historical product or price is awaiting review")
+            continue
+        accepted_price = entry.quotation_line.accepted_unit_price if entry.quotation_line.outcome_status in {"accepted", "quantity_changed"} else None
+        if (accepted_price is None or accepted_price <= 0) and (entry.unit_price is None or entry.unit_price <= 0):
+            reasons.add("historical price is missing or zero")
             continue
         eligible.append(entry)
     if not eligible:
-        return _unavailable("No eligible price for this unit/currency; older or conflicting sources need review", unit, currency)
+        return _unavailable("Price not filled: " + "; ".join(sorted(reasons)[:3]) + ".", unit, currency)
     accepted = [e for e in eligible if e.quotation_line.outcome_status in {"accepted", "quantity_changed"}
                 and e.quotation_line.accepted_unit_price is not None
                 and e.quotation_line.accepted_unit_price > 0]
@@ -116,7 +145,10 @@ def recommend_price(quotation, product, unit, *, context=None, source_wording=""
             "quotation_number": entry.quotation.quotation_number,
             "date": str(entry.quotation.outcome_date or entry.quoted_at.date()) if basis == "accepted" else str(entry.quoted_at.date()),
             "unit": entry.unit, "currency": entry.currency, "quantity": str(entry.quantity),
-            "company_id": quotation.company_id, "product_id": product.pk}
+            "company_id": quotation.company_id, "product_id": product.pk,
+            "pricing_unit": key,
+            "source_product_id": entry.product_id, "source_product_name": entry.product.name if entry.product_id else "",
+            "matched_duplicate": entry.product_id != product.pk}
 
 
 def line_price_snapshot(line):

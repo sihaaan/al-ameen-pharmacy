@@ -1289,7 +1289,7 @@ describe('QuotationEditor Product price context', () => {
     expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
   });
 
-  test('offers direct finalization beside Review Email without sending an email', async () => {
+  test('offers direct finalization in More actions without sending an email', async () => {
     const finalizedQuote = {
       ...withGmailChainedActions(),
       status: 'finalized',
@@ -1312,8 +1312,9 @@ describe('QuotationEditor Product price context', () => {
 
       const finalizeButtons = await screen.findAllByRole('button', { name: 'Finalize' });
       const reviewButtons = screen.getAllByRole('button', { name: 'Review Email' });
-      expect(finalizeButtons).toHaveLength(2);
-      expect(reviewButtons).toHaveLength(2);
+      expect(finalizeButtons).toHaveLength(1);
+      expect(reviewButtons).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
 
       fireEvent.click(finalizeButtons[0]);
 

@@ -12,7 +12,7 @@ test('keeps saved rows compact and exposes keyboard accessible image and delete 
   expect(screen.getByText('Saved')).toBeInTheDocument();
   const trigger = screen.getByRole('button', { name: 'Actions for Gloves' });
   fireEvent.keyDown(trigger, { key: 'ArrowDown' });
-  const image = screen.getByRole('menuitemcheckbox', { name: 'Image in PDF' });
+  const image = screen.getByRole('menuitemcheckbox', { name: 'Include product photo in PDF' });
   expect(image).toHaveFocus();
   fireEvent.click(image);
   expect(props.onToggleImage).toHaveBeenCalledTimes(1);

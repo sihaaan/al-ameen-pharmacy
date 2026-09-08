@@ -20,7 +20,7 @@ export default function QuotationLineActions({ label, isDirty, canSave, canEditI
     const rect = trigger.current.getBoundingClientRect();
     const height = menu.current.getBoundingClientRect().height;
     setPosition({
-      left: Math.max(8, Math.min(rect.right - 208, window.innerWidth - 216)),
+      left: Math.max(8, Math.min(rect.right - 256, window.innerWidth - 264)),
       top: Math.max(8, rect.bottom + height + 8 <= window.innerHeight ? rect.bottom + 4 : rect.top - height - 4),
     });
     (menu.current.querySelector('button:not(:disabled)') || menu.current).focus({ preventScroll: true });
@@ -83,7 +83,7 @@ export default function QuotationLineActions({ label, isDirty, canSave, canEditI
     {open && createPortal(<div className="qm-line-menu" style={position} ref={menu} id={menuId}
       role="menu" tabIndex={-1} aria-label={`Actions for ${label}`} onKeyDown={navigateMenu}>
       <button type="button" role="menuitemcheckbox" aria-checked={includeImage} disabled={!canEditImage}
-        onClick={onToggleImage}><span className="qm-menu-check" aria-hidden="true">{includeImage ? '✓' : ''}</span>Image in PDF</button>
+        onClick={onToggleImage}><span className="qm-menu-check" aria-hidden="true">{includeImage ? '✓' : ''}</span>Include product photo in PDF</button>
       <button type="button" role="menuitem" disabled={!canUpload}
         onClick={() => { close(true); fileInput.current?.click(); }}>Upload image</button>
       <button type="button" role="menuitem" className="danger" disabled={!canDelete}
