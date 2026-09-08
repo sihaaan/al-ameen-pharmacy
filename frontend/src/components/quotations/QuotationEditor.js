@@ -7,6 +7,7 @@ import QuotationErrorNotice from './QuotationErrorNotice';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 import CompanyPriceField, { historyPricePatch, isBlankPrice } from './CompanyPriceField';
+import QuotationLineActions from './QuotationLineActions';
 import { reviewProductCreation } from './creationReview';
 import ProductSelect, { buildProductCatalogue } from './ProductSelect';
 
@@ -498,6 +499,7 @@ const QuotationEditor = ({
   const initialEmailReviewRequestRef = useRef('');
   const loadEmailPreviewRef = useRef(null);
   const priceInputRefs = useRef(new Map());
+  const vatInputRefs = useRef(new Map());
   const initialPriceFocusQuoteRef = useRef('');
   const quoteRef = useRef(null);
   const quotePartyDraftRef = useRef(quotePartyDraft);
@@ -951,6 +953,7 @@ const QuotationEditor = ({
 
   useEffect(() => {
     const mountedPriceInputs = priceInputRefs.current;
+    const mountedVatInputs = vatInputRefs.current;
     lineSaveGenerationRef.current += 1;
     setSaving(false);
     setEmailPreviewOpen(false);
@@ -983,6 +986,7 @@ const QuotationEditor = ({
       reviewEmailInFlightRef.current = false;
       supportingDatasetGenerationRef.current = {};
       mountedPriceInputs.clear();
+      mountedVatInputs.clear();
     };
   }, [load]);
 
@@ -1213,17 +1217,31 @@ const QuotationEditor = ({
     else priceInputRefs.current.delete(key);
   };
 
-  const moveToNextBlankPrice = (event, lineId) => {
-    if (!progressiveLoadEnabled || event.shiftKey || !['Enter', 'Tab'].includes(event.key)) return;
+  const assignVatInputRef = (lineId, node) => {
+    const key = String(lineId);
+    if (node) vatInputRefs.current.set(key, node);
+    else vatInputRefs.current.delete(key);
+  };
+
+  const navigatePriceEntry = (event, lineId, field = 'price') => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     const currentIndex = visiblePriceLineIds.indexOf(String(lineId));
     if (currentIndex < 0) return;
-    const nextInput = visiblePriceLineIds
-      .slice(currentIndex + 1)
-      .map((id) => priceInputRefs.current.get(id))
-      .find((input) => input && !input.disabled && String(input.value || '').trim() === '');
-    if (!nextInput) return;
-    event.preventDefault();
-    nextInput.focus();
+    let nextInput;
+    if (event.key === 'Tab') {
+      const entryInputs = visiblePriceLineIds.flatMap((id) => [priceInputRefs.current.get(id), vatInputRefs.current.get(id)])
+        .filter((input) => input && !input.disabled);
+      const index = entryInputs.indexOf(event.currentTarget);
+      if (index >= 0) nextInput = entryInputs[index + (event.shiftKey ? -1 : 1)];
+    } else if (field === 'price' && progressiveLoadEnabled && event.key === 'Enter' && !event.shiftKey) {
+      nextInput = visiblePriceLineIds.slice(currentIndex + 1)
+        .map((id) => priceInputRefs.current.get(id))
+        .find((input) => input && !input.disabled && String(input.value || '').trim() === '');
+    }
+    if (nextInput) {
+      event.preventDefault();
+      nextInput.focus();
+    }
   };
 
   useEffect(() => {
@@ -3559,6 +3577,7 @@ const QuotationEditor = ({
             {unitSuggestions.map((unit) => <option key={unit} value={unit} />)}
           </datalist>
           {companyPricingVisible && <div className="qm-price-legend"><span className="history">◷ Historical price</span><span>✎ Manual price</span><span className="review">△ Needs review</span><span>Click the icon for details</span></div>}
+          {isEditable && <p className="qm-entry-shortcuts">Tab: Price → VAT → next price · Shift+Tab: back{companyPricingVisible ? ' · Alt+↓: price details' : ''}</p>}
           <table className={`qm-table line-table${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
             <thead>
               <tr>
@@ -3661,7 +3680,7 @@ const QuotationEditor = ({
                         inputRef={(node) => assignPriceInputRef(line.id, node)}
                         aria-label={`Unit price for ${lineLabel(line, draft)}`} disabled={!isEditable}
                         type="number" min="0" step="0.001" onWheel={releaseNumberWheelFocus}
-                        onKeyDown={(event) => moveToNextBlankPrice(event, line.id)}
+                        onKeyDown={(event) => navigatePriceEntry(event, line.id)}
                       /> : <>
                       <input
                         ref={(node) => assignPriceInputRef(line.id, node)}
@@ -3672,7 +3691,7 @@ const QuotationEditor = ({
                         step="0.001"
                         value={draft.unit_price || ''}
                         onWheel={releaseNumberWheelFocus}
-                        onKeyDown={(event) => moveToNextBlankPrice(event, line.id)}
+                        onKeyDown={(event) => navigatePriceEntry(event, line.id)}
                         onChange={(event) => updateLineDraft(line.id, { unit_price: event.target.value })}
                       />
                       {draft.product && (
@@ -3688,41 +3707,24 @@ const QuotationEditor = ({
                       </>}
                     </td>
                     <td className="qm-vat-cell">
-                      <select className="qm-vat-select" disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
+                      <select className="qm-vat-select" aria-label={`VAT for ${lineLabel(line, draft)}`}
+                        ref={(node) => assignVatInputRef(line.id, node)} onKeyDown={(event) => navigatePriceEntry(event, line.id, 'vat')}
+                        disabled={!isEditable} value={draft.vat_rate || '0'} onChange={(event) => updateLineDraft(line.id, { vat_rate: event.target.value })}>
                         <option value="0">0%</option>
                         <option value="5">5%</option>
                       </select>
                     </td>
                     <td className="qm-line-status-cell"><span className={`qm-line-status ${statusInfo.id}`}>{statusInfo.label}</span></td>
                     <td className="qm-line-total-cell">{quote.currency} {formatMoneyCents(lineMoneyForDraft(draft).totalCents)}</td>
-                    <td className="qm-row-actions qm-line-actions-cell">
-                      <span className={isDirty ? 'qm-line-state unsaved' : 'qm-line-state saved'}>{isDirty ? 'Unsaved' : 'Saved'}</span>
-                      <button type="button" className="qm-secondary small" disabled={!isEditable || saving || actionInFlight || !isDirty || Boolean(discountError)} onClick={() => saveLine(line.id)}>Save</button>
-                      <div className="qm-line-image-tools">
-                        <label className={`qm-line-image-toggle ${draft.include_product_image ? 'enabled' : ''}`}>
-                          <input
-                            type="checkbox"
-                            disabled={!isEditable || !draft.product || !draft.has_product_image}
-                            checked={!!draft.include_product_image}
-                            onChange={(event) => updateLineDraft(line.id, { include_product_image: event.target.checked })}
-                          />
-                          Image in PDF
-                        </label>
-                        <label className={`qm-secondary small qm-image-upload ${!isEditable || !draft.product || saving || actionInFlight ? 'disabled' : ''}`}>
-                          Upload
-                          <input
-                            type="file"
-                            accept="image/png,image/jpeg,image/webp"
-                            disabled={!isEditable || !draft.product || saving || actionInFlight}
-                            onChange={(event) => {
-                              const file = event.target.files?.[0];
-                              event.target.value = '';
-                              uploadImageForLine(line.id, file);
-                            }}
-                          />
-                        </label>
-                      </div>
-                      <button type="button" className="qm-secondary small danger" disabled={!isEditable || saving || actionInFlight} onClick={() => deleteLine(line.id)}>Delete</button>
+                    <td className="qm-line-actions-cell">
+                      <QuotationLineActions label={lineLabel(line, draft)} isDirty={isDirty}
+                        canSave={isEditable && !saving && !actionInFlight && !discountError}
+                        canEditImage={isEditable && !!draft.product && !!draft.has_product_image}
+                        canUpload={isEditable && !!draft.product && !saving && !actionInFlight}
+                        canDelete={isEditable && !saving && !actionInFlight}
+                        includeImage={!!draft.include_product_image} onSave={() => saveLine(line.id)}
+                        onToggleImage={() => updateLineDraft(line.id, { include_product_image: !draft.include_product_image })}
+                        onUpload={(file) => uploadImageForLine(line.id, file)} onDelete={() => deleteLine(line.id)} />
                     </td>
                   </tr>
                 );

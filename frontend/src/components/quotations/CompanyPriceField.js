@@ -67,15 +67,20 @@ export default function CompanyPriceField({ draft, recommendation, loading, fail
     : kind === 'manual' ? 'Manually entered price' : loading ? 'Loading price history' : failed ? 'Price lookup failed'
       : !draft.product ? 'Confirm a product to find its price' : recommendation?.reason || 'Look up company price';
   const original = source.kind === 'history' ? source : source.previous_source;
+  const toggleDetails = () => {
+    const rect = trigger.current.getBoundingClientRect();
+    setPosition({ left: Math.max(8, Math.min(rect.right - 300, window.innerWidth - 308)), top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 360)) });
+    setOpen(!open);
+  };
   return <div className={`qm-company-price ${kind}`}>
-    <input {...inputProps} ref={inputRef} value={draft.unit_price ?? ''} onChange={(event) => onPatch(manualPricePatch(draft, event.target.value))} />
+    <input {...inputProps} ref={inputRef} value={draft.unit_price ?? ''} onChange={(event) => onPatch(manualPricePatch(draft, event.target.value))}
+      aria-keyshortcuts="Alt+ArrowDown" onKeyDown={(event) => {
+        if (event.altKey && event.key === 'ArrowDown') { event.preventDefault(); toggleDetails(); }
+        else inputProps.onKeyDown?.(event);
+      }} />
     <div className="qm-price-details">
       <button type="button" className="qm-price-trigger" ref={trigger} aria-label={label} title={original?.history_id ? `${label}: ${original.currency} ${original.amount} / ${original.unit}, ${original.quotation_number}, ${original.date}` : label}
-        aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={() => {
-          const rect = trigger.current.getBoundingClientRect();
-          setPosition({ left: Math.max(8, Math.min(rect.right - 300, window.innerWidth - 308)), top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 360)) });
-          setOpen(!open);
-        }}>
+        aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={toggleDetails}>
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8">
           {kind === 'history' ? <><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></>
             : kind === 'manual' ? <path d="m4 16 12-12 4 4L8 20H4zm10-10 4 4"/>
