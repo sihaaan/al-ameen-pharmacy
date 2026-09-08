@@ -3730,6 +3730,7 @@ const QuotationEditor = ({
                         canEditImage={isEditable && !!draft.product && !!draft.has_product_image}
                         canUpload={isEditable && !!draft.product && !saving && !actionInFlight}
                         canDelete={isEditable && !saving && !actionInFlight}
+                        hasImage={!!draft.has_product_image}
                         includeImage={!!draft.include_product_image} onSave={() => saveLine(line.id)}
                         onToggleImage={() => updateLineDraft(line.id, { include_product_image: !draft.include_product_image })}
                         onUpload={(file) => uploadImageForLine(line.id, file)} onDelete={() => deleteLine(line.id)} />
