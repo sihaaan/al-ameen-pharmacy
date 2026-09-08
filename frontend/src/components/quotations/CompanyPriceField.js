@@ -21,7 +21,9 @@ export const manualPricePatch = (draft, value) => {
   const original = previous.kind === 'history' ? previous : previous.previous_source;
   const priorCheck = previous.match_check;
   const baseline = priorCheck?.status === 'confirmed' ? priorCheck.entered_amount : original?.amount;
-  const sameProduct = original?.history_id && String(original.product_id) === String(draft.product);
+  const sameProduct = original?.history_id && String(original.product_id) === String(draft.product)
+    && !draft.price_context_changed
+    && String(original.unit || '').trim().toLowerCase() === String(draft.unit || '').trim().toLowerCase();
   const large = sameProduct && priceChangeIsLarge(baseline, value);
   const changed = String(draft.unit_price ?? '') !== String(value ?? '');
   const check = large ? { status: 'pending', reason: 'large_price_change', original_amount: original.amount, entered_amount: value }
@@ -30,7 +32,7 @@ export const manualPricePatch = (draft, value) => {
     unit_price: value, price_source_history: null,
     price_original_history: draft.price_original_history || null,
     price_provenance: { kind: 'manual', previous_source: original, ...(check ? { match_check: check } : {}) },
-    price_review_required: !!large || (!!draft.price_review_required && !priorCheck),
+    price_review_required: !!large || !!draft.price_context_changed || (!!draft.price_review_required && (!priorCheck || !sameProduct)),
     price_reviewed: changed ? false : !!draft.price_reviewed,
     price_feedback: changed ? '' : (draft.price_feedback || ''),
   };

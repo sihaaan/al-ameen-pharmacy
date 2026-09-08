@@ -31,3 +31,10 @@ test('editing after a confirmation requires fresh review for another drastic cha
   expect(manualPricePatch(reviewed, '6').price_review_required).toBe(false);
   expect(manualPricePatch(reviewed, '100')).toEqual(expect.objectContaining({ price_review_required: true, price_reviewed: false }));
 });
+
+test('a pack-to-piece change retains unit review without declaring a price mismatch', () => {
+  const changedUnit = { ...filled, ...manualPricePatch(filled, '5'), unit: 'piece', price_context_changed: true };
+  const patch = manualPricePatch(changedUnit, '1');
+  expect(patch.price_review_required).toBe(true);
+  expect(patch.price_provenance.match_check.status).toBe('confirmed');
+});
