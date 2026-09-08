@@ -198,7 +198,7 @@ def item_identity(name, *, dosage="", pack_size="", unit=""):
     return ItemIdentity(
         normalized_text=normalize_item_text(" ".join(part for part in [name, dosage, pack_size] if part)),
         core_name=_core_name(name),
-        dimensions=tuple(sorted(f"{_canonical_number(number)}{dimension.lower()}" for number, dimension in _DIMENSION_RE.findall(" ".join([name, dosage, pack_size])))),
+        dimensions=tuple(sorted({f"{_canonical_number(number)}{dimension.lower()}" for number, dimension in _DIMENSION_RE.findall(" ".join([name, dosage, pack_size]))})),
         core_tokens=tuple(_core_name(name).split()),
         strengths=_extract_measurements(" ".join(part for part in [name, dosage] if part)),
         pack_counts=_extract_pack_counts(" ".join(part for part in [name, pack_size] if part)),
