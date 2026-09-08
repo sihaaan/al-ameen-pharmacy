@@ -93,6 +93,9 @@ _DOSAGE_FORMS = {
 }
 _PACK_FORMS = {"box", "pack", "bottle", "piece", "strip", "roll", "kit", "tube", "bag", "pair"}
 _IDENTITY_NOISE = _DOSAGE_FORMS | _PACK_FORMS | {"of", "per", "each", "unit", "units"}
+# These words can identify an accessory or the item itself, even though they
+# also appear as packaging. A glucometer strip is not a glucometer.
+_PRODUCT_ROLE_WORDS = {"strip", "kit", "bag", "roll", "tube"}
 
 
 def normalize_item_text(value):
@@ -182,10 +185,11 @@ class ItemIdentity:
     dosage_forms: tuple[str, ...]
     pack_forms: tuple[str, ...]
     dimensions: tuple[str, ...] = ()
+    name_roles: tuple[str, ...] = ()
 
     @property
     def fingerprint(self):
-        return (self.core_name, self.strengths, self.pack_counts, self.dosage_forms, self.pack_forms, self.dimensions)
+        return (self.core_name, self.strengths, self.pack_counts, self.dosage_forms, self.pack_forms, self.dimensions, self.name_roles)
 
 
 def item_identity(name, *, dosage="", pack_size="", unit=""):
@@ -204,6 +208,9 @@ def item_identity(name, *, dosage="", pack_size="", unit=""):
         pack_counts=_extract_pack_counts(" ".join(part for part in [name, pack_size] if part)),
         dosage_forms=tuple(sorted({form for form in (*strong_forms, *unit_forms) if form in _DOSAGE_FORMS})),
         pack_forms=tuple(form for form in strong_forms if form in _PACK_FORMS),
+        # Preserve role words from the name, not unit metadata. Counts do not
+        # make a role optional: "50 glucometer strips" still describes strips.
+        name_roles=tuple(sorted(set(normalize_item_text(name).split()) & _PRODUCT_ROLE_WORDS)),
     )
 
 
@@ -216,6 +223,8 @@ def product_identity(product):
 
 
 def identities_compatible(requested, candidate):
+    if requested.name_roles != candidate.name_roles:
+        return False
     if requested.dimensions and candidate.dimensions and requested.dimensions != candidate.dimensions:
         return False
     # Multiple ingredient strengths or ratios cannot be matched as unordered
