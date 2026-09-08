@@ -1,0 +1,30 @@
+.qm-product-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qm-product-picker input,
+.qm-product-picker select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.qm-product-picker-help {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.qm-product-picker-help:empty {
+  display: none;
+}
+
+.qm-line-product-name {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

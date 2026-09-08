@@ -223,6 +223,49 @@ describe('QuotationEditor Product price context', () => {
     quotationAPI.lines.rememberAlias.mockResolvedValue({ data: {} });
   });
 
+  test('keeps nine quotation product pickers small and selects a product found beyond the initial list', async () => {
+    const catalogue = Array.from({ length: 5400 }, (_, index) => ({
+      id: index + 100,
+      name: `Catalogue product ${String(index).padStart(4, '0')}`,
+      unit: 'box',
+    }));
+    const target = { id: 6000, name: 'Nitrile gloves', brand_name: 'Medline', unit: 'box' };
+    catalogue.push(target);
+    quotationAPI.items.list.mockImplementation((params) => Promise.resolve({
+      data: params?.company_used ? [] : catalogue,
+    }));
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: withProgressiveLoad({
+      ...quote,
+      lines: Array.from({ length: 9 }, (_, index) => ({
+        ...quote.lines[0], id: 31 + index, sort_order: index, item_name_snapshot: `Imported item ${index + 1}`,
+      })),
+    }) });
+    quotationAPI.quotes.productPrice.mockResolvedValueOnce({ data: priceContext(6000, target.name, 25) });
+    const { container } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const select = await screen.findByLabelText('Product for Imported item 1');
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(container.querySelectorAll('.qm-line-product-cell option')).toHaveLength(9 * 22);
+    fireEvent.change(screen.getByLabelText('Search products for Imported item 1'), { target: { value: 'nitrile' } });
+    expect(within(select).getAllByRole('option')).toHaveLength(3);
+    fireEvent.change(select, { target: { value: '6000' } });
+    await waitFor(() => expect(quotationAPI.quotes.productPrice).toHaveBeenCalledWith(21, { product: '6000' }));
+    expect(select).toHaveValue('6000');
+    expect(screen.getByLabelText('Unit price for Imported item 1')).toHaveValue(null);
+
+    fireEvent.change(screen.getByLabelText('Search products for new line'), { target: { value: 'nitrile' } });
+    fireEvent.change(screen.getByLabelText('Product for new line'), { target: { value: '6000' } });
+    expect(screen.getByPlaceholderText('Snapshot name')).toHaveValue('Nitrile gloves');
+  });
+
+  test.each(['finalized', 'sent'])('shows saved product names with no product pickers for a %s quotation', async (status) => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: { ...readyQuote, status, status_display: status } });
+    const { container } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    await screen.findByRole('button', { name: 'Create Revision' });
+    expect(container.querySelector('.qm-line-product-name')).toHaveTextContent('Gloves A');
+    expect(container.querySelectorAll('.qm-line-product-cell option')).toHaveLength(0);
+    expect(container.querySelectorAll('.qm-product-picker')).toHaveLength(0);
+  });
+
   test('keeps the optional Brand column off by default', async () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 

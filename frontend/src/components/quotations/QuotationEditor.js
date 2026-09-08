@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import ProductPriceHistoryDialog from './ProductPriceHistoryDialog';
@@ -6,6 +6,7 @@ import AuditLogPanel from './AuditLogPanel';
 import QuotationErrorNotice from './QuotationErrorNotice';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
+import ProductSelect, { buildProductCatalogue } from './ProductSelect';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
 const UNSAVED_LINES_FINALIZE_ISSUE = 'Save all line changes before finalizing.';
@@ -1103,54 +1104,7 @@ const QuotationEditor = ({
 
   const lineLabel = (line, draft = {}) => draft.item_name_snapshot || line.inquiry_line_raw_name || line.item_name_snapshot || `Line ${line.sort_order + 1}`;
 
-  const productOptionsForDraft = (draft = {}, fallbackProduct = null) => {
-    const companyProductIds = new Set(companyItems.map((item) => String(item.id)));
-    const byId = new Map(items.map((item) => [String(item.id), item]));
-    if (
-      progressiveLoadEnabled
-      && draft.product
-      && fallbackProduct
-      && !byId.has(String(draft.product))
-    ) {
-      byId.set(String(draft.product), {
-        id: draft.product,
-        name: fallbackProduct.product_name
-          || fallbackProduct.matched_product_name
-          || draft.item_name_snapshot
-          || `Product ${draft.product}`,
-        brand_name: draft.brand_name_snapshot || '',
-        unit: draft.unit || '',
-        primary_image_url: draft.product_image_url || '',
-      });
-    }
-    return Array.from(byId.values()).sort((a, b) => {
-      const aUsed = companyProductIds.has(String(a.id));
-      const bUsed = companyProductIds.has(String(b.id));
-      if (aUsed !== bUsed) return aUsed ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-  };
-
-  const renderProductOptions = (draft = {}, fallbackProduct = null) => {
-    const companyProductIds = new Set(companyItems.map((item) => String(item.id)));
-    const options = productOptionsForDraft(draft, fallbackProduct);
-    const previouslyUsed = options.filter((item) => companyProductIds.has(String(item.id)));
-    const remaining = options.filter((item) => !companyProductIds.has(String(item.id)));
-    return (
-      <>
-        {previouslyUsed.length > 0 && (
-          <optgroup label="Previously quoted for this customer">
-            {previouslyUsed.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </optgroup>
-        )}
-        {remaining.length > 0 && (
-          <optgroup label="All other Products">
-            {remaining.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </optgroup>
-        )}
-      </>
-    );
-  };
+  const productCatalogue = useMemo(() => buildProductCatalogue(items, companyItems), [items, companyItems]);
 
   const lineMoneyForDraft = (draft = {}) => {
     if (draft.match_status === 'ignored') {
@@ -3524,11 +3478,27 @@ const QuotationEditor = ({
                     <td className="qm-check-cell"><input type="checkbox" checked={selectedLineIds.includes(line.id)} onChange={() => toggleLineSelection(line.id)} /></td>
                     <td className="qm-serial-cell">{lineIndex + 1}</td>
                     <td className="qm-line-product-cell">
-                      <select aria-label={`Product for ${lineLabel(line, draft)}`} aria-busy={productCatalogueLoading} disabled={!isEditable || productCatalogueBlocked} value={draft.product || ''} onChange={(event) => handleLineProductChange(line, event.target.value)}>
-                        <option value="">Unmatched</option>
-                        {isEditable && <option value="__create__">+ Create a new Product…</option>}
-                        {renderProductOptions(draft, line)}
-                      </select>
+                      {isEditable ? (
+                        <ProductSelect
+                          key={`${quote.id}-${line.id}`}
+                          catalogue={productCatalogue}
+                          value={draft.product}
+                          fallbackName={line.product_name || line.matched_product_name || draft.item_name_snapshot}
+                          label={`Product for ${lineLabel(line, draft)}`}
+                          searchLabel={`Search products for ${lineLabel(line, draft)}`}
+                          loading={productCatalogueLoading}
+                          disabled={productCatalogueBlocked}
+                          allowCreate
+                          onChange={(productId) => handleLineProductChange(line, productId)}
+                        />
+                      ) : (
+                        <span className="qm-line-product-name">
+                          {draft.product
+                            ? line.product_name || line.matched_product_name || draft.item_name_snapshot
+                              || productCatalogue.byId.get(String(draft.product))?.name || `Product ${draft.product}`
+                            : 'Unmatched'}
+                        </span>
+                      )}
                     </td>
                     <td className="qm-line-snapshot-cell"><input disabled={!isEditable} value={draft.item_name_snapshot || ''} onChange={(event) => updateLineDraft(line.id, { item_name_snapshot: event.target.value })} /></td>
                     {quoteTermsDraft.show_brand_column && (
@@ -3627,10 +3597,18 @@ const QuotationEditor = ({
 
         {isEditable && (
           <form onSubmit={addLine} className={`qm-add-line${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
-            <select disabled={productCatalogueBlocked} aria-busy={productCatalogueLoading} value={lineForm.product} onChange={(event) => handleLineFormProductChange(event.target.value)}>
-              <option value="">Select item</option>
-              {renderProductOptions(lineForm)}
-            </select>
+            <ProductSelect
+              key={quote.id}
+              catalogue={productCatalogue}
+              value={lineForm.product}
+              fallbackName={lineForm.item_name_snapshot}
+              label="Product for new line"
+              searchLabel="Search products for new line"
+              placeholder="Select item"
+              disabled={productCatalogueBlocked}
+              loading={productCatalogueLoading}
+              onChange={handleLineFormProductChange}
+            />
             <input placeholder="Snapshot name" required value={lineForm.item_name_snapshot} onChange={(event) => setLineForm({ ...lineForm, item_name_snapshot: event.target.value })} />
             {quoteTermsDraft.show_brand_column && (
               <input
