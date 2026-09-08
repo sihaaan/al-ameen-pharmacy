@@ -31,6 +31,7 @@ _COUNT_FORM_RE = re.compile(
 )
 _X_COUNT_RE = re.compile(r"(?<![a-z0-9])(?:pack|box|packet|pkt|strip)?\s*x\s*(\d+)(?![a-z0-9])", re.IGNORECASE)
 
+_DIMENSION_RE = re.compile(r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(mm|cm|fr|gauge|inches?|inch)(?![a-z])", re.IGNORECASE)
 _BOX_OF_RE = re.compile(r"\b(?:box|pack|packet)\s+of\s+(\d+)\b", re.IGNORECASE)
 
 _TOKEN_ALIASES = {
@@ -180,10 +181,11 @@ class ItemIdentity:
     pack_counts: tuple[tuple[int, str], ...]
     dosage_forms: tuple[str, ...]
     pack_forms: tuple[str, ...]
+    dimensions: tuple[str, ...] = ()
 
     @property
     def fingerprint(self):
-        return (self.core_name, self.strengths, self.pack_counts, self.dosage_forms, self.pack_forms)
+        return (self.core_name, self.strengths, self.pack_counts, self.dosage_forms, self.pack_forms, self.dimensions)
 
 
 def item_identity(name, *, dosage="", pack_size="", unit=""):
@@ -196,6 +198,7 @@ def item_identity(name, *, dosage="", pack_size="", unit=""):
     return ItemIdentity(
         normalized_text=normalize_item_text(" ".join(part for part in [name, dosage, pack_size] if part)),
         core_name=_core_name(name),
+        dimensions=tuple(sorted(f"{_canonical_number(number)}{dimension.lower()}" for number, dimension in _DIMENSION_RE.findall(" ".join([name, dosage, pack_size])))),
         core_tokens=tuple(_core_name(name).split()),
         strengths=_extract_measurements(" ".join(part for part in [name, dosage] if part)),
         pack_counts=_extract_pack_counts(" ".join(part for part in [name, pack_size] if part)),
@@ -213,6 +216,8 @@ def product_identity(product):
 
 
 def identities_compatible(requested, candidate):
+    if requested.dimensions and candidate.dimensions and requested.dimensions != candidate.dimensions:
+        return False
     # Multiple ingredient strengths or ratios cannot be matched as unordered
     # numbers: swapping which ingredient owns a strength changes the product.
     if len(requested.strengths) > 1 and len(candidate.strengths) > 1 and requested.normalized_text != candidate.normalized_text:
@@ -647,6 +652,10 @@ def _fuzzy_score(requested, candidate):
 
 
 def equivalent_identity(requested, candidate):
+    # Multiple dimensions stay reviewable when wording changes: ordered
+    # measurements can encode different roles (for example diameter vs length).
+    if len(requested.dimensions) > 1 and requested.normalized_text != candidate.normalized_text:
+        return False
     # Equality in identifying attributes, not a lower similarity threshold.
     counts = lambda identity: {count for count, form in identity.pack_counts}
     return bool(requested.core_name and requested.core_name == candidate.core_name

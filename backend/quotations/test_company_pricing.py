@@ -288,3 +288,9 @@ class CompanyPricingTests(APITestCase):
         line = QuotationLine.objects.get(pk=response.data["id"])
         self.save(line, price_reviewed=True)
         finalize_quotation(self.quote, self.staff)
+
+    def test_dimensions_do_not_swap_values_when_words_are_reordered(self):
+        Product.objects.create(name="Catheter 12Fr 24cm", price=1)
+        self.assertIsNone(suggest_product_for_text("Catheter 24Fr 12cm").product)
+        Product.objects.create(name="Tube diameter 6mm length 300mm", price=1)
+        self.assertIsNone(suggest_product_for_text("Tube diameter 300mm length 6mm").product)
