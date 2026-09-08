@@ -136,9 +136,10 @@ def validate_identity_edit(product, attrs):
         return attrs
     for field in identity_fields & attrs.keys():
         setattr(updated, field, attrs[field])
-    changed = not equivalent_identity(product_identity(product), product_identity(updated))
+    changed = not equivalent_identity(product_identity(product), product_identity(updated)) or any(
+        field in attrs and attrs[field] != getattr(product, field) for field in {"brand", "sku", "barcode", "active_ingredient"})
     if changed and (product.canonical_product_id or product.identity_variants.exists()):
         raise ValidationError("This identity belongs to an owner-approved consolidation. Create and review a distinct variant instead of changing its identifying attributes.")
-    if changed or any(field in attrs and attrs[field] != getattr(product, field) for field in {"brand", "sku", "barcode", "active_ingredient"}):
+    if changed:
         attrs["identity_review_state"] = "provisional"
     return attrs

@@ -270,3 +270,10 @@ class CompanyPricingTests(APITestCase):
         self.product.brand = Brand.objects.create(name="Brand A"); self.product.save()
         self.history(brand_name_snapshot="Brand B")
         self.assertFalse(recommend_price(self.quote, self.product, "box")["eligible"])
+
+    def test_consolidated_identity_cannot_change_brand_through_catalogue_edit(self):
+        from api.models import Brand
+        from .catalogue_identity import validate_identity_edit
+        duplicate = Product.objects.create(name=self.product.name, pack_size="box", price=1, canonical_product=self.product)
+        with self.assertRaises(ValidationError):
+            validate_identity_edit(duplicate, {"brand": Brand.objects.create(name="Different brand")})
