@@ -97,6 +97,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
   const [editingQuoteId, setEditingQuoteId] = useState(isReviewRoute ? null : route.quoteId);
   const [reviewingOutcomeQuoteId, setReviewingOutcomeQuoteId] = useState(isReviewRoute ? route.quoteId : null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [quotationListState, setQuotationListState] = useState({ search: '', statusFilter: '', scrollY: 0 });
   const [pendingEmailReview, setPendingEmailReview] = useState(null);
   const [preparedDeliveryNote, setPreparedDeliveryNote] = useState(null);
 
@@ -320,6 +321,8 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
           ) : (
             <QuotationList
               key={refreshKey}
+              viewState={quotationListState}
+              onViewStateChange={setQuotationListState}
               onOpenQuote={openQuote}
               onReviewOutcome={openOutcome}
               canManageMailboxAudit={canManageMailboxAudit}

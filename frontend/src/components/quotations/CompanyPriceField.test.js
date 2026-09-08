@@ -51,3 +51,16 @@ test('a pack-to-piece change retains unit review without declaring a price misma
   expect(patch.price_review_required).toBe(true);
   expect(patch.price_provenance.match_check.status).toBe('confirmed');
 });
+
+test('equivalent historical unit spellings still flag a drastic price correction', () => {
+  const draft = { ...filled, unit: 'NOS', price_provenance: { ...source, unit: 'NO.S', pricing_unit: 'piece' } };
+  expect(manualPricePatch(draft, '5').price_review_required).toBe(true);
+  expect(manualPricePatch(draft, '18').price_review_required).toBe(false);
+});
+
+test('matched duplicate names are explained beside their historical source', () => {
+  const draft = { ...filled, price_provenance: { ...source, matched_duplicate: true, source_product_name: 'Wheel Chair' } };
+  render(<CompanyPriceField draft={draft} aria-label="Unit price" onPatch={jest.fn()} />);
+  fireEvent.click(screen.getByRole('button', { name: /Filled from last quoted/ }));
+  expect(screen.getByText('Matched company history under “Wheel Chair”.')).toBeInTheDocument();
+});

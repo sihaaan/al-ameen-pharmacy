@@ -1588,6 +1588,8 @@ def _price_context_row(entry):
         "accepted_quantity": str(line.accepted_quantity) if is_accepted and line.accepted_quantity is not None else None,
         "accepted_at": _price_context_date(accepted_at),
         "lpo_number": confirmed_lpo.lpo_number if confirmed_lpo else "",
+        "source_product_id": entry.product_id,
+        "source_product_name": line.item_name_snapshot,
     }
 
 
@@ -1637,30 +1639,17 @@ def _product_price_context_payload(quotation, product, history_entries, latest_a
 
 
 def _build_product_price_context(quotation, product, history_limit):
-    source_ids = [product.pk, *Product.objects.filter(canonical_product=product).values_list("pk", flat=True)]
-    history_queryset = _price_context_queryset(quotation).filter(product_id__in=source_ids)
-    history_entries = list(history_queryset.order_by("-quoted_at", "-id")[:history_limit])
-    latest_accepted_entry = (
-        history_queryset.filter(
-            quotation_line__outcome_status__in=[
-                QuotationLine.OUTCOME_ACCEPTED,
-                QuotationLine.OUTCOME_QUANTITY_CHANGED,
-            ],
-            quotation_line__accepted_unit_price__isnull=False,
-        )
-        .order_by(*_accepted_price_ordering())
-        .first()
-    )
-    return _product_price_context_payload(
-        quotation,
-        product,
-        history_entries,
-        latest_accepted_entry,
-    )
+    return _build_product_price_contexts(quotation, {product.pk: product}, [product.pk], history_limit)[str(product.pk)]
 
 
 def _build_product_price_contexts(quotation, products_by_id, product_ids, history_limit):
-    history_queryset = _price_context_queryset(quotation).filter(product_id__in=product_ids)
+    from .price_identity import equivalent_product_ids
+    equivalents = equivalent_product_ids(quotation.company_id, list(products_by_id.values()))
+    related = {}
+    for product_id, source_ids in equivalents.items():
+        for source_id in source_ids:
+            related.setdefault(source_id, []).append(product_id)
+    history_queryset = _price_context_queryset(quotation).filter(product_id__in=related)
     history_entries = list(
         history_queryset.annotate(
             price_context_rank=Window(
@@ -1670,7 +1659,7 @@ def _build_product_price_contexts(quotation, products_by_id, product_ids, histor
             )
         )
         .filter(price_context_rank__lte=history_limit)
-        .order_by("product_id", "-quoted_at", "-id")
+        .order_by("-quoted_at", "-id")
     )
     latest_accepted_entries = list(
         history_queryset.filter(
@@ -1688,13 +1677,18 @@ def _build_product_price_contexts(quotation, products_by_id, product_ids, histor
             )
         )
         .filter(accepted_price_rank=1)
-        .order_by("product_id")
+        .order_by(*_accepted_price_ordering())
     )
 
     history_by_product = {product_id: [] for product_id in product_ids}
     for entry in history_entries:
-        history_by_product[entry.product_id].append(entry)
-    latest_accepted_by_product = {entry.product_id: entry for entry in latest_accepted_entries}
+        for product_id in related[entry.product_id]:
+            if len(history_by_product[product_id]) < history_limit:
+                history_by_product[product_id].append(entry)
+    latest_accepted_by_product = {}
+    for entry in latest_accepted_entries:
+        for product_id in related[entry.product_id]:
+            latest_accepted_by_product.setdefault(product_id, entry)
 
     return {
         str(product_id): _product_price_context_payload(
@@ -3909,9 +3903,18 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             return Response({"detail": "Selected Product was not found."}, status=status.HTTP_404_NOT_FOUND)
 
         history_limit = _price_context_history_limit(request.query_params.get("history_limit"))
-        payload = _build_product_price_context(quotation, product, history_limit)
+        recommendation = None
         if getattr(settings, "QUOTATION_COMPANY_PRICE_AUTOFILL_ENABLED", False):
-            payload["recommendation"] = recommend_price(quotation, product, request.query_params.get("unit", product.pack_size), source_wording=request.query_params.get("wording", ""))
+            from .price_identity import prepare_price_identity_matches
+            unit = request.query_params.get("unit", product.pack_size)
+            wording = request.query_params.get("wording", "")
+            recommendation = recommend_price(quotation, product, unit, source_wording=wording)
+            if unit and not recommendation["eligible"]:
+                prepare_price_identity_matches(quotation, [product])
+                recommendation = recommend_price(quotation, product, unit, source_wording=wording)
+        payload = _build_product_price_context(quotation, product, history_limit)
+        if recommendation is not None:
+            payload["recommendation"] = recommendation
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -3955,18 +3958,27 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
 
         history_limit = _price_context_history_limit(request.query_params.get("history_limit"))
-        results = _build_product_price_contexts(quotation, products_by_id, product_ids, history_limit)
         pricing_context = recommendation_context(quotation, product_ids)
         units = {product_id: {product.pack_size} for product_id, product in products_by_id.items()}
-        for line in quotation.lines.all():
+        lines = list(quotation.lines.all())
+        for line in lines:
             if line.product_id in units:
                 units[line.product_id].add(line.unit)
+        if getattr(settings, "QUOTATION_COMPANY_PRICE_AUTOFILL_ENABLED", False):
+            from .price_identity import prepare_price_identity_matches
+            missing = [product for product_id, product in products_by_id.items()
+                       if any(unit and not recommend_price(quotation, product, unit, context=pricing_context)["eligible"]
+                              for unit in units[product_id])]
+            if missing:
+                prepare_price_identity_matches(quotation, missing)
+                pricing_context = recommendation_context(quotation, product_ids)
+        results = _build_product_price_contexts(quotation, products_by_id, product_ids, history_limit)
         for product_id, product in products_by_id.items():
             results[str(product_id)]["recommendations_by_unit"] = {
                 unit: recommend_price(quotation, product, unit, context=pricing_context) for unit in units[product_id]
             }
             results[str(product_id)]["line_recommendations"] = {}
-        for line in quotation.lines.all():
+        for line in lines:
             if line.product_id in products_by_id:
                 results[str(line.product_id)]["line_recommendations"][str(line.pk)] = recommend_price(
                     quotation, products_by_id[line.product_id], line.unit, context=pricing_context,

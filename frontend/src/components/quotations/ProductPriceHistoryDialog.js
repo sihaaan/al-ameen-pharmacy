@@ -139,6 +139,7 @@ const ProductPriceHistoryDialog = ({ quoteId, productId, productName = '', initi
                         <td>
                           <strong>{row.quotation_number || 'Quotation'}</strong>
                           <small>{formatDate(row.quoted_at)}</small>
+                          {row.source_product_id && String(row.source_product_id) !== String(productId) && <small>Matched: {row.source_product_name}</small>}
                         </td>
                         <td>
                           <strong>{formatMoney(row.quoted_unit_price, row.currency)}</strong>

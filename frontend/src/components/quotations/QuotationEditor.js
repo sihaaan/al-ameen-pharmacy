@@ -8,6 +8,7 @@ import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 import CompanyPriceField, { historyPricePatch, isBlankPrice } from './CompanyPriceField';
 import QuotationLineActions from './QuotationLineActions';
+import QuotationMoreActions from './QuotationMoreActions';
 import { reviewProductCreation } from './creationReview';
 import ProductSelect, { buildProductCatalogue } from './ProductSelect';
 
@@ -3076,17 +3077,6 @@ const QuotationEditor = ({
 
     return (
       <>
-        {chainedActionsEnabled && (
-          <button
-            type="button"
-            className="qm-secondary"
-            disabled={saving || Boolean(actionInFlight) || directFinalizeIssues.length > 0}
-            title={directFinalizeIssues.length > 0 ? directFinalizeIssues[0] : 'Finalize without sending an email.'}
-            onClick={() => runAction('Finalize', finalizeWithoutEmail)}
-          >
-            {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
-          </button>
-        )}
         <button
           type="button"
           className="qm-primary"
@@ -3149,26 +3139,29 @@ const QuotationEditor = ({
           </button>
         </div>
       )}
-      <div className="qm-editor-header">
-        <div>
-          <button type="button" className="qm-secondary small" onClick={onClose}>Back to List</button>
+      <div className="qm-quote-bar" aria-label="Quotation actions">
+        <button type="button" className="qm-secondary qm-quote-back" aria-label="Back to List" onClick={onClose}>← Back to List</button>
+        <div className="qm-quote-bar-identity">
           <h3>{quote.quotation_number}</h3>
-          <p>{quote.company_name} - {quote.status_display} - Version {quote.version}</p>
-          {quote.contact_name && (
-            <p className="qm-muted-line">
-              Attention: {quote.contact_name}
-              {quote.contact_role ? ` - ${quote.contact_role}` : ''}
-              {quote.contact_department ? `, ${quote.contact_department}` : ''}
-            </p>
-          )}
+          <span>{quote.company_name} · {quote.status_display} · v{quote.version}</span>
         </div>
-        <div className="qm-action-row">
+        <div className="qm-quote-bar-total">
+          <span>Final total</span>
+          <strong>{quote.currency} {formatMoneyCents(liveFinalTotalCents)}</strong>
+          {isEditable && <small className={hasUnsavedLineOrDiscount ? 'qm-unsaved' : 'qm-saved'}>
+            {hasUnsavedLines && hasUnsavedDiscount
+              ? `${changedLineIds.length} unsaved line change(s) and an unsaved discount`
+              : hasUnsavedLines ? `${changedLineIds.length} unsaved line change(s)`
+                : hasUnsavedDiscount ? 'Final discount is unsaved' : 'All line changes saved'}
+          </small>}
+        </div>
+        <div className="qm-quote-bar-actions">
+          {isEditable && <button type="button" className="qm-secondary"
+            disabled={saving || Boolean(actionInFlight) || !hasUnsavedLineOrDiscount || Boolean(discountError)} onClick={saveAllLines}>
+            {saving && hasUnsavedLineOrDiscount ? 'Saving...' : hasUnsavedDiscount ? 'Save Quotation Changes' : 'Save All Lines'}
+          </button>}
           {renderDraftCompletionActions()}
-          {quote.status === 'finalized' && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
-          {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
-          {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>}
-          {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
-          {!['revised', 'cancelled'].includes(quote.status) && <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>{actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}</button>}
+          {['finalized', 'sent'].includes(quote.status) && <>
           <button
             type="button"
             className="qm-secondary"
@@ -3178,6 +3171,34 @@ const QuotationEditor = ({
           >
             {downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}
           </button>
+
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>
+          </>}
+          <QuotationMoreActions>
+        {isEditable && chainedActionsEnabled && (
+          <button
+            type="button"
+            className="qm-secondary"
+            disabled={saving || Boolean(actionInFlight) || directFinalizeIssues.length > 0}
+            title={directFinalizeIssues.length > 0 ? directFinalizeIssues[0] : 'Finalize without sending an email.'}
+            onClick={() => runAction('Finalize', finalizeWithoutEmail)}
+          >
+            {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
+          </button>
+        )}
+
+            {!['finalized', 'sent'].includes(quote.status) && <>
+          <button
+            type="button"
+            className="qm-secondary"
+            disabled={downloadLoading || saving || Boolean(actionInFlight) || hasUnsavedCustomerDocument}
+            title={hasUnsavedCustomerDocument ? 'Save customer, terms and layout, and line changes, including the final discount, before downloading.' : ''}
+            onClick={downloadPdf}
+          >
+            {downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}
+          </button>
+
+            </>}
           <button
             type="button"
             className="qm-secondary"
@@ -3187,8 +3208,17 @@ const QuotationEditor = ({
           >
             {excelDownloadLoading ? 'Preparing Excel...' : 'Download Excel'}
           </button>
+            {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
+            {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
+            {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
+            {!['revised', 'cancelled'].includes(quote.status) && <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>{actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel quotation'}</button>}
+          </QuotationMoreActions>
         </div>
       </div>
+      {quote.contact_name && <p className="qm-muted-line qm-quote-contact">
+        Attention: {quote.contact_name}{quote.contact_role ? ` - ${quote.contact_role}` : ''}
+        {quote.contact_department ? `, ${quote.contact_department}` : ''}
+      </p>}
 
       {gmailSource && (
         <section className="qm-gmail-source-banner" aria-label="Gmail inquiry source">
@@ -3532,43 +3562,21 @@ const QuotationEditor = ({
           </div>
         </div>
         {isEditable && (
-          <div className="qm-save-row sticky-line-actions">
-            <span className={hasUnsavedLineOrDiscount ? 'qm-unsaved' : 'qm-saved'}>
-              {hasUnsavedLines && hasUnsavedDiscount
-                ? `${changedLineIds.length} unsaved line change(s) and an unsaved discount`
-                : hasUnsavedLines
-                  ? `${changedLineIds.length} unsaved line change(s)`
-                  : hasUnsavedDiscount
-                    ? 'Final discount is unsaved'
-                    : 'All line changes saved'}
-            </span>
-            <span className="qm-sticky-total">
-              Final total <strong>{quote.currency} {formatMoneyCents(liveFinalTotalCents)}</strong>
-            </span>
-            <select className="qm-input compact" value={lineFilter} onChange={(event) => setLineFilter(event.target.value)}>
+          <div className="qm-line-tools" aria-label="Quotation item tools">
+            <label>Show <select className="qm-input compact" aria-label="Filter quotation items" value={lineFilter} onChange={(event) => setLineFilter(event.target.value)}>
               <option value="active">Active lines</option>
               <option value="unmatched">Unmatched</option>
               <option value="needs_review">Needs review</option>
               <option value="ready">Ready</option>
               <option value="skipped">Skipped</option>
               <option value="all">All lines</option>
-            </select>
+            </select></label>
             <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked} onClick={selectVisibleUnmatched}>Select visible unmatched</button>
-            <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked || !selectedUnmatchedLines.length} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
-            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedLineOrDiscount || Boolean(discountError)} onClick={saveAllLines}>
-              {saving && hasUnsavedLineOrDiscount
-                ? 'Saving...'
-                : hasUnsavedDiscount
-                  ? 'Save Quotation Changes'
-                  : 'Save All Lines'}
-            </button>
-            <span className="qm-sticky-action-divider" aria-hidden="true" />
-            {renderDraftCompletionActions()}
-            {!['revised', 'cancelled'].includes(quote.status) && (
-              <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>
-                {actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel'}
-              </button>
-            )}
+            {selectedUnmatchedLines.length > 0 && <>
+              <span className="qm-selected-count">{selectedUnmatchedLines.length} unmatched selected</span>
+              <button type="button" className="qm-secondary small" disabled={productCatalogueBlocked} onClick={() => openCreateProductModal(selectedUnmatchedLines.map((line) => line.id))}>Create Products for Selected Unmatched Rows</button>
+              <button type="button" className="qm-secondary small" onClick={() => setSelectedLineIds([])}>Clear selection</button>
+            </>}
           </div>
         )}
 
