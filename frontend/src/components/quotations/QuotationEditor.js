@@ -134,6 +134,7 @@ const normalizeDraft = (draft = {}) => ({
   price_source_history: draft.price_source_history || null,
   price_original_history: draft.price_original_history || null,
   price_reviewed: !!draft.price_reviewed,
+  price_context_changed: !!draft.price_context_changed,
   price_feedback: draft.price_feedback || '',
   vat_rate: normalizeVatRate(draft.vat_rate),
   match_status: String(draft.match_status || 'unresolved'),
@@ -1323,6 +1324,13 @@ const QuotationEditor = ({
     if (companyPricingEnabled && patch.company && String(patch.company) !== String(quotePartyDraftRef.current.company)) {
       priceContextGenerationRef.current += 1;
       setPriceContexts({}); setLinePriceHints({});
+      lineFormPriceVersionRef.current += 1;
+      setLineForm((current) => ({ ...current,
+        unit_price: current.price_provenance?.kind === 'history' ? '' : current.unit_price,
+        price_provenance: {}, price_source_history: null, price_original_history: null, price_reviewed: false,
+        price_context_changed: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history',
+        price_review_required: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history',
+      }));
       setLineDrafts((current) => Object.fromEntries(Object.entries(current).map(([id, draft]) => [id, {
         ...draft, unit_price: draft.price_provenance?.kind === 'history' ? '' : draft.unit_price,
         price_provenance: {}, price_source_history: null, price_original_history: null, price_reviewed: false,
@@ -1360,6 +1368,7 @@ const QuotationEditor = ({
         price_provenance: draft.price_provenance?.kind === 'history' ? {} : draft.price_provenance,
         price_source_history: null, price_original_history: null,
         price_review_required: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
+        price_context_changed: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
         price_reviewed: false,
       } : {}),
       product: productId,
@@ -3758,6 +3767,7 @@ const QuotationEditor = ({
                 setLineForm((current) => ({ ...current, unit: sanitizeUnitText(event.target.value),
                   ...(companyPricingEnabled ? { unit_price: current.price_provenance?.kind === 'history' ? '' : current.unit_price,
                     price_source_history: null, price_original_history: null, price_provenance: {}, price_reviewed: false,
+                    price_context_changed: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history',
                     price_review_required: !isBlankPrice(current.unit_price) && current.price_provenance?.kind !== 'history' } : {}) }));
               }}
               onBlur={async () => {

@@ -277,3 +277,14 @@ class CompanyPricingTests(APITestCase):
         duplicate = Product.objects.create(name=self.product.name, pack_size="box", price=1, canonical_product=self.product)
         with self.assertRaises(ValidationError):
             validate_identity_edit(duplicate, {"brand": Brand.objects.create(name="Different brand")})
+
+    def test_unsaved_manual_row_keeps_context_review_when_added(self):
+        response = self.client.post(reverse("quotation-line-list"), {"quotation": self.quote.pk, "product": self.product.pk,
+            "item_name_snapshot": self.product.name, "unit": "box", "unit_price": "22", "match_status": "confirmed",
+            "price_context_changed": True})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertTrue(response.data["price_review_required"])
+        with self.assertRaises(ValidationError): finalize_quotation(self.quote, self.staff)
+        line = QuotationLine.objects.get(pk=response.data["id"])
+        self.save(line, price_reviewed=True)
+        finalize_quotation(self.quote, self.staff)

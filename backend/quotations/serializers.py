@@ -2462,11 +2462,12 @@ class QuotationLineSerializer(serializers.ModelSerializer):
     price_source_history = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     price_original_history = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     price_reviewed = serializers.BooleanField(write_only=True, required=False)
+    price_context_changed = serializers.BooleanField(write_only=True, required=False)
     price_feedback = serializers.ChoiceField(choices=["", "one_off", "outdated", "wrong_product"], write_only=True, required=False)
 
     def create(self, validated_data):
         from .pricing import update_line_pricing
-        actions = {key: validated_data.pop(key) for key in ("price_source_history", "price_original_history", "price_reviewed", "price_feedback") if key in validated_data}
+        actions = {key: validated_data.pop(key) for key in ("price_source_history", "price_original_history", "price_reviewed", "price_context_changed", "price_feedback") if key in validated_data}
         instance = super().create(validated_data)
         update_line_pricing(instance, None, actions, getattr(self.context.get("request"), "user", None))
         instance.save()
@@ -2509,7 +2510,7 @@ class QuotationLineSerializer(serializers.ModelSerializer):
             "quantity",
             "unit",
             "unit_price",
-            "price_provenance", "price_review_required", "price_source_history", "price_original_history", "price_reviewed", "price_feedback",
+            "price_provenance", "price_review_required", "price_source_history", "price_original_history", "price_reviewed", "price_context_changed", "price_feedback",
             "vat_rate",
             "line_subtotal",
             "vat_amount",
@@ -2630,7 +2631,7 @@ class QuotationLineSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         from .pricing import line_price_snapshot, update_line_pricing
         before = line_price_snapshot(instance)
-        actions = {key: validated_data.pop(key) for key in ("price_source_history", "price_original_history", "price_reviewed", "price_feedback") if key in validated_data}
+        actions = {key: validated_data.pop(key) for key in ("price_source_history", "price_original_history", "price_reviewed", "price_context_changed", "price_feedback") if key in validated_data}
         if "product" in validated_data and validated_data.get("product") != instance.product:
             validated_data.setdefault("match_reason", "Selected manually by staff.")
             selected_image = validated_data.get("product_image", instance.product_image)

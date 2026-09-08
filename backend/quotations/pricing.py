@@ -147,6 +147,8 @@ def update_line_pricing(line, before, payload, actor, *, context=None):
             line.brand_name_snapshot = ""
         line.price_review_required = bool(before["review"] or variant_changed or feedback == "wrong_product" or
             (before["price"] is not None and previous.get("kind") != "history" and line.unit_price is not None))
+    if payload.get("price_context_changed") is True:
+        line.price_review_required = True
     source_id = payload.get("price_source_history")
     if source_id:
         if not line.product_id or line.match_status != QuotationLine.MATCH_CONFIRMED:
