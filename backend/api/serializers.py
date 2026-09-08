@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import (
@@ -256,6 +257,15 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
 class ProductCreateUpdateSerializer(serializers.ModelSerializer):
     """Serializer for creating/updating products (admin use)."""
+
+    def validate(self, attrs):
+        if self.instance:
+            from quotations.catalogue_identity import validate_identity_edit
+            try:
+                return validate_identity_edit(self.instance, attrs)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError(exc.messages)
+        return attrs
 
     class Meta:
         model = Product

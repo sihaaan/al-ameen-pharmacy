@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import QuotationErrorNotice from './QuotationErrorNotice';
 import ProductFormModal from '../ProductFormModal';
+import CatalogueIdentityReview from './CatalogueIdentityReview';
 
 const QuoteItemManager = () => {
   const [items, setItems] = useState([]);
@@ -99,6 +100,7 @@ const QuoteItemManager = () => {
       <div className="qm-helper">
         Products are now the master item catalog. Draft products are internal quotation items and are hidden from the public website.
       </div>
+      <CatalogueIdentityReview onUpdated={() => load()} />
       <div className="qm-split">
         <div className="qm-panel">
           <div className="qm-panel-heading">

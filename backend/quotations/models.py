@@ -2340,6 +2340,10 @@ class QuotationEmailThreadSelection(models.Model):
 
 
 class QuotationLine(models.Model):
+    # Server-owned provenance. Client actions are validated by pricing.py.
+    price_provenance = models.JSONField(default=dict, db_default={}, blank=True)
+    price_review_required = models.BooleanField(default=False, db_default=False)
+
     MATCH_UNRESOLVED = InquiryLine.MATCH_UNRESOLVED
     MATCH_CONFIRMED = InquiryLine.MATCH_CONFIRMED
     MATCH_IGNORED = InquiryLine.MATCH_IGNORED
@@ -3222,6 +3226,33 @@ class CompanyPriceHistory(models.Model):
     def __str__(self):
         item_name = self.product.name if self.product_id else (self.quote_item.name if self.quote_item_id else "Unknown item")
         return f"{self.company.name} - {item_name} - {self.unit_price}"
+
+
+class PriceRecommendationRetirement(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    product = models.ForeignKey("api.Product", on_delete=models.PROTECT)
+    unit = models.CharField(max_length=100)
+    currency = models.CharField(max_length=3)
+    retired_before = models.DateTimeField()
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["company", "product", "unit", "currency"], name="unique_price_retirement_context"
+        )]
+
+
+class QuotationPriceFeedback(models.Model):
+    line = models.ForeignKey(QuotationLine, null=True, on_delete=models.SET_NULL, related_name="price_feedback")
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    product = models.ForeignKey("api.Product", null=True, on_delete=models.PROTECT)
+    replacement_product = models.ForeignKey("api.Product", null=True, on_delete=models.PROTECT, related_name="price_corrections")
+    kind = models.CharField(max_length=30)
+    source_wording = models.TextField(blank=True)
+    previous = models.JSONField(default=dict)
+    entered_price = models.DecimalField(max_digits=12, decimal_places=3, null=True)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class QuotationAuditLog(models.Model):

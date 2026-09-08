@@ -228,6 +228,8 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
                 "quantity": line.quantity,
                 "unit": line.unit,
                 "unit_price": line.unit_price,
+                "price_provenance": line.price_provenance,
+                "price_review_required": line.price_review_required,
                 "vat_rate": line.vat_rate,
                 "line_subtotal": line.line_subtotal,
                 "vat_amount": line.vat_amount,

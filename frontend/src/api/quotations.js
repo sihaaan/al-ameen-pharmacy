@@ -80,6 +80,9 @@ const quotationAPI = {
     update: (id, data) => axiosInstance.patch(`/quotations/contacts/${id}/`, data),
   },
   items: {
+    identityPreview: (data) => axiosInstance.post('/quotations/items/identity_preview/', data),
+    identityReport: (params = {}) => axiosInstance.get('/quotations/items/identity_report/', { params }),
+    reviewIdentity: (id, data) => axiosInstance.post(`/quotations/items/${id}/review_identity/`, data),
     list: (params = {}) => axiosInstance.get('/quotations/items/', { params }),
     create: (data) => axiosInstance.post('/quotations/items/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/items/${id}/`, data),

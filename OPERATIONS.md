@@ -715,3 +715,8 @@ Known deviations and rollback owner:
 - [Railway pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command)
 - [Railway service variables](https://docs.railway.com/variables)
 - [Railway volumes](https://docs.railway.com/volumes/reference)
+
+
+### Company price recommendations and identity review
+
+See [Company pricing](COMPANY_PRICING.md) for the staff workflow, eligibility rules and audit behaviour. Set `QUOTATION_COMPANY_PRICE_AUTOFILL_ENABLED=1` after API migrations 0004/0005 and quotations migration 0045 have completed. Its default is `0`; it is independent of `QUOTATION_EDITOR_PROGRESSIVE_LOAD_ENABLED`. Existing provenance and required price reviews remain accessible if automatic filling is disabled.

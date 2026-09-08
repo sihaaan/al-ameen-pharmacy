@@ -1,0 +1,15 @@
+.qm-company-price { position: relative; min-width: 100px; }
+.qm-company-price > input { width: 100%; box-sizing: border-box; padding-right: 30px !important; }
+.qm-price-details { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
+.qm-price-details .qm-price-trigger { cursor: pointer; border: 0; background: transparent; display: flex; padding: 3px; color: #64748b; border-radius: 4px; }
+.qm-price-details .qm-price-trigger::-webkit-details-marker { display: none; }
+.qm-company-price.history .qm-price-trigger { color: #1d4ed8; background: #eff6ff; }
+.qm-company-price.review .qm-price-trigger, .qm-company-price.empty .qm-price-trigger { color: #9a5700; background: #fff7e6; }
+.qm-price-details .qm-price-trigger:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+.qm-price-popover { position: fixed; z-index: 1000; box-sizing: border-box; width: 300px; max-height: calc(100vh - 16px); overflow: auto; max-width: 75vw; white-space: normal; background: white; color: #172b45; border: 1px solid #ccd5e1; border-radius: 8px; box-shadow: 0 8px 24px #172b4526; padding: 12px; font-size: 12px; line-height: 1.5; }
+.qm-price-popover button { display: block; background: transparent; border: 0; color: #164eaa; text-align: left; padding: 6px 0; cursor: pointer; }
+.qm-price-popover p { margin: 7px 0; }
+.qm-price-legend { font-size: 12px; color: #526477; display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0; }
+.qm-price-legend .history { color: #1d4ed8; }.qm-price-legend .review { color: #9a5700; }
+
+.qm-company-price input::-webkit-inner-spin-button, .qm-company-price input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }

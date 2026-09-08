@@ -83,46 +83,46 @@ const renderModule = (initialEntry, props = {}) => render(
 describe('QuotationModule Gmail deep links', () => {
   test('opens the prepared delivery note after outcome approval and clears it when leaving', async () => {
     renderModule('/admin?quotation_tab=quotes');
-    fireEvent.click(screen.getByRole('button', { name: 'Review accepted order' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Approve & prepare DO' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review accepted order' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve & prepare DO' }));
     expect(await screen.findByText('Delivery workspace DN-90')).toBeInTheDocument();
     expect(screen.getByLabelText('location')).toHaveTextContent('quotation_tab=deliveries');
-    fireEvent.click(screen.getByRole('button', { name: 'Quotations', exact: true }));
-    fireEvent.click(screen.getByRole('button', { name: 'Orders & Delivery Notes', exact: true }));
-    expect(screen.getByText('Delivery workspace')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Quotations', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Orders & Delivery Notes', exact: true }));
+    expect(await screen.findByText('Delivery workspace')).toBeInTheDocument();
     expect(screen.queryByText('Delivery workspace DN-90')).not.toBeInTheDocument();
   });
 
-  test('a review link opens the order review directly after refresh', () => {
+  test('a review link opens the order review directly after refresh', async () => {
     renderModule('/admin?quotation_tab=quotes&quote_id=21&quotation_mode=review');
-    expect(screen.getByText('Outcome review')).toBeInTheDocument();
+    expect(await screen.findByText('Outcome review')).toBeInTheDocument();
     expect(screen.queryByText('Quotation editor 21')).not.toBeInTheDocument();
   });
 
   test('gives Gmail handoffs precedence and makes a claimed import resumable', async () => {
     renderModule('/admin?gmail_import=opaque-token');
 
-    expect(screen.getByText('Gmail token opaque-token')).toBeInTheDocument();
+    expect(await screen.findByText('Gmail token opaque-token')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
-    fireEvent.click(screen.getByRole('button', { name: /remember import/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /remember import/i }));
 
     await waitFor(() => {
       expect(screen.getByLabelText('location').textContent).toContain('gmail_import_id=45');
       expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import=opaque-token');
     });
-    expect(screen.getByText('Gmail import 45')).toBeInTheDocument();
+    expect(await screen.findByText('Gmail import 45')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
 
-    fireEvent.click(screen.getByRole('button', { name: /open exact quote/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /open exact quote/i }));
     expect(await screen.findByText('Quotation editor 88')).toBeInTheDocument();
     expect(screen.getByLabelText('location').textContent).toContain('quote_id=88');
     expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import_id');
   });
 
-  test('opens the exact quotation from a direct quote ID', () => {
+  test('opens the exact quotation from a direct quote ID', async () => {
     renderModule('/admin?quotation_tab=inquiries&quote_id=73');
 
-    expect(screen.getByText('Quotation editor 73')).toBeInTheDocument();
+    expect(await screen.findByText('Quotation editor 73')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
     expect(screen.getByLabelText('initial email review fingerprint')).toHaveTextContent('none');
   });
@@ -130,7 +130,7 @@ describe('QuotationModule Gmail deep links', () => {
   test('opens a newly created revision in the editor and updates the exact quote URL', async () => {
     renderModule('/admin?quotation_tab=quotes&quote_id=73');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open revision' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open revision' }));
 
     expect(await screen.findByText('Quotation editor 89')).toBeInTheDocument();
     expect(screen.getByLabelText('location').textContent).toContain('quotation_tab=quotes');
@@ -141,13 +141,13 @@ describe('QuotationModule Gmail deep links', () => {
   test('passes a prepared review only in memory and consumes it once without putting it in the URL', async () => {
     renderModule('/admin?gmail_import_id=31');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open prepared quote' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open prepared quote' }));
     expect(await screen.findByText('Quotation editor 88')).toBeInTheDocument();
     expect(screen.getByLabelText('initial email review fingerprint')).toHaveTextContent('a'.repeat(64));
     expect(screen.getByLabelText('location').textContent).not.toContain('fingerprint');
     expect(screen.getByLabelText('location').textContent).not.toContain('review_email');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Consume email review' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Consume email review' }));
     await waitFor(() => expect(
       screen.getByLabelText('initial email review fingerprint')
     ).toHaveTextContent('none'));
@@ -156,17 +156,17 @@ describe('QuotationModule Gmail deep links', () => {
   test('lets the standard editor reopen its Gmail source on the Quotations tab', async () => {
     renderModule('/admin?quote_id=88');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Gmail source' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Gmail source' }));
 
     expect(await screen.findByText('Gmail import 31')).toBeInTheDocument();
-    expect(screen.getByText('Gmail evidence visible')).toBeInTheDocument();
+    expect(await screen.findByText('Gmail evidence visible')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
     expect(screen.getByLabelText('location').textContent).toContain('quotation_tab=quotes');
     expect(screen.getByLabelText('location').textContent).toContain('gmail_import_id=31');
     expect(screen.getByLabelText('location').textContent).toContain('gmail_return_quote_id=88');
     expect(screen.getByLabelText('location').textContent).not.toMatch(/[?&]quote_id=/);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to quotation' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to quotation' }));
     expect(await screen.findByText('Quotation editor 88')).toBeInTheDocument();
     expect(screen.getByLabelText('location').textContent).toContain('quote_id=88');
     expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import_id');
@@ -176,7 +176,7 @@ describe('QuotationModule Gmail deep links', () => {
   test('returns from Gmail intake to the quotation list, not the old inquiries page', async () => {
     renderModule('/admin?quotation_tab=quotes&gmail_import_id=31');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to quotations' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to quotations' }));
 
     expect(await screen.findByText('Quotation list')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Quotations' })).toHaveClass('active');
@@ -184,7 +184,7 @@ describe('QuotationModule Gmail deep links', () => {
     expect(screen.getByLabelText('location').textContent).not.toContain('gmail_import_id');
   });
 
-  test('normalizes route precedence and rejects invalid IDs', () => {
+  test('normalizes route precedence and rejects invalid IDs', async () => {
     expect(quotationRouteFromSearch('?quotation_tab=quotes&gmail_import=token')).toEqual({
       activeTab: 'quotes',
       gmailToken: 'token',
@@ -207,16 +207,16 @@ describe('QuotationModule Gmail deep links', () => {
     }));
   });
 
-  test('hides Audit Logs from employees and permits the owner capability', () => {
+  test('hides Audit Logs from employees and permits the owner capability', async () => {
     const employee = renderModule('/admin?quotation_tab=audit');
 
     expect(screen.queryByRole('button', { name: 'Audit Logs' })).not.toBeInTheDocument();
-    expect(screen.getByText('Quotation dashboard')).toBeInTheDocument();
+    expect(await screen.findByText('Quotation dashboard')).toBeInTheDocument();
 
     employee.unmount();
     renderModule('/admin?quotation_tab=audit', { canManageMailboxAudit: true });
 
     expect(screen.getByRole('button', { name: 'Audit Logs' })).toHaveClass('active');
-    expect(screen.getByText('Audit view')).toBeInTheDocument();
+    expect(await screen.findByText('Audit view')).toBeInTheDocument();
   });
 });

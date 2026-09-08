@@ -7,7 +7,7 @@ const MAX_RESULTS = 20;
 export const buildProductCatalogue = (items, companyItems) => {
   const preferredIds = new Set(companyItems.map((item) => String(item.id)));
   const byId = new Map(items.map((item) => [String(item.id), item]));
-  const options = Array.from(byId.values()).map((item) => ({
+  const options = Array.from(byId.values()).filter((item) => !item.canonical_product).map((item) => ({
     ...item,
     previouslyUsed: preferredIds.has(String(item.id)),
     searchText: [item.name, item.brand_name, item.sku, item.barcode, item.unit, item.pack_size]
@@ -43,7 +43,7 @@ const ProductSelect = ({
   const previouslyUsed = matches.filter((item) => item.previouslyUsed);
   const remaining = matches.filter((item) => !item.previouslyUsed);
   const renderOptions = (options) => options.map((item) => (
-    <option key={item.id} value={item.id}>{item.name}</option>
+    <option key={item.id} value={item.id}>{item.name}{item.identity_review_state === 'provisional' ? ' · Provisional' : ''}</option>
   ));
 
   return (

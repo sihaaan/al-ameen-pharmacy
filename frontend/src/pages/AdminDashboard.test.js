@@ -76,9 +76,11 @@ describe('AdminDashboard deep-link tab inference', () => {
     );
 
     expect(await screen.findByText('Quotation workspace')).toBeInTheDocument();
-    await waitFor(() => expect(axiosInstance.get).toHaveBeenCalledTimes(2));
+    expect(axiosInstance.get).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: /products/i }));
     expect(await screen.findByText('Products workspace')).toBeInTheDocument();
+    expect(axiosInstance.get).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /overview/i }));
     await waitFor(() => expect(axiosInstance.get).toHaveBeenCalledTimes(2));
   });
 });

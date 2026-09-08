@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from api.models import Product, ProductImage, ProductSupplier
 
+from .pricing import line_price_snapshot, update_line_pricing, validate_stored_price_source, recommendation_context
 from .import_rules import is_obvious_po_metadata_item
 from .matching import (
     create_or_reuse_product,
@@ -2776,10 +2777,17 @@ def bulk_update_quotation_lines(
         except Exception as exc:
             raise ValidationError(f"{label} must be a valid number.") from exc
 
+    pricing_context = None
+    if any(row.get("price_source_history") or row.get("price_original_history") for row in rows_by_id.values()) and not any(row.get("price_feedback") in {"outdated", "wrong_product"} for row in rows_by_id.values()):
+        product_ids = {int(value) for line_id, row in rows_by_id.items()
+                       if (value := row.get("product", getattr(lines.get(line_id), "product_id", None))) and str(value).isdigit()}
+        pricing_context = recommendation_context(quotation, product_ids)
+
     for line_id, payload in rows_by_id.items():
         line = lines.get(line_id)
         if not line:
             raise ValidationError(f"Line {line_id} does not belong to this quotation.")
+        price_before = line_price_snapshot(line)
         source_wording = quotation_line_source_wording(line)
         requested_product_id = payload.get("product") if "product" in payload else line.product_id
         product_changed = (
@@ -2873,6 +2881,7 @@ def bulk_update_quotation_lines(
             line.item_name_snapshot = source_wording
         elif line.product_id and not str(line.item_name_snapshot or "").strip():
             line.item_name_snapshot = source_wording or line.product.name
+        update_line_pricing(line, price_before, payload, actor, context=pricing_context)
         line.save()
         should_learn_alias = matching_decision_changed or (
             snapshot_changed and not line.inquiry_line_id
@@ -2990,6 +2999,9 @@ def _validate_line_for_finalization(line):
         )
     if not line.product_id and not line.quote_item_id:
         raise ValidationError(f"Line '{line.item_name_snapshot}' must be linked to a product/item.")
+    if line.price_review_required:
+        raise ValidationError(f"Review the price for line '{line.item_name_snapshot}' after its product, customer or unit changed.")
+    validate_stored_price_source(line)
     if line.quantity is None or line.quantity <= 0:
         raise ValidationError(f"Line '{line.item_name_snapshot}' must have a valid quantity.")
     if line.unit_price is None or line.unit_price <= 0:

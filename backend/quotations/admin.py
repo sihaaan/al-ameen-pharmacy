@@ -654,3 +654,18 @@ class QuotationAuditLogAdmin(MailboxAuditOperatorAdminMixin, admin.ModelAdmin):
     list_display = ["created_at", "actor", "action", "target_type", "target_id", "company", "quotation"]
     list_filter = ["action", "created_at"]
     search_fields = ["message", "actor__username", "company__name", "quotation__quotation_number"]
+
+
+from .models import QuotationPriceFeedback, PriceRecommendationRetirement
+
+
+@admin.register(QuotationPriceFeedback)
+class QuotationPriceFeedbackAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["created_at", "company", "product", "kind", "entered_price", "actor"]
+    list_filter = ["kind"]
+    search_fields = ["company__name", "product__name", "source_wording"]
+
+
+@admin.register(PriceRecommendationRetirement)
+class PriceRecommendationRetirementAdmin(ReadOnlyHistoryAdminMixin, admin.ModelAdmin):
+    list_display = ["company", "product", "unit", "currency", "retired_before", "actor"]

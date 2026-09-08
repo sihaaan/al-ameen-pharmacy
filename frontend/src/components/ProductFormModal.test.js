@@ -21,6 +21,7 @@ describe('ProductFormModal duplicate prevention', () => {
 
   test('shows ranked existing Products and requires an explicit create-anyway retry', async () => {
     axiosInstance.post
+      .mockResolvedValueOnce({ data: { standard_name: '' } })
       .mockRejectedValueOnce({
         response: {
           status: 409,
@@ -39,6 +40,7 @@ describe('ProductFormModal duplicate prevention', () => {
           },
         },
       })
+      .mockResolvedValueOnce({ data: { standard_name: '' } })
       .mockResolvedValueOnce({ data: { id: 9, name: 'Paracetamol 500mg tablet pack', status: 'draft' } });
     const onSaved = jest.fn();
     const { container } = render(
@@ -50,8 +52,8 @@ describe('ProductFormModal duplicate prevention', () => {
     expect(screen.getByRole('button', { name: /use existing: paracetamol 500mg tablets/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /create new product anyway/i }));
-    await waitFor(() => expect(axiosInstance.post).toHaveBeenCalledTimes(2));
-    const retryBody = axiosInstance.post.mock.calls[1][1];
+    await waitFor(() => expect(axiosInstance.post).toHaveBeenCalledTimes(4));
+    const retryBody = axiosInstance.post.mock.calls[3][1];
     expect(retryBody.get('confirm_create')).toBe('true');
     expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ id: 9 }));
   });
