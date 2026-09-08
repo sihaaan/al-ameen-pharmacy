@@ -1,4 +1,4 @@
-.qm-company-price { position: relative; min-width: 100px; }
+.qm-company-price { position: relative; width: 100%; min-width: 0; }
 .qm-company-price > input { width: 100%; box-sizing: border-box; padding-right: 30px !important; }
 .qm-price-details { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
 .qm-price-details .qm-price-trigger { cursor: pointer; border: 0; background: transparent; display: flex; padding: 3px; color: #64748b; border-radius: 4px; }

@@ -3315,7 +3315,7 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.queryByLabelText('Supporting quotation data status')).not.toBeInTheDocument();
   });
 
-  test('focuses the first blank price once and advances only to later rendered blank prices', async () => {
+  test('tabs through price and VAT on visible rows while Enter still skips filled prices', async () => {
     const line = (id, sortOrder, name, unitPrice, matchStatus = 'confirmed') => ({
       ...readyQuote.lines[0],
       id,
@@ -3342,16 +3342,30 @@ describe('QuotationEditor Product price context', () => {
     const first = await screen.findByLabelText('Unit price for First blank');
     const second = screen.getByLabelText('Unit price for Second blank');
     const last = screen.getByLabelText('Unit price for Last blank');
+    const firstVat = screen.getByLabelText('VAT for First blank');
+    const filled = screen.getByLabelText('Unit price for Filled price');
+    const filledVat = screen.getByLabelText('VAT for Filled price');
+    const lastVat = screen.getByLabelText('VAT for Last blank');
     await waitFor(() => expect(document.activeElement).toBe(first));
 
     const forwardTab = createEvent.keyDown(first, { key: 'Tab' });
     fireEvent(first, forwardTab);
     expect(forwardTab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(firstVat);
+    fireEvent.keyDown(firstVat, { key: 'Tab' });
+    expect(document.activeElement).toBe(filled);
+    fireEvent.keyDown(filled, { key: 'Tab' });
+    expect(document.activeElement).toBe(filledVat);
+    fireEvent.keyDown(filledVat, { key: 'Tab' });
     expect(document.activeElement).toBe(second);
 
     const reverseTab = createEvent.keyDown(second, { key: 'Tab', shiftKey: true });
     fireEvent(second, reverseTab);
-    expect(reverseTab.defaultPrevented).toBe(false);
+    expect(reverseTab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(filledVat);
+    fireEvent.keyDown(filledVat, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(filled);
+    fireEvent.keyDown(first, { key: 'Enter' });
     expect(document.activeElement).toBe(second);
 
     const enter = createEvent.keyDown(second, { key: 'Enter' });
@@ -3359,14 +3373,31 @@ describe('QuotationEditor Product price context', () => {
     expect(enter.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(last);
 
-    const finalTab = createEvent.keyDown(last, { key: 'Tab' });
-    fireEvent(last, finalTab);
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(lastVat);
+    const finalTab = createEvent.keyDown(lastVat, { key: 'Tab' });
+    fireEvent(lastVat, finalTab);
     expect(finalTab.defaultPrevented).toBe(false);
+    const firstReverseTab = createEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    fireEvent(first, firstReverseTab);
+    expect(firstReverseTab.defaultPrevented).toBe(false);
 
     const quantity = screen.getByLabelText('Quantity for First blank');
     quantity.focus();
     fireEvent.change(screen.getByDisplayValue('Active lines'), { target: { value: 'all' } });
     expect(document.activeElement).toBe(quantity);
+  });
+
+  test('price to VAT navigation also works without progressive loading and with company price icons', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: {
+      ...readyQuote, workflow_features: { company_price_autofill: true },
+    } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const price = await screen.findByLabelText('Unit price for Imported gloves');
+    fireEvent.keyDown(price, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByLabelText('VAT for Imported gloves'));
+    fireEvent.keyDown(document.activeElement, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(price);
   });
 
   test('focuses a new quotation once its blank row becomes visible through the persisted filter', async () => {

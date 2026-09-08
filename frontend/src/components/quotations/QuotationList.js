@@ -473,16 +473,16 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit }) 
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       <div className="qm-split wide-left single-panel">
         <section className="qm-panel qm-quotation-list-panel" aria-labelledby="quotation-list-title">
-        <div className="qm-panel-heading">
+        <div className="qm-quotation-toolbar">
           <h3 id="quotation-list-title">Quotations</h3>
-          <div className="qm-controls">
-            <button ref={createQuoteButtonRef} type="button" className="qm-primary" onClick={() => setShowCreateQuote(true)}>New Quotation</button>
-            <input className="qm-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search quotes" />
-            <select className="qm-input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+          <div className="qm-quotation-filters">
+            <input className="qm-input" aria-label="Search quotes" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search quotes" />
+            <select className="qm-input" aria-label="Quotation status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
               <option value="">All statuses</option>
               {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </div>
+          <button ref={createQuoteButtonRef} type="button" className="qm-primary" onClick={() => setShowCreateQuote(true)}>New Quotation</button>
         </div>
         {mailboxAuditAuthorized && <div className="qm-po-scan-card">
           <div>

@@ -4,6 +4,19 @@ import CompanyPriceField, { manualPricePatch } from './CompanyPriceField';
 const source = { kind: 'history', history_id: 44, product_id: 8, amount: '20', currency: 'AED', unit: 'box', basis: 'quoted' };
 const filled = { product: 8, unit: 'box', unit_price: '20', price_provenance: source };
 
+test('price details remain accessible by keyboard during price and VAT entry', () => {
+  const onKeyDown = jest.fn();
+  render(<CompanyPriceField draft={filled} aria-label="Unit price" onPatch={jest.fn()} onKeyDown={onKeyDown} />);
+  const price = screen.getByLabelText('Unit price');
+  fireEvent.keyDown(price, { key: 'Tab' });
+  expect(onKeyDown).toHaveBeenCalledTimes(1);
+  fireEvent.keyDown(price, { key: 'ArrowDown', altKey: true });
+  expect(screen.getByRole('dialog', { name: 'Company price details' })).toHaveFocus();
+  fireEvent.keyDown(document.activeElement, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Filled from last quoted/ })).toHaveFocus();
+});
+
 test('large corrections keep the entered price and expose a compact match check', () => {
   const onPatch = jest.fn(), onWrongProduct = jest.fn();
   const correction = { ...filled, ...manualPricePatch(filled, '5') };
