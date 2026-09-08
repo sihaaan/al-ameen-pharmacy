@@ -1838,6 +1838,27 @@ class QuoteItemViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         company = Company.objects.filter(pk=company_id).first() if company_id else None
         return Response(identity_preview(name, company))
 
+    @action(detail=False, methods=["post"])
+    def creation_review(self, request):
+        from .creation_matching import MAX_REVIEW_ROWS, review_creation_rows
+        rows = request.data.get("rows")
+        if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_REVIEW_ROWS:
+            return Response({"detail": f"Provide between 1 and {MAX_REVIEW_ROWS} product rows."}, status=400)
+        cleaned, ids = [], set()
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip() or len(row["name"]) > 200:
+                return Response({"detail": "Each row needs a product name of at most 200 characters."}, status=400)
+            row_id = row.get("id")
+            if type(row_id) not in (str, int) or not str(row_id) or len(str(row_id)) > 80 or str(row_id) in ids:
+                return Response({"detail": "Each row needs a unique ID."}, status=400)
+            ids.add(str(row_id))
+            fields = {key: str(row.get(key) or "").strip()[:100]
+                      for key in ("dosage", "pack_size", "unit", "sku", "barcode", "brand")}
+            cleaned.append({"id": row_id, "name": row["name"].strip(), **fields})
+        company_id = _positive_pk(request.data.get("company"))
+        company = Company.objects.filter(pk=company_id).first() if company_id else None
+        return Response({"results": review_creation_rows(cleaned, company)})
+
     @action(detail=False, methods=["get"])
     def identity_report(self, request):
         from .catalogue_identity import identity_report

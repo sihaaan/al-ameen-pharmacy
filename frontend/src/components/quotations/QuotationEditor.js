@@ -7,6 +7,7 @@ import QuotationErrorNotice from './QuotationErrorNotice';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
 import QuotationEmailPreviewDialog from './QuotationEmailPreviewDialog';
 import CompanyPriceField, { historyPricePatch, isBlankPrice } from './CompanyPriceField';
+import { reviewProductCreation } from './creationReview';
 import ProductSelect, { buildProductCatalogue } from './ProductSelect';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
@@ -1884,17 +1885,12 @@ const QuotationEditor = ({
     setLineFeedback(null);
     try {
       const names = { ...productCreateModal.names };
-      if (!forceCreate && companyPricingEnabled) {
-        // Small batches keep AI preflight outside the quotation's save lock.
-        for (let offset = 0; offset < productCreateModal.lineIds.length; offset += 3) {
-          await Promise.all(productCreateModal.lineIds.slice(offset, offset + 3).map(async (id) => {
-            try {
-              const preview = (await quotationAPI.items.identityPreview({ name: names[id], company: quote.company })).data;
-              names[id] = preview.standard_name || names[id];
-            } catch { /* Original wording still passes deterministic matching. */ }
-          }));
-        }
-        setProductCreateModal((current) => current ? { ...current, names } : current);
+      if (!forceCreate) {
+        const reviews = await reviewProductCreation(productCreateModal.lineIds.map((id) => ({
+          id, name: names[id], unit: lineDrafts[id]?.unit || '',
+        })), quote.company);
+        productCreateModal.lineIds.forEach((id) => { names[id] = reviews[id]?.standard_name || names[id]; });
+        setProductCreateModal((current) => current ? { ...current, names, aiReviews: reviews } : current);
       }
       const response = await quotationAPI.quotes.bulkCreateProductsForLines(quote.id, {
         line_ids: productCreateModal.lineIds,
@@ -2072,11 +2068,15 @@ const QuotationEditor = ({
     setActionInFlight(`create-product-${lineId}`);
     setErrorInfo(null);
     setLineFeedback(null);
+    const draft = lineDrafts[lineId] || {};
+    const reviewFingerprint = quoteRef.current?.quotation_review_fingerprint || '';
+    let review;
     try {
-      const draft = lineDrafts[lineId] || {};
+      review = (await reviewProductCreation([{ id: lineId, name: draft.item_name_snapshot || '', unit: draft.unit || '' }], quote.company))[lineId];
+      if (!draftsMatch(draft, lineDraftsRef.current[lineId])) throw new Error('This row changed during the AI check. Check the current item again.');
       const response = await quotationAPI.lines.createProduct(lineId, {
-        product_name: draft.item_name_snapshot || '',
-        quotation_review_fingerprint: quoteRef.current?.quotation_review_fingerprint || '',
+        product_name: review?.standard_name || draft.item_name_snapshot || '',
+        quotation_review_fingerprint: reviewFingerprint,
       });
       applyUpdatedLines([response.data.line], response.data.quotation);
       rememberProductsInList([response.data.product]);
@@ -2090,7 +2090,8 @@ const QuotationEditor = ({
         setProductCreateError(null);
         setProductCreateModal({
           lineIds: [lineId],
-          names: { [lineId]: draft.item_name_snapshot || '' },
+          names: { [lineId]: review?.standard_name || draft.item_name_snapshot || '' },
+          aiReviews: { [lineId]: review },
           confirmations: { [lineId]: { line_id: lineId, ...warning } },
         });
         setLineFeedback({
@@ -3783,6 +3784,11 @@ const QuotationEditor = ({
             {companyPricingVisible ? <CompanyPriceField draft={lineForm} recommendation={lineForm.price_recommendation}
               type="number" min="0" step="0.001" placeholder="Price" aria-label="Price"
               onPatch={(patch) => { lineFormPriceVersionRef.current += 1; setLineForm((current) => ({ ...current, ...patch })); }}
+              onWrongProduct={() => {
+                lineFormPriceVersionRef.current += 1;
+                lineFormSelectedProductRef.current = '';
+                setLineForm((current) => ({ ...current, ...productPatch(current, ''), price_recommendation: null }));
+              }}
             /> : <input type="number" min="0" step="0.001" placeholder="Price" value={lineForm.unit_price} onWheel={releaseNumberWheelFocus} onChange={(event) => {
               lineFormPriceVersionRef.current += 1;
               setLineForm({ ...lineForm, unit_price: event.target.value });
@@ -3802,7 +3808,7 @@ const QuotationEditor = ({
             <div className="qm-panel-heading">
               <div>
                 <h3>Create Products from unmatched rows</h3>
-                <p>The catalog is checked first. Exact matches are reused automatically; similar matches must be reviewed before a new internal Product is created.</p>
+                <p>AI checks for existing items before creation. Clear matches are reused automatically; you can still add an item when the match is uncertain.</p>
               </div>
               <button type="button" className="qm-secondary small" disabled={saving} onClick={closeCreateProductModal}>Close</button>
             </div>
@@ -3830,13 +3836,17 @@ const QuotationEditor = ({
                               if (!current) return current;
                               const confirmations = { ...current.confirmations };
                               delete confirmations[lineId];
+                              const aiReviews = { ...current.aiReviews };
+                              delete aiReviews[lineId];
                               return {
                                 ...current,
                                 names: { ...current.names, [lineId]: event.target.value },
                                 confirmations,
+                                aiReviews,
                               };
                             })}
                           />
+                          {productCreateModal.aiReviews?.[lineId] && <small role="status">{productCreateModal.aiReviews[lineId].reason}</small>}
                           {warning && (
                             <div className={`qm-product-match-warning ${warning.creation_blocked ? 'blocked' : ''}`}>
                               <strong>{warning.creation_blocked ? 'Existing identity conflict — select a Product' : 'Likely existing Product found'}</strong>
@@ -3878,7 +3888,7 @@ const QuotationEditor = ({
                 disabled={saving || (hasProductCreationWarnings && !canOverrideProductCreationWarning)}
                 onClick={() => confirmCreateProducts(hasProductCreationWarnings)}
               >
-                {saving ? 'Checking catalog...' : hasProductCreationWarnings ? 'Create reviewed provisional items' : 'Check catalog and continue'}
+                {saving ? 'Checking AI matches and catalog...' : hasProductCreationWarnings ? 'Create reviewed provisional items' : 'Check catalog and continue'}
               </button>
               <button type="button" className="qm-secondary" disabled={saving} onClick={closeCreateProductModal}>Cancel</button>
             </div>

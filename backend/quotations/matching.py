@@ -708,15 +708,19 @@ def rejected_product_ids(raw_text, company):
         return set()
     from .models import QuotationPriceFeedback
     normalized = normalize_item_text(raw_text)
-    return {row["product_id"] for row in QuotationPriceFeedback.objects.filter(company=company, kind="wrong_product").values("product_id", "source_wording")
-            if normalize_item_text(row["source_wording"]) == normalized}
+    rejected = {row["product_id"] for row in QuotationPriceFeedback.objects.filter(company=company, kind="wrong_product").values("product_id", "source_wording")
+                if normalize_item_text(row["source_wording"]) == normalized}
+    from .pricing import pending_match_checks
+    rejected.update(row["product_id"] for row in pending_match_checks(company.pk).values("product_id", "item_name_snapshot")
+                    if normalize_item_text(row["item_name_snapshot"]) == normalized)
+    return rejected
 
 
 def suggest_product_for_text(raw_text, company=None, **kwargs):
     result = _suggest_product_for_text(raw_text, company, **kwargs)
     rejected = rejected_product_ids(raw_text, company)
     if result.product and result.product.pk in rejected:
-        return ProductMatch(None, 0, "product_correction_review", "This wording previously linked the wrong product; confirm its identity.",
+        return ProductMatch(None, 0, "product_correction_review", "This wording has a recorded product-match concern; confirm its identity.",
                             [c for c in result.candidates if c.product.pk not in rejected], True)
     return result
 

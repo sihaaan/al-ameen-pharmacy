@@ -22,7 +22,7 @@ jest.mock('../../api/quotations', () => ({
       revise: jest.fn(),
       pdf: jest.fn(),
     },
-    items: { list: jest.fn() },
+    items: { list: jest.fn(), creationReview: jest.fn() },
     companies: { list: jest.fn(), create: jest.fn() },
     contacts: { list: jest.fn(), create: jest.fn() },
     auditLogs: { list: jest.fn() },
@@ -2713,6 +2713,24 @@ describe('QuotationEditor Product price context', () => {
 
     expect(document.activeElement).not.toBe(newLineQuantity);
     expect(newLineQuantity).toHaveValue(8);
+  });
+
+  test('AI second pass resolves an unmatched name before the add-anyway flow', async () => {
+    quotationAPI.items.creationReview.mockResolvedValueOnce({ data: { results: [{ id: 31,
+      standard_name: 'Gloves A', ai_status: 'ai_matched', matched_product_id: 11 }] } });
+    quotationAPI.lines.createProduct.mockResolvedValueOnce({ data: {
+      line: { ...quote.lines[0], product: 11, product_name: 'Gloves A', match_status: 'confirmed' },
+      product: products[0], message: 'Reused existing product.',
+    } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    await waitFor(() => expect(quotationAPI.lines.createProduct).toHaveBeenCalledWith(31, {
+      product_name: 'Gloves A', quotation_review_fingerprint: 'quotation-review-fingerprint-1',
+    }));
+    expect(quotationAPI.items.creationReview).toHaveBeenCalledWith({ company: 7,
+      rows: [{ id: 31, name: 'Imported gloves', unit: 'box' }] });
+    expect(await screen.findByText('Reused existing product.')).toBeInTheDocument();
+    expect(screen.queryByText('Likely existing Product found')).not.toBeInTheDocument();
   });
 
   test('warns about a similar Product and only creates after an explicit override', async () => {
