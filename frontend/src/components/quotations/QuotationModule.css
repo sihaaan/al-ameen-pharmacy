@@ -2282,6 +2282,17 @@ fieldset.qm-gmail-locked-editor,
   box-shadow: 0 24px 80px rgba(17, 24, 39, 0.28);
 }
 
+.qm-product-create-modal { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+.qm-product-create-modal > .qm-panel-heading, .qm-product-create-modal > .qm-action-row { flex-shrink: 0; margin: 0; }
+.qm-product-create-modal > .qm-panel-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.qm-product-create-modal > .qm-panel-heading p { font-size: 13px; margin: 5px 0 0; }
+.qm-product-create-modal > .qm-table-wrap { min-height: 0; overflow: auto; }
+.qm-product-create-modal .qm-product-match-warning > label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; line-height: 1.5; }
+.qm-product-create-modal .qm-product-match-warning input[type="checkbox"] { flex: 0 0 16px; width: 16px; min-height: 16px; height: 16px; margin: 2px 0 0; accent-color: #0f766e; }
+.qm-product-review-progress { display: grid; gap: 5px; flex-shrink: 0; padding: 12px 14px; border: 1px solid #99d9cd; border-radius: 8px; background: #effaf6; color: #134e4a; font-size: 13px; }
+.qm-product-review-progress span { line-height: 1.5; color: #3f625b; }
+.qm-product-review-source { display: block; margin-top: 5px; }
+
 .qm-email-preview-backdrop {
   z-index: 80;
   background: rgba(15, 23, 42, 0.58);

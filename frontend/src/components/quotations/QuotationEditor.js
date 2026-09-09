@@ -1788,7 +1788,7 @@ const QuotationEditor = ({
       return [lineId, lineLabel(line, lineDrafts[lineId])];
     }));
     setProductCreateError(null);
-    setProductCreateModal({ lineIds: ids, names, confirmations: {} });
+    setProductCreateModal({ lineIds: ids, totalCount: ids.length, names, confirmations: {} });
   };
 
   const closeCreateProductModal = () => {
@@ -1796,8 +1796,15 @@ const QuotationEditor = ({
     setProductCreateModal(null);
   };
 
-  const confirmCreateProducts = async (forceCreate = false) => {
+  const confirmCreateProducts = async () => {
     if (!productCreateModal || saving || actionInFlight) return;
+    // Submit only unchecked names and explicit new-item decisions. Other
+    // suggestions stay in the dialog until the user chooses what to do.
+    const submissionIds = productCreateModal.lineIds.filter((id) => {
+      const warning = productCreateModal.confirmations?.[id];
+      return !warning || (!warning.creation_blocked && productCreateModal.reviewed?.[id]);
+    });
+    if (!submissionIds.length) return;
     const currentQuote = quoteRef.current || quote;
     setSaving(true);
     setErrorInfo(null);
@@ -1805,22 +1812,21 @@ const QuotationEditor = ({
     setLineFeedback(null);
     try {
       const names = { ...productCreateModal.names };
-      if (!forceCreate) {
-        const reviews = await reviewProductCreation(productCreateModal.lineIds.map((id) => ({
+      const uncheckedIds = submissionIds.filter((id) => !productCreateModal.confirmations?.[id] && !productCreateModal.aiReviews?.[id]);
+      if (uncheckedIds.length) {
+        const reviews = await reviewProductCreation(uncheckedIds.map((id) => ({
           id, name: names[id], unit: lineDrafts[id]?.unit || '',
         })), quote.company);
-        productCreateModal.lineIds.forEach((id) => { names[id] = reviews[id]?.standard_name || names[id]; });
-        setProductCreateModal((current) => current ? { ...current, names, aiReviews: reviews } : current);
+        uncheckedIds.forEach((id) => { names[id] = reviews[id]?.standard_name || names[id]; });
+        setProductCreateModal((current) => current ? { ...current, names, aiReviews: { ...current.aiReviews, ...reviews } } : current);
       }
       const response = await quotationAPI.quotes.bulkCreateProductsForLines(quote.id, {
-        line_ids: productCreateModal.lineIds,
-        names,
-        confirm_create_line_ids: forceCreate
-          ? productCreateModal.lineIds.filter((lineId) => {
+        line_ids: submissionIds,
+        names: Object.fromEntries(submissionIds.map((id) => [id, names[id]])),
+        confirm_create_line_ids: submissionIds.filter((lineId) => {
             const warning = productCreateModal.confirmations?.[lineId];
             return warning && !warning.creation_blocked && productCreateModal.reviewed?.[lineId];
-          })
-          : [],
+          }),
         quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
       const updatedLines = response.data.updated_lines || [];
@@ -1836,20 +1842,20 @@ const QuotationEditor = ({
       });
       const updatedIds = updatedLines.map((line) => line.id);
       setSelectedLineIds((current) => current.filter((id) => !updatedIds.includes(id)));
-      if (confirmationRequired.length > 0) {
-        const pendingIds = confirmationRequired.map((entry) => entry.line_id);
-        setProductCreateModal((current) => (
-          current
-            ? {
-              ...current,
-              lineIds: pendingIds,
-              confirmations: Object.fromEntries(confirmationRequired.map((entry) => [entry.line_id, entry])),
-            }
-            : null
-        ));
+      const pendingIds = productCreateModal.lineIds.filter((id) => !updatedIds.includes(id));
+      if (pendingIds.length > 0) {
+        setProductCreateModal((current) => {
+          if (!current) return null;
+          const confirmations = { ...current.confirmations };
+          const reviewed = { ...current.reviewed };
+          updatedIds.forEach((id) => { delete confirmations[id]; delete reviewed[id]; });
+          confirmationRequired.forEach((entry) => { confirmations[entry.line_id] = entry; delete reviewed[entry.line_id]; });
+          return { ...current, lineIds: pendingIds, confirmations, reviewed,
+            lastResult: updatedIds.length ? `Saved ${updatedIds.length} item${updatedIds.length === 1 ? '' : 's'}. Only the remaining rows are shown below.` : current.lastResult };
+        });
         setLineFeedback({
           type: 'warning',
-          message: `${confirmationRequired.length} row${confirmationRequired.length === 1 ? '' : 's'} look like existing Products. Review the matches before creating anything new.`,
+          message: `${pendingIds.length} row${pendingIds.length === 1 ? '' : 's'} still need a product decision. Completed selections have been saved.`,
         });
       } else {
         closeCreateProductModal();
@@ -1921,7 +1927,8 @@ const QuotationEditor = ({
         if (!remainingIds.length) return null;
         const confirmations = { ...current.confirmations };
         delete confirmations[lineId];
-        return { ...current, lineIds: remainingIds, confirmations };
+        return { ...current, lineIds: remainingIds, confirmations,
+          lastResult: `Linked “${currentDraft.item_name_snapshot || candidate.product_name}” to “${candidate.product_name}”. Only the remaining rows are shown below.` };
       });
       setSelectedLineIds((current) => current.filter((id) => id !== lineId));
       setLineFeedback({ type: 'success', message: `Linked the row to existing Product '${candidate.product_name}'.` });
@@ -2010,6 +2017,7 @@ const QuotationEditor = ({
         setProductCreateError(null);
         setProductCreateModal({
           lineIds: [lineId],
+          totalCount: 1,
           names: { [lineId]: review?.standard_name || draft.item_name_snapshot || '' },
           aiReviews: { [lineId]: review },
           confirmations: { [lineId]: { line_id: lineId, ...warning } },
@@ -2843,7 +2851,8 @@ const QuotationEditor = ({
     : [];
   const productCreationWarnings = productCreateModal ? Object.values(productCreateModal.confirmations || {}) : [];
   const hasProductCreationWarnings = productCreationWarnings.length > 0;
-  const canOverrideProductCreationWarning = productCreationWarnings.some((warning) => !warning.creation_blocked) && productCreateModal?.lineIds?.every((id) => productCreateModal.confirmations?.[id]?.creation_blocked || productCreateModal.reviewed?.[id]);
+  const hasUncheckedProductNames = productCreateModal?.lineIds?.some((id) => !productCreateModal.confirmations?.[id]);
+  const canOverrideProductCreationWarning = productCreateModal?.lineIds?.some((id) => productCreateModal.confirmations?.[id] && !productCreateModal.confirmations[id].creation_blocked && productCreateModal.reviewed?.[id]);
   const gmailSource = quote.gmail_source && typeof quote.gmail_source === 'object'
     ? quote.gmail_source
     : null;
@@ -3520,7 +3529,7 @@ const QuotationEditor = ({
 
       {productCreateModal && (
         <div className="qm-modal-backdrop" role="presentation">
-          <div className="qm-modal" role="dialog" aria-modal="true" aria-label="Create Products from quotation lines">
+          <div className="qm-modal qm-product-create-modal" role="dialog" aria-modal="true" aria-label="Create Products from quotation lines">
             <div className="qm-panel-heading">
               <div>
                 <h3>Create Products from unmatched rows</h3>
@@ -3529,6 +3538,12 @@ const QuotationEditor = ({
               <button type="button" className="qm-secondary small" disabled={saving} onClick={closeCreateProductModal}>Close</button>
             </div>
             <QuotationErrorNotice error={productCreateError} onDismiss={() => setProductCreateError(null)} />
+            <div className="qm-product-review-progress" role="status" aria-live="polite" aria-atomic="true">
+              <strong>{productCreateModal.totalCount - productCreateModal.lineIds.length} of {productCreateModal.totalCount} items linked · {productCreateModal.lineIds.length} remaining</strong>
+              <span>{productCreateModal.lastResult || (hasProductCreationWarnings
+                ? 'Choose an existing product for each remaining row, or confirm that it is a different item. Selections are saved as you go.'
+                : 'Check the catalog to find existing products for these rows. You can edit the names before checking.')}</span>
+            </div>
             <div className="qm-table-wrap">
               <table className="qm-table">
                 <thead>
@@ -3543,9 +3558,10 @@ const QuotationEditor = ({
                     const warning = productCreateModal.confirmations?.[lineId];
                     return (
                       <tr key={lineId}>
-                        <td>{line ? lineLabel(line, lineDrafts[lineId]) : `Line ${lineId}`}</td>
+                        <td><strong>Line {quote.lines.findIndex((row) => row.id === lineId) + 1}</strong><span className="qm-product-review-source">{line ? lineLabel(line, lineDrafts[lineId]) : `Line ${lineId}`}</span></td>
                         <td>
                           <input
+                            aria-label={`Product name for ${line ? lineLabel(line, lineDrafts[lineId]) : `Line ${lineId}`}`}
                             value={productCreateModal.names[lineId] || ''}
                             disabled={saving}
                             onChange={(event) => setProductCreateModal((current) => {
@@ -3554,11 +3570,14 @@ const QuotationEditor = ({
                               delete confirmations[lineId];
                               const aiReviews = { ...current.aiReviews };
                               delete aiReviews[lineId];
+                              const reviewed = { ...current.reviewed };
+                              delete reviewed[lineId];
                               return {
                                 ...current,
                                 names: { ...current.names, [lineId]: event.target.value },
                                 confirmations,
                                 aiReviews,
+                                reviewed,
                               };
                             })}
                           />
@@ -3601,10 +3620,10 @@ const QuotationEditor = ({
               <button
                 type="button"
                 className="qm-primary"
-                disabled={saving || (hasProductCreationWarnings && !canOverrideProductCreationWarning)}
-                onClick={() => confirmCreateProducts(hasProductCreationWarnings)}
+                disabled={saving || (!hasUncheckedProductNames && !canOverrideProductCreationWarning)}
+                onClick={confirmCreateProducts}
               >
-                {saving ? 'Checking AI matches and catalog...' : hasProductCreationWarnings ? 'Create reviewed provisional items' : 'Check catalog and continue'}
+                {saving ? 'Checking AI matches and catalog...' : hasUncheckedProductNames ? (hasProductCreationWarnings ? 'Check edited names and continue' : 'Check catalog and continue') : 'Create reviewed provisional items'}
               </button>
               <button type="button" className="qm-secondary" disabled={saving} onClick={closeCreateProductModal}>Cancel</button>
             </div>
