@@ -21,6 +21,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError as DRFValidationError
+from rest_framework.fields import BooleanField
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
@@ -3589,6 +3590,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def finalize(self, request, pk=None):
         quotation = self.get_object()
+        assume_sent = BooleanField().run_validation(request.data.get("assume_sent", False))
         has_review_fingerprint = (
             hasattr(request.data, "get")
             and "quotation_review_fingerprint" in request.data
@@ -3613,6 +3615,13 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         review_fingerprint,
                     )
                 quotation = finalize_quotation(quotation, request.user)
+                if assume_sent:
+                    quotation = transition_quotation_status(quotation, request.user, Quotation.STATUS_SENT)
+                    audit_log(
+                        request.user, QuotationAuditLog.ACTION_UPDATED, quotation,
+                        message="Marked as sent on finalization. Sending is assumed; this action did not send an email.",
+                        changes={"sent_status_basis": "assumed_on_finalization", "email_sent": False},
+                    )
                 payload = self.get_serializer(quotation).data
         except QuotationEmailError as exc:
             return self._quotation_email_error_response(exc)

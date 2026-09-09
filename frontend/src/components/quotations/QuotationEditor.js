@@ -31,14 +31,6 @@ const supportingDatasetLabels = {
   contacts: 'Company contacts',
   priceHistory: 'Price history',
 };
-const statusSteps = [
-  { id: 'draft', label: 'Draft' },
-  { id: 'pending_review', label: 'Pending Review' },
-  { id: 'approved', label: 'Approved' },
-  { id: 'finalized', label: 'Finalized' },
-  { id: 'sent', label: 'Sent' },
-];
-
 const paymentTermOptions = [
   { value: 'credit_30_days', label: 'Credit 30 days' },
   { value: 'credit_60_days', label: 'Credit 60 days' },
@@ -1203,7 +1195,9 @@ const QuotationEditor = ({
     setLineFeedback(null);
     if (companyPricingEnabled && Object.prototype.hasOwnProperty.call(patch, 'item_name_snapshot')
         && !Object.prototype.hasOwnProperty.call(patch, 'product')) {
-      patch = { ...patch, price_source_history: null, price_original_history: null, price_review_required: true, price_reviewed: false };
+      // The server checks whether edited wording changes the product identity.
+      // Spelling and description edits alone do not require another confirmation.
+      patch = { ...patch, price_source_history: null, price_original_history: null, price_reviewed: false };
       linePriceVersionRef.current[lineId] = (linePriceVersionRef.current[lineId] || 0) + 1;
     }
     const affectsPriceRequest = Object.prototype.hasOwnProperty.call(patch, 'unit_price') || Object.prototype.hasOwnProperty.call(patch, 'product') || Object.prototype.hasOwnProperty.call(patch, 'unit');
@@ -1283,13 +1277,14 @@ const QuotationEditor = ({
     const item = items.find((candidate) => String(candidate.id) === String(productId));
     const hasSnapshotName = String(draft.item_name_snapshot || '').trim().length > 0;
     const changed = String(draft.product || '') !== String(productId || '');
+    const needsContextReview = !!draft.product && !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history';
     return {
       ...(changed && companyPricingVisible ? {
         unit_price: draft.price_provenance?.kind === 'history' ? '' : draft.unit_price,
         price_provenance: draft.price_provenance?.kind === 'history' ? {} : draft.price_provenance,
         price_source_history: null, price_original_history: null,
-        price_review_required: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
-        price_context_changed: !isBlankPrice(draft.unit_price) && draft.price_provenance?.kind !== 'history',
+        price_review_required: !!draft.price_review_required || needsContextReview,
+        price_context_changed: !!draft.price_context_changed || needsContextReview,
         price_reviewed: false,
       } : {}),
       product: productId,
@@ -2556,6 +2551,7 @@ const QuotationEditor = ({
 
   const finalizeWithoutEmail = (id) => quotationAPI.quotes.finalize(id, {
     quotation_review_fingerprint: quoteRef.current?.quotation_review_fingerprint || '',
+    assume_sent: true,
   });
 
   const reconcileQuotationEmail = async () => {
@@ -2645,7 +2641,7 @@ const QuotationEditor = ({
         setDownloadLoading(false);
       }
       setEmailPreviewOpen(false);
-      setLineFeedback({ type: 'success', message: 'Quotation finalized. No email was sent.' });
+      setLineFeedback({ type: 'success', message: 'Quotation finalized and marked as sent. No email was sent through the app.' });
       await load({ refreshReferences: false });
     } catch (error) {
       if (replaceStaleQuotationReview(error)) return;
@@ -2752,6 +2748,7 @@ const QuotationEditor = ({
         return;
       }
       if (label === 'Finalize') {
+        setLineFeedback({ type: 'success', message: 'Quotation finalized and marked as sent. No email was sent through the app.' });
         setDownloadLoading(true);
         try {
           await downloadPdfFile(response.data || quote);
@@ -2885,12 +2882,21 @@ const QuotationEditor = ({
         <button
           type="button"
           className="qm-primary"
+          disabled={saving || Boolean(actionInFlight) || directFinalizeIssues.length > 0}
+          title={directFinalizeIssues.length > 0 ? directFinalizeIssues[0] : 'Finalize, mark as sent and download the PDF.'}
+          onClick={() => runAction('Finalize', finalizeWithoutEmail)}
+        >
+          {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
+        </button>
+        <button
+          type="button"
+          className="qm-secondary"
           disabled={saving || Boolean(actionInFlight) || primaryEmailActionIssues.length > 0}
           onClick={chainedActionsEnabled ? reviewEmail : loadEmailPreview}
         >
           {chainedActionsEnabled
             ? (actionInFlight === 'Review Email' ? 'Opening Email Review...' : 'Review Email')
-            : 'Finalize'}
+            : 'Email Quotation'}
         </button>
       </>
     );
@@ -2980,18 +2986,6 @@ const QuotationEditor = ({
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Manage order</button>
           </>}
           <QuotationMoreActions>
-        {isEditable && chainedActionsEnabled && (
-          <button
-            type="button"
-            className="qm-secondary"
-            disabled={saving || Boolean(actionInFlight) || directFinalizeIssues.length > 0}
-            title={directFinalizeIssues.length > 0 ? directFinalizeIssues[0] : 'Finalize without sending an email.'}
-            onClick={() => runAction('Finalize', finalizeWithoutEmail)}
-          >
-            {actionInFlight === 'Finalize' ? 'Finalizing...' : 'Finalize'}
-          </button>
-        )}
-
             {!['finalized', 'sent'].includes(quote.status) && <>
           <button
             type="button"
@@ -3013,8 +3007,7 @@ const QuotationEditor = ({
           >
             {excelDownloadLoading ? 'Preparing Excel...' : 'Download Excel'}
           </button>
-            {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
-            {quote.status === 'finalized' && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Mark Sent', quotationAPI.quotes.markSent)}>{actionInFlight === 'Mark Sent' ? 'Saving...' : 'Mark Sent'}</button>}
+            {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={loadEmailPreview}>Email Quotation</button>}
             {['finalized', 'sent'].includes(quote.status) && <button type="button" className="qm-secondary" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Create Revision', quotationAPI.quotes.revise)}>{actionInFlight === 'Create Revision' ? 'Creating...' : 'Create Revision'}</button>}
             {!['revised', 'cancelled'].includes(quote.status) && <button type="button" className="qm-secondary danger" disabled={saving || Boolean(actionInFlight)} onClick={() => runAction('Cancel', quotationAPI.quotes.cancel)}>{actionInFlight === 'Cancel' ? 'Cancelling...' : 'Cancel quotation'}</button>}
           </QuotationMoreActions>
@@ -3058,20 +3051,6 @@ const QuotationEditor = ({
           )}
         </section>
       )}
-
-      {isEditable && <div className="qm-status-progress" aria-label="Quotation status progress">
-        {statusSteps.map((step, index) => {
-          const currentIndex = statusSteps.findIndex((candidate) => candidate.id === quote.status);
-          const isComplete = currentIndex >= index && currentIndex !== -1;
-          const isActive = quote.status === step.id;
-          return (
-            <div key={step.id} className={`qm-status-step ${isComplete ? 'complete' : ''} ${isActive ? 'active' : ''}`}>
-              <span>{index + 1}</span>
-              <p>{step.label}</p>
-            </div>
-          );
-        })}
-      </div>}
 
       {!isEditable && (
         <p className="qm-locked-note">This quotation is locked. Create a revision to make changes.</p>

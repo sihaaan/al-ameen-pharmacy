@@ -1281,6 +1281,51 @@ class QuotationWorkflowTests(APITestCase):
         quotation.refresh_from_db()
         self.assertEqual(quotation.status, Quotation.STATUS_FINALIZED)
 
+    @patch("quotations.quotation_email_delivery.gmail_send_raw_message")
+    def test_finalize_can_assume_sent_atomically_without_email_delivery(self, gmail_send):
+        quotation = self.create_quote()
+        self.create_valid_line(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.pk]))
+        response = self.client.post(reverse("quotation-finalize", args=[quotation.pk]), {
+            "quotation_review_fingerprint": detail.data["quotation_review_fingerprint"],
+            "assume_sent": True,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["status"], Quotation.STATUS_SENT)
+        quotation.refresh_from_db()
+        self.assertIsNotNone(quotation.finalized_at)
+        self.assertIsNotNone(quotation.sent_at)
+        self.assertIsNotNone(quotation.next_follow_up_date)
+        self.assertEqual(CompanyPriceHistory.objects.filter(quotation=quotation).count(), 1)
+        self.assertFalse(QuotationEmailDelivery.objects.filter(quotation=quotation).exists())
+        self.assertTrue(QuotationAuditLog.objects.filter(quotation=quotation,
+            changes__sent_status_basis="assumed_on_finalization", changes__email_sent=False).exists())
+        gmail_send.assert_not_called()
+        repeat = self.client.post(reverse("quotation-finalize", args=[quotation.pk]), {"assume_sent": True}, format="json")
+        self.assertEqual(repeat.status_code, 400)
+        self.assertEqual(CompanyPriceHistory.objects.filter(quotation=quotation).count(), 1)
+
+    def test_assume_sent_never_bypasses_validation_or_a_stale_review(self):
+        quotation = self.create_quote()
+        line = self.create_valid_line(quotation)
+        detail = self.client.get(reverse("quotation-detail", args=[quotation.pk]))
+        line.unit_price = Decimal("15")
+        line.save()
+        response = self.client.post(reverse("quotation-finalize", args=[quotation.pk]), {
+            "quotation_review_fingerprint": detail.data["quotation_review_fingerprint"],
+            "assume_sent": True,
+        }, format="json")
+        self.assertEqual(response.status_code, 409)
+        line.unit_price = None
+        line.save()
+        response = self.client.post(reverse("quotation-finalize", args=[quotation.pk]), {"assume_sent": True}, format="json")
+        self.assertEqual(response.status_code, 400)
+        quotation.refresh_from_db()
+        self.assertEqual(quotation.status, Quotation.STATUS_DRAFT)
+        self.assertIsNone(quotation.sent_at)
+        self.assertIsNone(quotation.finalized_at)
+        self.assertFalse(CompanyPriceHistory.objects.filter(quotation=quotation).exists())
+
     def test_outcome_review_requires_finalized_or_sent_quote(self):
         quotation = self.create_quote()
         self.create_valid_line(quotation)

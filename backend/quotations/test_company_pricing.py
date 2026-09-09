@@ -10,7 +10,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from api.models import Product
-from .models import Company, CompanyPriceHistory, Quotation, QuotationLine, QuotationPriceFeedback
+from .models import Company, CompanyPriceHistory, ProductAlias, Quotation, QuotationLine, QuotationPriceFeedback
 from .pricing import recommend_price
 from .services import bulk_update_quotation_lines, finalize_quotation
 from .catalogue_identity import identity_preview, review_identity, identity_report
@@ -203,6 +203,29 @@ class CompanyPricingTests(APITestCase):
         with self.assertRaises(ValidationError): finalize_quotation(self.quote, self.staff)
         self.save(line, price_reviewed=True)
         finalize_quotation(self.quote, self.staff)
+
+    def test_first_manual_link_keeps_price_without_review_and_learns_only_for_this_company(self):
+        wording = "Customer examination supply"
+        line = QuotationLine.objects.create(quotation=self.quote, item_name_snapshot=wording,
+            quantity=1, unit="box", unit_price=22, match_status="unresolved")
+        self.save(line, product=self.product.pk, match_status="confirmed")
+        self.assertEqual(line.unit_price, 22)
+        self.assertFalse(line.price_review_required)
+        self.assertTrue(ProductAlias.objects.filter(company=self.company, product=self.product, alias=wording).exists())
+        self.assertFalse(ProductAlias.objects.filter(company__isnull=True, alias=wording).exists())
+        other = Company.objects.create(name="Other customer")
+        self.assertIsNone(suggest_product_for_text(wording, other).product)
+        finalize_quotation(self.quote, self.staff)
+        other_quote = Quotation.objects.create(company=other, created_by=self.staff)
+        self.assertFalse(recommend_price(other_quote, self.product, "box")["eligible"])
+
+    def test_first_link_does_not_clear_existing_review_or_change_pricing_units_silently(self):
+        for review, unit in [(True, "box"), (False, "piece")]:
+            with self.subTest(review=review, unit=unit):
+                line = QuotationLine.objects.create(quotation=self.quote, item_name_snapshot=self.product.name,
+                    quantity=1, unit="box", unit_price=22, match_status="unresolved", price_review_required=review)
+                self.save(line, product=self.product.pk, match_status="confirmed", unit=unit)
+                self.assertTrue(line.price_review_required)
 
     def test_customer_change_invalidates_auto_and_marks_manual_for_review(self):
         source = self.history()

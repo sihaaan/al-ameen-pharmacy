@@ -90,7 +90,8 @@ export default function CompanyPriceField({ draft, recommendation, loading, fail
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8">
           {kind === 'history' ? <><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></>
             : kind === 'manual' ? <path d="m4 16 12-12 4 4L8 20H4zm10-10 4 4"/>
-              : <><path d="m12 3 10 18H2zM12 9v5"/><path d="M12 17v1"/></>}
+              : needsReview || failed ? <><path d="m12 3 10 18H2zM12 9v5"/><path d="M12 17v1"/></>
+                : <><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></>}
         </svg>
       </button>
       {open && createPortal(<div className="qm-price-popover" id={panelId} ref={panel} tabIndex={-1} role="dialog" aria-label="Company price details" style={position}>
