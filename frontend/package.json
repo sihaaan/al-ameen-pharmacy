@@ -30,7 +30,8 @@
     "test": "react-scripts test",
     "test:ci": "react-scripts test --watchAll=false --runInBand",
     "eject": "react-scripts eject",
-    "serve": "serve -s build -l 3000"
+    "serve": "serve build -l 3000 --config ../serve.json",
+    "test:serve": "node --test scripts/serve-config.test.cjs"
   },
   "eslintConfig": {
     "extends": [

@@ -269,6 +269,7 @@ describe('QuotationEditor Product price context', () => {
   test('keeps the optional Brand column off by default', async () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
     const termsPanel = screen.getByRole('heading', { name: 'Quotation Terms & Layout' }).closest('.qm-terms-panel');
     expect(toggle).not.toBeChecked();
@@ -391,6 +392,7 @@ describe('QuotationEditor Product price context', () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} onOpenGmailImport={jest.fn()} />);
 
     const evidenceButton = await screen.findByRole('button', { name: 'View Gmail evidence' });
+    fireEvent.click(screen.getByRole('button', { name: /Edit customer & contact/i }));
     fireEvent.click(screen.getByRole('button', { name: '+ Create contact' }));
     fireEvent.change(screen.getByLabelText('Name'), {
       target: { value: 'Unfinished purchaser' },
@@ -490,6 +492,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     expect(await screen.findByRole('checkbox', { name: 'Show Brand column' })).toBeChecked();
     expect(screen.getByRole('columnheader', { name: 'Brand' })).toBeInTheDocument();
     expect(screen.getByLabelText('Brand for Imported gloves')).toHaveValue('Customer Brand');
@@ -503,6 +506,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Show Brand column' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
 
@@ -728,6 +732,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Show Brand column' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled());
@@ -863,6 +868,7 @@ describe('QuotationEditor Product price context', () => {
   test('preserves an unsaved Brand layout choice when adding a line refreshes the quote', async () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
     fireEvent.click(toggle);
     fireEvent.change(screen.getByPlaceholderText('Snapshot name'), { target: { value: 'New customer item' } });
@@ -878,6 +884,7 @@ describe('QuotationEditor Product price context', () => {
   test('disables customer document downloads while the Brand layout is unsaved', async () => {
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     const toggle = await screen.findByRole('checkbox', { name: 'Show Brand column' });
     const pdfButton = screen.getByRole('button', { name: 'Download Draft PDF' });
     const excelButton = screen.getByRole('button', { name: 'Download Excel' });
@@ -1247,6 +1254,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /(?:Edit|View) terms & layout/i }));
     expect(await screen.findByRole('checkbox', { name: 'Show Brand column' })).toBeDisabled();
     expect(screen.getByLabelText('Brand for Imported gloves')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Save Terms & Layout' })).not.toBeInTheDocument();
@@ -2585,11 +2593,56 @@ describe('QuotationEditor Product price context', () => {
     expect(within(order).getByText(/LPO-77/)).toBeInTheDocument();
     expect(screen.queryByText('LPO & Proforma Tax Invoice')).not.toBeInTheDocument();
     expect(quotationAPI.quotes.lpos).not.toHaveBeenCalled();
-    expect(document.querySelector('.qm-party-panel')).not.toHaveAttribute('open');
-    expect(document.querySelector('.qm-terms-panel')).not.toHaveAttribute('open');
+    expect(document.querySelector('.qm-party-panel')).not.toBeVisible();
+    expect(document.querySelector('.qm-terms-panel')).not.toBeVisible();
     expect(screen.getByRole('heading', { name: 'Quotation Lines' })).toBeVisible();
     fireEvent.click(within(order).getByRole('button', { name: 'Manage order' }));
     expect(onReviewOutcome).toHaveBeenCalledWith(21);
+  });
+
+  test('keeps both details controls above the selected form and preserves edits when switching', async () => {
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const customerButton = await screen.findByRole('button', { name: /Edit customer & contact/i });
+    const termsButton = screen.getByRole('button', { name: /Edit terms & layout/i });
+    const grid = customerButton.parentElement;
+    expect(Array.from(grid.children).slice(0, 2)).toEqual([customerButton, termsButton]);
+    expect(customerButton).toHaveAttribute('aria-expanded', 'false');
+    expect(termsButton).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(termsButton);
+    const panel = screen.getByRole('region', { name: 'Quotation Terms & Layout' });
+    const dateInput = within(panel).getByLabelText('Valid until');
+    fireEvent.change(dateInput, { target: { value: '2026-10-15' } });
+    fireEvent.click(customerButton);
+    expect(termsButton).toHaveAttribute('aria-expanded', 'false');
+    expect(panel).not.toBeVisible();
+    expect(screen.getByRole('region', { name: 'Customer & Contact' })).toBeVisible();
+    fireEvent.click(termsButton);
+    expect(dateInput).toBeVisible();
+    expect(dateInput).toHaveValue('2026-10-15');
+    expect(Array.from(grid.children).slice(0, 2)).toEqual([customerButton, termsButton]);
+    fireEvent.click(screen.getByRole('button', { name: /Close terms & layout/i }));
+    expect(panel).not.toBeVisible();
+    expect(termsButton).toHaveFocus();
+  });
+
+  test('keeps the customer form mounted and open while saving refreshes the same quote', async () => {
+    const refresh = deferred();
+    quotationAPI.contacts.list.mockResolvedValue({ data: [{ id: 71, company: 7, name: 'Buyer A' }] });
+    quotationAPI.quotes.retrieve.mockReset().mockResolvedValueOnce({ data: quote }).mockReturnValueOnce(refresh.promise);
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const customerButton = await screen.findByRole('button', { name: /Edit customer & contact/i });
+    fireEvent.click(customerButton);
+    const panel = screen.getByRole('region', { name: 'Customer & Contact' });
+    fireEvent.change(within(panel).getByLabelText('Contact / Purchaser'), { target: { value: '71' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save Customer & Contact' }));
+    await waitFor(() => expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2));
+    expect(panel).toBeVisible();
+    expect(customerButton).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.queryByText('Loading quotation...')).not.toBeInTheDocument();
+    await act(async () => refresh.resolve({ data: { ...quote, contact: 71, contact_name: 'Buyer A' } }));
+    expect(screen.getByRole('region', { name: 'Customer & Contact' })).toBe(panel);
+    expect(panel).toBeVisible();
+    expect(within(panel).getByLabelText('Contact / Purchaser')).toHaveValue('71');
   });
 
   test('never overwrites a price typed while history is loading', async () => {
@@ -2986,6 +3039,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /Edit customer & contact/i }));
     const companyOption = await screen.findByRole('option', { name: 'Customer B' });
     const companySelect = companyOption.closest('select');
     fireEvent.change(companySelect, { target: { value: '8' } });
@@ -3054,6 +3108,7 @@ describe('QuotationEditor Product price context', () => {
     const priceInput = screen.getByLabelText('Unit price for Imported gloves');
     const quantityInput = screen.getByLabelText('Quantity for Imported gloves');
     const productSelect = screen.getByLabelText('Product for Imported gloves');
+    fireEvent.click(screen.getByRole('button', { name: /Edit customer & contact/i }));
     const companySelect = screen.getByRole('option', { name: 'Customer A' }).closest('select');
     const contactSelect = screen.getByRole('option', { name: 'Buyer A' }).closest('select');
 
@@ -3394,6 +3449,7 @@ describe('QuotationEditor Product price context', () => {
     await act(async () => companiesRequest.resolve({
       data: [{ id: 7, name: 'Customer A' }, { id: 8, name: 'Customer B' }],
     }));
+    fireEvent.click(screen.getByRole('button', { name: /Edit customer & contact/i }));
     expect(await screen.findByRole('option', { name: 'Customer B' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'Customer B' }).closest('select')).toBeEnabled();
 
@@ -3423,6 +3479,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: /Edit customer & contact/i }));
     const companyBOption = await screen.findByRole('option', { name: 'Customer B' });
     fireEvent.change(companyBOption.closest('select'), { target: { value: '8' } });
 

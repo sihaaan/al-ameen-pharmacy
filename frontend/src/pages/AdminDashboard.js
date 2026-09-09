@@ -1,15 +1,16 @@
+import lazyWorkspace from '../components/WorkspaceLoader';
 // frontend/src/pages/AdminDashboard.js
-import React, { lazy, Suspense, useCallback, useState, useEffect } from 'react';
+import React, { Suspense, useCallback, useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useLocation, useNavigate } from 'react-router-dom';
 import axiosInstance from '../utils/axios';
 import { internalPathOrHome } from '../utils/internalRedirect';
 import '../styles/Dashboard.css';
 
-const ProductManagement = lazy(() => import('../components/ProductManagement'));
-const OrderManagement = lazy(() => import('../components/OrderManagement'));
-const QuotationModule = lazy(() => import('../components/quotations/QuotationModule'));
-const AccountingModule = lazy(() => import('../components/accounting/AccountingModule'));
+const ProductManagement = lazyWorkspace(() => import('../components/ProductManagement'));
+const OrderManagement = lazyWorkspace(() => import('../components/OrderManagement'));
+const QuotationModule = lazyWorkspace(() => import('../components/quotations/QuotationModule'));
+const AccountingModule = lazyWorkspace(() => import('../components/accounting/AccountingModule'));
 
 const ADMIN_TABS = new Set(['overview', 'products', 'orders', 'quotations', 'accounting']);
 

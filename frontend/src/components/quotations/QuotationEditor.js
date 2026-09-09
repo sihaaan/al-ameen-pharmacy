@@ -346,6 +346,11 @@ const QuotationEditor = ({
   const [savedQuotePartyDraft, setSavedQuotePartyDraft] = useState(partyDraftFromQuote());
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
+  const [detailsSelection, setDetailsSelection] = useState({ quoteId: '', section: null });
+  const openDetailsSection = detailsSelection.quoteId === String(quoteId)
+    ? detailsSelection.section : (!quotePartyDraft.company ? 'customer' : null);
+  const customerDetailsButtonRef = useRef(null);
+  const termsDetailsButtonRef = useRef(null);
   const [discountDraft, setDiscountDraft] = useState(discountDraftFromQuote());
   const [savedDiscountDraft, setSavedDiscountDraft] = useState(discountDraftFromQuote());
   const [items, setItems] = useState([]);
@@ -2812,7 +2817,7 @@ const QuotationEditor = ({
     }
   };
 
-  if (loading) return <div className="qm-loading">Loading quotation...</div>;
+  if (loading && (!quote || String(quote.id) !== String(quoteId))) return <div className="qm-loading">Loading quotation...</div>;
   if (!quote) {
     return (
       <div className="qm-section">
@@ -2902,8 +2907,19 @@ const QuotationEditor = ({
     );
   };
 
+  const toggleDetailsSection = (section) => {
+    initialPriceFocusQuoteRef.current = String(quoteId);
+    setDetailsSelection({ quoteId: String(quoteId), section: openDetailsSection === section ? null : section });
+  };
+  const closeDetailsSection = (section) => {
+    setDetailsSelection({ quoteId: String(quoteId), section: null });
+    const button = section === 'customer' ? customerDetailsButtonRef.current : termsDetailsButtonRef.current;
+    button?.focus({ preventScroll: true });
+    button?.scrollIntoView?.({ block: 'nearest', behavior: 'auto' });
+  };
+
   return (
-    <div className="qm-editor">
+    <div className="qm-editor" aria-busy={loading}>
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       {visibleSupportingDatasetStates.length > 0 && (
         <div
@@ -3076,20 +3092,28 @@ const QuotationEditor = ({
         </section>
       )}
       <div className="qm-quote-details-grid">
-      <details className="qm-panel qm-party-panel qm-compact-details" key={`party-${quote.id}`} open={!quotePartyDraft.company || undefined}>
-        <summary><span><strong>Customer &amp; Contact</strong><span>{selectedCompanyName} · {selectedContactName}</span></span><span className="qm-details-action">{hasUnsavedQuoteParty ? 'Unsaved changes' : isEditable ? 'Edit' : 'Details'}</span></summary>
-        <div className="qm-details-body">
+        <button type="button" ref={customerDetailsButtonRef} className="qm-details-toggle" aria-expanded={openDetailsSection === 'customer'} aria-controls={`customer-details-${quote.id}`} onClick={() => toggleDetailsSection('customer')}>
+          <span className="qm-details-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M3 20v-3a6 6 0 0 1 12 0v3M17 5h5M17 10h5M18 15h4"/></svg></span>
+          <span className="qm-details-copy"><strong>Customer &amp; Contact</strong><span>{selectedCompanyName} · {selectedContactName}</span>{hasUnsavedQuoteParty && <small>Unsaved changes</small>}</span>
+          <span className="qm-details-action">{openDetailsSection === 'customer' ? 'Customer details open' : isEditable ? 'Edit customer & contact' : 'View customer & contact'}<span aria-hidden="true">{openDetailsSection === 'customer' ? '−' : '+'}</span></span>
+        </button>
+        <button type="button" ref={termsDetailsButtonRef} className="qm-details-toggle" aria-expanded={openDetailsSection === 'terms'} aria-controls={`terms-details-${quote.id}`} onClick={() => toggleDetailsSection('terms')}>
+          <span className="qm-details-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
+          <span className="qm-details-copy"><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'}</span>{hasUnsavedQuoteTerms && <small>Unsaved changes</small>}</span>
+          <span className="qm-details-action">{openDetailsSection === 'terms' ? 'Terms & layout open' : isEditable ? 'Edit terms & layout' : 'View terms & layout'}<span aria-hidden="true">{openDetailsSection === 'terms' ? '−' : '+'}</span></span>
+        </button>
+      <section className="qm-panel qm-party-panel qm-details-panel" id={`customer-details-${quote.id}`} aria-labelledby={`customer-details-title-${quote.id}`} hidden={openDetailsSection !== 'customer'}>
 
         <div className="qm-panel-heading">
           <div>
-            <h3>Customer & Contact</h3>
+            <h3 id={`customer-details-title-${quote.id}`}>Customer & Contact</h3>
             <p>Select the customer company and the purchaser/contact shown on this quotation.</p>
           </div>
-          {isEditable && (
+          <div className="qm-details-panel-actions">{isEditable && (
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || partyControlsBlocked || !hasUnsavedQuoteParty} onClick={saveQuoteParty}>
               {saving && hasUnsavedQuoteParty ? 'Saving...' : hasUnsavedQuoteParty ? 'Save Customer & Contact' : 'Saved'}
             </button>
-          )}
+          )}<button type="button" className="qm-secondary qm-details-close" onClick={() => closeDetailsSection('customer')}>Close customer details <span aria-hidden="true">×</span></button></div>
         </div>
         <div className="qm-party-grid">
           <CompanySelectWithCreate
@@ -3138,21 +3162,18 @@ const QuotationEditor = ({
             </button>
           </div>
         )}
-      </div>
-      </details>
-      <details className="qm-panel qm-terms-panel qm-compact-details" key={`terms-${quote.id}`}>
-        <summary><span><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'}</span></span><span className="qm-details-action">{hasUnsavedQuoteTerms ? 'Unsaved changes' : isEditable ? 'Edit' : 'Details'}</span></summary>
-        <div className="qm-details-body">
+      </section>
+      <section className="qm-panel qm-terms-panel qm-details-panel" id={`terms-details-${quote.id}`} aria-labelledby={`terms-details-title-${quote.id}`} hidden={openDetailsSection !== 'terms'}>
         <div className="qm-panel-heading qm-terms-heading">
           <div>
-            <h3>Quotation Terms &amp; Layout</h3>
+            <h3 id={`terms-details-title-${quote.id}`}>Quotation Terms &amp; Layout</h3>
             <p>Choose the customer-facing terms and columns used in the saved PDF and Excel quotation.</p>
           </div>
-          {isEditable && (
+          <div className="qm-details-panel-actions">{isEditable && (
             <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight) || !hasUnsavedQuoteTerms} onClick={saveQuoteTerms}>
               {saving && hasUnsavedQuoteTerms ? 'Saving terms & layout...' : hasUnsavedQuoteTerms ? 'Save Terms & Layout' : 'Terms & Layout Saved'}
             </button>
-          )}
+          )}<button type="button" className="qm-secondary qm-details-close" onClick={() => closeDetailsSection('terms')}>Close terms &amp; layout <span aria-hidden="true">×</span></button></div>
         </div>
         <div className="qm-terms-fields">
           <label className="qm-terms-field">
@@ -3182,8 +3203,7 @@ const QuotationEditor = ({
             </span>
           </label>
         </div>
-      </div>
-      </details>
+      </section>
       </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
       {directFinalizeIssues.length > 0 && (
