@@ -611,7 +611,7 @@ const QuotationList = ({ onOpenQuote, onReviewOutcome, canManageMailboxAudit, vi
                           reviewOutcomeFromList(quote.id);
                         }}
                       >
-                        Review Outcome
+                        Manage order
                       </button>
                     ) : '-'}
                   </td>

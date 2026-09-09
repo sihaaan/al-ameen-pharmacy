@@ -3300,11 +3300,16 @@ class QuotationOutcomePOImportSerializer(serializers.ModelSerializer):
 
     def get_canonical_lpo(self, obj):
         evidence = obj.gmail_evidence
-        if not evidence:
-            return None
-        try:
-            lpo = evidence.canonical_lpo
-        except QuotationLPO.DoesNotExist:
+        if evidence:
+            try:
+                lpo = evidence.canonical_lpo
+            except QuotationLPO.DoesNotExist:
+                lpo = None
+        else:
+            lpo = QuotationLPO.objects.filter(
+                pk=(obj.parsed_meta or {}).get("lpo_id"), quotation_id=obj.quotation_id
+            ).first()
+        if not lpo:
             return None
         return {"id": lpo.id, "status": lpo.status, "lpo_number": lpo.lpo_number}
 

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import QuotationErrorNotice from './QuotationErrorNotice';
+import OrderLpoDetails from './OrderLpoDetails';
 
 const money = (value, currency = 'AED') => `${currency} ${Number(value || 0).toFixed(2)}`;
 
@@ -859,8 +860,12 @@ const draftFromLine = (line) => ({
   outcome_notes: line.outcome_notes || '',
 });
 
-const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
+const QuotationOutcomeReview = ({ quoteId, onBack, onOpenQuote, onDeliveryNoteCreated }) => {
   const [quote, setQuote] = useState(null);
+  const [lpos, setLpos] = useState([]);
+  const [selectedLpoId, setSelectedLpoId] = useState(null);
+  const [lpoDetailsDirty, setLpoDetailsDirty] = useState(false);
+  const [documentBusy, setDocumentBusy] = useState(false);
   const [summary, setSummary] = useState(null);
   const [lineDrafts, setLineDrafts] = useState({});
   const [dirtyLineIds, setDirtyLineIds] = useState([]);
@@ -914,6 +919,9 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
 
   const setLoaded = useCallback((data) => {
     setQuote(data.quotation);
+    const records = data.lpos || (data.quotation.latest_lpo ? [data.quotation.latest_lpo] : []);
+    setLpos(records);
+    setSelectedLpoId((current) => records.some((entry) => String(entry.id) === String(current)) ? current : records[0]?.id || null);
     setSummary(data.summary);
     setPoEvidence(data.po_evidence || []);
     setPoEvidencePagination(data.po_evidence_pagination || null);
@@ -958,6 +966,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
   const hasUnsavedLineChanges = dirtyLineIds.length > 0 || selectedSuggestions.length > 0;
   const outcomeMutationInProgress = (
     saving
+    || documentBusy
     || poLoading
     || findingEvidence
     || parsingEvidenceId !== null
@@ -1219,6 +1228,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
       return next;
     });
     setPoResult(result);
+    setSelectedLpoId(result.canonical_lpo?.id || null);
     setPoResultEvidenceId(evidenceId);
     setReviewStep('items');
     setItemFilter('all');
@@ -1235,6 +1245,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
   };
 
   const openEvidenceReview = (evidenceId) => {
+    if (lpoDetailsDirty) return;
     if (mutationLockRef.current || outcomeMutationInProgress) return;
     setNotice(null);
     setErrorInfo(null);
@@ -1243,6 +1254,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
       return;
     }
     resetStagedPODrafts();
+    setSelectedLpoId(null);
     setPoResult(null);
     setPoResultEvidenceId(null);
     setSelectedEvidenceId(evidenceId);
@@ -1281,6 +1293,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
     message,
     { preserveFollowup = false, preserveManualOutcome = false, prepareDelivery = false } = {}
   ) => {
+    if (lpoDetailsDirty) return false;
     if (!acquireMutationLock()) return false;
     const followupBeforeSave = followupDraft;
     const manualOutcomeBeforeSave = manualOutcome;
@@ -1297,14 +1310,20 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
       setSelectedLines([]);
       setNotice({ type: 'success', message });
       if (prepareDelivery) {
+        const selectedLpo = (response.data.lpos || []).find((entry) => String(entry.id) === String(selectedLpoId));
+        if (selectedLpoId && selectedLpo?.status !== 'confirmed') {
+          setNotice({ type: 'warning', message: 'Order saved. Review the selected LPO items and approve their quantities before preparing its delivery note.' });
+          return true;
+        }
+        const coveredIds = selectedLpo ? new Set((selectedLpo.parsed_meta?.applied_outcome_line_ids || []).map(String)) : null;
         const { data: order } = await quotationAPI.deliveryOrders.retrieve(quoteId);
-        const lines = order.lines.filter((line) => Number(line.available_quantity) > 0)
+        const lines = order.lines.filter((line) => Number(line.available_quantity) > 0 && (!coveredIds || coveredIds.has(String(line.id))))
           .map((line) => ({ quotation_line: line.id, quantity: line.available_quantity }));
         if (!lines.length) {
           setNotice({ type: 'warning', message: 'Acceptance saved. No accepted quantities remain available for a new DO. Check existing deliveries or review the accepted items.' });
           return true;
         }
-        const { data: note } = await quotationAPI.deliveryNotes.create({ quotation: quoteId, lines });
+        const { data: note } = await quotationAPI.deliveryNotes.create({ quotation: quoteId, lines, ...(selectedLpo ? { lpo_number: selectedLpo.lpo_number } : {}) });
         onDeliveryNoteCreated(note);
       }
       return true;
@@ -1327,7 +1346,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
     const lineUpdates = changedLineIds.length
       ? changedLineIds.map((lineId) => lineDrafts[lineId]).filter(Boolean)
       : Object.values(lineDrafts);
-    const payload = { line_updates: lineUpdates };
+    const payload = { line_updates: lineUpdates, ...(selectedLpoId && changedLineIds.length ? { lpo_id: selectedLpoId } : {}) };
     if (activeParsedPOResult && poResult?.id && selectedSuggestions.length) {
       const appliedMatchedLineIds = uniqueLineIds(
         parsedPOComparison.lines
@@ -1358,7 +1377,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
   const runBulk = (action, ids, message) => {
     if (!ids.length) return;
     patchOutcome(
-      { bulk_action: action, line_ids: ids },
+      { bulk_action: action, line_ids: ids, ...(selectedLpoId ? { lpo_id: selectedLpoId } : {}) },
       message,
       { preserveFollowup: true, preserveManualOutcome: true }
     );
@@ -1384,14 +1403,17 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
     );
   };
 
-  const parsePo = async () => {
+  const parsePo = async (savedLpoId = null) => {
+    if (lpoDetailsDirty) return;
     if (!acquireMutationLock()) return;
     setPoLoading(true);
     setNotice(null);
     setErrorInfo(null);
     try {
       let response;
-      if (poFile) {
+      if (savedLpoId) {
+        response = await quotationAPI.quotes.parseOutcomePO(quoteId, { lpo_id: savedLpoId, use_ai: false });
+      } else if (poFile) {
         const formData = new FormData();
         formData.append('file', poFile);
         formData.append('use_ai', poUseAi ? '1' : '0');
@@ -1402,6 +1424,13 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
       setSelectedEvidenceId(null);
       setEvidenceReviewExpanded(false);
       const stagedIds = stagePOResult(response.data, null);
+      if (response.data.canonical_lpo) {
+        const records = await quotationAPI.quotes.lpos(quoteId);
+        setLpos(records.data || []);
+      }
+      setPoFile(null);
+      setPoText('');
+      if (uploadRef.current) uploadRef.current.value = '';
       setNotice({
         type: 'success',
         message: stagedIds.length
@@ -1416,6 +1445,34 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
       setPoLoading(false);
       releaseMutationLock();
     }
+  };
+
+  const saveLpoDetails = async (id, draft) => {
+    if (!acquireMutationLock()) return;
+    setDocumentBusy(true);
+    try {
+      const { data } = await quotationAPI.lpos.update(id, draft);
+      setLpos((records) => records.map((record) => record.id === data.id ? data : record));
+      setNotice({ type: 'success', message: 'LPO details saved.' });
+    } catch (error) {
+      setErrorInfo(await describeQuotationError(error, 'Save LPO details', `PATCH /quotations/lpos/${id}/`));
+    } finally { setDocumentBusy(false); releaseMutationLock(); }
+  };
+
+  const downloadOrderProforma = async () => {
+    if (hasUnsavedLineChanges || lpoDetailsDirty || !acquireMutationLock()) return;
+    setDocumentBusy(true);
+    try {
+      const { data } = await quotationAPI.quotes.proformaPdf(quoteId, { basis: 'accepted_order', ...(selectedLpoId ? { lpo: selectedLpoId } : {}) });
+      const url = window.URL.createObjectURL(new Blob([data], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `PROFORMA-${quote.quotation_number}.pdf`;
+      document.body.appendChild(link); link.click(); link.remove(); window.URL.revokeObjectURL(url);
+      setNotice({ type: 'success', message: 'Proforma downloaded from the saved accepted items and prices.' });
+    } catch (error) {
+      setErrorInfo(await describeQuotationError(error, 'Download order proforma', `GET /quotations/quotes/${quoteId}/proforma_pdf/`));
+    } finally { setDocumentBusy(false); releaseMutationLock(); }
   };
 
   const loadPOEvidence = async ({ archivedOffset, append = false } = {}) => {
@@ -1478,6 +1535,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
   };
 
   const approveAndParseEvidence = async (evidenceId) => {
+    if (lpoDetailsDirty) return;
     if (!acquireMutationLock()) return;
     setParsingEvidenceId(evidenceId);
     setNotice(null);
@@ -1489,6 +1547,10 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
         use_ai: evidenceUseAi,
       });
       const stagedIds = stagePOResult(response.data, evidenceId);
+      if (response.data.canonical_lpo) {
+        const records = await quotationAPI.quotes.lpos(quoteId);
+        setLpos(records.data || []);
+      }
       await loadPOEvidence();
       setNotice({
         type: 'success',
@@ -1637,14 +1699,16 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
     <div className="qm-section qm-outcome qm-order-review">
       <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
       <header className="qm-review-header">
-        <div><button type="button" className="qm-review-back" disabled={outcomeMutationInProgress} onClick={onBack}>← Back to quotations</button><h3>Review customer order</h3><p>{quote.company_name} <span>·</span> {quote.quotation_number}</p></div>
+        <div><button type="button" className="qm-review-back" disabled={outcomeMutationInProgress || hasUnsavedLineChanges || lpoDetailsDirty} onClick={onBack}>← Back to quotations</button><h3>Manage order</h3><p>{quote.company_name} <span>·</span> {quote.quotation_number}</p></div>
+        {onOpenQuote && <button type="button" className="qm-secondary small" disabled={outcomeMutationInProgress || hasUnsavedLineChanges || lpoDetailsDirty} onClick={() => onOpenQuote(quoteId)}>Back to quotation</button>}
         <span className={`qm-badge status-${quote.outcome_status}`}>{quoteOutcomeLabels[quote.outcome_status] || quote.outcome_status}</span>
       </header>
       <nav className="qm-review-steps" aria-label="Order review steps">
-        {[['source', 'Choose the LPO', 'Upload, email or manual'], ['items', 'Review the items', 'Confirm quantities & prices'], ['approval', 'Approve the order', 'Save or prepare delivery']].map(([step, title, description], index) => <button type="button" key={step} aria-current={reviewStep === step ? 'step' : undefined} disabled={outcomeMutationInProgress} onClick={() => goToReviewStep(step)}><span className="qm-review-step-number">{index + 1}</span><span><strong>{title}</strong><small>{description}</small></span><span className="qm-review-step-arrow" aria-hidden="true">→</span></button>)}
+        {[['source', 'Choose the LPO', 'Upload, email or manual'], ['items', 'Review the items', 'Confirm quantities & prices'], ['approval', 'Order & documents', 'Approve, proforma or delivery']].map(([step, title, description], index) => <button type="button" key={step} aria-current={reviewStep === step ? 'step' : undefined} disabled={outcomeMutationInProgress} onClick={() => goToReviewStep(step)}><span className="qm-review-step-number">{index + 1}</span><span><strong>{title}</strong><small>{description}</small></span><span className="qm-review-step-arrow" aria-hidden="true">→</span></button>)}
       </nav>
       {notice && <div className={`qm-feedback ${notice.type}`} aria-live="polite">{notice.message}</div>}
 
+      <OrderLpoDetails records={lpos} selectedId={selectedLpoId} onSelect={(id) => { resetStagedPODrafts(); setPoResult(null); setSelectedLpoId(id || null); }} onReview={parsePo} onSave={saveLpoDetails} busy={outcomeMutationInProgress} hasUnsavedLines={hasUnsavedLineChanges} onDirtyChange={setLpoDetailsDirty} />
       <section className="qm-panel qm-review-source" ref={sourceRef} aria-labelledby="qm-review-source-title">
         <div className="qm-review-section-heading"><span className="qm-review-step-number">1</span><div><h3 id="qm-review-source-title">Start with the customer’s LPO</h3><p>Read the order, then check the suggested items before approving anything.</p></div></div>
         <div className="qm-review-source-grid">
@@ -1652,7 +1716,7 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
             <label className={`qm-review-file-picker ${poFile ? 'has-file' : ''}`}><span className="qm-review-document-icon" aria-hidden="true">↥</span><strong>{poFile ? poFile.name : 'Choose an LPO file'}</strong><span>{poFile ? `${formatFileSize(poFile.size)} · Ready to read` : 'PDF or Excel · Select a file from your computer'}</span><input ref={uploadRef} type="file" aria-label="Or upload PO file" disabled={outcomeMutationInProgress} accept=".xlsx,.xls,.xlsb,.pdf" onChange={(event) => setPoFile(event.target.files?.[0] || null)} /></label>
             {poFile && <button type="button" className="qm-review-text-button" disabled={outcomeMutationInProgress} onClick={() => { setPoFile(null); if (uploadRef.current) uploadRef.current.value = ''; }}>Remove file</button>}
             <details className="qm-review-paste"><summary>Paste LPO text instead</summary><label>Paste PO text<textarea rows="4" disabled={outcomeMutationInProgress} value={poText} onChange={(event) => setPoText(event.target.value)} placeholder="Paste the items, quantities and prices from the customer’s order…" /></label>{poFile && <small>The selected file will be read. Remove it to use the pasted text.</small>}</details>
-            <div className="qm-review-upload-actions"><label className="qm-checkbox"><input type="checkbox" disabled={outcomeMutationInProgress} checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />Use AI cleanup when available</label><button type="button" className="qm-primary" disabled={outcomeMutationInProgress || (!poText.trim() && !poFile)} onClick={parsePo}>{poLoading ? 'Reading LPO…' : 'Read LPO & review items'}</button></div>
+            <div className="qm-review-upload-actions"><label className="qm-checkbox"><input type="checkbox" disabled={outcomeMutationInProgress} checked={poUseAi} onChange={(event) => setPoUseAi(event.target.checked)} />Use AI cleanup when available</label><button type="button" className="qm-primary" disabled={outcomeMutationInProgress || (!poText.trim() && !poFile)} onClick={() => parsePo()}>{poLoading ? 'Reading LPO…' : 'Read LPO & review items'}</button></div>
           </div>
           <div className="qm-review-alternatives">
             <div><span className="qm-review-source-label">FROM YOUR INBOX</span><h4>Find an LPO in Gmail</h4><p>{activeEvidence.length ? `${activeEvidence.length} suggested email${activeEvidence.length === 1 ? '' : 's'} available for this quotation.` : 'Look for the customer’s order in the connected mailbox.'}</p><button type="button" className="qm-secondary" disabled={outcomeMutationInProgress} onClick={() => { if (gmailSourceRef.current) { gmailSourceRef.current.open = true; gmailSourceRef.current.scrollIntoView?.({ behavior: 'smooth', block: 'start' }); } }}>Choose an email ↓</button></div>
@@ -2275,7 +2339,12 @@ const QuotationOutcomeReview = ({ quoteId, onBack, onDeliveryNoteCreated }) => {
         <div className="qm-review-section-heading"><span className="qm-review-step-number">3</span><div><h3 id="qm-review-approval-title">Approve the customer’s final order</h3><p>These are the quantities the customer accepted. You can choose how much to dispatch in the delivery note.</p></div></div>
         <div className="qm-review-order-counts"><div><strong>{reviewCounts.accepted}</strong><span>Accepted items</span></div><div><strong>{reviewCounts.not_ordered}</strong><span>Not ordered / unavailable</span></div><div className={reviewCounts.review ? 'needs-review' : ''}><strong>{reviewCounts.review}</strong><span>Still to review</span></div></div>
         {(reviewCounts.review > 0 || unmatchedActiveLPORows.length > 0) && <p className="qm-review-approval-note">{reviewCounts.review > 0 && `${reviewCounts.review} quoted item(s) still need a decision. `}{unmatchedActiveLPORows.length > 0 && `${unmatchedActiveLPORows.length} LPO item(s) have not been matched. `}Preparing a DO includes only accepted items; the other items are not automatically accepted or rejected.</p>}
-        <div className="qm-review-approval-actions"><div><strong>{hasUnsavedLineChanges ? 'Your changes are ready to save' : 'Review before preparing delivery'}</strong><p>For an LPO reduced from 10 to 6, approve 6. Delivery is complete when those 6 are received.</p></div><div className="qm-action-row"><button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || !hasUnsavedLineChanges} onClick={saveLineDrafts}>{saving ? 'Saving…' : 'Save review'}</button>{onDeliveryNoteCreated && <button type="button" className="qm-primary" disabled={outcomeMutationInProgress || !reviewCounts.accepted} onClick={() => saveLineDrafts({ prepareDelivery: true })}>Approve & prepare DO</button>}</div></div>
+        <div className="qm-review-approval-actions"><div><strong>{hasUnsavedLineChanges ? 'Your changes are ready to save' : 'Review before preparing delivery'}</strong><p>For an LPO reduced from 10 to 6, approve 6. Delivery is complete when those 6 are received.</p></div><div className="qm-action-row"><button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || lpoDetailsDirty || (!hasUnsavedLineChanges && !reviewCounts.accepted)} onClick={() => saveLineDrafts()}>{saving ? 'Saving…' : 'Approve / save order'}</button>{onDeliveryNoteCreated && <button type="button" className="qm-primary" disabled={outcomeMutationInProgress || lpoDetailsDirty || !reviewCounts.accepted} onClick={() => saveLineDrafts({ prepareDelivery: true })}>Approve & prepare DO</button>}</div></div>
+        <div className="qm-order-document-actions">
+          <div><strong>Proforma invoice <span>Optional</span></strong><p>Request advance payment using the saved accepted items and prices. No email is sent.</p></div>
+          <button type="button" className="qm-secondary" disabled={outcomeMutationInProgress || hasUnsavedLineChanges || lpoDetailsDirty || !reviewCounts.accepted || (selectedLpoId && lpos.find((entry) => String(entry.id) === String(selectedLpoId))?.status !== 'confirmed')} onClick={downloadOrderProforma}>{documentBusy ? 'Preparing…' : 'Download proforma'}</button>
+        </div>
+        {(hasUnsavedLineChanges || lpoDetailsDirty) && <p className="qm-review-help">Save order and LPO changes before downloading documents or leaving this screen.</p>}
         {onDeliveryNoteCreated && !reviewCounts.accepted && <p className="qm-review-help">Accept at least one item with a quantity and price to prepare a DO. You can save the review without creating a delivery note.</p>}
       </section>
 

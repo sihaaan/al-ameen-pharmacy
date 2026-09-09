@@ -2570,106 +2570,19 @@ describe('QuotationEditor Product price context', () => {
     expect(within(screen.getByRole('dialog', { name: /price history/i })).getByText(/Gloves B/)).toBeInTheDocument();
   });
 
-  test('reviews and saves exact ordered line mappings when confirming a manual LPO', async () => {
-    const sentQuote = {
-      ...quote,
-      status: 'sent',
-      status_display: 'Sent',
-      lines: [{ ...quote.lines[0], match_status: 'confirmed' }],
-    };
-    const parsedLpo = {
-      id: 91,
-      lpo_number: 'LPO-MANUAL-77',
-      lpo_date: '2026-07-15',
-      notes: '',
-      status: 'parsed',
-      status_display: 'Parsed',
-      source_filename: 'LPO-MANUAL-77.pdf',
-      source_type_display: 'File',
-      parsed_row_count: 1,
-      received_at: '2026-07-15T08:00:00Z',
-      warnings: [],
-      parsed_meta: {
-        outcome_suggestions: [{ quotation_line_id: 31 }],
-      },
-    };
-    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: sentQuote });
-    quotationAPI.quotes.lpos.mockResolvedValueOnce({ data: [parsedLpo] });
-    quotationAPI.lpos.update.mockResolvedValueOnce({
-      data: {
-        ...parsedLpo,
-        status: 'confirmed',
-        status_display: 'Confirmed',
-        parsed_meta: {
-          ...parsedLpo.parsed_meta,
-          applied_outcome_line_ids: [31],
-        },
-      },
-    });
-
-    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-
-    const mappingPanel = (await screen.findByText('Ordered quotation lines')).closest('.qm-lpo-warning');
-    expect(within(mappingPanel).getByRole('checkbox')).toBeChecked();
-    const detailsCard = screen.getByText('Review detected details').closest('.qm-lpo-card');
-    fireEvent.change(within(detailsCard).getByLabelText('Status'), { target: { value: 'confirmed' } });
-    fireEvent.click(within(detailsCard).getByRole('button', { name: /save lpo details/i }));
-
-    await waitFor(() => expect(quotationAPI.lpos.update).toHaveBeenCalledWith(91, {
-      lpo_number: 'LPO-MANUAL-77',
-      lpo_date: '2026-07-15',
-      notes: '',
-      status: 'confirmed',
-      applied_outcome_line_ids: [31],
-    }));
-  });
-
-  test('keeps every attachment warning reviewable when an LPO has more than three', async () => {
-    const sentQuote = {
-      ...readyQuote,
-      status: 'sent',
-      status_display: 'Sent',
-    };
-    const warnings = [
-      'Workbook contains formula cells; verify quantities and prices.',
-      'Workbook contains hidden sheets, rows, or columns.',
-      'Workbook contains merged cells; verify extracted row alignment.',
-      "Stopped reading sheet 'Items' after 500 rows.",
-      "Stopped reading columns in sheet 'Items' after 100 columns.",
-      'Workbook has more than 10 visible sheets; later visible sheets were not parsed.',
-      'Workbook contains explicit date cells; verify item codes.',
-    ];
-    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: sentQuote });
-    quotationAPI.quotes.lpos.mockResolvedValueOnce({
-      data: [{
-        id: 92,
-        lpo_number: 'LPO-WARN-92',
-        lpo_date: '2026-07-31',
-        notes: '',
-        status: 'needs_review',
-        status_display: 'Needs review',
-        source_filename: 'warning-source.xlsx',
-        source_type_display: 'File',
-        parsed_row_count: 1,
-        received_at: '2026-07-31T08:00:00Z',
-        warnings,
-        parsed_meta: {},
-      }],
-    });
-
-    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-
-    const warningPanel = await screen.findByRole('alert', { name: 'LPO attachment warnings' });
-    expect(within(warningPanel).getByText(warnings[0])).toBeVisible();
-    expect(within(warningPanel).getByText(warnings[2])).toBeVisible();
-    // Material completeness warnings stay visible even when they occur after
-    // the original three-warning display limit.
-    expect(within(warningPanel).getByText(warnings[3])).toBeVisible();
-    expect(within(warningPanel).getByText(warnings[4])).toBeVisible();
-    expect(within(warningPanel).getByText(warnings[5])).toBeVisible();
-    const expansion = within(warningPanel).getByText('Show 1 more warning');
-    fireEvent.click(expansion);
-    expect(within(warningPanel).getByText(warnings[6])).toBeVisible();
+  test('keeps issued quote details compact and opens the shared order workflow', async () => {
+    const onReviewOutcome = jest.fn();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: { ...readyQuote, status: 'sent', latest_lpo: { id: 91, lpo_number: 'LPO-77' } } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} onReviewOutcome={onReviewOutcome} />);
+    const order = await screen.findByRole('region', { name: 'Customer order' });
+    expect(within(order).getByText(/LPO-77/)).toBeInTheDocument();
+    expect(screen.queryByText('LPO & Proforma Tax Invoice')).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.lpos).not.toHaveBeenCalled();
+    expect(document.querySelector('.qm-party-panel')).not.toHaveAttribute('open');
+    expect(document.querySelector('.qm-terms-panel')).not.toHaveAttribute('open');
+    expect(screen.getByRole('heading', { name: 'Quotation Lines' })).toBeVisible();
+    fireEvent.click(within(order).getByRole('button', { name: 'Manage order' }));
+    expect(onReviewOutcome).toHaveBeenCalledWith(21);
   });
 
   test('never overwrites a price typed while history is loading', async () => {
@@ -3146,8 +3059,8 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.getByText('Product catalogue and images: Loading')).toBeInTheDocument();
     expect(screen.getByText('Company directory: Loading')).toBeInTheDocument();
     expect(screen.getByText('Company contacts: Loading')).toBeInTheDocument();
-    expect(screen.getByText('Loading LPO records...')).toBeInTheDocument();
-    expect(screen.queryByText('No LPO recorded')).not.toBeInTheDocument();
+    expect(quotationAPI.quotes.lpos).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: 'Customer order' })).not.toBeInTheDocument();
     await waitFor(() => expect(document.activeElement).toBe(priceInput));
 
     await act(async () => companiesRequest.resolve({
@@ -3167,7 +3080,7 @@ describe('QuotationEditor Product price context', () => {
     await waitFor(() => expect(contactSelect).toBeEnabled());
 
     await act(async () => lposRequest.resolve({ data: [] }));
-    expect(await screen.findByText('No LPO recorded')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Customer order' })).not.toBeInTheDocument();
 
     await act(async () => {
       companyCatalogue.resolve({ data: [products[0]] });

@@ -4027,6 +4027,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             {
                 "quotation": serializer.data,
                 "summary": outcome_summary_for_quotation(quotation),
+                "lpos": QuotationLPOSerializer(quotation.lpos.order_by("-received_at", "-id"), many=True, context={"request": request}).data,
                 "po_evidence": QuotationPOEvidenceSerializer(evidence, many=True, context={"request": request}).data,
                 "po_evidence_pagination": evidence_pagination,
                 "line_outcome_statuses": [
@@ -4056,7 +4057,30 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             uploaded = request.FILES.get("file")
             raw_text = request.data.get("text") or request.data.get("raw_text") or ""
             raw_html = request.data.get("html") or request.data.get("raw_html") or ""
-            if uploaded:
+            existing_lpo = None
+            if request.data.get("lpo_id"):
+                try:
+                    selected_lpo_id = int(request.data["lpo_id"])
+                except (TypeError, ValueError) as exc:
+                    raise DjangoValidationError("Select a valid LPO.") from exc
+                existing_lpo = quotation.lpos.filter(pk=selected_lpo_id).first()
+                if not existing_lpo:
+                    raise DjangoValidationError("The selected LPO does not belong to this quotation.")
+                saved_import = quotation.outcome_po_imports.filter(
+                    parsed_meta__lpo_id=existing_lpo.pk
+                ).first()
+                if not saved_import and existing_lpo.gmail_evidence_id:
+                    saved_import = quotation.outcome_po_imports.filter(gmail_evidence_id=existing_lpo.gmail_evidence_id).first()
+                if saved_import:
+                    return Response(QuotationOutcomePOImportSerializer(saved_import, context={"request": request}).data)
+                preview = {
+                    "lines": existing_lpo.parsed_rows, "meta": existing_lpo.parsed_meta,
+                    "warnings": existing_lpo.warnings, "parse_method": existing_lpo.parse_method,
+                    "source_filename": existing_lpo.source_filename,
+                    "source_sha256": existing_lpo.source_sha256, "source_file_ref": existing_lpo.source_file_ref,
+                }
+                source_type = existing_lpo.source_type
+            elif uploaded:
                 filename = (uploaded.name or "").lower()
                 if filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
                     return Response(
@@ -4076,7 +4100,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             deterministic_preview = preview
             warnings = list(preview.get("warnings") or [])
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
-            if use_ai:
+            if use_ai and not existing_lpo:
                 try:
                     ai_preview = clean_preview_with_ai(
                         deterministic_preview,
@@ -4101,26 +4125,54 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             )
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
             preview["warnings"] = warnings
-            po_import = QuotationOutcomePOImport.objects.create(
-                quotation=quotation,
-                source_type=source_type,
-                source_filename=preview.get("source_filename", ""),
-                source_sha256=preview.get("source_sha256", ""),
-                source_file_ref=preview.get("source_file_ref", ""),
-                parse_method=preview.get("parse_method", ""),
-                parsed_rows=preview.get("lines") or [],
-                parsed_meta={
-                    key: value
-                    for key, value in (preview.get("meta") or {}).items()
-                    if key in ATTACHMENT_INSPECTION_META_KEYS
-                    and isinstance(value, dict)
-                },
-                suggestions=suggestions,
-                unmatched_po_rows=unmatched,
-                missing_quote_line_ids=missing_line_ids,
-                warnings=warnings,
-                created_by=request.user if request.user.is_authenticated else None,
-            )
+            with transaction.atomic():
+                locked_quote = Quotation.objects.select_for_update().get(pk=quotation.pk)
+                ensure_outcome_reviewable(locked_quote)
+                if existing_lpo:
+                    existing_lpo = QuotationLPO.objects.select_for_update().get(pk=existing_lpo.pk, quotation=locked_quote)
+                po_import = QuotationOutcomePOImport.objects.create(
+                    quotation=quotation,
+                    gmail_evidence=existing_lpo.gmail_evidence if existing_lpo else None,
+                    source_type=source_type,
+                    source_filename=preview.get("source_filename", ""),
+                    source_sha256=preview.get("source_sha256", ""),
+                    source_file_ref=preview.get("source_file_ref", ""),
+                    parse_method=preview.get("parse_method", ""),
+                    parsed_rows=preview.get("lines") or [],
+                    parsed_meta={
+                        key: value
+                        for key, value in (preview.get("meta") or {}).items()
+                        if key in ATTACHMENT_INSPECTION_META_KEYS
+                        and isinstance(value, dict)
+                    },
+                    suggestions=suggestions,
+                    unmatched_po_rows=unmatched,
+                    missing_quote_line_ids=missing_line_ids,
+                    warnings=warnings,
+                    created_by=request.user if request.user.is_authenticated else None,
+                )
+                details = _extract_lpo_details(preview)
+                lpo = existing_lpo or QuotationLPO.objects.create(
+                    quotation=quotation, source_type=source_type,
+                    source_filename=preview.get("source_filename", ""),
+                    source_sha256=preview.get("source_sha256", ""),
+                    source_file_ref=preview.get("source_file_ref", ""),
+                    source_file_size=int(getattr(uploaded, "size", 0) or 0),
+                    parse_method=preview.get("parse_method", ""),
+                    lpo_number=details["lpo_number"], lpo_date=details["lpo_date"],
+                    parsed_rows=preview.get("lines") or [], warnings=warnings,
+                    status=QuotationLPO.STATUS_NEEDS_REVIEW, received_by=request.user,
+                )
+                if lpo.status != QuotationLPO.STATUS_CONFIRMED:
+                    lpo.parsed_meta = {**(lpo.parsed_meta or {}), **details["parsed_meta"],
+                                       "outcome_import_id": po_import.id, "outcome_suggestions": suggestions}
+                    lpo.save(update_fields=["parsed_meta", "updated_at"])
+                po_import.parsed_meta = {**po_import.parsed_meta, "lpo_id": lpo.id}
+                po_import.save(update_fields=["parsed_meta", "updated_at"])
+                audit_log(request.user, QuotationAuditLog.ACTION_LPO_UPLOADED, lpo,
+                          message=f"Recorded LPO for order review on {quotation.quotation_number}.",
+                          changes={"lpo_id": lpo.id, "po_import_id": po_import.id})
+
         except DjangoValidationError as exc:
             return self.handle_workflow_error(exc)
         serializer = QuotationOutcomePOImportSerializer(po_import, context={"request": request})
@@ -4454,6 +4506,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def proforma_pdf(self, request, pk=None):
         quotation = self.get_object()
+        accepted_order = request.query_params.get("basis") == "accepted_order"
         if quotation.status not in {Quotation.STATUS_APPROVED, Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
             return Response(
                 {"detail": "Approve or finalize this quotation before downloading a Proforma Tax Invoice."},
@@ -4467,21 +4520,24 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                 lpo = lpos.get(pk=lpo_id)
             except (QuotationLPO.DoesNotExist, ValueError):
                 return Response({"detail": "Selected LPO was not found for this quotation."}, status=status.HTTP_404_NOT_FOUND)
-        else:
+        elif not accepted_order:
             lpo = lpos.first()
-        if not lpo:
+        if not lpo and not accepted_order:
             return Response(
                 {"detail": "Record the customer's LPO before downloading a Proforma Tax Invoice."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        pdf_bytes = build_proforma_invoice_pdf(quotation, lpo=lpo)
+        try:
+            pdf_bytes = build_proforma_invoice_pdf(quotation, lpo=lpo, accepted_order=accepted_order)
+        except DjangoValidationError as exc:
+            return self.handle_workflow_error(exc)
         audit_log(
             request.user,
             QuotationAuditLog.ACTION_PROFORMA_DOWNLOADED,
             quotation,
             message=f"Downloaded Proforma Tax Invoice for {quotation.quotation_number}.",
-            changes={"lpo_id": lpo.id, "lpo_number": lpo.lpo_number},
+            changes={"lpo_id": lpo.id if lpo else None, "lpo_number": lpo.lpo_number if lpo else "", "basis": "accepted_order" if accepted_order else "quotation"},
         )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{_proforma_download_filename(quotation)}"'
