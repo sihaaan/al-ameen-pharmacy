@@ -187,5 +187,10 @@ class AttachmentInspectionMetaRetentionTests(APITestCase):
         po_import = QuotationOutcomePOImport.objects.get(pk=response.data["id"])
         self.assertEqual(po_import.warnings, PARSER_WARNINGS)
         self.assertEqual(response.data["warnings"], PARSER_WARNINGS)
-        self.assertEqual(po_import.parsed_meta, INSPECTION_META)
-        self.assertEqual(response.data["parsed_meta"], INSPECTION_META)
+        lpo = QuotationLPO.objects.get(pk=response.data["canonical_lpo"]["id"])
+        expected_meta = {**INSPECTION_META, "lpo_id": lpo.pk}
+        self.assertEqual(po_import.parsed_meta, expected_meta)
+        self.assertEqual(response.data["parsed_meta"], expected_meta)
+        for key, value in INSPECTION_META.items():
+            self.assertEqual(lpo.parsed_meta[key], value)
+        self.assertEqual(lpo.warnings, po_import.warnings)

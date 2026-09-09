@@ -4167,7 +4167,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                     lpo.parsed_meta = {**(lpo.parsed_meta or {}), **details["parsed_meta"],
                                        "outcome_import_id": po_import.id, "outcome_suggestions": suggestions}
                     lpo.save(update_fields=["parsed_meta", "updated_at"])
-                po_import.parsed_meta = {**po_import.parsed_meta, **details["parsed_meta"], "lpo_id": lpo.id}
+                po_import.parsed_meta = {**po_import.parsed_meta, "lpo_id": lpo.id}
                 po_import.save(update_fields=["parsed_meta", "updated_at"])
                 audit_log(request.user, QuotationAuditLog.ACTION_LPO_UPLOADED, lpo,
                           message=f"Recorded LPO for order review on {quotation.quotation_number}.",
