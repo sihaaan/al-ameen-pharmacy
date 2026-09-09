@@ -298,7 +298,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
               initialShowEvidence={Boolean(gmailReturnQuoteId)}
             />
           ) : reviewingOutcomeQuoteId ? (
-            <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} onDeliveryNoteCreated={openPreparedDeliveryNote} />
+            <QuotationOutcomeReview quoteId={reviewingOutcomeQuoteId} onBack={closeQuote} onOpenQuote={openQuote} onDeliveryNoteCreated={openPreparedDeliveryNote} />
           ) : editingQuoteId ? (
             <QuotationEditor
               quoteId={editingQuoteId}

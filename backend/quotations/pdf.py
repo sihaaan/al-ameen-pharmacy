@@ -1,4 +1,5 @@
 import re
+from copy import copy
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from datetime import timedelta
@@ -10,6 +11,7 @@ from xml.sax.saxutils import escape
 
 import reportlab
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
@@ -565,7 +567,7 @@ def _quotation_line_column_widths(show_brand_column):
     return [10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm]
 
 
-def _build_quotation_line_table(quotation, styles, primary):
+def _build_quotation_line_table(quotation, styles, primary, lines=None):
     show_brand_column = bool(getattr(quotation, "show_brand_column", False))
     headers = ["#", "Item Description"]
     if show_brand_column:
@@ -573,7 +575,7 @@ def _build_quotation_line_table(quotation, styles, primary):
     headers.extend(["Qty", "Unit", "Unit Price", "VAT", "Total"])
     table_data = [[Paragraph(header, styles["TableHeader"]) for header in headers]]
 
-    lines = (
+    lines = lines if lines is not None else (
         quotation.lines.exclude(match_status=QuotationLine.MATCH_IGNORED)
         .select_related("product", "product_image")
         .order_by("sort_order", "id")
@@ -796,7 +798,53 @@ def _proforma_number(quotation):
     return f"PI-{number or quotation.pk}"
 
 
-def build_proforma_invoice_pdf(quotation, lpo=None):
+def accepted_order_document(quotation, lpo=None):
+    """Build an in-memory document from reviewed acceptance, never edit the quote."""
+    from .services import quotation_line_outcome_analytics
+
+    if quotation.status not in {"finalized", "sent"}:
+        raise ValidationError("Finalize the quotation and approve the ordered items before preparing a proforma.")
+    all_lines = list(quotation.lines.select_related("product", "product_image").order_by("sort_order", "id"))
+    mapped_ids = None
+    if lpo:
+        if lpo.quotation_id != quotation.pk or lpo.status != "confirmed":
+            raise ValidationError("Approve the selected LPO's ordered items before preparing its proforma.")
+        mapped_ids = set((lpo.parsed_meta or {}).get("applied_outcome_line_ids") or [])
+        if not mapped_ids:
+            raise ValidationError("Review and save the items covered by this LPO before preparing its proforma.")
+    analytics = quotation_line_outcome_analytics(quotation, all_lines)
+    lines = []
+    discount = Decimal("0.00")
+    for original in all_lines:
+        if original.match_status == QuotationLine.MATCH_IGNORED or original.outcome_status not in {"accepted", "quantity_changed"}:
+            continue
+        if mapped_ids is not None and original.pk not in mapped_ids:
+            continue
+        if original.accepted_quantity is None or original.accepted_quantity <= 0 or original.accepted_unit_price is None or original.accepted_unit_price < 0:
+            raise ValidationError("Save a valid accepted quantity and price for every ordered item.")
+        line = copy(original)
+        line.quantity = original.accepted_quantity
+        line.unit_price = original.accepted_unit_price
+        subtotal = line.quantity * line.unit_price
+        line.line_subtotal = subtotal.quantize(Decimal("0.01"))
+        line.vat_amount = (subtotal * line.vat_rate / 100).quantize(Decimal("0.01"))
+        line.line_total = line.line_subtotal + line.vat_amount
+        discount += original.accepted_total - analytics[original.pk]["accepted_value"]
+        lines.append(line)
+    if not lines:
+        raise ValidationError("Approve at least one ordered item before preparing a proforma.")
+    document = copy(quotation)
+    document.subtotal = sum((line.line_subtotal for line in lines), Decimal("0.00"))
+    document.vat_total = sum((line.vat_amount for line in lines), Decimal("0.00"))
+    document.discount_amount = discount
+    document.total = document.subtotal + document.vat_total - discount
+    return document, lines
+
+
+def build_proforma_invoice_pdf(quotation, lpo=None, *, accepted_order=False):
+    order_lines = None
+    if accepted_order:
+        quotation, order_lines = accepted_order_document(quotation, lpo)
     config = get_quotation_pdf_config(quotation=quotation)
     primary = colors.HexColor(config.primary_color or "#0F766E")
     accent = colors.HexColor(config.accent_color or "#ECFDF5")
@@ -885,7 +933,7 @@ def build_proforma_invoice_pdf(quotation, lpo=None):
     elements.append(meta_table)
     elements.append(Spacer(1, 8))
 
-    line_table, _lines = _build_quotation_line_table(quotation, styles, primary)
+    line_table, _lines = _build_quotation_line_table(quotation, styles, primary, lines=order_lines)
     elements.append(line_table)
 
     totals_table = Table(

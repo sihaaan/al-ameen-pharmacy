@@ -7,6 +7,8 @@ jest.mock('../../api/quotations', () => ({
   default: {
     quotes: {
       outcome: jest.fn(),
+      lpos: jest.fn(),
+      proformaPdf: jest.fn(),
       poEvidence: jest.fn(),
       poEvidenceSource: jest.fn(),
       poEvidenceAttachment: jest.fn(),
@@ -16,6 +18,7 @@ jest.mock('../../api/quotations', () => ({
       updateOutcome: jest.fn(),
       parseOutcomePO: jest.fn(),
     },
+    lpos: { update: jest.fn() },
     deliveryOrders: { retrieve: jest.fn() },
     deliveryNotes: { create: jest.fn() },
   },
@@ -77,6 +80,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     describeQuotationError.mockImplementation(async (error, action, endpoint) => ({
       action, endpoint, status: error?.response?.status || 'Network error', detail: error?.message || 'Request failed',
     }));
+    quotationAPI.quotes.lpos.mockResolvedValue({ data: [] });
     quotationAPI.quotes.outcome.mockResolvedValue({ data: outcomePayload });
     quotationAPI.quotes.poEvidence.mockResolvedValue({ data: { results: [{ ...evidence, status: 'parsed' }] } });
     quotationAPI.quotes.poEvidenceSource.mockImplementation(() => new Promise(() => {}));
@@ -95,6 +99,31 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     });
   });
 
+  test('uses the saved accepted order for proforma and blocks stale downloads while editing', async () => {
+    const lpo = { id: 91, lpo_number: 'LPO-123', status: 'confirmed', warnings: [], notes: '' };
+    const line = { id: 501, item_name_snapshot: 'Wheelchair', quantity: '10', unit: 'nos', unit_price: '100', match_status: 'confirmed', outcome_status: 'quantity_changed', accepted_quantity: '6', accepted_unit_price: '90' };
+    const data = { ...outcomePayload, quotation: { ...outcomePayload.quotation, lines: [line] }, lpos: [lpo] };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({ data });
+    quotationAPI.quotes.updateOutcome.mockResolvedValueOnce({ data: { ...data, quotation: { ...data.quotation, lines: [{ ...line, accepted_quantity: '5' }] } } });
+    quotationAPI.quotes.proformaPdf.mockResolvedValueOnce({ data: new Blob(['pdf']) });
+    window.URL.createObjectURL = jest.fn(() => 'blob:order-proforma');
+    window.URL.revokeObjectURL = jest.fn();
+    const click = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
+    const quantity = await screen.findByRole('spinbutton', { name: /accepted quantity for wheelchair/i });
+    const download = screen.getByRole('button', { name: 'Download proforma' });
+    expect(download).toBeEnabled();
+    fireEvent.change(quantity, { target: { value: '5' } });
+    expect(download).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /^approve \/ save order$/i }));
+    await waitFor(() => expect(download).toBeEnabled());
+    expect(quotationAPI.quotes.updateOutcome.mock.calls[0][1]).toEqual(expect.objectContaining({ lpo_id: 91, line_updates: [expect.objectContaining({ id: 501, accepted_quantity: '5', accepted_unit_price: '90' })] }));
+    fireEvent.click(download);
+    await waitFor(() => expect(quotationAPI.quotes.proformaPdf).toHaveBeenCalledWith(21, { basis: 'accepted_order', lpo: 91 }));
+    expect(quotationAPI.quotes.parseOutcomePO).not.toHaveBeenCalled();
+    click.mockRestore();
+  });
+
   test('only advertises PO file types accepted by the server', async () => {
     render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} />);
 
@@ -103,6 +132,22 @@ describe('QuotationOutcomeReview Gmail approval', () => {
       'accept',
       '.xlsx,.xls,.xlsb,.pdf',
     );
+  });
+
+  test('prepares a delivery for only the selected LPO without reassigning other accepted items', async () => {
+    const lpo = { id: 91, lpo_number: 'LPO-123', status: 'confirmed', warnings: [], parsed_meta: { applied_outcome_line_ids: [501] } };
+    const line = { id: 501, item_name_snapshot: 'Wheelchair', quantity: '10', unit: 'nos', unit_price: '100', match_status: 'confirmed', outcome_status: 'quantity_changed', accepted_quantity: '6', accepted_unit_price: '90' };
+    const data = { ...outcomePayload, quotation: { ...outcomePayload.quotation, lines: [line, { ...line, id: 502, item_name_snapshot: 'Different LPO item' }] }, lpos: [lpo] };
+    quotationAPI.quotes.outcome.mockResolvedValueOnce({ data });
+    quotationAPI.quotes.updateOutcome.mockResolvedValueOnce({ data });
+    quotationAPI.deliveryOrders.retrieve.mockResolvedValueOnce({ data: { lines: [{ id: 501, available_quantity: '6' }, { id: 502, available_quantity: '6' }] } });
+    quotationAPI.deliveryNotes.create.mockResolvedValueOnce({ data: { id: 81 } });
+    const onDeliveryNoteCreated = jest.fn();
+    render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} onDeliveryNoteCreated={onDeliveryNoteCreated} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve & prepare DO' }));
+    await waitFor(() => expect(onDeliveryNoteCreated).toHaveBeenCalledWith({ id: 81 }));
+    expect(quotationAPI.quotes.updateOutcome.mock.calls[0][1]).not.toHaveProperty('lpo_id');
+    expect(quotationAPI.deliveryNotes.create).toHaveBeenCalledWith({ quotation: 21, lines: [{ quotation_line: 501, quantity: '6' }], lpo_number: 'LPO-123' });
   });
 
   test('manual review keeps edited quantities and notes when searching, filtering and moving to approval', async () => {
@@ -116,7 +161,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     quotationAPI.quotes.outcome.mockResolvedValueOnce({ data: reviewPayload });
     quotationAPI.quotes.updateOutcome.mockResolvedValueOnce({ data: reviewPayload });
     render(<QuotationOutcomeReview quoteId={21} onBack={jest.fn()} onDeliveryNoteCreated={jest.fn()} />);
-    await screen.findByRole('heading', { name: 'Review customer order' });
+    await screen.findByRole('heading', { name: 'Manage order' });
     fireEvent.click(screen.getByRole('button', { name: /enter order manually/i }));
     const decision = screen.getByLabelText('Outcome for Examination gloves · powder free');
     fireEvent.change(decision, { target: { value: 'accepted' } });
@@ -132,7 +177,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(screen.queryByLabelText('Outcome for Digital thermometer')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /continue to approval/i }));
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /^save review$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^approve \/ save order$/i }));
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, expect.objectContaining({ line_updates: [expect.objectContaining({
       id: 501, accepted_quantity: '6', accepted_unit_price: '28.50', outcome_notes: 'Customer confirmed six boxes.',
     })] })));
@@ -281,7 +326,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'Call purchasing tomorrow.' } });
     fireEvent.change(screen.getByRole('combobox', { name: /override status/i }), { target: { value: 'lost' } });
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole('button', { name: /^save review$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^approve \/ save order$/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
@@ -293,6 +338,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
         outcome_notes: 'LPO review: Exact item and quantity match',
       }],
       po_import_id: 77,
+      lpo_id: 9,
       applied_po_line_ids: [501],
     }));
     expect(screen.getByLabelText('Notes')).toHaveValue('Call purchasing tomorrow.');
@@ -347,7 +393,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     await waitFor(() => expect(quotationAPI.quotes.parseOutcomePO).toHaveBeenCalled());
 
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(10);
-    const saveStaged = screen.getByRole('button', { name: /^save review$/i });
+    const saveStaged = screen.getByRole('button', { name: /^approve \/ save order$/i });
     await waitFor(() => expect(saveStaged).toBeEnabled());
     fireEvent.click(saveStaged);
 
@@ -471,7 +517,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.click(immutableButton);
 
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(10);
-    expect(screen.getByRole('button', { name: /^save review$/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^approve \/ save order$/i })).toBeEnabled();
     expect(screen.getByRole('region', { name: /customer a - lpo for q-0021/i })).toBeInTheDocument();
     expect(quotationAPI.quotes.markPOEvidenceNotRelevant).not.toHaveBeenCalled();
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
@@ -589,7 +635,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     fireEvent.click(await screen.findByRole('button', { name: /populate line outcomes from this lpo/i }));
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(8.75);
 
-    fireEvent.click(screen.getByRole('button', { name: /^save review$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^approve \/ save order$/i }));
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
         id: 501,
@@ -937,7 +983,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(screen.getAllByText('PO-7781').length).toBeGreaterThanOrEqual(1);
 
     fireEvent.click(omittedCheckbox);
-    fireEvent.click(screen.getByRole('button', { name: /^save review$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^approve \/ save order$/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledWith(21, {
       line_updates: [{
@@ -960,7 +1006,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     }));
     expect(await screen.findByText(/selected lpo decisions and line outcomes saved/i)).toBeInTheDocument();
     await waitFor(() => expect(
-      screen.getByRole('button', { name: /^save review$/i })
+      screen.getByRole('button', { name: /^approve \/ save order$/i })
     ).toBeDisabled());
   });
 
@@ -1009,7 +1055,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect((await within(bandageRow).findAllByText('Accepted - price not stated')).length).toBeGreaterThanOrEqual(1);
     expect(within(bandageRow).queryByRole('checkbox', { name: /use these lpo values/i })).not.toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: /accepted unit price for bandage pack/i })).toHaveValue(null);
-    expect(screen.getByRole('button', { name: /^save review$/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^approve \/ save order$/i })).toBeDisabled();
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
   });
 
@@ -1060,7 +1106,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
     expect(screen.getByRole('button', { name: /mark accepted/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /mark accepted/i })).toHaveAttribute('aria-describedby', 'qm-unsaved-line-changes');
     expect(screen.getByRole('button', { name: /mark rejected/i })).toBeDisabled();
-    expect(screen.getAllByRole('button', { name: /^save review$/i }).every((button) => !button.disabled)).toBe(true);
+    expect(screen.getAllByRole('button', { name: /^approve \/ save order$/i }).every((button) => !button.disabled)).toBe(true);
     expect(quotationAPI.quotes.updateOutcome).not.toHaveBeenCalled();
   });
 
@@ -1133,7 +1179,7 @@ describe('QuotationOutcomeReview Gmail approval', () => {
 
     const acceptedQuantity = await screen.findByRole('spinbutton', { name: /accepted quantity for bandage pack/i });
     fireEvent.change(acceptedQuantity, { target: { value: '1' } });
-    fireEvent.click(screen.getAllByRole('button', { name: /^save review$/i })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /^approve \/ save order$/i })[0]);
 
     await waitFor(() => expect(quotationAPI.quotes.updateOutcome).toHaveBeenCalledTimes(1));
     expect(acceptedQuantity).toBeDisabled();

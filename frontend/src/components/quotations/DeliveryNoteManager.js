@@ -245,7 +245,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       </tbody></table></div>
       {order.delivery_status === 'needs_review' && <p>Record the accepted line quantities in the quotation outcome before creating a delivery note.</p>}
       <div className="dn-actions">
-        {onReviewOutcome && <button onClick={() => onReviewOutcome(order.id)}>Review acceptance / LPO</button>}
+        {onReviewOutcome && <button onClick={() => onReviewOutcome(order.id)}>Manage order</button>}
         <button className="qm-primary" disabled={busy || order.delivery_status === 'cancelled' || !order.lines.some((line) => Number(line.available_quantity) > 0)} onClick={createFromOrder}>Create delivery note for remaining items</button>
         <button onClick={() => setOrder(null)}>Close order</button>
       </div>

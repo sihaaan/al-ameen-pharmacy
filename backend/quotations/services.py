@@ -29,6 +29,7 @@ from .models import (
     QuotationAuditLog,
     QuotationEmailDelivery,
     QuotationLine,
+    QuotationLPO,
     QuotationOutcomePOImport,
 )
 
@@ -601,6 +602,36 @@ def update_quotation_outcome(quotation, data, actor):
         lines_by_id=lines_by_id,
         touched_line_ids=touched,
     )
+
+    # One selected LPO supplies both order acceptance and its documents.
+    if data.get("lpo_id"):
+        try:
+            lpo_id = int(data["lpo_id"])
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("Select a valid LPO.") from exc
+        lpo = QuotationLPO.objects.select_for_update().filter(pk=lpo_id, quotation=quotation).first()
+        if not lpo:
+            raise ValidationError("The selected LPO does not belong to this quotation.")
+        if applied_po_import_id:
+            source_import = QuotationOutcomePOImport.objects.get(pk=applied_po_import_id)
+            if source_import.gmail_evidence_id:
+                source_matches = lpo.gmail_evidence_id == source_import.gmail_evidence_id
+            else:
+                source_matches = (source_import.parsed_meta or {}).get("lpo_id") == lpo.pk
+            if not source_matches:
+                raise ValidationError("The selected LPO does not match the reviewed source. Reload its items before saving.")
+        accepted_ids = {line_id for line_id in touched if lines_by_id[line_id].outcome_status in {
+            QuotationLine.OUTCOME_ACCEPTED, QuotationLine.OUTCOME_QUANTITY_CHANGED
+        } and (lines_by_id[line_id].accepted_quantity or 0) > 0}
+        previous_ids = set((lpo.parsed_meta or {}).get("applied_outcome_line_ids") or [])
+        mapped_ids = (previous_ids - set(touched)) | accepted_ids
+        lpo.parsed_meta = {**(lpo.parsed_meta or {}), "applied_outcome_line_ids": sorted(mapped_ids)}
+        if mapped_ids:
+            lpo.status = QuotationLPO.STATUS_CONFIRMED
+        lpo.save(update_fields=["parsed_meta", "status", "updated_at"])
+        audit_log(actor, QuotationAuditLog.ACTION_UPDATED, lpo,
+                  message="Saved reviewed order items against the selected LPO.",
+                  changes={"applied_outcome_line_ids": {"before": sorted(previous_ids), "after": sorted(mapped_ids)}})
 
     followup_changed = False
     for field in ["follow_up_status", "follow_up_notes", "follow_up_contact_method", "next_follow_up_date"]:

@@ -29,7 +29,6 @@ const supportingDatasetLabels = {
   companyItems: 'Customer Product history',
   companies: 'Company directory',
   contacts: 'Company contacts',
-  lpos: 'LPO records',
   priceHistory: 'Price history',
 };
 const statusSteps = [
@@ -317,83 +316,7 @@ const quotationDownloadFilename = (quote, extension) => {
   return `${companyPart ? `${companyPart}-` : ''}${quotePart}.${extension}`;
 };
 
-const proformaDownloadFilename = (quote) => {
-  const companyPart = safeDownloadNamePart(quote?.company_name);
-  const quotePart = safeDownloadNamePart(quote?.quotation_number) || 'QUOTATION';
-  return `${companyPart ? `${companyPart}-` : ''}PROFORMA-${quotePart}.pdf`;
-};
-
-const lpoDraftFromRecord = (lpo = null) => {
-  const parsedMeta = lpo?.parsed_meta || {};
-  const hasAppliedMapping = Object.prototype.hasOwnProperty.call(parsedMeta, 'applied_outcome_line_ids');
-  const suggestedIds = (parsedMeta.outcome_suggestions || [])
-    .map((suggestion) => Number(suggestion?.quotation_line_id))
-    .filter(Number.isInteger);
-  const appliedIds = (parsedMeta.applied_outcome_line_ids || [])
-    .map(Number)
-    .filter(Number.isInteger);
-  return {
-    lpo_number: lpo?.lpo_number || '',
-    lpo_date: lpo?.lpo_date || '',
-    notes: lpo?.notes || '',
-    status: lpo?.status || 'parsed',
-    applied_outcome_line_ids: hasAppliedMapping ? appliedIds : suggestedIds,
-  };
-};
-
 const transientLoadStatuses = new Set([408, 500, 502, 503, 504]);
-
-const MATERIAL_LPO_WARNING_PATTERNS = [
-  /stopp(?:ed|ing)?\s+reading/i,
-  /truncat/i,
-  /\blimit(?:ed|s)?\b/i,
-  /\bfallback\b/i,
-  /\bpartial(?:ly)?\b/i,
-  /no cached result/i,
-  /\bnot (?:parsed|imported|refreshed)\b/i,
-  /\bcould not\b/i,
-  /cannot be fully inspected/i,
-  /may appear blank|missing values/i,
-  /not used for row extraction/i,
-  /active[- ]content|embedded|macro|vba|external links?|highly compressed/i,
-];
-
-const isMaterialLpoWarning = (warning) => MATERIAL_LPO_WARNING_PATTERNS.some(
-  (pattern) => pattern.test(String(warning)),
-);
-
-const LpoWarningReview = ({ warnings = [] }) => {
-  const reviewWarnings = Array.isArray(warnings)
-    ? warnings.filter((warning) => String(warning || '').trim())
-    : [];
-  if (!reviewWarnings.length) return null;
-  const alwaysVisibleIndexes = new Set(
-    reviewWarnings.reduce((indexes, warning, index) => {
-      if (index < 3 || isMaterialLpoWarning(warning)) indexes.push(index);
-      return indexes;
-    }, []),
-  );
-  const alwaysVisible = reviewWarnings.filter((warning, index) => alwaysVisibleIndexes.has(index));
-  const remaining = reviewWarnings.filter((warning, index) => !alwaysVisibleIndexes.has(index));
-  return (
-    <div className="qm-lpo-warning" role="alert" aria-label="LPO attachment warnings">
-      <strong>Review attachment warnings</strong>
-      {alwaysVisible.map((warning, index) => (
-        <p key={`lpo-warning-${index}`}>{warning}</p>
-      ))}
-      {remaining.length > 0 && (
-        <details>
-          <summary>
-            Show {remaining.length} more {remaining.length === 1 ? 'warning' : 'warnings'}
-          </summary>
-          {remaining.map((warning, index) => (
-            <p key={`lpo-warning-more-${index}`}>{warning}</p>
-          ))}
-        </details>
-      )}
-    </div>
-  );
-};
 
 export const shouldRetryQuotationGet = (error) => {
   if (error?.code === 'ERR_CANCELED') return false;
@@ -443,7 +366,6 @@ const QuotationEditor = ({
   const [actionInFlight, setActionInFlight] = useState('');
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [excelDownloadLoading, setExcelDownloadLoading] = useState(false);
-  const [proformaDownloadLoading, setProformaDownloadLoading] = useState(false);
   const [lineFeedback, setLineFeedback] = useState(null);
   const [linePriceHints, setLinePriceHints] = useState({});
   const [priceContexts, setPriceContexts] = useState({});
@@ -460,14 +382,6 @@ const QuotationEditor = ({
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
   const [contactSaving, setContactSaving] = useState(false);
-  const [lpos, setLpos] = useState([]);
-  const [lpoDraft, setLpoDraft] = useState(lpoDraftFromRecord());
-  const [lpoFile, setLpoFile] = useState(null);
-  const [lpoText, setLpoText] = useState('');
-  const [lpoUseAi, setLpoUseAi] = useState(true);
-  const [lpoUploading, setLpoUploading] = useState(false);
-  const [lpoSaving, setLpoSaving] = useState(false);
-  const [lpoFeedback, setLpoFeedback] = useState(null);
   const [emailPreviewOpen, setEmailPreviewOpen] = useState(false);
   const [emailPreviewLoading, setEmailPreviewLoading] = useState(false);
   const [emailPreview, setEmailPreview] = useState(null);
@@ -606,11 +520,7 @@ const QuotationEditor = ({
     setSelectedLineIds((current) => current.filter((id) => (quoteData.lines || []).some((line) => line.id === id)));
   }, []);
 
-  const syncLpos = useCallback((records) => {
-    const nextRecords = records || [];
-    setLpos(nextRecords);
-    setLpoDraft(lpoDraftFromRecord(nextRecords[0] || null));
-  }, []);
+
 
   const load = useCallback(async ({
     refreshQuote = true,
@@ -808,7 +718,6 @@ const QuotationEditor = ({
         if (refreshQuote) {
           setCompanyItems([]);
           setContacts([]);
-          syncLpos([]);
         }
         const referenceRequests = [
           {
@@ -850,13 +759,7 @@ const QuotationEditor = ({
               }
             },
           },
-          {
-            key: 'lpos',
-            action: 'Load quotation LPO records',
-            endpoint: `GET /quotations/quotes/${quoteId}/lpos/`,
-            request: () => quotationAPI.quotes.lpos(quoteId),
-            apply: (response) => syncLpos(response.data || []),
-          },
+
         ];
         const selectedReferenceRequests = requestedReferenceKeys
           ? referenceRequests.filter((request) => requestedReferenceKeys.has(request.key))
@@ -950,7 +853,7 @@ const QuotationEditor = ({
         else setReferenceRetrying(false);
       }
     }
-  }, [quoteId, setLoadedQuote, syncLpos]);
+  }, [quoteId, setLoadedQuote]);
 
   useEffect(() => {
     const mountedPriceInputs = priceInputRefs.current;
@@ -1017,7 +920,6 @@ const QuotationEditor = ({
   const productCatalogueLoading = progressiveLoadEnabled && datasetStatus('items') === 'loading';
   const companyDirectoryLoading = progressiveLoadEnabled && datasetStatus('companies') === 'loading';
   const companyContactsLoading = progressiveLoadEnabled && datasetStatus('contacts') === 'loading';
-  const lpoRecordsLoading = progressiveLoadEnabled && datasetStatus('lpos') === 'loading';
   const priceHistoryLoading = progressiveLoadEnabled && datasetStatus('priceHistory') === 'loading';
   const currentCompanyFallback = quote?.company ? {
     id: quote.company,
@@ -1051,7 +953,6 @@ const QuotationEditor = ({
   const partyDataUnavailable = companyDirectoryUnavailable
     || companyContactsUnavailable
     || (progressiveLoadEnabled && (companyDirectoryLoading || companyContactsLoading || loadingContacts));
-  const lpoRecordsUnavailable = referenceFailureKeys.has('lpos');
   const productCatalogueBlocked = productCatalogueUnavailable || productCatalogueLoading;
   const companyDirectoryBlocked = companyDirectoryUnavailable || companyDirectoryLoading;
   const companyContactsBlocked = companyContactsUnavailable
@@ -2914,99 +2815,6 @@ const QuotationEditor = ({
     }
   };
 
-  const uploadLpo = async () => {
-    if (lpoUploading || actionInFlight) return;
-    if (!lpoFile && !lpoText.trim()) {
-      setLpoFeedback({ type: 'warning', message: 'Upload an LPO file or paste LPO text first.' });
-      return;
-    }
-    setLpoUploading(true);
-    setLpoFeedback(null);
-    setErrorInfo(null);
-    try {
-      let response;
-      if (lpoFile) {
-        const formData = new FormData();
-        formData.append('file', lpoFile);
-        formData.append('use_ai', lpoUseAi ? 'true' : 'false');
-        response = await quotationAPI.quotes.uploadLpo(quote.id, formData, true);
-      } else {
-        response = await quotationAPI.quotes.uploadLpo(quote.id, {
-          text: lpoText,
-          use_ai: lpoUseAi,
-        });
-      }
-      const nextLpo = response.data.lpo;
-      const existing = lpos.filter((item) => item.id !== nextLpo.id);
-      syncLpos([nextLpo, ...existing]);
-      setLpoFile(null);
-      setLpoText('');
-      setLpoFeedback({
-        type: 'success',
-        message: response.data.message || 'LPO recorded. Review details and download the Proforma Tax Invoice.',
-      });
-    } catch (error) {
-      const details = await describeQuotationError(error, 'Upload LPO', `POST /quotations/quotes/${quote.id}/upload_lpo/`);
-      setErrorInfo(details);
-      setLpoFeedback({ type: 'error', message: details.detail || 'LPO upload failed.' });
-      console.error(formatQuotationError(details), error);
-    } finally {
-      setLpoUploading(false);
-    }
-  };
-
-  const saveLpoDetails = async () => {
-    const currentLpo = lpos[0];
-    if (!currentLpo || lpoSaving) return;
-    setLpoSaving(true);
-    setLpoFeedback(null);
-    setErrorInfo(null);
-    try {
-      const response = await quotationAPI.lpos.update(currentLpo.id, {
-        lpo_number: lpoDraft.lpo_number,
-        lpo_date: lpoDraft.lpo_date || null,
-        notes: lpoDraft.notes,
-        status: lpoDraft.status || currentLpo.status,
-        applied_outcome_line_ids: lpoDraft.applied_outcome_line_ids || [],
-      });
-      syncLpos([response.data, ...lpos.filter((item) => item.id !== response.data.id)]);
-      setLpoFeedback({ type: 'success', message: 'LPO details saved.' });
-    } catch (error) {
-      const details = await describeQuotationError(error, 'Save LPO details', `PATCH /quotations/lpos/${currentLpo.id}/`);
-      setErrorInfo(details);
-      setLpoFeedback({ type: 'error', message: details.detail || 'Could not save LPO details.' });
-      console.error(formatQuotationError(details), error);
-    } finally {
-      setLpoSaving(false);
-    }
-  };
-
-  const downloadProforma = async () => {
-    const currentLpo = lpos[0];
-    if (!currentLpo || proformaDownloadLoading || actionInFlight) return;
-    setProformaDownloadLoading(true);
-    setErrorInfo(null);
-    try {
-      const response = await quotationAPI.quotes.proformaPdf(quote.id, { lpo: currentLpo.id });
-      const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', proformaDownloadFilename(quote));
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-      setLpoFeedback({ type: 'success', message: 'Proforma Tax Invoice downloaded.' });
-    } catch (error) {
-      const details = await describeQuotationError(error, 'Download Proforma Tax Invoice', `GET /quotations/quotes/${quote.id}/proforma_pdf/`);
-      setErrorInfo(details);
-      setLpoFeedback({ type: 'error', message: details.detail || 'Could not download Proforma Tax Invoice.' });
-      console.error(formatQuotationError(details), error);
-    } finally {
-      setProformaDownloadLoading(false);
-    }
-  };
-
   if (loading) return <div className="qm-loading">Loading quotation...</div>;
   if (!quote) {
     return (
@@ -3022,13 +2830,10 @@ const QuotationEditor = ({
     );
   }
 
-  const latestLpo = lpos[0] || null;
-  const lpoWorkflowEligible = ['approved', 'finalized', 'sent'].includes(quote.status);
-  const canUseLpoWorkflow = (
-    lpoWorkflowEligible
-    && !lpoRecordsUnavailable
-    && !lpoRecordsLoading
-  );
+  const canManageOrder = ['finalized', 'sent'].includes(quote.status);
+  const selectedCompanyName = companiesForQuotePicker.find((company) => String(company.id) === String(quotePartyDraft.company))?.name || quote.company_name || 'Choose a customer';
+  const selectedContactName = contactsForQuoteCompany.find((contact) => String(contact.id) === String(quotePartyDraft.contact))?.name || (quotePartyDraft.contact ? quote.contact_name : '') || 'No contact selected';
+  const paymentTermsLabel = paymentTermOptions.find((option) => option.value === quoteTermsDraft.payment_terms)?.label || 'As per agreement';
   const visibleSupportingDatasetStates = progressiveLoadEnabled
     ? Object.entries(supportingDatasetLabels)
       .map(([key, label]) => ({ key, label, ...(supportingDatasetStates[key] || {}) }))
@@ -3172,7 +2977,7 @@ const QuotationEditor = ({
             {downloadLoading ? 'Preparing PDF...' : quote.status === 'draft' ? 'Download Draft PDF' : ['finalized', 'sent'].includes(quote.status) ? 'Download Final PDF' : 'Download PDF'}
           </button>
 
-            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Review Outcome</button>
+            <button type="button" className="qm-primary" disabled={saving || Boolean(actionInFlight)} onClick={() => onReviewOutcome && onReviewOutcome(quote.id)}>Manage order</button>
           </>}
           <QuotationMoreActions>
         {isEditable && chainedActionsEnabled && (
@@ -3254,7 +3059,7 @@ const QuotationEditor = ({
         </section>
       )}
 
-      <div className="qm-status-progress" aria-label="Quotation status progress">
+      {isEditable && <div className="qm-status-progress" aria-label="Quotation status progress">
         {statusSteps.map((step, index) => {
           const currentIndex = statusSteps.findIndex((candidate) => candidate.id === quote.status);
           const isComplete = currentIndex >= index && currentIndex !== -1;
@@ -3266,12 +3071,12 @@ const QuotationEditor = ({
             </div>
           );
         })}
-      </div>
+      </div>}
 
       {!isEditable && (
-        <div className="qm-notice">This quotation is locked. Create a revision to make changes.</div>
+        <p className="qm-locked-note">This quotation is locked. Create a revision to make changes.</p>
       )}
-      <div className="qm-helper">PDF and Excel use the latest saved customer, terms, layout, final discount, and line data. Save any changes before downloading or finalizing.</div>
+      {isEditable && <p className="qm-locked-note">Save customer, terms and line changes before downloading or finalizing.</p>}
       {priceContextError && (
         <div className="qm-feedback warning" role="status">
           <div>
@@ -3284,122 +3089,18 @@ const QuotationEditor = ({
           <button type="button" className="qm-secondary small" onClick={() => setPriceContextError(null)}>Dismiss</button>
         </div>
       )}
-      {progressiveLoadEnabled && lpoWorkflowEligible && lpoRecordsLoading && (
-        <div className="qm-panel qm-lpo-workflow qm-supporting-panel-loading" role="status">
-          <strong>Loading LPO records...</strong>
-          <p>The quotation and pricing controls are ready while purchase-order history loads.</p>
-        </div>
+      {canManageOrder && (
+        <section className="qm-order-summary" aria-label="Customer order">
+          <div><strong>Customer order</strong><span>{quote.latest_lpo ? `LPO ${quote.latest_lpo.lpo_number || 'recorded'}` : 'No LPO recorded'} · {String(quote.outcome_status || 'pending').replaceAll('_', ' ')}</span></div>
+          <p>Review the LPO, prepare a proforma or arrange delivery.</p>
+          <button type="button" className="qm-secondary small" disabled={saving || Boolean(actionInFlight) || hasUnsavedCustomerDocument} onClick={() => onReviewOutcome?.(quote.id)}>Manage order</button>
+        </section>
       )}
-      {canUseLpoWorkflow && (
-        <div className="qm-panel qm-lpo-workflow">
-          <div className="qm-panel-heading">
-            <div>
-              <h3>LPO & Proforma Tax Invoice</h3>
-              <p>Record the customer LPO, verify the detected details, then download a Proforma Tax Invoice for advance-payment processing.</p>
-            </div>
-            <div className="qm-lpo-status-pill">{latestLpo ? `LPO ${latestLpo.status_display || latestLpo.status}` : 'No LPO recorded'}</div>
-          </div>
-          {lpoFeedback && <div className={`qm-feedback ${lpoFeedback.type}`}>{lpoFeedback.message}</div>}
-          <div className="qm-lpo-steps">
-            <div className="qm-lpo-card">
-              <span className="qm-step-kicker">Step 1</span>
-              <h4>Upload or paste LPO</h4>
-              <p>Use a PDF/Excel LPO or paste the purchase order text. Source files stay private.</p>
-              <label className="qm-file-control">
-                <span className="qm-label-text">LPO file</span>
-                <input type="file" accept=".pdf,.xlsx,.xls,.xlsb" onChange={(event) => setLpoFile(event.target.files?.[0] || null)} />
-              </label>
-              <label>
-                <span className="qm-label-text">Or paste LPO text</span>
-                <textarea rows="4" value={lpoText} onChange={(event) => setLpoText(event.target.value)} placeholder="Paste LPO / purchase order details here..." />
-              </label>
-              <label className="qm-checkbox">
-                <input type="checkbox" checked={lpoUseAi} onChange={(event) => setLpoUseAi(event.target.checked)} />
-                Use AI cleanup when available
-              </label>
-              <button type="button" className="qm-primary" disabled={lpoUploading || (!lpoFile && !lpoText.trim())} onClick={uploadLpo}>
-                {lpoUploading ? 'Recording LPO...' : latestLpo ? 'Upload another LPO' : 'Record LPO'}
-              </button>
-            </div>
-            <div className="qm-lpo-card featured">
-              <span className="qm-step-kicker">Step 2</span>
-              <h4>Review detected details</h4>
-              {latestLpo ? (
-                <>
-                  <div className="qm-lpo-metadata">
-                    <span><strong>Source</strong>{latestLpo.source_filename || latestLpo.source_type_display}</span>
-                    <span><strong>Rows parsed</strong>{latestLpo.parsed_row_count}</span>
-                    <span><strong>Received</strong>{new Date(latestLpo.received_at).toLocaleDateString()}</span>
-                  </div>
-                  <div className="qm-lpo-detail-grid">
-                    <label>
-                      <span className="qm-label-text">LPO number</span>
-                      <input value={lpoDraft.lpo_number} onChange={(event) => setLpoDraft({ ...lpoDraft, lpo_number: event.target.value })} placeholder="Enter LPO number if missing" />
-                    </label>
-                    <label>
-                      <span className="qm-label-text">LPO date</span>
-                      <input type="date" value={lpoDraft.lpo_date || ''} onChange={(event) => setLpoDraft({ ...lpoDraft, lpo_date: event.target.value })} />
-                    </label>
-                    <label>
-                      <span className="qm-label-text">Status</span>
-                      <select value={lpoDraft.status} onChange={(event) => setLpoDraft({ ...lpoDraft, status: event.target.value })}>
-                        <option value="received">Received</option>
-                        <option value="parsed">Parsed</option>
-                        <option value="needs_review">Needs review</option>
-                        <option value="confirmed">Confirmed</option>
-                      </select>
-                    </label>
-                    <label className="span-two">
-                      <span className="qm-label-text">Notes</span>
-                      <textarea rows="2" value={lpoDraft.notes} onChange={(event) => setLpoDraft({ ...lpoDraft, notes: event.target.value })} placeholder="Optional internal note" />
-                    </label>
-                  </div>
-                  {(quote.lines || []).length > 0 && (
-                    <div className="qm-lpo-warning">
-                      <strong>Ordered quotation lines</strong>
-                      <p>Select the exact lines covered by this LPO. Parser suggestions are preselected for review; only saved selections appear as LPO provenance in price history. Corrections to confirmed mappings are audited.</p>
-                      {(quote.lines || []).map((line) => {
-                        const checked = (lpoDraft.applied_outcome_line_ids || []).includes(line.id);
-                        return (
-                          <label className="qm-checkbox" key={`lpo-line-${line.id}`}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => setLpoDraft((current) => ({
-                                ...current,
-                                applied_outcome_line_ids: checked
-                                  ? (current.applied_outcome_line_ids || []).filter((id) => id !== line.id)
-                                  : [...(current.applied_outcome_line_ids || []), line.id],
-                              }))}
-                            />
-                            {line.item_name_snapshot || `Line ${line.id}`} ({line.quantity} {line.unit || ''})
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
-                  <LpoWarningReview warnings={latestLpo.warnings} />
-                  <button type="button" className="qm-secondary" disabled={lpoSaving} onClick={saveLpoDetails}>
-                    {lpoSaving ? 'Saving LPO...' : 'Save LPO Details'}
-                  </button>
-                </>
-              ) : (
-                <div className="qm-empty compact">No LPO recorded yet. Upload or paste the customer LPO to unlock Proforma Tax Invoice download.</div>
-              )}
-            </div>
-            <div className="qm-lpo-card">
-              <span className="qm-step-kicker">Step 3</span>
-              <h4>Download proforma</h4>
-              <p>Uses the same official layout as the quotation, with Proforma Tax Invoice title, quote reference, LPO details, totals, signature and stamp.</p>
-              <button type="button" className="qm-primary" disabled={!latestLpo || proformaDownloadLoading} onClick={downloadProforma}>
-                {proformaDownloadLoading ? 'Preparing Proforma...' : 'Download Proforma Tax Invoice'}
-              </button>
-              <small>No email is sent. This only prepares the PDF for staff to review and share.</small>
-            </div>
-          </div>
-        </div>
-      )}
-      <div className="qm-panel qm-party-panel">
+      <div className="qm-quote-details-grid">
+      <details className="qm-panel qm-party-panel qm-compact-details" key={`party-${quote.id}`} open={!quotePartyDraft.company || undefined}>
+        <summary><span><strong>Customer &amp; Contact</strong><span>{selectedCompanyName} · {selectedContactName}</span></span><span className="qm-details-action">{hasUnsavedQuoteParty ? 'Unsaved changes' : isEditable ? 'Edit' : 'Details'}</span></summary>
+        <div className="qm-details-body">
+
         <div className="qm-panel-heading">
           <div>
             <h3>Customer & Contact</h3>
@@ -3459,7 +3160,10 @@ const QuotationEditor = ({
           </div>
         )}
       </div>
-      <div className="qm-panel qm-terms-panel">
+      </details>
+      <details className="qm-panel qm-terms-panel qm-compact-details" key={`terms-${quote.id}`}>
+        <summary><span><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'}</span></span><span className="qm-details-action">{hasUnsavedQuoteTerms ? 'Unsaved changes' : isEditable ? 'Edit' : 'Details'}</span></summary>
+        <div className="qm-details-body">
         <div className="qm-panel-heading qm-terms-heading">
           <div>
             <h3>Quotation Terms &amp; Layout</h3>
@@ -3500,6 +3204,8 @@ const QuotationEditor = ({
           </label>
         </div>
       </div>
+      </details>
+      </div>
       {lineFeedback && <div className={`qm-feedback ${lineFeedback.type}`}>{lineFeedback.message}</div>}
       {directFinalizeIssues.length > 0 && (
         <div className="qm-notice">
@@ -3515,11 +3221,11 @@ const QuotationEditor = ({
         </div>
       )}
 
-      <div className="qm-panel">
+      <div className="qm-panel qm-quotation-lines-panel">
         <div className="qm-panel-heading">
           <div>
-            <h3>Step 4: Edit Quotation Lines</h3>
-            <p>Each active line needs a Product decision, quantity, unit price, and VAT before finalization. Create draft/internal Products directly from unmatched lines.</p>
+            <h3>{isEditable ? 'Edit Quotation Lines' : 'Quotation Lines'}</h3>
+            {isEditable && <p>Review the product, quantity, price and VAT for each item.</p>}
           </div>
           <div className="qm-final-total-area">
             <label className="qm-discount-field" htmlFor={`quotation-discount-${quote.id}`}>
