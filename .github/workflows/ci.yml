@@ -126,5 +126,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=critical
       - name: Run frontend tests
         run: npm run test:ci
+      - name: Verify production routes and asset caching
+        run: npm run test:serve
       - name: Build production frontend
         run: npm run build

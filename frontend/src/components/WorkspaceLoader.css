@@ -1,0 +1,14 @@
+.workspace-loading { padding: 24px; color: #475569; }
+.workspace-recovery { display: flex; gap: 20px; align-items: flex-start; max-width: 760px; margin: 24px auto; padding: 28px; border: 1px solid #99d9d2; border-radius: 14px; background: #fff; box-shadow: 0 6px 24px #0f172a0a; color: #334155; }
+.workspace-recovery-icon { display: grid; place-items: center; flex: 0 0 44px; height: 44px; border-radius: 12px; background: #e6f7f4; color: #0f766e; font-size: 28px; font-weight: 700; }
+.workspace-recovery h2 { margin: 0 0 10px; font-size: 20px; color: #134e4a; }
+.workspace-recovery p { margin: 0 0 12px; line-height: 1.55; }
+.workspace-recovery .workspace-recovery-note { font-size: 13px; color: #64748b; }
+.workspace-recovery-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0; }
+.workspace-recovery-actions button { padding: 11px 17px; background: #0f766e; color: #fff; border: 1px solid #0f766e; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; }
+.workspace-recovery-actions .workspace-recovery-reload { color: #115e59; background: #f0fdfa; }
+.workspace-recovery button:focus-visible, .workspace-recovery summary:focus-visible { outline: 3px solid #14b8a6; outline-offset: 3px; }
+.workspace-recovery details { color: #64748b; font-size: 12px; }
+.workspace-recovery summary { cursor: pointer; }
+.workspace-recovery code { display: block; overflow-wrap: anywhere; margin-top: 8px; }
+@media (max-width: 600px) { .workspace-recovery { margin: 12px; padding: 18px; gap: 12px; } .workspace-recovery-icon { display: none; } }

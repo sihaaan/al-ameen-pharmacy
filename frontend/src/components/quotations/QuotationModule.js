@@ -1,23 +1,24 @@
-import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import lazyWorkspace from '../WorkspaceLoader';
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import './QuotationModule.css';
 import './QuotationOutcomeReview.css';
 
-const CompanyManager = lazy(() => import('./CompanyManager'));
-const QuoteItemManager = lazy(() => import('./QuoteItemManager'));
-const InquiryManager = lazy(() => import('./InquiryManager'));
-const GmailInquiryReview = lazy(() => import('./GmailInquiryReview'));
-const QuotationList = lazy(() => import('./QuotationList'));
-const QuotationEditor = lazy(() => import('./QuotationEditor'));
-const QuotationOutcomeReview = lazy(() => import('./QuotationOutcomeReview'));
-const QuotationDashboard = lazy(() => import('./QuotationDashboard'));
-const ProformaInvoiceManager = lazy(() => import('./ProformaInvoiceManager'));
-const DeliveryNoteManager = lazy(() => import('./DeliveryNoteManager'));
-const PriceHistoryPanel = lazy(() => import('./PriceHistoryPanel'));
-const AuditLogPanel = lazy(() => import('./AuditLogPanel'));
-const QuotationSettings = lazy(() => import('./QuotationSettings'));
-const HistoricalImportManager = lazy(() => import('./HistoricalImportManager'));
-const ContractIntelligenceManager = lazy(() => import('./ContractIntelligenceManager'));
+const CompanyManager = lazyWorkspace(() => import('./CompanyManager'));
+const QuoteItemManager = lazyWorkspace(() => import('./QuoteItemManager'));
+const InquiryManager = lazyWorkspace(() => import('./InquiryManager'));
+const GmailInquiryReview = lazyWorkspace(() => import('./GmailInquiryReview'));
+const QuotationList = lazyWorkspace(() => import('./QuotationList'));
+const QuotationEditor = lazyWorkspace(() => import('./QuotationEditor'));
+const QuotationOutcomeReview = lazyWorkspace(() => import('./QuotationOutcomeReview'));
+const QuotationDashboard = lazyWorkspace(() => import('./QuotationDashboard'));
+const ProformaInvoiceManager = lazyWorkspace(() => import('./ProformaInvoiceManager'));
+const DeliveryNoteManager = lazyWorkspace(() => import('./DeliveryNoteManager'));
+const PriceHistoryPanel = lazyWorkspace(() => import('./PriceHistoryPanel'));
+const AuditLogPanel = lazyWorkspace(() => import('./AuditLogPanel'));
+const QuotationSettings = lazyWorkspace(() => import('./QuotationSettings'));
+const HistoricalImportManager = lazyWorkspace(() => import('./HistoricalImportManager'));
+const ContractIntelligenceManager = lazyWorkspace(() => import('./ContractIntelligenceManager'));
 
 const tabs = [
   { id: 'dashboard', label: 'Dashboard' },

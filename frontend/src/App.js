@@ -1,5 +1,6 @@
 // frontend/src/App.js
-import React, { lazy, Suspense } from "react";
+import React from "react";
+import lazyWorkspace from "./components/WorkspaceLoader";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { CartProvider } from "./context/CartContext";
 import { AuthProvider } from "./context/AuthContext";
@@ -18,7 +19,7 @@ import OrderConfirmation from "./pages/OrderConfirmation";
 import Profile from "./pages/Profile";
 import "./App.css";
 
-const AdminDashboard = lazy(() => {
+const AdminDashboard = lazyWorkspace(() => {
   const dashboard = import("./pages/AdminDashboard");
   const params = new URLSearchParams(window.location.search);
   const tab = params.get('admin_tab');
@@ -45,16 +46,7 @@ const AdminDashboard = lazy(() => {
   // still mount only after the dashboard's authentication/permission gates.
   void Promise.allSettled(pending);
   return dashboard;
-});
-
-class AdminLoadBoundary extends React.Component {
-  state = { failed: false };
-  static getDerivedStateFromError() { return { failed: true }; }
-  render() {
-    if (this.state.failed) return <div role="alert" className="admin-dashboard"><p>Could not load this workspace.</p><button type="button" onClick={() => window.location.reload()}>Reload workspace</button></div>;
-    return this.props.children;
-  }
-}
+}, 'admin workspace');
 
 function App() {
   return (
@@ -72,7 +64,7 @@ function App() {
               <Route path="/register" element={<Register />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password/:token" element={<ResetPassword />} />
-              <Route path="/admin" element={<AdminLoadBoundary><Suspense fallback={<div role="status" className="admin-dashboard">Loading admin workspace…</div>}><AdminDashboard /></Suspense></AdminLoadBoundary>} />
+              <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/profile" element={<Profile />} />
               <Route path="/product/:id" element={<ProductDetail />} />
               <Route path="/checkout" element={<Checkout />} />
