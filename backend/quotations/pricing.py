@@ -152,7 +152,7 @@ def recommend_price(quotation, product, unit, *, context=None, source_wording=""
 
 
 def line_price_snapshot(line):
-    return {"line_id": line.pk, "quotation_id": line.quotation_id, "product_id": line.product_id, "unit": line.unit, "price": str(line.unit_price) if line.unit_price is not None else None,
+    return {"line_id": line.pk, "quotation_id": line.quotation_id, "product_id": line.product_id, "quote_item_id": line.quote_item_id, "unit": line.unit, "price": str(line.unit_price) if line.unit_price is not None else None,
             "provenance": dict(line.price_provenance or {}), "review": line.price_review_required,
             "wording": line.item_name_snapshot}
 
@@ -177,6 +177,8 @@ def update_line_pricing(line, before, payload, actor, *, context=None):
     variant_changed = bool(before.get("wording") and before["wording"] != line.item_name_snapshot
         and not identities_compatible(item_identity(before["wording"]), item_identity(line.item_name_snapshot)))
     context_changed = not is_new and (variant_changed or before["product_id"] != line.product_id or pricing_unit(before["unit"]) != pricing_unit(line.unit))
+    first_product_link = bool(not before["product_id"] and not before.get("quote_item_id") and line.product_id and not variant_changed
+        and (not pricing_unit(before["unit"]) or pricing_unit(before["unit"]) == pricing_unit(line.unit)))
     changed = before["price"] != (str(line.unit_price) if line.unit_price is not None else None)
     if before["price"] is not None and line.unit_price is not None:
         changed = Decimal(before["price"]) != line.unit_price
@@ -197,7 +199,7 @@ def update_line_pricing(line, before, payload, actor, *, context=None):
             line.include_product_image = False
             line.brand_name_snapshot = ""
         line.price_review_required = bool(before["review"] or variant_changed or feedback == "wrong_product" or
-            (before["price"] is not None and previous.get("kind") != "history" and line.unit_price is not None))
+            (not first_product_link and before["price"] is not None and previous.get("kind") != "history" and line.unit_price is not None))
     if payload.get("price_context_changed") is True:
         line.price_review_required = True
     source_id = payload.get("price_source_history")

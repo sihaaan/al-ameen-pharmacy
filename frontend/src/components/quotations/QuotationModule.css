@@ -5604,60 +5604,6 @@ fieldset.qm-gmail-locked-editor,
   font-weight: 800;
 }
 
-.qm-status-progress {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.qm-status-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #6b7280;
-  font-weight: 800;
-}
-
-.qm-status-step span {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 24px;
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
-  background: #e5e7eb;
-  color: #374151;
-  font-size: 12px;
-}
-
-.qm-status-step p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.qm-status-step.complete {
-  border-color: #99f6e4;
-  background: #f0fdfa;
-  color: #0f766e;
-}
-
-.qm-status-step.complete span,
-.qm-status-step.active span {
-  background: #0d9488;
-  color: #ffffff;
-}
-
-.qm-status-step.active {
-  border-color: #0d9488;
-  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.12);
-}
-
 .qm-save-row {
   display: flex;
   justify-content: space-between;
@@ -6167,10 +6113,6 @@ fieldset.qm-gmail-locked-editor,
 
   .qm-add-line,
   .qm-add-line.with-brand {
-    grid-template-columns: 1fr;
-  }
-
-  .qm-status-progress {
     grid-template-columns: 1fr;
   }
 

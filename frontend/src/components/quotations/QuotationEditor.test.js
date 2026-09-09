@@ -1289,11 +1289,11 @@ describe('QuotationEditor Product price context', () => {
     expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
   });
 
-  test('offers direct finalization in More actions without sending an email', async () => {
+  test('offers primary finalization outside More actions and assumes sent without emailing', async () => {
     const finalizedQuote = {
       ...withGmailChainedActions(),
-      status: 'finalized',
-      status_display: 'Finalized',
+      status: 'sent',
+      status_display: 'Sent',
     };
     const originalCreateObjectURL = window.URL.createObjectURL;
     const originalRevokeObjectURL = window.URL.revokeObjectURL;
@@ -1314,11 +1314,14 @@ describe('QuotationEditor Product price context', () => {
       const reviewButtons = screen.getAllByRole('button', { name: 'Review Email' });
       expect(finalizeButtons).toHaveLength(1);
       expect(reviewButtons).toHaveLength(1);
-      fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+      expect(finalizeButtons[0].closest('details')).toBeNull();
+      expect(finalizeButtons[0]).toHaveClass('qm-primary');
+      expect(reviewButtons[0]).toHaveClass('qm-secondary');
 
       fireEvent.click(finalizeButtons[0]);
 
       await waitFor(() => expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+        assume_sent: true,
         quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       }));
       expect(confirmSpy).not.toHaveBeenCalled();
@@ -1328,6 +1331,7 @@ describe('QuotationEditor Product price context', () => {
       expect(quotationAPI.quotes.sendEmail).not.toHaveBeenCalled();
       expect(await screen.findByRole('button', { name: 'Email Quotation' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Review Email' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Mark Sent' })).not.toBeInTheDocument();
     } finally {
       confirmSpy.mockRestore();
       anchorClickSpy.mockRestore();
@@ -1422,6 +1426,7 @@ describe('QuotationEditor Product price context', () => {
 
       await waitFor(() => expect(quotationAPI.quotes.finalize).toHaveBeenCalledTimes(1));
       expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+        assume_sent: true,
         quotation_review_fingerprint: 'quotation-review-fingerprint-2',
       });
       expect(confirmSpy).not.toHaveBeenCalled();
@@ -1466,6 +1471,7 @@ describe('QuotationEditor Product price context', () => {
       expect(await screen.findByText('The quotation changed in another session.')).toBeInTheDocument();
       expect(screen.getByDisplayValue('Gloves changed by another employee')).toBeInTheDocument();
       expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+        assume_sent: true,
         quotation_review_fingerprint: 'quotation-review-fingerprint-1',
       });
       expect(quotationAPI.quotes.pdf).not.toHaveBeenCalled();
@@ -1554,7 +1560,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
-    const finalizeButtons = await screen.findAllByRole('button', { name: 'Finalize' });
+    const finalizeButtons = await screen.findAllByRole('button', { name: 'Email Quotation' });
     fireEvent.click(finalizeButtons[0]);
 
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
@@ -1604,7 +1610,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize Only' }));
 
@@ -1612,6 +1618,7 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.getByDisplayValue('Latest gloves wording')).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: 'Finalize and send quotation' })).not.toBeInTheDocument();
     expect(quotationAPI.quotes.finalize).toHaveBeenCalledWith(21, {
+      assume_sent: true,
       quotation_review_fingerprint: 'quotation-review-fingerprint-1',
     });
     expect(quotationAPI.quotes.pdf).not.toHaveBeenCalled();
@@ -1863,14 +1870,14 @@ describe('QuotationEditor Product price context', () => {
       .mockResolvedValue({ data: remotelyChangedQuote });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
 
     expect(await screen.findByText(/changed since this editor loaded/i)).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue('Gloves changed by another employee')).toBeInTheDocument();
     expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
 
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
     expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
@@ -1897,14 +1904,14 @@ describe('QuotationEditor Product price context', () => {
       .mockResolvedValue({ data: atomicCurrentQuote });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
 
     expect(await screen.findByText(/changed since this editor loaded/i)).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: /quotation/i })).not.toBeInTheDocument();
     expect(screen.getByDisplayValue('Current locked quotation line')).toBeInTheDocument();
     expect(quotationAPI.quotes.emailPreview).not.toHaveBeenCalled();
 
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledWith(21, {
       quotation_review_fingerprint: 'quotation-review-fingerprint-2',
@@ -1944,7 +1951,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(await within(dialog).findByRole('button', { name: 'Finalize & Send Quotation' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Refresh preview' }));
@@ -1954,7 +1961,7 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.getByDisplayValue('Changed before stale preview refresh')).toBeInTheDocument();
     expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(1);
 
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     await within(dialog).findByRole('button', { name: 'Finalize & Send Quotation' });
     expect(quotationAPI.quotes.emailPreview).toHaveBeenCalledTimes(2);
@@ -1978,7 +1985,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
 
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     expect(within(dialog).getByText('Sending a new email')).toBeInTheDocument();
@@ -2016,7 +2023,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
 
@@ -2098,7 +2105,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Reconnect Gmail' }));
 
@@ -2150,7 +2157,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.change(within(dialog).getByLabelText(/To/), { target: { value: 'buyer@example.com' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Find original Gmail thread' }));
@@ -2248,7 +2255,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.change(within(dialog).getByLabelText(/To/), {
       target: { value: 'buyer@example.com' },
@@ -2339,7 +2346,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     let dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
 
@@ -2387,7 +2394,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
 
@@ -2421,7 +2428,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Finalize' }))[0]);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Email Quotation' }))[0]);
     const dialog = await screen.findByRole('dialog', { name: 'Finalize and send quotation' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finalize & Send Quotation' }));
 
@@ -3493,6 +3500,22 @@ describe('QuotationEditor Product price context', () => {
     render(<QuotationEditor quoteId={21} />);
     expect(await screen.findByLabelText('No eligible price for this unit/currency')).toBeInTheDocument();
     expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(null);
+  });
+
+  test('first product linking keeps a manual price without adding a review warning', async () => {
+    const current = pricingQuote('22');
+    current.lines[0] = { ...current.lines[0], product: null, match_status: 'unresolved' };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: current });
+    quotationAPI.quotes.productPrice.mockResolvedValue({ data: { product: 11, recommendation: acceptedRecommendation } });
+    render(<QuotationEditor quoteId={21} />);
+    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    await waitFor(() => expect(quotationAPI.quotes.productPrice).toHaveBeenCalled());
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(22);
+    expect(screen.getByLabelText('Manually entered price')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Price needs review')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Company price details' })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByDisplayValue('Imported gloves'), { target: { value: 'Imported Gloves' } });
+    expect(screen.queryByLabelText('Price needs review')).not.toBeInTheDocument();
   });
 
 });
