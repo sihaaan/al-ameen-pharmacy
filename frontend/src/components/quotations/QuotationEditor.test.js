@@ -2906,6 +2906,119 @@ describe('QuotationEditor Product price context', () => {
     expect(within(dialog).getByDisplayValue('Imported gloves')).toBeEnabled();
   });
 
+  const openTwoRowProductReview = async () => {
+    const twoRows = { ...quote, lines: [...quote.lines, { ...quote.lines[0], id: 32, sort_order: 1, item_name_snapshot: 'Imported masks' }] };
+    const warnings = twoRows.lines.map((line, index) => ({ line_id: line.id, warning: 'A similar Product exists.', creation_blocked: false,
+      candidates: [{ product_id: 11 + index, product_name: products[index].name, confidence: 0.9 }] }));
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: twoRows });
+    quotationAPI.items.creationReview.mockImplementation(async ({ rows }) => ({ data: { results: rows.map((row) => ({ ...row, standard_name: row.name, reason: 'Review the suggested products.' })) } }));
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: { updated_lines: [], quotation: twoRows, confirmation_required: warnings } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit terms & layout/i }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Show Brand column' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    const dialog = screen.getByRole('dialog', { name: 'Create Products from quotation lines' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+    await within(dialog).findByRole('button', { name: /Use Gloves A/i });
+    return { dialog, twoRows };
+  };
+
+  test('shows saved progress inside product review and keeps a selected suggestion from appearing again with Brand on', async () => {
+    const { dialog, twoRows } = await openTwoRowProductReview();
+    const linkedQuote = { ...twoRows, quotation_review_fingerprint: 'linked-first-row', lines: [
+      { ...twoRows.lines[0], product: 11, product_name: 'Gloves A', match_status: 'confirmed' }, twoRows.lines[1],
+    ] };
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({ data: { quotation: linkedQuote } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /Use Gloves A/i }));
+    await waitFor(() => expect(within(dialog).queryByRole('button', { name: /Use Gloves A/i })).not.toBeInTheDocument());
+    expect(within(dialog).getByText('1 of 2 items linked · 1 remaining')).toBeVisible();
+    expect(within(dialog).getByText(/Linked “Imported gloves” to “Gloves A”/)).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: /Use Gloves B/i })).toBeVisible();
+    expect(screen.getByLabelText('Brand for Imported gloves')).toBeInTheDocument();
+    expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.items.creationReview).toHaveBeenCalledTimes(1);
+  });
+
+  test('can recheck an edited name while other suggestions remain and never resubmits completed rows', async () => {
+    const { dialog, twoRows } = await openTwoRowProductReview();
+    fireEvent.change(within(dialog).getByDisplayValue('Imported masks'), { target: { value: 'Distinct face shield' } });
+    const checkEdited = within(dialog).getByRole('button', { name: 'Check edited names and continue' });
+    expect(checkEdited).toBeEnabled();
+    const linkedSecond = { ...twoRows.lines[1], product: 13, product_name: 'Distinct face shield', match_status: 'confirmed' };
+    const linkedQuote = { ...twoRows, quotation_review_fingerprint: 'linked-second-row', lines: [twoRows.lines[0], linkedSecond] };
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: { quotation: linkedQuote, updated_lines: [linkedSecond], confirmation_required: [] } });
+    fireEvent.click(checkEdited);
+    await waitFor(() => expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenLastCalledWith(21, {
+      line_ids: [32], names: { 32: 'Distinct face shield' }, confirm_create_line_ids: [], quotation_review_fingerprint: quote.quotation_review_fingerprint,
+    }));
+    expect(quotationAPI.items.creationReview).toHaveBeenLastCalledWith({ company: 7, rows: [{ id: 32, name: 'Distinct face shield', unit: 'box' }] });
+    expect(within(dialog).getByRole('button', { name: /Use Gloves A/i })).toBeVisible();
+    expect(within(dialog).queryByRole('button', { name: /Use Gloves B/i })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I checked these candidates/i }));
+    const linkedFirst = { ...twoRows.lines[0], product: 14, product_name: 'Imported gloves', match_status: 'confirmed' };
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: { quotation: { ...linkedQuote, lines: [linkedFirst, linkedSecond] }, updated_lines: [linkedFirst], confirmation_required: [] } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create reviewed provisional items' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenLastCalledWith(21, {
+      line_ids: [31], names: { 31: 'Imported gloves' }, confirm_create_line_ids: [31], quotation_review_fingerprint: 'linked-second-row',
+    }));
+    expect(quotationAPI.items.creationReview).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+  });
+
+  test('only creates the explicitly reviewed row and keeps other suggestions pending', async () => {
+    const { dialog, twoRows } = await openTwoRowProductReview();
+    fireEvent.click(within(dialog).getAllByRole('checkbox', { name: /I checked these candidates/i })[0]);
+    const linkedFirst = { ...twoRows.lines[0], product: 13, product_name: 'Imported gloves', match_status: 'confirmed' };
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: {
+      quotation: { ...twoRows, lines: [linkedFirst, twoRows.lines[1]] }, updated_lines: [linkedFirst], confirmation_required: [],
+    } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create reviewed provisional items' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenLastCalledWith(21, {
+      line_ids: [31], names: { 31: 'Imported gloves' }, confirm_create_line_ids: [31], quotation_review_fingerprint: quote.quotation_review_fingerprint,
+    }));
+    await within(dialog).findByText('1 of 2 items linked · 1 remaining');
+    expect(within(dialog).getByRole('button', { name: /Use Gloves B/i })).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: 'Create reviewed provisional items' })).toBeDisabled();
+    expect(quotationAPI.items.creationReview).toHaveBeenCalledTimes(1);
+  });
+
+  test('editing a reviewed name clears its old confirmation before checking the new suggestions', async () => {
+    const { dialog, twoRows } = await openTwoRowProductReview();
+    fireEvent.click(within(dialog).getAllByRole('checkbox', { name: /I checked these candidates/i })[0]);
+    fireEvent.change(within(dialog).getByDisplayValue('Imported gloves'), { target: { value: 'New glove variant' } });
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: { quotation: twoRows, updated_lines: [], confirmation_required: [{
+      line_id: 31, warning: 'Different suggestions for the edited name.', creation_blocked: false, candidates: [],
+    }] } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check edited names and continue' }));
+    await within(dialog).findByText('Different suggestions for the edited name.');
+    expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenLastCalledWith(21, {
+      line_ids: [31], names: { 31: 'New glove variant' }, confirm_create_line_ids: [], quotation_review_fingerprint: quote.quotation_review_fingerprint,
+    });
+    expect(within(dialog).getByRole('button', { name: 'Create reviewed provisional items' })).toBeDisabled();
+    within(dialog).getAllByRole('checkbox', { name: /I checked these candidates/i }).forEach((checkbox) => expect(checkbox).not.toBeChecked());
+  });
+
+  test('retrying a failed product save reuses the AI check for unchanged names', async () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    quotationAPI.items.creationReview.mockResolvedValue({ data: { results: [{ id: 31, standard_name: 'Cleaned gloves', ai_status: 'needs_review' }] } });
+    quotationAPI.quotes.bulkCreateProductsForLines.mockRejectedValueOnce(new Error('Connection interrupted'));
+    const linked = { ...quote.lines[0], product: 13, product_name: 'Cleaned gloves', match_status: 'confirmed' };
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: { quotation: { ...quote, lines: [linked] }, updated_lines: [linked], confirmation_required: [] } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    const dialog = screen.getByRole('dialog', { name: 'Create Products from quotation lines' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+    await within(dialog).findByText('Connection interrupted');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Check catalog and continue' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
+    expect(quotationAPI.items.creationReview).toHaveBeenCalledTimes(1);
+    expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenCalledTimes(2);
+    expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenLastCalledWith(21, expect.objectContaining({ names: {31: 'Cleaned gloves'} }));
+    consoleError.mockRestore();
+  });
+
   test('automatically retries a transient quotation 500 without closing the editor', async () => {
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
     quotationAPI.quotes.retrieve
