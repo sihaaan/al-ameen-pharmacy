@@ -32,6 +32,10 @@ _COUNT_FORM_RE = re.compile(
 _X_COUNT_RE = re.compile(r"(?<![a-z0-9])(?:pack|box|packet|pkt|strip)?\s*x\s*(\d+)(?![a-z0-9])", re.IGNORECASE)
 
 _DIMENSION_RE = re.compile(r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*(mm|cm|fr|gauge|inches?|inch)(?![a-z])", re.IGNORECASE)
+_SPACED_DIMENSION_DECIMAL_RE = re.compile(
+    r"(?<![\w.])(\d+)\.[ \t]+(\d+)(?=[ \t]*(?:mm|cm|inches?|inch)(?![a-z]))",
+    re.IGNORECASE,
+)
 _BOX_OF_RE = re.compile(r"\b(?:box|pack|packet)\s+of\s+(\d+)\b", re.IGNORECASE)
 
 _TOKEN_ALIASES = {
@@ -98,9 +102,27 @@ _IDENTITY_NOISE = _DOSAGE_FORMS | _PACK_FORMS | {"of", "per", "each", "unit", "u
 _PRODUCT_ROLE_WORDS = {"strip", "kit", "bag", "roll", "tube"}
 
 
+def _normalize_dimension_spacing(value):
+    """Read inline size typos such as 'Gauze 7. 5CM' as 7.5 cm.
+
+    Limit this repair to physical sizes after descriptive text on the same
+    line. Do not reinterpret list numbers, line breaks, doses or pack counts.
+    The stored product name and customer wording remain unchanged.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+
+    def repair(match):
+        line_prefix = text[:match.start()].rsplit("\n", 1)[-1].rsplit("\r", 1)[-1]
+        if not re.search(r"[a-z]", line_prefix, re.IGNORECASE):
+            return match.group(0)
+        return f"{match.group(1)}.{match.group(2)}"
+
+    return _SPACED_DIMENSION_DECIMAL_RE.sub(repair, text)
+
+
 def normalize_item_text(value):
     """Normalize pharmacy item text without discarding strength or pack information."""
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = _normalize_dimension_spacing(value)
     text = text.replace("µ", "u").replace("μ", "u").replace("×", " x ").lower()
     tokens = [_TOKEN_ALIASES.get(token, token) for token in _TOKEN_RE.findall(text)]
     return " ".join(tokens)
@@ -193,9 +215,9 @@ class ItemIdentity:
 
 
 def item_identity(name, *, dosage="", pack_size="", unit=""):
-    name = str(name or "")
-    dosage = str(dosage or "")
-    pack_size = str(pack_size or "")
+    name = _normalize_dimension_spacing(name)
+    dosage = _normalize_dimension_spacing(dosage)
+    pack_size = _normalize_dimension_spacing(pack_size)
     unit = str(unit or "")
     strong_forms = _forms(" ".join([name, dosage, pack_size]))
     unit_forms = _forms(unit)
