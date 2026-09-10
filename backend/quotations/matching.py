@@ -320,6 +320,7 @@ class ProductMatch:
     reason: str
     candidates: list[ProductCandidate] = field(default_factory=list)
     requires_confirmation: bool = False
+    saved_match_review: dict | None = None
 
     @property
     def matched(self):
@@ -334,6 +335,7 @@ class ProductMatch:
             "match_reason": self.reason,
             "match_candidates": [candidate.as_dict() for candidate in self.candidates],
             "requires_match_confirmation": bool(self.requires_confirmation),
+            "saved_match_review": self.saved_match_review,
         }
 
 
@@ -361,6 +363,7 @@ class ProductCreationResult:
             "candidates": [candidate.as_dict() for candidate in self.match.candidates],
             "override_used": self.override_used,
             "creation_blocked": self.creation_blocked,
+            "saved_match_review": self.match.saved_match_review,
         }
 
 
@@ -380,7 +383,7 @@ def _candidate(product, score, method, reason):
     return ProductCandidate(product=product, score=score, method=method, reason=reason)
 
 
-def _aliases_for_text(raw_text, company, *, for_update=False, include_inactive=False):
+def _aliases_for_text(raw_text, company, *, for_update=False, include_inactive=False, include_archived=False):
     simple = normalize_label(raw_text)
     domain = normalize_item_text(raw_text)
     queryset = ProductAlias.objects.filter(company=company).select_related("product")
@@ -391,7 +394,7 @@ def _aliases_for_text(raw_text, company, *, for_update=False, include_inactive=F
     matches = []
     exact = list(queryset.filter(normalized_alias=simple).order_by("id")[:10])
     for alias in exact:
-        if alias.product.status != "archived":
+        if include_archived or alias.product.status != "archived":
             matches.append(alias)
     first_term = domain.split()[0] if domain.split() else ""
     fallback = queryset
@@ -407,7 +410,7 @@ def _aliases_for_text(raw_text, company, *, for_update=False, include_inactive=F
     seen = {alias.id for alias in matches}
     ordered_fallback = fallback.order_by("id")
     for alias in ordered_fallback:
-        if alias.id in seen or alias.product.status == "archived":
+        if alias.id in seen or (not include_archived and alias.product.status == "archived"):
             continue
         if normalize_item_text(alias.alias) == domain:
             matches.append(alias)
@@ -538,41 +541,47 @@ def update_managed_product_alias(*, alias_id, changes):
     return alias
 
 
-def _alias_match(raw_text, company, scope_label):
-    aliases = _aliases_for_text(raw_text, company)
+def _alias_match(raw_text, company, scope_label, *, context_company=None):
+    aliases = _aliases_for_text(raw_text, company, include_archived=True)
     if not aliases:
         return None
+    from .saved_matches import saved_match_review, confirmation_is_current
     products = {}
     for alias in aliases:
-        if alias.product.canonical_product_id:
-            alias.product = alias.product.canonical_product
-        products.setdefault(alias.product_id, alias)
+        product = alias.product.canonical_product if alias.product.canonical_product_id else alias.product
+        products.setdefault(product.pk, product)
     if len(products) > 1:
         candidates = [
             _candidate(
-                alias.product,
-                0.99,
+                product,
+                0,
                 "alias_conflict",
                 f"Equivalent {scope_label} aliases point to different Products.",
             )
-            for alias in products.values()
+            for product in products.values()
         ]
         return ProductMatch(
             None,
-            0.99,
+            0,
             "alias_conflict",
             f"Equivalent {scope_label} aliases point to different Products; resolve the alias conflict before matching.",
             candidates,
             True,
+            saved_match_review(raw_text, context_company or company, aliases),
         )
     alias = aliases[0]
-    if not identities_compatible(item_identity(raw_text), product_identity(alias.product)):
-        return None
+    product = next(iter(products.values()))
+    compatible = identities_compatible(item_identity(raw_text), product_identity(product))
+    if (product.status == "archived" or (company is None and product.identity_review_state != "verified")
+            or (not compatible and not any(confirmation_is_current(saved, raw_text, product, context_company or company) for saved in aliases))):
+        review = saved_match_review(raw_text, context_company or company, aliases)
+        return ProductMatch(None, 0, "saved_alias_review", review["reason"],
+            [_candidate(product, 0, "saved_alias_review", review["reason"])], True, review)
     method = "company_alias" if company else "global_alias"
     label = "company" if company else "global"
     score = 0.99 if company else 0.97
-    candidate = _candidate(alias.product, score, method, f"Matched {label} alias '{alias.alias}'.")
-    return ProductMatch(alias.product, candidate.score, candidate.method, candidate.reason, [candidate])
+    candidate = _candidate(product, score, method, f"Matched {label} alias '{alias.alias}'.")
+    return ProductMatch(product, candidate.score, candidate.method, candidate.reason, [candidate])
 
 
 def _company_history_queryset(company):
@@ -770,7 +779,7 @@ def _suggest_product_for_text(
 
     if company:
         alias_match = _alias_match(raw_text, company, "company")
-        if alias_match and (not alias_match.product or alias_match.product.identity_review_state == "verified"):
+        if alias_match:
             return alias_match
 
         history_product = _company_history_product_match(
@@ -786,7 +795,7 @@ def _suggest_product_for_text(
             candidate = _candidate(history_product, 0.96, "company_price_history", reason)
             return ProductMatch(history_product, candidate.score, candidate.method, reason, [candidate])
 
-    alias_match = _alias_match(raw_text, None, "global")
+    alias_match = _alias_match(raw_text, None, "global", context_company=company)
     if alias_match and (not alias_match.product or alias_match.product.identity_review_state == "verified"):
         return alias_match
 
@@ -934,6 +943,7 @@ def learn_confirmed_product_alias(
     actor=None,
     notes="",
     explicit_confirmation=False,
+    require_saved_identity_review=False,
 ):
     """Remember confirmed customer wording without changing the Product identity.
 
@@ -966,17 +976,28 @@ def learn_confirmed_product_alias(
     ]
     # Active cross-Product aliases remain authoritative. Staff must resolve
     # those explicitly instead of silently remapping live catalogue knowledge.
-    if any(alias.is_active and alias.product_id != product.id for alias in equivalent):
-        return create_product_alias(
-            alias_text=cleaned_source,
-            product=product,
-            company=company,
-            actor=actor,
-            notes=notes,
+    effective_product_id = product.canonical_product_id or product.pk
+    if any(alias.is_active and (alias.product.canonical_product_id or alias.product_id) != effective_product_id for alias in equivalent):
+        from .saved_matches import SavedProductMatchConflict, saved_match_review
+        raise SavedProductMatchConflict(
+            saved_match_review(cleaned_source, company, [alias for alias in equivalent if alias.is_active]),
+            selected_product_id=product.pk,
         )
 
+    active_equivalent = [alias for alias in equivalent if alias.is_active]
+    if explicit_confirmation and active_equivalent and not identities_compatible(item_identity(cleaned_source), product_identity(product)):
+        from .saved_matches import SavedProductMatchConflict, saved_match_review, confirmation_is_current, remember_identity_confirmation
+        if not any(confirmation_is_current(alias, cleaned_source, product, company) for alias in active_equivalent):
+            if require_saved_identity_review:
+                raise SavedProductMatchConflict(saved_match_review(cleaned_source, company, active_equivalent),
+                                               selected_product_id=product.pk)
+            # An inquiry's explicit product selection is its existing review
+            # action. Remember equivalent spellings without adding a second dialog.
+            for alias in active_equivalent:
+                remember_identity_confirmation(alias, cleaned_source, product, company, actor)
+
     exact_alias = exact_existing[0] if exact_existing else None
-    if exact_alias and exact_alias.product_id == product.id and exact_alias.is_active:
+    if exact_alias and (exact_alias.product.canonical_product_id or exact_alias.product_id) == effective_product_id and exact_alias.is_active:
         return exact_alias, False
 
     if not explicit_confirmation and any(not alias.is_active for alias in equivalent):
@@ -1100,6 +1121,9 @@ def create_or_reuse_product(
         pack_size=requested_pack_size,
         unit=unit,
     )
+    if match.saved_match_review:
+        return ProductCreationResult(product=None, created=False, match=match, requires_confirmation=True,
+                                     warning=match.reason, creation_blocked=True)
     if not match.product:
         provisional = [p for p in product_catalog_queryset().filter(identity_review_state="provisional", name__iexact=cleaned_name)
                        if equivalent_identity(item_identity(cleaned_name, dosage=dosage, pack_size=requested_pack_size), product_identity(p))]
@@ -1107,7 +1131,7 @@ def create_or_reuse_product(
             return ProductCreationResult(product=provisional[0], created=False, match=match)
     if match.product:
         return ProductCreationResult(product=match.product, created=False, match=match)
-    if match.method in {"identifier_conflict", "alias_conflict", "canonical_name_conflict"}:
+    if match.method in {"identifier_conflict", "alias_conflict", "canonical_name_conflict", "saved_alias_review"}:
         return ProductCreationResult(
             product=None,
             created=False,

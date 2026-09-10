@@ -545,6 +545,12 @@ class QuotationBaseViewSet:
         )
 
     def handle_workflow_error(self, exc):
+        if hasattr(exc, "saved_match_review"):
+            return Response({
+                "detail": "; ".join(exc.messages), "code": "saved_product_match_review",
+                "saved_match_review": exc.saved_match_review, "line_id": exc.line_id,
+                "selected_product_id": exc.selected_product_id,
+            }, status=exc.http_status)
         return Response(serializer_error_from_django_validation(exc), status=status.HTTP_400_BAD_REQUEST)
 
     def handle_safe_workflow_exception(self, exc, fallback_message="Quotation workflow action failed."):
@@ -4551,6 +4557,50 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{_proforma_download_filename(quotation)}"'
         return response
+
+    @action(detail=True, methods=["post"])
+    def resolve_saved_match(self, request, pk=None):
+        from .saved_matches import resolve_company_match
+        from .matching import _lock_product_alias_scopes
+        from .services import quotation_line_source_wording, ensure_quotation_editable
+        quotation = self.get_object()
+        try:
+            with transaction.atomic():
+                quotation = _quotations_for_update().select_related("company").get(pk=quotation.pk)
+                _lock_product_alias_scopes(None, quotation.company)
+                lock_quotation_review_dependencies(quotation)
+                require_current_quotation_review(quotation, request.data.get("quotation_review_fingerprint", ""))
+                ensure_quotation_editable(quotation)
+                try:
+                    line_id, product_id = int(request.data.get("line_id")), int(request.data.get("product"))
+                except (ValueError, TypeError):
+                    raise DjangoValidationError("Choose a quotation row and product to resolve.")
+                line = quotation.lines.select_for_update(of=("self",)).select_related("inquiry_line").filter(pk=line_id).first()
+                if not line:
+                    raise DjangoValidationError("This row does not belong to the quotation.")
+                product, changes = resolve_company_match(
+                    raw_text=quotation_line_source_wording(line), company=quotation.company,
+                    product_id=product_id, token=request.data.get("review_token", ""),
+                    resolution=request.data.get("resolution"), actor=request.user,
+                )
+                # Keep all other local edits and the entered price. This action
+                # changes the row's product and the company's remembered link.
+                quotation, updated = bulk_update_quotation_lines(quotation, [{
+                    "id": line.pk, "product": product.pk, "match_status": "confirmed",
+                }], request.user)
+                audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, line,
+                    message=f"Reviewed saved product match for {quotation.company.name}.",
+                    changes={"saved_match_review": changes}, company=quotation.company, quotation=quotation)
+                quotation.refresh_from_db()
+                payload = self.serialize_locked_quotation_review(quotation)
+        except QuotationEmailError as exc:
+            return self.quotation_review_error_response(exc, quotation)
+        except DjangoValidationError as exc:
+            if hasattr(exc, "saved_match_review"):
+                exc.line_id = request.data.get("line_id")
+            return self.handle_workflow_error(exc)
+        return Response({"quotation": payload, "updated_lines": QuotationLineSerializer(updated, many=True, context={"request": request}).data,
+                         "message": f"Saved the product match for {quotation.company.name}."})
 
     @action(detail=True, methods=["post"])
     def bulk_update_lines(self, request, pk=None):

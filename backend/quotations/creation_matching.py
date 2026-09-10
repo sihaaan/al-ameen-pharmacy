@@ -63,7 +63,7 @@ def review_creation_rows(rows, company=None):
             result.update(matched_product_id=match.product.pk, ai_status="existing_match",
                           reason="Existing product matched by catalogue checks.")
             continue
-        if match.method in {"identifier_conflict", "alias_conflict", "canonical_name_conflict", "product_correction_review"}:
+        if match.method in {"identifier_conflict", "alias_conflict", "canonical_name_conflict", "product_correction_review", "saved_alias_review"}:
             result.update(ai_status="needs_review", reason=match.reason)
             continue
         rejected = rejected_product_ids(name, company)

@@ -11,6 +11,7 @@ import QuotationLineActions from './QuotationLineActions';
 import QuotationMoreActions from './QuotationMoreActions';
 import { reviewProductCreation } from './creationReview';
 import ProductSelect, { buildProductCatalogue } from './ProductSelect';
+import SavedCompanyMatchDialog from './SavedCompanyMatchDialog';
 
 const editableStatuses = new Set(['draft', 'pending_review', 'approved']);
 const UNSAVED_LINES_FINALIZE_ISSUE = 'Save all line changes before finalizing.';
@@ -376,6 +377,9 @@ const QuotationEditor = ({
   const [lineFilter, setLineFilter] = useState('active');
   const [productCreateModal, setProductCreateModal] = useState(null);
   const [productCreateError, setProductCreateError] = useState(null);
+  const [savedMatchReview, setSavedMatchReview] = useState(null);
+  const [savedMatchError, setSavedMatchError] = useState('');
+  useEffect(() => { setSavedMatchReview(null); setSavedMatchError(''); }, [quoteId]);
   const [showContactForm, setShowContactForm] = useState(false);
   const [contactForm, setContactForm] = useState(emptyContactForm);
   const [contactSaving, setContactSaving] = useState(false);
@@ -1525,6 +1529,91 @@ const QuotationEditor = ({
     return value === '' ? '0.00' : value;
   };
 
+  const openSavedMatchReview = (lineId, review, selectedProduct = '') => {
+    setSavedMatchError('');
+    setSavedMatchReview({ lineId: Number(lineId), review, selectedProduct,
+      quoteId: String(quoteRef.current?.id || quoteId), generation: loadGenerationRef.current });
+  };
+
+  const receiveSavedMatchError = (error) => {
+    const data = error?.response?.data;
+    if (data?.code !== 'saved_product_match_review' || !data.line_id || !data.saved_match_review) return false;
+    openSavedMatchReview(data.line_id, data.saved_match_review, data.selected_product_id || '');
+    setProductCreateError(null);
+    setErrorInfo(null);
+    return true;
+  };
+
+  const closeSavedMatchReview = () => {
+    const lineId = savedMatchReview?.lineId;
+    setSavedMatchReview(null);
+    // The product-creation dialog is remounted, so its original trigger node
+    // no longer exists. Return keyboard focus to the same pending row.
+    window.requestAnimationFrame(() => {
+      document.querySelector(`[data-saved-match-line="${lineId}"]`)?.focus();
+    });
+  };
+
+  const resolveSavedMatch = async (productId, resolution) => {
+    const current = savedMatchReview;
+    if (!current || saving || actionInFlight) return;
+    const isCurrent = () => String(quoteRef.current?.id) === current.quoteId
+      && loadGenerationRef.current === current.generation;
+    if (!isCurrent()) { setSavedMatchReview(null); return; }
+    setSaving(true);
+    setSavedMatchError('');
+    try {
+      const response = await quotationAPI.quotes.resolveSavedMatch(current.quoteId, {
+        line_id: current.lineId, product: productId, resolution,
+        review_token: current.review.token,
+        quotation_review_fingerprint: quoteRef.current?.quotation_review_fingerprint || '',
+      });
+      if (!isCurrent()) return;
+      const savedLine = response.data.quotation.lines.find((line) => Number(line.id) === current.lineId);
+      const previousDraft = lineDraftsRef.current[current.lineId];
+      const previousSaved = savedLineDraftsRef.current[current.lineId];
+      const retainedEdits = Object.fromEntries(Object.entries(previousDraft || {})
+        .filter(([key, value]) => value !== previousSaved?.[key]));
+      // Product identity/pricing provenance come from the server. Keep local
+      // quantity, description, VAT, price and other-row edits for Save All.
+      const identityFields = ['product', 'match_status', 'brand_name_snapshot', 'price_provenance', 'price_source_history',
+        'price_original_history', 'price_review_required', 'price_reviewed', 'product_image', 'product_image_url',
+        'has_product_image', 'include_product_image'];
+      identityFields.push('price_feedback', 'price_match_check_decision', 'price_context_changed');
+      identityFields.forEach((key) => delete retainedEdits[key]);
+      mergeSavedQuote(response.data.quotation, [current.lineId], true);
+      mergeSavedDiscount(response.data.quotation, true);
+      const nextDraft = { ...draftFromLine(savedLine), ...retainedEdits };
+      lineDraftsRef.current = { ...lineDraftsRef.current, [current.lineId]: nextDraft };
+      setLineDrafts(lineDraftsRef.current);
+      linePriceVersionRef.current[current.lineId] = (linePriceVersionRef.current[current.lineId] || 0) + 1;
+      lineSelectedProductRef.current[current.lineId] = String(productId);
+      setLinePriceHints((hints) => { const next = { ...hints }; delete next[current.lineId]; return next; });
+      setSavedMatchReview(null);
+      setProductCreateModal((modal) => {
+        if (!modal) return null;
+        const remaining = modal.lineIds.filter((id) => id !== current.lineId);
+        if (!remaining.length) return null;
+        const confirmations = { ...modal.confirmations };
+        delete confirmations[current.lineId];
+        return { ...modal, lineIds: remaining, confirmations,
+          lastResult: `Saved the company match for “${current.review.source_wording}”. Only remaining rows are shown below.` };
+      });
+      setSelectedLineIds((ids) => ids.filter((id) => id !== current.lineId));
+      setLineFeedback({ type: 'success', message: `${response.data.message} Any other unsaved edits are kept.` });
+    } catch (error) {
+      if (!isCurrent()) return;
+      if (replaceStaleQuotationReview(error)) { setSavedMatchReview(null); closeCreateProductModal(); return; }
+      if (receiveSavedMatchError(error)) {
+        setSavedMatchError(error.response.data.detail);
+        return;
+      }
+      setSavedMatchError(error?.response?.data?.detail || 'The match could not be saved. Your previous link and quotation are unchanged.');
+    } finally {
+      if (isCurrent()) setSaving(false);
+    }
+  };
+
   const saveLine = async (lineId) => {
     if (saving || actionInFlight || discountError) return;
     const currentQuote = quoteRef.current || quote;
@@ -1569,6 +1658,7 @@ const QuotationEditor = ({
     } catch (error) {
       if (!requestIsCurrent()) return;
       if (replaceStaleQuotationReview(error)) return;
+      if (receiveSavedMatchError(error)) return;
       const details = await describeQuotationError(error, 'Save quote line', `PATCH /quotations/quote-lines/${lineId}/`);
       if (!requestIsCurrent()) return;
       setErrorInfo(details);
@@ -1630,6 +1720,7 @@ const QuotationEditor = ({
     } catch (error) {
       if (!requestIsCurrent()) return;
       if (replaceStaleQuotationReview(error)) return;
+      if (receiveSavedMatchError(error)) return;
       const details = await describeQuotationError(error, 'Save all quote lines', 'PATCH /quotations/quote-lines/{id}/');
       if (!requestIsCurrent()) return;
       setErrorInfo(details);
@@ -1866,6 +1957,7 @@ const QuotationEditor = ({
         closeCreateProductModal();
         return;
       }
+      if (receiveSavedMatchError(error)) return;
       const details = await describeQuotationError(error, 'Create Products from quote lines', `POST /quotations/quotes/${quote.id}/bulk_create_products_for_lines/`);
       setProductCreateError(details);
       console.error(formatQuotationError(details), error);
@@ -1937,6 +2029,7 @@ const QuotationEditor = ({
         closeCreateProductModal();
         return;
       }
+      if (receiveSavedMatchError(error)) return;
       const details = await describeQuotationError(error, 'Link existing Product to quote line', `POST /quotations/quotes/${quote.id}/bulk_update_lines/`);
       setProductCreateError(details);
       console.error(formatQuotationError(details), error);
@@ -2030,6 +2123,7 @@ const QuotationEditor = ({
         });
         return;
       }
+      if (receiveSavedMatchError(error)) return;
       const details = await describeQuotationError(error, 'Create Product from quote line', `POST /quotations/quote-lines/${lineId}/create_product/`);
       setErrorInfo(details);
       console.error(formatQuotationError(details), error);
@@ -2131,6 +2225,7 @@ const QuotationEditor = ({
   const replaceStaleQuotationReview = (error) => {
     const responseData = error?.response?.data || {};
     if (String(responseData.code || '') !== 'stale_quotation_review') return false;
+    setSavedMatchReview(null);
     if (responseData.quote?.id) setLoadedQuote(responseData.quote);
     emailPreviewGenerationRef.current += 1;
     setEmailPreviewOpen(false);
@@ -3527,7 +3622,7 @@ const QuotationEditor = ({
         )}
       </div>
 
-      {productCreateModal && (
+      {productCreateModal && !savedMatchReview && (
         <div className="qm-modal-backdrop" role="presentation">
           <div className="qm-modal qm-product-create-modal" role="dialog" aria-modal="true" aria-label="Create Products from quotation lines">
             <div className="qm-panel-heading">
@@ -3584,15 +3679,22 @@ const QuotationEditor = ({
                           {productCreateModal.aiReviews?.[lineId] && <small role="status">{productCreateModal.aiReviews[lineId].reason}</small>}
                           {warning && (
                             <div className={`qm-product-match-warning ${warning.creation_blocked ? 'blocked' : ''}`}>
-                              <strong>{warning.creation_blocked ? 'Existing identity conflict — select a Product' : 'Likely existing Product found'}</strong>
+                              <strong>{warning.saved_match_review ? 'Saved company match needs review' : warning.creation_blocked ? 'Existing identity conflict — select a Product' : 'Likely existing Product found'}</strong>
                               <p>{warning.warning || warning.match_reason}</p>
-                              {(warning.candidates || []).length > 0 && (
+                              {warning.saved_match_review && <>
+                                <p>Previously linked to: {warning.saved_match_review.products.map((product) => product.product_name).join(' / ')}</p>
+                                <button type="button" className="qm-primary" disabled={saving}
+                                  data-saved-match-line={lineId}
+                                  onClick={() => openSavedMatchReview(lineId, warning.saved_match_review)}>Review saved company match</button>
+                              </>}
+                              {!warning.saved_match_review && (warning.candidates || []).length > 0 && (
                                 <div className="qm-product-candidate-list">
                                   {(warning.candidates || []).map((candidate) => (
                                     <button
                                       type="button"
                                       className="qm-product-candidate"
                                       key={candidate.product_id}
+                                      data-saved-match-line={lineId}
                                       disabled={saving}
                                       onClick={() => linkCandidateFromCreateModal(lineId, candidate)}
                                     >
@@ -3630,6 +3732,10 @@ const QuotationEditor = ({
           </div>
         </div>
       )}
+
+      {savedMatchReview && <SavedCompanyMatchDialog key={savedMatchReview.review.token}
+        review={savedMatchReview.review} catalogue={productCatalogue} selectedProduct={savedMatchReview.selectedProduct}
+        saving={saving} error={savedMatchError} onResolve={resolveSavedMatch} onClose={closeSavedMatchReview} />}
 
       {emailPreviewOpen && (
         <QuotationEmailPreviewDialog

@@ -12,6 +12,7 @@ jest.mock('../../api/quotations', () => ({
       productPrice: jest.fn(),
       lpos: jest.fn(),
       bulkUpdateLines: jest.fn(),
+      resolveSavedMatch: jest.fn(),
       bulkCreateProductsForLines: jest.fn(),
       emailPreview: jest.fn(),
       emailThreadCandidates: jest.fn(),
@@ -2923,6 +2924,105 @@ describe('QuotationEditor Product price context', () => {
     await within(dialog).findByRole('button', { name: /Use Gloves A/i });
     return { dialog, twoRows };
   };
+
+  const savedCompanyReview = {
+    company_id: 7, company_name: 'Customer A', source_wording: 'Imported gloves', token: 'saved-alias-token',
+    reason: 'A previous company match exists.', differences: ['Size differs: inquiry medium; saved product large.'],
+    products: [{ product_id: 11, product_name: 'Gloves A', pack_size: 'box', can_confirm: true }],
+  };
+
+  const savedMatchConflict = (review = savedCompanyReview) => ({ response: { status: 400, data: {
+    code: 'saved_product_match_review', line_id: 31, selected_product_id: 12, saved_match_review: review,
+    detail: 'Review the saved company match.',
+  } } });
+
+  const openSavedMatchFromCandidate = async () => {
+    const { dialog, twoRows } = await openTwoRowProductReview();
+    quotationAPI.quotes.bulkUpdateLines.mockRejectedValueOnce(savedMatchConflict());
+    fireEvent.click(within(dialog).getByRole('button', { name: /Use Gloves A/i }));
+    const savedDialog = await screen.findByRole('dialog', { name: 'Review saved product match' });
+    return { savedDialog, twoRows };
+  };
+
+  test('shows a saved-link review instead of a raw save error and returns to pending rows on close', async () => {
+    const { savedDialog } = await openSavedMatchFromCandidate();
+    expect(within(savedDialog).getByText('Gloves A', { selector: 'strong' })).toBeVisible();
+    expect(within(savedDialog).getByText(/Size differs/)).toBeVisible();
+    expect(screen.queryByRole('dialog', { name: 'Create Products from quotation lines' })).not.toBeInTheDocument();
+    expect(describeQuotationError).not.toHaveBeenCalled();
+    fireEvent.click(within(savedDialog).getByRole('button', { name: 'Decide later' }));
+    const original = screen.getByRole('dialog', { name: 'Create Products from quotation lines' });
+    expect(within(original).getByRole('button', { name: /Use Gloves A/i })).toBeVisible();
+    expect(within(original).getByRole('button', { name: /Use Gloves B/i })).toBeVisible();
+    expect(quotationAPI.quotes.resolveSavedMatch).not.toHaveBeenCalled();
+  });
+
+  test('confirming a saved match keeps unsaved prices and other rows while removing the resolved prompt', async () => {
+    const { savedDialog, twoRows } = await openSavedMatchFromCandidate();
+    fireEvent.change(screen.getByLabelText('Unit price for Imported gloves'), { target: { value: '9' } });
+    fireEvent.change(screen.getByLabelText('Unit price for Imported masks'), { target: { value: '22' } });
+    const linkedQuote = { ...twoRows, quotation_review_fingerprint: 'saved-match-quote-token', lines: [
+      { ...twoRows.lines[0], product: 11, product_name: 'Gloves A', match_status: 'confirmed' }, twoRows.lines[1],
+    ] };
+    quotationAPI.quotes.resolveSavedMatch.mockResolvedValueOnce({ data: { quotation: linkedQuote, message: 'Saved the product match for Customer A.' } });
+    fireEvent.click(within(savedDialog).getByRole('button', { name: 'Confirm this saved product' }));
+    await waitFor(() => expect(quotationAPI.quotes.resolveSavedMatch).toHaveBeenCalledWith('21', {
+      line_id: 31, product: 11, resolution: 'confirm', review_token: 'saved-alias-token',
+      quotation_review_fingerprint: quote.quotation_review_fingerprint,
+    }));
+    const pending = await screen.findByRole('dialog', { name: 'Create Products from quotation lines' });
+    expect(within(pending).getByText('1 of 2 items linked · 1 remaining')).toBeVisible();
+    expect(within(pending).queryByRole('button', { name: /Use Gloves A/i })).not.toBeInTheDocument();
+    expect(within(pending).getByRole('button', { name: /Use Gloves B/i })).toBeVisible();
+    expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(9);
+    expect(screen.getByLabelText('Unit price for Imported masks')).toHaveValue(22);
+    expect(quotationAPI.quotes.bulkCreateProductsForLines).toHaveBeenCalledTimes(1);
+  });
+
+  test('correcting a saved match sends the replacement explicitly and disables repeat clicks while saving', async () => {
+    const { savedDialog, twoRows } = await openSavedMatchFromCandidate();
+    let complete;
+    quotationAPI.quotes.resolveSavedMatch.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const correct = within(savedDialog).getByRole('button', { name: 'Save corrected company match' });
+    expect(within(savedDialog).getByLabelText('Correct product for this company')).toHaveValue('12');
+    fireEvent.click(correct);
+    expect(correct).toBeDisabled();
+    expect(within(savedDialog).getByRole('button', { name: 'Confirm this saved product' })).toBeDisabled();
+    expect(quotationAPI.quotes.resolveSavedMatch).toHaveBeenCalledWith('21', expect.objectContaining({ product: 12, resolution: 'correct' }));
+    await act(async () => complete({ data: { quotation: { ...twoRows, lines: [
+      { ...twoRows.lines[0], product: 12, product_name: 'Gloves B', match_status: 'confirmed' }, twoRows.lines[1],
+    ] }, message: 'Company match corrected.' } }));
+    expect(screen.queryByRole('dialog', { name: 'Review saved product match' })).not.toBeInTheDocument();
+  });
+
+  test('a stale alias review refreshes the shown product and requires another explicit decision', async () => {
+    const { savedDialog } = await openSavedMatchFromCandidate();
+    const changedReview = { ...savedCompanyReview, token: 'changed-alias-token',
+      products: [{ product_id: 12, product_name: 'Gloves B', can_confirm: true }] };
+    quotationAPI.quotes.resolveSavedMatch.mockRejectedValueOnce({ response: { status: 409, data: {
+      ...savedMatchConflict(changedReview).response.data, detail: 'The saved match changed. Review the current details again.',
+    } } });
+    fireEvent.click(within(savedDialog).getByRole('button', { name: 'Confirm this saved product' }));
+    const message = await screen.findByRole('alert');
+    expect(message).toHaveTextContent('The saved match changed');
+    const refreshed = screen.getByRole('dialog', { name: 'Review saved product match' });
+    expect(within(refreshed).getByText('Gloves B', { selector: 'strong' })).toBeVisible();
+    expect(quotationAPI.quotes.resolveSavedMatch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a saved-link warning in creation opens review without showing misleading match percentages', async () => {
+    quotationAPI.quotes.bulkCreateProductsForLines.mockResolvedValueOnce({ data: { quotation: quote, updated_lines: [],
+      confirmation_required: [{ line_id: 31, creation_blocked: true, saved_match_review: savedCompanyReview,
+        warning: savedCompanyReview.reason, candidates: [{ product_id: 11, product_name: 'Gloves A', confidence: 0 }] }],
+    } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Select visible unmatched' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create Products for Selected Unmatched Rows' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check catalog and continue' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Review saved company match' }));
+    expect(screen.getByRole('dialog', { name: 'Review saved product match' })).toBeVisible();
+    expect(screen.queryByText('0% match')).not.toBeInTheDocument();
+  });
 
   test('shows saved progress inside product review and keeps a selected suggestion from appearing again with Brand on', async () => {
     const { dialog, twoRows } = await openTwoRowProductReview();
