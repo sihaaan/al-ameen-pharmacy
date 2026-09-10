@@ -214,7 +214,7 @@ def preserve_lpo_line_details(original, cleaned):
                 return None
         except InvalidOperation:
             return None
-        name = re.sub(r"[^a-z0-9]", "", str(name).lower())
+        name = re.sub(r"\s+", "", str(name).casefold())
         return (name, quantity, pricing_unit(row.get("unit"))) if name else None
 
     sources = defaultdict(list)

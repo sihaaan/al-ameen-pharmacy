@@ -143,7 +143,7 @@ class DeliveryLPOTests(TestCase):
         result = preserve_lpo_line_details(source, cleaned)
         self.assertEqual(result["lines"][0]["description"], source["lines"][0]["description"])
         self.assertNotIn("description", cleaned["lines"][0])
-        for changes in ({"requested_item_name": "Gauze 10cm"}, {"quantity": "5"}, {"unit": "piece"}):
+        for changes in ({"requested_item_name": "Gauze 10cm"}, {"requested_item_name": "Gauze 75cm"}, {"quantity": "5"}, {"unit": "piece"}):
             changed = {**cleaned, "lines": [{**cleaned["lines"][0], **changes}]}
             self.assertNotIn("description", preserve_lpo_line_details(source, changed)["lines"][0])
         source["lines"].append({**source["lines"][0], "description": "Product code: DIFFERENT"})
