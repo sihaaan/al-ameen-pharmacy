@@ -13,7 +13,7 @@ from rest_framework.test import APIClient
 from .ai_parsing import AIParseError, _normalize_ai_result, LPO_DELIVERY_JSON_SCHEMA
 from .import_parsers import parse_file_preview
 from .import_rules import classify_header_cell
-from .lpo_parsing import normalize_lpo_preview
+from .lpo_parsing import normalize_lpo_preview, preserve_lpo_line_details
 from .models import Company, DeliveryNote, Quotation, QuotationLine
 from .views import _extract_lpo_details
 
@@ -134,6 +134,20 @@ class DeliveryLPOTests(TestCase):
             with patch("quotations.delivery_views.clean_preview_with_ai", return_value=cleaned):
                 response = self.parse({"text": "PO", "use_ai": True})
             self.assertEqual(response.data["lines"][0]["unit"], expected)
+
+    def test_ai_keeps_source_references_only_for_unique_same_item_quantity_and_unit(self):
+        source = preview()
+        source["lines"][0]["description"] = "Product code: GI123\nBPA: JIL-PA-1"
+        cleaned = preview()
+        cleaned["lines"][0].update(requested_item_name="GAUZE 7.5 CM", quantity="10.000", unit="boxes")
+        result = preserve_lpo_line_details(source, cleaned)
+        self.assertEqual(result["lines"][0]["description"], source["lines"][0]["description"])
+        self.assertNotIn("description", cleaned["lines"][0])
+        for changes in ({"requested_item_name": "Gauze 10cm"}, {"requested_item_name": "Gauze 75cm"}, {"quantity": "5"}, {"unit": "piece"}):
+            changed = {**cleaned, "lines": [{**cleaned["lines"][0], **changes}]}
+            self.assertNotIn("description", preserve_lpo_line_details(source, changed)["lines"][0])
+        source["lines"].append({**source["lines"][0], "description": "Product code: DIFFERENT"})
+        self.assertNotIn("description", preserve_lpo_line_details(source, cleaned)["lines"][0])
 
     def test_ambiguous_customer_requires_selection(self):
         Company.objects.create(name="Resort L.L.C.")

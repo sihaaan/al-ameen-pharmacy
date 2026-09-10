@@ -841,6 +841,9 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
         pipeline_started_at=pipeline_started_at,
         source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
+    if delivery_details:
+        from .lpo_parsing import preserve_lpo_line_details
+        result = preserve_lpo_line_details(preview, result)
     return _bind_result_source(result, preview) if _is_image_preview(preview) else result
 
 
