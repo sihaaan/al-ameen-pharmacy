@@ -101,6 +101,7 @@ from .gmail_workflow_metrics import (
     workflow_elapsed_ms,
 )
 from .import_parsers import parse_file_preview, parse_text_preview
+from .lpo_parsing import normalize_lpo_preview
 from .workflow_features import (
     gmail_background_analysis_enabled,
     gmail_analysis_progress_enabled,
@@ -330,6 +331,7 @@ def _parse_lpo_business_date(value):
         "%d%m%Y",
         "%Y%m%d",
         "%d-%b-%Y",
+        "%d-%b-%y",
         "%d %b %Y",
         "%d.%b.%Y",
         "%d/%b/%Y",
@@ -383,6 +385,9 @@ def _preserve_attachment_inspection_meta(preview, source_preview):
 def _extract_lpo_details(preview):
     text = _preview_text_blob(preview)
     meta = dict(preview.get("meta") or {})
+    for key in ("lpo_number", "lpo_date"):
+        if not meta.get(key) and (meta.get("delivery_details") or {}).get(key):
+            meta[key] = meta["delivery_details"][key]
     lpo_number = ""
     lpo_date = None
 
@@ -394,6 +399,7 @@ def _extract_lpo_details(preview):
 
     if not lpo_number:
         number_patterns = [
+            r"\bPURCHASE\s+ORDER\s*[:#]\s*([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
             r"\b(LPO[-\/.]?[A-Z0-9][A-Z0-9\/\-.]{2,})\b",
@@ -4112,6 +4118,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             else:
                 return Response({"detail": "Upload a PO file or paste PO text."}, status=status.HTTP_400_BAD_REQUEST)
 
+            preview = normalize_lpo_preview(preview)
             deterministic_preview = preview
             warnings = list(preview.get("warnings") or [])
             use_ai = str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}
@@ -4122,8 +4129,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         actor=request.user,
                         requested_mode="auto",
                         allow_vision=True,
+                        delivery_details=True,
                     )
-                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
+                    ai_preview = normalize_lpo_preview(ai_preview, read_pdf=False)
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
@@ -4426,6 +4435,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             else:
                 return Response({"detail": "Upload an LPO file or paste LPO text."}, status=status.HTTP_400_BAD_REQUEST)
 
+            preview = normalize_lpo_preview(preview)
             source_context = {
                 "original_text": preview.get("original_text") or "",
                 "source_filename": preview.get("source_filename") or "",
@@ -4442,8 +4452,10 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         actor=request.user,
                         requested_mode="auto",
                         allow_vision=True,
+                        delivery_details=True,
                     )
-                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
+                    ai_preview = normalize_lpo_preview(ai_preview, read_pdf=False)
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
@@ -4965,6 +4977,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
             else:
                 return Response({"detail": "Upload an LPO file or paste LPO text."}, status=status.HTTP_400_BAD_REQUEST)
 
+            preview = normalize_lpo_preview(preview)
             source_context = {
                 "original_text": preview.get("original_text") or "",
                 "source_filename": preview.get("source_filename") or "",
@@ -4981,8 +4994,10 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         actor=request.user,
                         requested_mode="auto",
                         allow_vision=True,
+                        delivery_details=True,
                     )
-                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview)
+                    ai_preview = normalize_lpo_preview(ai_preview, read_pdf=False)
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))

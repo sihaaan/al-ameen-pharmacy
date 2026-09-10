@@ -41,7 +41,13 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const [receipt, setReceipt] = useState(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
+  const [lpoInput, setLpoInput] = useState({ file: null, text: '', useAI: true });
+  const [lpoPreview, setLpoPreview] = useState(null);
+  const [lpoImportToken, setLpoImportToken] = useState('');
   const detailRequest = useRef(0);
+  const editorForm = useRef(null);
+  const lpoFileInput = useRef(null);
+  useEffect(() => { if (!lpoInput.file && lpoFileInput.current) lpoFileInput.current.value = ''; }, [lpoInput.file]);
 
   const reportError = useCallback(async (error, operation) => {
     setErrorInfo(await describeQuotationError(error, operation, 'Orders & delivery notes'));
@@ -70,6 +76,9 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   }, [view, search, status, page, revision, reportError]);
 
   const showNote = useCallback((data) => {
+    detailRequest.current += 1;
+    setLpoPreview(null); setLpoImportToken('');
+    setLpoInput({ file: null, text: '', useAI: true });
     setNote(data);
     setForm({
       ...blankForm(), ...data,
@@ -126,6 +135,32 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     detailRequest.current += 1;
     setNote(null); setForm(blankForm()); setOrder(null); setEditorOpen(true);
     setErrorInfo(null); setFeedback(''); setCancelOpen(false);
+    setLpoPreview(null); setLpoImportToken('');
+    setLpoInput({ file: null, text: '', useAI: true });
+  };
+  const parseLpo = () => run('Read LPO for delivery note', async () => {
+    const requestId = detailRequest.current;
+    const payload = new FormData();
+    if (lpoInput.file) payload.append('file', lpoInput.file);
+    else payload.append('text', lpoInput.text);
+    payload.append('use_ai', String(lpoInput.useAI));
+    const { data } = await quotationAPI.deliveryNotes.parseLpo(payload, true);
+    if (requestId !== detailRequest.current) return;
+    setLpoPreview(data);
+  });
+  const applyLpo = () => {
+    const details = lpoPreview.details || {};
+    setForm((current) => ({
+      ...current,
+      company: current.company || String(lpoPreview.company || ''),
+      ...Object.fromEntries(['lpo_number', 'delivery_address', 'attention', 'contact_phone']
+        .filter((key) => details[key]).map((key) => [key, details[key]])),
+      lines: lpoPreview.lines.map((line) => ({ ...line })),
+    }));
+    setLpoImportToken(lpoPreview.import_token);
+    setFeedback(lpoPreview.lines.length + ' LPO items filled in. Review the customer, delivery date and quantities before saving.');
+    setLpoPreview(null);
+    window.requestAnimationFrame(() => editorForm.current?.querySelector('input, select')?.focus());
   };
   const createFromOrder = () => run('Create order delivery note', async () => {
     const lines = order.lines.filter((line) => Number(line.available_quantity) > 0).map((line) => ({
@@ -143,6 +178,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       delivery_date: form.delivery_date, lpo_number: form.lpo_number, invoice_number: form.invoice_number,
       delivery_address: form.delivery_address, attention: form.attention, contact_phone: form.contact_phone,
       notes: form.notes,
+      ...(lpoImportToken ? { lpo_import_token: lpoImportToken } : {}),
       lines: form.lines.map((line) => ({
         quotation_line: line.quotation_line || null, item_name: line.item_name,
         description: line.description || '', unit: line.unit || '', quantity: line.quantity,
@@ -157,6 +193,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   };
   const submitDraft = (event, issue = false) => {
     event.preventDefault();
+    if (lpoPreview || busy) return;
     run(issue ? 'Issue delivery note' : 'Save delivery note', async () => {
       const saved = await saveDraft();
       if (issue) {
@@ -194,6 +231,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   };
   const editable = !note || note.status === 'draft';
   const draftChanged = note?.status === 'draft' && (
+    Boolean(lpoImportToken) ||
     ['delivery_date', 'lpo_number', 'invoice_number', 'delivery_address', 'attention', 'contact_phone', 'notes']
       .some((key) => (form[key] || '') !== (note[key] || ''))
     || JSON.stringify(form.lines) !== JSON.stringify(note.lines)
@@ -253,12 +291,46 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
 
     {editorOpen && <section className="qm-panel dn-detail" aria-label="Delivery note editor">
       <div className="qm-panel-heading"><div><h3>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>{badge(note?.status || 'draft')}</div>
-      <form onSubmit={submitDraft}>
+      {editable && !form.quotation && <section className="dn-lpo-import" aria-label="Import delivery items from LPO">
+        <div><h4>Fill from an LPO</h4><p>Upload the customer's purchase order. Review the detected details, then fill the delivery note.</p></div>
+        {!lpoPreview ? <>
+          <div className="dn-form-grid">
+            <label>LPO file<input ref={lpoFileInput} type="file" accept=".pdf,.xlsx,.xls,.xlsb,.png,.jpg,.jpeg,.webp" disabled={busy}
+              onChange={(event) => setLpoInput((current) => ({ ...current, file: event.target.files?.[0] || null, text: '' }))} /></label>
+            <label>Or paste LPO text<textarea value={lpoInput.text} disabled={busy || Boolean(lpoInput.file)}
+              placeholder="Paste the purchase order or item table"
+              onChange={(event) => setLpoInput((current) => ({ ...current, text: event.target.value }))} /></label>
+          </div>
+          {lpoInput.file && <p>Selected: {lpoInput.file.name}</p>}
+          <div className="dn-actions">
+            <label className="dn-ai-toggle"><input type="checkbox" checked={lpoInput.useAI} disabled={busy}
+              onChange={(event) => setLpoInput((current) => ({ ...current, useAI: event.target.checked }))} />Use AI to read and clean up the LPO</label>
+            <button type="button" className="qm-primary" disabled={busy || (!lpoInput.file && !lpoInput.text.trim())} onClick={parseLpo}>{busy ? 'Reading LPO…' : 'Read LPO'}</button>
+            {lpoInput.file && <button type="button" disabled={busy} onClick={() => setLpoInput({ file: null, text: '', useAI: lpoInput.useAI })}>Use pasted text instead</button>}
+          </div>
+        </> : <div className="dn-lpo-preview" role="region" aria-label="Detected LPO details">
+          <div className="dn-form-grid">
+            <div><strong>{lpoPreview.details.customer_name || 'Customer needs selection'}</strong><p>{lpoPreview.details.lpo_number || 'LPO number not found'} · {lpoPreview.lines.length} items</p></div>
+            <div><strong>Deliver to</strong><p className="dn-preserve-lines">{lpoPreview.details.delivery_address || 'Address needs review'}</p><p>{lpoPreview.details.attention}</p></div>
+          </div>
+          {lpoPreview.details.requested_delivery_date && <p>Requested delivery date on LPO: {lpoPreview.details.requested_delivery_date}. Set the actual delivery date below.</p>}
+          {!!lpoPreview.warnings?.length && <ul className="dn-lpo-warnings">{lpoPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
+          <div className="qm-table-wrap dn-lpo-items"><table className="qm-table"><thead><tr><th>Detected item</th><th>Quantity</th><th>Unit</th></tr></thead><tbody>
+            {lpoPreview.lines.map((line, index) => <tr key={index}><td>{line.item_name}</td><td>{line.quantity || 'Check quantity'}</td><td>{line.unit}</td></tr>)}
+          </tbody></table></div>
+          <div className="dn-actions"><button type="button" className="qm-primary" onClick={applyLpo}>{form.lines.some((line) => line.item_name.trim()) ? 'Replace items with this LPO' : 'Fill delivery note'}</button>
+            <button type="button" onClick={() => setLpoPreview(null)}>Discard preview</button></div>
+        </div>}
+      </section>}
+      {form.quotation && editable && <p className="dn-help">Items and quantities are filled from the approved order. To upload or change an LPO, use Manage order on the quotation.
+        {onReviewOutcome && <button type="button" disabled={busy} onClick={() => onReviewOutcome(form.quotation)}>Manage order / upload LPO</button>}</p>}
+      {note?.lpo_source?.source_filename && <p className="dn-help">Source LPO: {note.lpo_source.source_filename}</p>}
+      <form onSubmit={submitDraft} ref={editorForm}>
         <fieldset disabled={!editable || busy}>
           <div className="dn-form-grid">
             <label>Customer<select required value={form.company} disabled={Boolean(note?.id || form.quotation)} onChange={(event) => {
               const company = companies.find((entry) => String(entry.id) === event.target.value);
-              setForm((current) => ({ ...current, company: event.target.value, delivery_address: company?.billing_address || '' }));
+              setForm((current) => ({ ...current, company: event.target.value, delivery_address: current.delivery_address || company?.billing_address || '' }));
             }}><option value="">Select customer</option>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
             <label>Delivery date<input type="date" required value={form.delivery_date} onChange={(event) => update('delivery_date', event.target.value)} /></label>
             <label>LPO number<input maxLength={120} value={form.lpo_number} onChange={(event) => update('lpo_number', event.target.value)} /></label>
@@ -278,12 +350,12 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
           {!form.quotation && <button type="button" disabled={form.lines.length >= 300} onClick={() => update('lines', [...form.lines, blankLine()])}>Add item</button>}
           <label className="dn-notes">Delivery instructions<textarea maxLength={4000} value={form.notes} onChange={(event) => update('notes', event.target.value)} /></label>
         </fieldset>
-        {editable && <div className="dn-actions"><button type="submit" disabled={busy || !form.lines.length}>Save draft</button><button className="qm-primary" type="button" disabled={busy || !form.lines.length} onClick={(event) => {
+        {editable && <div className="dn-actions"><button type="submit" disabled={busy || Boolean(lpoPreview) || !form.lines.length}>Save draft</button><button className="qm-primary" type="button" disabled={busy || Boolean(lpoPreview) || !form.lines.length} onClick={(event) => {
           if (event.currentTarget.form.reportValidity()) submitDraft(event, true);
         }}>Save & issue delivery note</button></div>}
       </form>
       <div className="dn-actions">
-        {note && <button disabled={busy || draftChanged} onClick={download}>Download {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
+        {note && <button disabled={busy || draftChanged || Boolean(lpoPreview)} onClick={download}>Download {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
         {note && note.status !== 'cancelled' && <button disabled={busy} onClick={() => setCancelOpen(!cancelOpen)}>Cancel note</button>}
         <button disabled={busy} onClick={() => setEditorOpen(false)}>Close note</button>
       </div>

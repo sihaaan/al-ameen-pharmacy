@@ -9,6 +9,7 @@ jest.mock('../../api/quotations', () => ({
     companies: { list: jest.fn() },
     deliveryOrders: { list: jest.fn(), retrieve: jest.fn() },
     deliveryNotes: {
+      parseLpo: jest.fn(),
       list: jest.fn(), retrieve: jest.fn(), create: jest.fn(), update: jest.fn(),
       issue: jest.fn(), confirmReceipt: jest.fn(), cancel: jest.fn(), pdf: jest.fn(),
     },
@@ -128,4 +129,86 @@ test('issue saves the reviewed draft first and a changed draft cannot download s
   await waitFor(() => expect(quotationAPI.deliveryNotes.issue).toHaveBeenCalledWith(20));
   expect(quotationAPI.deliveryNotes.update).toHaveBeenCalledWith(20, expect.objectContaining({ invoice_number: 'INV-NEW' }));
   expect(await screen.findByRole('form', { name: 'Confirm delivery receipt' })).toBeInTheDocument();
+});
+
+const parsedLpo = {
+  company: 2, import_token: 'signed-source', source_filename: 'purchase-order.pdf',
+  details: { customer_name: 'Warehouse customer', lpo_number: 'NEW-PO-123', delivery_address: 'Site warehouse',
+    attention: 'Receiving contact', contact_phone: '', requested_delivery_date: '2026-09-06' },
+  lines: [{ item_name: 'Gauze 7.5cm', quantity: '10', unit: 'BOX', description: 'Product code: GI123', quotation_line: null }],
+  warnings: [],
+};
+
+test('reads an LPO, stages it for review, then fills editable fields without creating or issuing a note', async () => {
+  quotationAPI.deliveryNotes.parseLpo.mockResolvedValue({ data: parsedLpo });
+  quotationAPI.deliveryNotes.create.mockResolvedValue({ data: { ...note, status: 'draft', quotation: null } });
+  render(<DeliveryNoteManager />);
+  await screen.findByRole('button', { name: 'View order' });
+  fireEvent.click(screen.getByRole('button', { name: 'New standalone delivery note' }));
+  const deliveryDate = screen.getByLabelText('Delivery date').value;
+  fireEvent.change(screen.getByLabelText('LPO file'), { target: { files: [new File(['PDF'], 'purchase-order.pdf', { type: 'application/pdf' })] } });
+  fireEvent.click(screen.getByRole('button', { name: 'Read LPO' }));
+  await screen.findByRole('region', { name: 'Detected LPO details' });
+  const request = quotationAPI.deliveryNotes.parseLpo.mock.calls[0][0];
+  expect(request.get('file').name).toBe('purchase-order.pdf');
+  expect(request.get('use_ai')).toBe('true');
+  expect(screen.getByLabelText('Item 1')).toHaveValue('');
+  expect(screen.getByRole('button', { name: 'Save draft', exact: true })).toBeDisabled();
+  expect(quotationAPI.deliveryNotes.create).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Fill delivery note' }));
+  expect(screen.getByLabelText('Customer')).toHaveValue('2');
+  expect(screen.getByLabelText('LPO number')).toHaveValue('NEW-PO-123');
+  expect(screen.getByLabelText('Delivery address')).toHaveValue('Site warehouse');
+  expect(screen.getByLabelText('Attention')).toHaveValue('Receiving contact');
+  expect(screen.getByLabelText('Item 1')).toHaveValue('Gauze 7.5cm');
+  expect(screen.getByLabelText('Delivery date')).toHaveValue(deliveryDate);
+  fireEvent.change(screen.getByLabelText('Quantity 1'), { target: { value: '6' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft', exact: true }));
+  await waitFor(() => expect(quotationAPI.deliveryNotes.create).toHaveBeenCalledWith(expect.objectContaining({
+    lpo_import_token: 'signed-source', lines: [expect.objectContaining({ quantity: '6' })],
+  })));
+  expect(quotationAPI.deliveryNotes.issue).not.toHaveBeenCalled();
+});
+
+test('discarding a parsed LPO keeps existing item edits and does not attach its source', async () => {
+  quotationAPI.deliveryNotes.parseLpo.mockResolvedValue({ data: parsedLpo });
+  render(<DeliveryNoteManager />);
+  await screen.findByRole('button', { name: 'View order' });
+  fireEvent.click(screen.getByRole('button', { name: 'New standalone delivery note' }));
+  fireEvent.change(screen.getByLabelText('Item 1'), { target: { value: 'Existing edited item' } });
+  fireEvent.change(screen.getByLabelText('Or paste LPO text'), { target: { value: 'Purchase order text' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Read LPO' }));
+  await screen.findByRole('button', { name: 'Replace items with this LPO' });
+  fireEvent.click(screen.getByRole('button', { name: 'Discard preview' }));
+  expect(screen.getByLabelText('Item 1')).toHaveValue('Existing edited item');
+  expect(screen.getByRole('button', { name: 'Save draft', exact: true })).toBeEnabled();
+  expect(quotationAPI.deliveryNotes.create).not.toHaveBeenCalled();
+});
+
+test('a parsing failure preserves the manually entered delivery details', async () => {
+  quotationAPI.deliveryNotes.parseLpo.mockRejectedValue(new Error('Invalid LPO'));
+  render(<DeliveryNoteManager />);
+  await screen.findByRole('button', { name: 'View order' });
+  fireEvent.click(screen.getByRole('button', { name: 'New standalone delivery note' }));
+  fireEvent.change(screen.getByLabelText('LPO number'), { target: { value: 'KEEP-PO' } });
+  fireEvent.change(screen.getByLabelText('Or paste LPO text'), { target: { value: 'Purchase order text' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Read LPO' }));
+  await screen.findByRole('alert');
+  expect(screen.getByLabelText('LPO number')).toHaveValue('KEEP-PO');
+  expect(screen.queryByRole('button', { name: 'Fill delivery note' })).not.toBeInTheDocument();
+});
+
+test('an old parsing response cannot replace a different quotation delivery draft', async () => {
+  let resolve;
+  quotationAPI.deliveryNotes.parseLpo.mockReturnValue(new Promise((done) => { resolve = done; }));
+  const { rerender } = render(<DeliveryNoteManager />);
+  await screen.findByRole('button', { name: 'View order' });
+  fireEvent.click(screen.getByRole('button', { name: 'New standalone delivery note' }));
+  fireEvent.change(screen.getByLabelText('Or paste LPO text'), { target: { value: 'Purchase order text' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Read LPO' }));
+  rerender(<DeliveryNoteManager initialNote={{ ...note, status: 'draft' }} />);
+  resolve({ data: parsedLpo });
+  await waitFor(() => expect(screen.getByLabelText('Item 1')).toHaveValue('Gloves'));
+  expect(screen.queryByRole('region', { name: 'Detected LPO details' })).not.toBeInTheDocument();
+  expect(screen.getByText(/filled from the approved order/)).toBeInTheDocument();
 });

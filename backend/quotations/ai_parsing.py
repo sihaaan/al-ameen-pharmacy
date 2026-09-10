@@ -320,6 +320,20 @@ AI_DOCUMENT_REFERENCE_SCHEMA = {
     "required": ["reference", "page_number", "confidence"],
 }
 
+LPO_DELIVERY_FIELDS = (
+    "customer_name", "customer_address", "customer_trn", "delivery_address",
+    "attention", "contact_phone", "lpo_number", "lpo_date", "requested_delivery_date",
+)
+LPO_DELIVERY_JSON_SCHEMA = {
+    **AI_PARSE_JSON_SCHEMA,
+    "properties": {**AI_PARSE_JSON_SCHEMA["properties"], "delivery_details": {
+        "type": "object", "additionalProperties": False,
+        "properties": {key: {"type": "string"} for key in LPO_DELIVERY_FIELDS},
+        "required": list(LPO_DELIVERY_FIELDS),
+    }},
+    "required": [*AI_PARSE_JSON_SCHEMA["required"], "delivery_details"],
+}
+
 
 MAILBOX_PO_VISION_JSON_SCHEMA = {
     "type": "object",
@@ -693,12 +707,12 @@ def _guard_decimal(value):
         return None
 
 
-def prefer_safe_ai_preview(deterministic_preview, ai_preview):
+def prefer_safe_ai_preview(deterministic_preview, ai_preview, *, max_guard_rows=10):
     """Keep a small, strong deterministic parse when AI loses source data."""
 
     deterministic_rows = list((deterministic_preview or {}).get("lines") or [])
     ai_rows = list((ai_preview or {}).get("lines") or [])
-    if not 1 <= len(deterministic_rows) <= 10:
+    if not 1 <= len(deterministic_rows) <= max_guard_rows:
         return ai_preview
 
     strong_rows = [
@@ -768,7 +782,7 @@ def prefer_safe_ai_preview(deterministic_preview, ai_preview):
     return fallback
 
 
-def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_vision=True):
+def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_vision=True, delivery_details=False):
     pipeline_started_at = time.perf_counter()
     settings_obj = QuotationSettings.get_solo()
     _assert_ai_allowed(settings_obj)
@@ -817,6 +831,8 @@ def clean_preview_with_ai(preview, actor=None, *, requested_mode="auto", allow_v
         images=images,
         page_count=page_count,
         output_style="inquiry",
+        json_schema=LPO_DELIVERY_JSON_SCHEMA if delivery_details else None,
+        schema_name="lpo_delivery_parse" if delivery_details else "quotation_import_parse",
         pipeline_started_at=pipeline_started_at,
         source_preparation_ms=ai_parse_elapsed_ms(pipeline_started_at),
     )
@@ -1413,6 +1429,17 @@ def _run_ai_cleanup(
         mode=mode,
         include_mailbox_metadata=schema_name == "mailbox_po_vision_parse",
     )
+    if schema_name == "lpo_delivery_parse":
+        instructions += (
+            "\nExtract delivery_details from the LPO itself. The customer is the purchaser/Bill To, "
+            "never the supplier (our pharmacy). Use Ship To for delivery_address and the requestor "
+            "or delivery contact for attention/contact_phone; never copy the supplier phone. "
+            "Keep legal company names and explicit addresses intact. Return ISO dates when explicit, "
+            "and empty strings for missing fields. Do not invent an invoice number, address, phone, "
+            "or delivery date. Requested delivery dates are document evidence, not proof of dispatch. "
+            "Item rows exclude page footers, totals, terms and header fields. Keep product codes/BPA "
+            "references in notes rather than item_name; preserve sizes, strengths, brands and packs."
+        )
     effective_schema = json_schema or AI_PARSE_JSON_SCHEMA
     pipeline_version = (
         MAILBOX_PO_AI_PIPELINE_VERSION
@@ -1886,6 +1913,13 @@ def _normalize_ai_result(
         "model": model,
         "cache_hit": False,
     }
+    if schema_name == "lpo_delivery_parse":
+        fields = raw_result.get("delivery_details") or {}
+        if not isinstance(fields, dict):
+            raise AIParseError("AI returned invalid delivery details. Review the original extraction.")
+        result["meta"]["delivery_details"] = {
+            key: _clean_text(fields.get(key))[:2000] for key in LPO_DELIVERY_FIELDS
+        }
     return result
 
 

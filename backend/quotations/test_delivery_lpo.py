@@ -1,0 +1,234 @@
+from decimal import Decimal
+from io import BytesIO
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from reportlab.pdfgen import canvas
+from rest_framework.test import APIClient
+
+from .ai_parsing import AIParseError, _normalize_ai_result, LPO_DELIVERY_JSON_SCHEMA
+from .import_parsers import parse_file_preview
+from .import_rules import classify_header_cell
+from .lpo_parsing import normalize_lpo_preview
+from .models import Company, DeliveryNote, Quotation, QuotationLine
+from .views import _extract_lpo_details
+
+
+def preview():
+    return {
+        "source_filename": "purchase-order.xlsx", "source_sha256": "a" * 64,
+        "source_file_ref": "", "parse_method": "deterministic_test",
+        "original_text": "Purchase Order: RES-PO-00957871\nPO Date: 09-SEP-26",
+        "meta": {"delivery_details": {
+            "customer_name": "Resort LLC", "delivery_address": "Al Sufouh\nDubai",
+            "attention": "Receiving contact", "contact_phone": "", "requested_delivery_date": "2026-09-06",
+        }},
+        "warnings": [],
+        "lines": [{"raw_name": "Gauze 7.5cm", "requested_item_name": "Gauze 7.5cm",
+                   "quantity": "10", "unit": "BOX", "unit_price": "12.5", "parse_confidence": .98}],
+    }
+
+
+@override_settings(QUOTATION_AI_PARSE_GLOBAL_ENABLED=False)
+class DeliveryLPOTests(TestCase):
+    def setUp(self):
+        self.actor = get_user_model().objects.create_user("delivery-lpo-staff", is_staff=True)
+        self.company = Company.objects.create(name="Resort LLC")
+        self.client = APIClient()
+        self.client.force_authenticate(self.actor)
+
+    def parse(self, data=None, source=None):
+        with patch("quotations.delivery_views.parse_text_preview", return_value=source or preview()):
+            return self.client.post(reverse("quotation-delivery-note-parse-lpo"),
+                data or {"text": "PO", "use_ai": False}, format="json")
+
+    def test_parse_then_save_reviewed_standalone_note_does_not_create_a_quotation_or_issue(self):
+        response = self.parse()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(DeliveryNote.objects.count(), 0)
+        self.assertEqual(Quotation.objects.count(), 0)
+        self.assertEqual(response.data["company"], self.company.pk)
+        self.assertEqual(response.data["details"]["lpo_number"], "RES-PO-00957871")
+        self.assertEqual(response.data["details"]["lpo_date"], "2026-09-09")
+        rows = response.data["lines"]
+        rows[0]["quantity"] = "6"
+        saved = self.client.post(reverse("quotation-delivery-note-list"), {
+            "company": self.company.pk, "quotation": None,
+            "lpo_number": response.data["details"]["lpo_number"],
+            "delivery_address": response.data["details"]["delivery_address"],
+            "lpo_import_token": response.data["import_token"], "lines": rows,
+        }, format="json")
+        self.assertEqual(saved.status_code, 201, saved.data)
+        self.assertEqual(saved.data["status"], "draft")
+        self.assertIsNone(saved.data["quotation"])
+        self.assertNotEqual(saved.data["delivery_date"], "2026-09-06")
+        self.assertEqual(Decimal(saved.data["lines"][0]["quantity"]), 6)
+        note = DeliveryNote.objects.get(pk=saved.data["id"])
+        self.assertEqual(note.lpo_import["rows"][0]["quantity"], "10")
+        self.assertEqual(note.lpo_import["parsed_by"], self.actor.pk)
+        self.assertNotIn("source_file_ref", saved.data["lpo_source"])
+        self.assertNotIn("lpo_import", saved.data)
+
+    def test_ai_is_used_for_rows_and_header_details_and_failure_keeps_a_reviewable_preview(self):
+        cleaned = preview()
+        cleaned["meta"]["delivery_details"]["contact_phone"] = "04 111 2222"
+        with patch("quotations.delivery_views.clean_preview_with_ai", return_value=cleaned) as ai:
+            response = self.parse({"text": "PO", "use_ai": True})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(ai.call_args.kwargs["delivery_details"])
+        self.assertEqual(response.data["details"]["contact_phone"], "04 111 2222")
+        with patch("quotations.delivery_views.clean_preview_with_ai", side_effect=AIParseError("AI unavailable")):
+            response = self.parse({"text": "PO", "use_ai": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("AI unavailable", response.data["warnings"])
+        self.assertEqual(response.data["lines"][0]["quantity"], "10")
+
+    def test_matching_lpo_supplies_missing_customer_snapshot_without_editing_company(self):
+        source = preview()
+        source["meta"]["delivery_details"].update(customer_address="King Street, Dubai", customer_trn="100000000000003")
+        parsed = self.parse(source=source).data
+        response = self.client.post(reverse("quotation-delivery-note-list"), {
+            "company": self.company.pk, "lpo_import_token": parsed["import_token"], "lines": parsed["lines"],
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["customer_address"], "King Street, Dubai")
+        self.assertEqual(response.data["customer_trn"], "100000000000003")
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.billing_address, "")
+        self.assertEqual(self.company.trn, "")
+
+    def test_ai_cannot_remove_a_strong_item_or_change_its_quantity(self):
+        cleaned = preview()
+        cleaned["lines"][0]["quantity"] = "999"
+        with patch("quotations.delivery_views.clean_preview_with_ai", return_value=cleaned):
+            response = self.parse({"text": "PO", "use_ai": True})
+        self.assertEqual(response.data["lines"][0]["quantity"], "10")
+        self.assertTrue(any("rejected" in warning for warning in response.data["warnings"]))
+
+    def test_missing_or_invalid_quantities_are_never_invented(self):
+        for quantity in ("", "NaN", "-1", "0", "0.0001"):
+            source = preview()
+            source["lines"][0]["quantity"] = quantity
+            response = self.parse(source=source)
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data["lines"][0]["quantity"], "")
+            self.assertTrue(any("quantity" in warning for warning in response.data["warnings"]))
+
+    def test_larger_lpo_cannot_silently_lose_items_during_ai_cleanup(self):
+        source = preview()
+        source["lines"] = [{**source["lines"][0], "raw_name": "Gauze " + str(i), "requested_item_name": "Gauze " + str(i)} for i in range(12)]
+        cleaned = {**source, "lines": source["lines"][:10]}
+        with patch("quotations.delivery_views.clean_preview_with_ai", return_value=cleaned):
+            response = self.parse({"text": "PO", "use_ai": True}, source=source)
+        self.assertEqual(len(response.data["lines"]), 12)
+        self.assertTrue(any("rejected" in warning for warning in response.data["warnings"]))
+
+    def test_ambiguous_customer_requires_selection(self):
+        Company.objects.create(name="Resort L.L.C.")
+        response = self.parse()
+        self.assertIsNone(response.data["company"])
+        self.assertEqual(len(response.data["company_candidates"]), 2)
+
+    def test_signed_preview_cannot_be_tampered_with_or_used_by_another_staff_member(self):
+        token = self.parse().data["import_token"]
+        for value, actor in [(token + "x", self.actor), (token, get_user_model().objects.create_user("other", is_staff=True))]:
+            self.client.force_authenticate(actor)
+            response = self.client.post(reverse("quotation-delivery-note-list"), {
+                "company": self.company.pk, "lpo_import_token": value,
+                "lines": [{"item_name": "Gauze", "quantity": 1}],
+            }, format="json")
+            self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(DeliveryNote.objects.exists())
+
+    def test_empty_unsupported_and_nonstaff_uploads_are_rejected(self):
+        url = reverse("quotation-delivery-note-parse-lpo")
+        self.assertEqual(self.client.post(url, {}, format="json").status_code, 400)
+        bad = SimpleUploadedFile("bad.exe", b"invalid", content_type="application/octet-stream")
+        self.assertEqual(self.client.post(url, {"file": bad}, format="multipart").status_code, 400)
+        self.client.force_authenticate(get_user_model().objects.create_user("external"))
+        self.assertEqual(self.client.post(url, {"text": "PO"}, format="json").status_code, 403)
+
+    def test_quotation_lpo_headers_and_accepted_quantities_flow_into_delivery(self):
+        quote = Quotation.objects.create(company=self.company, status="sent")
+        line = QuotationLine.objects.create(quotation=quote, item_name_snapshot="Gauze 7.5cm",
+            quantity=10, unit="BOX", unit_price=12.5, match_status="confirmed")
+        with patch("quotations.views.parse_text_preview", return_value=preview()):
+            parsed = self.client.post(reverse("quotation-parse-outcome-po", args=[quote.pk]),
+                {"text": "PO", "use_ai": False}, format="json")
+        self.assertEqual(parsed.status_code, 201, parsed.data)
+        lpo = quote.lpos.get()
+        self.assertEqual(lpo.parsed_meta["delivery_details"]["delivery_address"], "Al Sufouh\nDubai")
+        approved = self.client.patch(reverse("quotation-outcome", args=[quote.pk]), {
+            "lpo_id": lpo.pk, "po_import_id": parsed.data["id"], "applied_po_line_ids": [line.pk],
+            "line_updates": [{"id": line.pk, "outcome_status": "quantity_changed",
+                             "accepted_quantity": "6", "accepted_unit_price": "12.5"}],
+        }, format="json")
+        self.assertEqual(approved.status_code, 200, approved.data)
+        note = self.client.post(reverse("quotation-delivery-note-list"), {
+            "quotation": quote.pk, "lpo_number": lpo.lpo_number,
+            "lines": [{"quotation_line": line.pk, "quantity": "6"}],
+        }, format="json")
+        self.assertEqual(note.status_code, 201, note.data)
+        self.assertEqual(note.data["delivery_address"], "Al Sufouh\nDubai")
+        self.assertEqual(note.data["attention"], "Receiving contact")
+        self.assertEqual(Decimal(note.data["lines"][0]["quantity"]), 6)
+        self.assertEqual(note.data["status"], "draft")
+
+    def test_cleanup_removes_document_rows_and_preserves_codes_sizes_and_prices(self):
+        source = preview()
+        row = source["lines"][0]
+        row.update(raw_name="Gauze 7.5cm Product Code: GI123 BPA: REF-1 Note from Requester:",
+                   requested_item_name="Gauze 7.5cm Product Code: GI123 BPA: REF-1 Note from Requester:",
+                   raw_line="1 | Gauze 7.5cm Product Code: GI123 BPA: REF-1 Note from Requester: | BOX | 10")
+        source["lines"].extend({"raw_name": value} for value in
+            ["Table Of Particulars", "PO Total (AED) 125", "* Tax Total (AED) 6.25", "Page 1 O F 8"])
+        result = normalize_lpo_preview(source, read_pdf=False)
+        self.assertEqual(len(result["lines"]), 1)
+        self.assertEqual(result["lines"][0]["raw_name"], "Gauze 7.5cm")
+        self.assertIn("Product code: GI123", result["lines"][0]["description"])
+        self.assertEqual(result["lines"][0]["unit_price"], "12.5")
+        self.assertEqual(classify_header_cell("Unit\nPrice\n(AED)"), "unit_price")
+        self.assertEqual(classify_header_cell("Amou\nnt\n(AED)"), "amount")
+
+    def test_pdf_columns_keep_supplier_phone_and_payment_terms_out_of_customer_fields(self):
+        stream = BytesIO()
+        pdf = canvas.Canvas(stream, pagesize=(600, 840))
+        for x, y, text in [
+            (25, 730, "Purchase Order: RES-PO-00957871"), (320, 730, "PO Date: 09-SEP-26"),
+            (25, 690, "Supplier:"), (25, 675, "Our Pharmacy"), (25, 660, "Tel: 04 999 9999"),
+            (290, 690, "Bill To:"), (290, 675, "Resort LLC"), (290, 660, "King Street, Dubai"),
+            (290, 630, "100000000000003"),
+            (25, 600, "Ship To:"), (290, 600, "Payment Terms: 45 days"),
+            (25, 580, "Al Sufouh"), (25, 565, "Dubai"), (25, 550, "United Arab Emirates"),
+            (25, 530, "Requestor: Receiving contact"), (25, 515, "Requestor Phone Number:"),
+            (240, 480, "Table Of Particulars"),
+        ]:
+            pdf.drawString(x, y, text)
+        pdf.save()
+        with TemporaryDirectory() as folder, override_settings(
+            QUOTATION_PRIVATE_STORAGE_ROOT=folder,
+            STORAGES={"default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+                      "quotation_evidence": {"BACKEND": "quotations.private_storage.QuotationEvidenceFileSystemStorage"}},
+        ):
+            parsed = parse_file_preview(SimpleUploadedFile("header.pdf", stream.getvalue(), content_type="application/pdf"))
+            result = normalize_lpo_preview(parsed)
+        fields = result["meta"]["delivery_details"]
+        self.assertEqual(fields["customer_name"], "Resort LLC")
+        self.assertEqual(fields["customer_address"], "King Street, Dubai")
+        self.assertEqual(fields["customer_trn"], "100000000000003")
+        self.assertEqual(fields["delivery_address"], "Al Sufouh\nDubai\nUnited Arab Emirates")
+        self.assertEqual(fields["attention"], "Receiving contact")
+        self.assertEqual(fields["contact_phone"], "")
+        self.assertEqual(_extract_lpo_details(result)["lpo_number"], "RES-PO-00957871")
+
+    def test_lpo_ai_contract_retains_delivery_fields(self):
+        raw = {"rows": [{"item_name": "Gauze", "quantity": "10", "unit": "BOX", "parse_status": "parsed",
+                        "confidence": .99}], "warnings": [], "delivery_details": {"customer_name": "Resort LLC"}}
+        result = _normalize_ai_result(raw, preview=preview(), mode="text", provider="test", model="test", output_style="inquiry",
+                                      schema_name="lpo_delivery_parse")
+        self.assertEqual(result["meta"]["delivery_details"]["customer_name"], "Resort LLC")
+        self.assertIn("delivery_details", LPO_DELIVERY_JSON_SCHEMA["required"])

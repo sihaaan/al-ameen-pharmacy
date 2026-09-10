@@ -9,6 +9,7 @@ from rest_framework import serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from .delivery import (
     accepted_quantity, cancel_delivery_note, confirm_delivery_note, issue_delivery_note,
@@ -17,6 +18,12 @@ from .delivery import (
 from .models import Company, DeliveryNote, DeliveryNoteLine, Quotation, QuotationAuditLog, QuotationLine
 from .permissions import IsQuotationStaff
 from .services import audit_log
+from .lpo_parsing import (
+    normalize_lpo_preview, delivery_lpo_preview, read_delivery_import_token, extract_delivery_details,
+)
+from .import_parsers import parse_file_preview, parse_text_preview
+from .ai_parsing import AIParseError, clean_preview_with_ai, prefer_safe_ai_preview
+from .company_matching import score_company_name
 
 
 class DeliveryPagination(PageNumberPagination):
@@ -35,6 +42,8 @@ class DeliveryLineSerializer(serializers.ModelSerializer):
 
 
 class DeliveryNoteSerializer(serializers.ModelSerializer):
+    lpo_import_token = serializers.CharField(write_only=True, required=False, max_length=500000)
+    lpo_source = serializers.SerializerMethodField()
     lines = DeliveryLineSerializer(many=True, required=False)
     company_name = serializers.CharField(source="company.name", read_only=True)
     quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True, default=None)
@@ -53,6 +62,7 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
             "contact_phone", "notes", "lines", "received_by", "received_date", "receipt_reference",
             "receipt_notes", "cancellation_reason", "created_by_username", "issued_at", "confirmed_at",
             "cancelled_at", "created_at", "updated_at",
+            "lpo_import_token", "lpo_source",
         ]
         read_only_fields = [
             "delivery_number", "status", "customer_name", "customer_address", "customer_trn",
@@ -77,6 +87,13 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
             attrs["company"] = quote.company
         elif not company:
             raise serializers.ValidationError({"company": "Select a customer."})
+        token = attrs.pop("lpo_import_token", None)
+        if token:
+            if quote:
+                raise serializers.ValidationError("Review this LPO through the quotation's Manage order workflow.")
+            attrs["lpo_import"] = read_delivery_import_token(token, self.context["request"].user)
+            if instance:
+                attrs.update(self._customer_snapshot(company, attrs["lpo_import"]))
         rows = attrs.get("lines", [])
         if len(rows) > 300:
             raise serializers.ValidationError("A delivery note can contain at most 300 items.")
@@ -96,6 +113,21 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("Enter a name for every delivery item.")
         return attrs
 
+    def get_lpo_source(self, note):
+        source = note.lpo_import or {}
+        return {key: source.get(key) for key in ("source_filename", "parse_method", "parsed_at", "details", "warnings")} if source else None
+
+    @staticmethod
+    def _customer_snapshot(company, source):
+        fields = {"customer_name": company.name, "customer_address": company.billing_address, "customer_trn": company.trn}
+        details = (source or {}).get("details") or {}
+        if score_company_name(details.get("customer_name", ""), company.name)[0] >= 96:
+            fields["customer_name"] = str(details["customer_name"])[:255]
+            for field, limit in (("customer_address", 2000), ("customer_trn", 100)):
+                if not fields[field]:
+                    fields[field] = str(details.get(field) or "")[:limit]
+        return fields
+
     @transaction.atomic
     def create(self, validated_data):
         rows = validated_data.pop("lines", [])
@@ -105,13 +137,29 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
             if quote.status not in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
                 raise serializers.ValidationError("This quotation is no longer available for delivery.")
         company = validated_data["company"]
-        validated_data.update(customer_name=company.name, customer_address=company.billing_address, customer_trn=company.trn)
         if quote:
-            lpo = quote.lpos.filter(status="confirmed").order_by("-id").first()
+            lpos = quote.lpos.filter(status="confirmed")
+            if validated_data.get("lpo_number"):
+                lpos = lpos.filter(lpo_number=validated_data["lpo_number"])
+            lpo = lpos.order_by("-id").first()
             validated_data.setdefault("lpo_number", lpo.lpo_number if lpo else "")
             validated_data.setdefault("attention", quote.contact.name if quote.contact else "")
             validated_data.setdefault("contact_phone", quote.contact.phone if quote.contact else "")
+            if lpo:
+                details = (lpo.parsed_meta or {}).get("delivery_details") or extract_delivery_details({
+                    "source_filename": lpo.source_filename, "source_file_ref": lpo.source_file_ref,
+                    "source_sha256": lpo.source_sha256, "meta": lpo.parsed_meta,
+                })
+                validated_data["lpo_import"] = {
+                    "lpo_id": lpo.pk, "source_filename": lpo.source_filename,
+                    "source_file_ref": lpo.source_file_ref, "source_sha256": lpo.source_sha256,
+                    "parse_method": lpo.parse_method, "details": details, "warnings": lpo.warnings,
+                }
+                for field in ("delivery_address", "attention", "contact_phone"):
+                    if details.get(field) and not validated_data.get(field):
+                        validated_data[field] = details[field]
         validated_data.setdefault("delivery_address", company.billing_address)
+        validated_data.update(self._customer_snapshot(company, validated_data.get("lpo_import")))
         actor = self.context["request"].user
         note = DeliveryNote.objects.create(**validated_data, created_by=actor)
         self._save_lines(note, rows)
@@ -184,6 +232,31 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
         if isinstance(exc, DjangoValidationError):
             exc = serializers.ValidationError({"detail": " ".join(exc.messages)})
         return super().handle_exception(exc)
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def parse_lpo(self, request):
+        uploaded = request.FILES.get("file")
+        text = str(request.data.get("text") or "")
+        if not uploaded and not text.strip():
+            raise serializers.ValidationError("Upload an LPO or paste its text.")
+        if len(text) > 200000:
+            raise serializers.ValidationError("The pasted LPO is too large. Upload the file instead.")
+        preview = normalize_lpo_preview(parse_file_preview(uploaded) if uploaded else parse_text_preview(text))
+        original = preview
+        warnings = list(preview.get("warnings") or [])
+        if str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}:
+            try:
+                cleaned = clean_preview_with_ai(preview, actor=request.user, delivery_details=True)
+                cleaned = normalize_lpo_preview(cleaned, read_pdf=False)
+                preview = prefer_safe_ai_preview(original, cleaned, max_guard_rows=300)
+            except AIParseError as exc:
+                warnings.append(str(exc))
+        preview["warnings"] = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
+        result = delivery_lpo_preview(preview, request.user)
+        audit_log(request.user, QuotationAuditLog.ACTION_LPO_UPLOADED, None,
+                  message="Parsed an LPO for standalone delivery note review.",
+                  changes={"source_filename": result["source_filename"], "line_count": len(result["lines"])})
+        return Response(result)
 
     @action(detail=True, methods=["post"])
     def issue(self, request, pk=None):

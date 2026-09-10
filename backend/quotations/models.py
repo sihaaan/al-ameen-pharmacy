@@ -3127,6 +3127,7 @@ class DeliveryNote(models.Model):
     attention = models.CharField(max_length=255, blank=True)
     contact_phone = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
+    lpo_import = models.JSONField(default=dict, blank=True, editable=False)
     received_by = models.CharField(max_length=255, blank=True)
     received_date = models.DateField(null=True, blank=True)
     receipt_reference = models.CharField(max_length=255, blank=True)

@@ -335,6 +335,10 @@ def is_title_row(row):
 
 def classify_header_cell(value):
     normalized = normalize_header(value)
+    # Currency suffixes and wrapped PDF headings are still price columns.
+    normalized = re.sub(r"\s+(?:aed|usd|eur|gbp)$", "", normalized)
+    if normalized.replace(" ", "") == "amount":
+        normalized = "amount"
     if not normalized:
         return None
     for role, aliases in HEADER_ALIASES.items():
