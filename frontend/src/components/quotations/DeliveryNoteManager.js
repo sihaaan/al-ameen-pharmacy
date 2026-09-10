@@ -142,7 +142,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       editorHeading.current?.focus({ preventScroll: true });
       editorHeading.current?.scrollIntoView?.({
         block: 'start',
-        behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
       });
     });
   };
