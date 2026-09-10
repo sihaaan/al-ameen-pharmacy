@@ -4132,7 +4132,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         delivery_details=True,
                     )
                     ai_preview = normalize_lpo_preview(ai_preview, read_pdf=False)
-                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300)
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300, check_units=True)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
@@ -4455,7 +4455,7 @@ class QuotationViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         delivery_details=True,
                     )
                     ai_preview = normalize_lpo_preview(ai_preview, read_pdf=False)
-                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300)
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300, check_units=True)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
@@ -4997,7 +4997,7 @@ class ProformaInvoiceViewSet(QuotationBaseViewSet, viewsets.ModelViewSet):
                         delivery_details=True,
                     )
                     ai_preview = normalize_lpo_preview(ai_preview, read_pdf=False)
-                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300)
+                    preview = prefer_safe_ai_preview(deterministic_preview, ai_preview, max_guard_rows=300, check_units=True)
                 except AIParseError as exc:
                     warnings.append(str(exc))
             warnings = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))

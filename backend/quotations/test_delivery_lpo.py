@@ -127,6 +127,14 @@ class DeliveryLPOTests(TestCase):
         self.assertEqual(len(response.data["lines"]), 12)
         self.assertTrue(any("rejected" in warning for warning in response.data["warnings"]))
 
+    def test_ai_unit_changes_are_rejected_but_equivalent_spellings_are_allowed(self):
+        for unit, expected in (("PIECE", "BOX"), ("boxes", "boxes")):
+            cleaned = preview()
+            cleaned["lines"][0]["unit"] = unit
+            with patch("quotations.delivery_views.clean_preview_with_ai", return_value=cleaned):
+                response = self.parse({"text": "PO", "use_ai": True})
+            self.assertEqual(response.data["lines"][0]["unit"], expected)
+
     def test_ambiguous_customer_requires_selection(self):
         Company.objects.create(name="Resort L.L.C.")
         response = self.parse()

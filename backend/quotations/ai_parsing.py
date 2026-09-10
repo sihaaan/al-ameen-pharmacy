@@ -707,7 +707,7 @@ def _guard_decimal(value):
         return None
 
 
-def prefer_safe_ai_preview(deterministic_preview, ai_preview, *, max_guard_rows=10):
+def prefer_safe_ai_preview(deterministic_preview, ai_preview, *, max_guard_rows=10, check_units=False):
     """Keep a small, strong deterministic parse when AI loses source data."""
 
     deterministic_rows = list((deterministic_preview or {}).get("lines") or [])
@@ -748,6 +748,11 @@ def prefer_safe_ai_preview(deterministic_preview, ai_preview, *, max_guard_rows=
             break
         used_ai_rows.add(ranked[0][1])
         ai_row = ranked[0][2]
+        if check_units and deterministic_row.get("unit"):
+            from .pricing import pricing_unit
+            if pricing_unit(deterministic_row["unit"]) != pricing_unit(ai_row.get("unit")):
+                unsafe = True
+                break
         for field in ("quantity", "unit_price", "line_total"):
             deterministic_value = _guard_decimal(deterministic_row.get(field))
             if deterministic_value is None:

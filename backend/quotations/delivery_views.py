@@ -248,7 +248,7 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
             try:
                 cleaned = clean_preview_with_ai(preview, actor=request.user, delivery_details=True)
                 cleaned = normalize_lpo_preview(cleaned, read_pdf=False)
-                preview = prefer_safe_ai_preview(original, cleaned, max_guard_rows=300)
+                preview = prefer_safe_ai_preview(original, cleaned, max_guard_rows=300, check_units=True)
             except AIParseError as exc:
                 warnings.append(str(exc))
         preview["warnings"] = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
