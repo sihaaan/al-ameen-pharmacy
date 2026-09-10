@@ -4,6 +4,10 @@ The quotation editor fills an untouched blank selling price from the customer's 
 
 ## Staff workflow
 
+- Saved company aliases remain visible when their product details conflict with inquiry wording. Recognition returns a saved-match review instead of silently searching for another product; AI creation review and provisional creation cannot bypass it.
+- In quotation product review or after a conflicting line save, staff can confirm the previous product or explicitly correct the company match. The decision is saved with an identity fingerprint and audit trail. Formatting-only changes preserve the confirmation; changed identifying details expire it. Archived products must be replaced. Company confirmation of a provisional product does not verify its global catalogue identity or relax price eligibility checks.
+- The resolution endpoint checks both the current quotation fingerprint and the displayed alias snapshot under database locks. Corrections affect only the selected company, including when a catalogue alias is overridden; old issued quotations, other companies, and entered prices remain unchanged. The editor preserves other unsaved row edits for the next save. Price eligibility checks still apply independently.
+
 - Select the customer and confirm the product. Equivalent reordered descriptions can resolve to a unique existing identity; ambiguous variants and duplicate IDs require selection.
 - The blue clock inside a price field identifies a historical recommendation. The grey pencil identifies a manual price. The amber warning identifies a price requiring review. Open the icon for the source quotation, date, amount, unit and historical quantity. Keyboard users can open it with Enter and close it with Escape.
 - Edit any suggested price. Saving records the original suggestion and entered amount, including edits made before the first save. Saving does not record customer acceptance. Finalisation adds quoted history; the existing outcome workflow records accepted prices.

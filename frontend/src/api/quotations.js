@@ -221,6 +221,7 @@ const quotationAPI = {
     sendEmail: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/send_email/`, data),
     reconcileEmail: (id) => axiosInstance.post(`/quotations/quotes/${id}/reconcile_email/`),
     bulkUpdateLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_update_lines/`, data),
+    resolveSavedMatch: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/resolve_saved_match/`, data),
     bulkCreateProductsForLines: (id, data) => axiosInstance.post(`/quotations/quotes/${id}/bulk_create_products_for_lines/`, data),
     productPrice: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_price/`, { params }),
     productPrices: (id, params = {}) => axiosInstance.get(`/quotations/quotes/${id}/product_prices/`, { params }),

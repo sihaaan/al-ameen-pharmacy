@@ -104,6 +104,7 @@ jobs:
           python manage.py test
           quotations.test_product_matching_rework.ProductAliasConcurrencyTests
           quotations.test_quotation_concurrency
+          quotations.test_saved_matches.SavedMatchConcurrencyTests
           --noinput --verbosity 2
 
   frontend:

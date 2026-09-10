@@ -1623,11 +1623,14 @@ def _audit_automatic_alias_learning(alias, created, actor, *, company, quotation
         "product_id": alias.product_id,
         "previous": previous,
     }
+    if action == "identity_confirmed":
+        changes["identity_confirmation"] = alias.identity_confirmation
     audit_log(
         actor,
         QuotationAuditLog.ACTION_CREATED if created else QuotationAuditLog.ACTION_UPDATED,
         alias,
-        message=f"Automatically {action} company Product alias '{alias.alias}' from a confirmed item match.",
+        message=(f"Confirmed saved company product match for '{alias.alias}'." if action == "identity_confirmed"
+                 else f"Automatically {action} company Product alias '{alias.alias}' from a confirmed item match."),
         changes=changes,
         company=company,
         quotation=quotation,
@@ -1680,14 +1683,20 @@ def learn_confirmed_quotation_line_alias(
     ):
         return None, False
     wording = source_wording if str(source_wording or "").strip() else quotation_line_source_wording(line)
-    alias, created = learn_confirmed_product_alias(
-        source_text=wording,
-        product=line.product,
-        company=line.quotation.company,
-        actor=actor,
-        notes=f"Learned from confirmed quotation line {line.pk}.",
-        explicit_confirmation=explicit_confirmation,
-    )
+    try:
+        alias, created = learn_confirmed_product_alias(
+            source_text=wording,
+            product=line.product,
+            company=line.quotation.company,
+            actor=actor,
+            notes=f"Learned from confirmed quotation line {line.pk}.",
+            explicit_confirmation=explicit_confirmation,
+            require_saved_identity_review=True,
+        )
+    except ValidationError as exc:
+        if hasattr(exc, "saved_match_review"):
+            exc.line_id = line.pk
+        raise
     _audit_automatic_alias_learning(
         alias,
         created,

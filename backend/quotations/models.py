@@ -173,6 +173,7 @@ class ProductAlias(models.Model):
     normalized_alias = models.CharField(max_length=255, editable=False, db_index=True)
     notes = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    identity_confirmation = models.JSONField(default=dict, blank=True, editable=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

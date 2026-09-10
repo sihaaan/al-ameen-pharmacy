@@ -1,0 +1,18 @@
+.qm-modal.qm-saved-match-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); padding: 0; display: flex; flex-direction: column; overflow: hidden; border: 2px solid #0d9488; }
+.qm-saved-match-dialog header, .qm-saved-match-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; flex-shrink: 0; background: #f0fdfa; }
+.qm-saved-match-dialog h3, .qm-saved-match-dialog h4 { margin: 4px 0 12px; }
+.qm-saved-match-company { color: #0f766e; font-weight: 700; }
+.qm-saved-match-body { padding: 20px; overflow-y: auto; min-height: 0; }
+.qm-saved-match-request { display: grid; gap: 6px; margin: 0 0 16px; }
+.qm-saved-match-request span { font-size: 1.1rem; overflow-wrap: anywhere; }
+.qm-saved-match-differences { padding: 12px 16px; border: 1px solid #f59e0b; border-radius: 8px; background: #fffbeb; color: #78350f; }
+.qm-saved-match-differences ul { margin: 8px 0 0; padding-left: 20px; }
+.qm-saved-match-previous { display: grid; gap: 8px; padding: 16px; margin: 16px 0; background: #f0fdfa; border: 1px solid #5eead4; border-radius: 8px; }
+.qm-saved-match-previous strong { overflow-wrap: anywhere; }
+.qm-saved-match-previous button, .qm-saved-match-correction button { justify-self: start; margin-top: 4px; }
+.qm-saved-match-correction { border-top: 1px solid #e2e8f0; padding-top: 16px; }
+.qm-saved-match-correction .qm-product-picker { margin-bottom: 12px; }
+.qm-saved-match-dialog .qm-product-picker input, .qm-saved-match-dialog .qm-product-picker select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #94a3b8; border-radius: 6px; color: #0f172a; background: #fff; font: inherit; box-sizing: border-box; }
+.qm-saved-match-dialog .qm-product-picker input:focus, .qm-saved-match-dialog .qm-product-picker select:focus { outline: 2px solid #0d9488; outline-offset: 2px; }
+.qm-saved-match-scope { margin: 16px 0 0; color: #475569; font-size: .875rem; }
+.qm-saved-match-error { color: #991b1b; background: #fef2f2; padding: 12px; border-radius: 8px; }
