@@ -201,6 +201,39 @@ def delivery_lpo_preview(preview, actor):
             "import_token": signing.dumps(source, salt=IMPORT_SALT, compress=True)}
 
 
+def preserve_lpo_line_details(original, cleaned):
+    """Keep source references when AI returns the same item without its notes."""
+    from collections import defaultdict
+    from .pricing import pricing_unit
+
+    def key(row):
+        name = row.get("requested_item_name") or row.get("raw_name") or row.get("item_name") or ""
+        try:
+            quantity = Decimal(str(row.get("quantity") or ""))
+            if not quantity.is_finite():
+                return None
+        except InvalidOperation:
+            return None
+        name = re.sub(r"[^a-z0-9]", "", str(name).lower())
+        return (name, quantity, pricing_unit(row.get("unit"))) if name else None
+
+    sources = defaultdict(list)
+    for row in original.get("lines") or []:
+        if key(row):
+            sources[key(row)].append(row)
+    rows = []
+    for source in cleaned.get("lines") or []:
+        row = dict(source)
+        matches = sources.get(key(row), [])
+        if len(matches) == 1:
+            row["description"] = "\n".join(dict.fromkeys(filter(None, [
+                *str(row.get("description") or "").splitlines(),
+                *str(matches[0].get("description") or "").splitlines(),
+            ])))
+        rows.append(row)
+    return {**cleaned, "lines": rows}
+
+
 def read_delivery_import_token(token, actor):
     try:
         source = signing.loads(token, salt=IMPORT_SALT, max_age=86400)
