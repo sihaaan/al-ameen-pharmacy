@@ -46,6 +46,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const [lpoImportToken, setLpoImportToken] = useState('');
   const detailRequest = useRef(0);
   const editorForm = useRef(null);
+  const editorHeading = useRef(null);
   const lpoFileInput = useRef(null);
   useEffect(() => { if (!lpoInput.file && lpoFileInput.current) lpoFileInput.current.value = ''; }, [lpoInput.file]);
 
@@ -137,6 +138,13 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     setErrorInfo(null); setFeedback(''); setCancelOpen(false);
     setLpoPreview(null); setLpoImportToken('');
     setLpoInput({ file: null, text: '', useAI: true });
+    window.requestAnimationFrame(() => {
+      editorHeading.current?.focus({ preventScroll: true });
+      editorHeading.current?.scrollIntoView?.({
+        block: 'start',
+        behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+      });
+    });
   };
   const parseLpo = () => run('Read LPO for delivery note', async () => {
     const requestId = detailRequest.current;
@@ -290,7 +298,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     </section>}
 
     {editorOpen && <section className="qm-panel dn-detail" aria-label="Delivery note editor">
-      <div className="qm-panel-heading"><div><h3>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>{badge(note?.status || 'draft')}</div>
+      <div className="qm-panel-heading"><div><h3 ref={editorHeading} className="dn-editor-title" tabIndex={-1}>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>{badge(note?.status || 'draft')}</div>
       {editable && !form.quotation && <section className="dn-lpo-import" aria-label="Import delivery items from LPO">
         <div><h4>Fill from an LPO</h4><p>Upload the customer's purchase order. Review the detected details, then fill the delivery note.</p></div>
         {!lpoPreview ? <>
