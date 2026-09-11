@@ -11,7 +11,7 @@ jest.mock('../../api/quotations', () => ({
     deliveryNotes: {
       parseDocument: jest.fn(),
       list: jest.fn(), retrieve: jest.fn(), create: jest.fn(), update: jest.fn(),
-      issue: jest.fn(), confirmReceipt: jest.fn(), cancel: jest.fn(), pdf: jest.fn(),
+      issue: jest.fn(), confirmReceipt: jest.fn(), cancel: jest.fn(), pdf: jest.fn(), updateReferences: jest.fn(),
     },
   },
   describeQuotationError: jest.fn(),
@@ -131,6 +131,81 @@ test('issue saves the reviewed draft first and a changed draft cannot download s
   expect(await screen.findByRole('form', { name: 'Confirm delivery receipt' })).toBeInTheDocument();
 });
 
+test('issued note has a prominent reference editor while quantities remain locked', async () => {
+  quotationAPI.deliveryNotes.updateReferences.mockResolvedValue({ data: { ...note, lpo_number: 'PO112_112353' } });
+  render(<DeliveryNoteManager initialNote={note} />);
+  await screen.findByRole('heading', { name: 'DN-EXAMPLE' });
+  expect(screen.getByLabelText('LPO number')).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Received by'), { target: { value: 'Receiver in progress' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Edit references / add LPO' }));
+  const editor = screen.getByRole('form', { name: 'Edit delivery note references' });
+  expect(screen.getByLabelText('Quantity 1')).toBeDisabled();
+  expect(screen.getByLabelText('Delivery date')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Download PDF' })).toBeDisabled();
+  expect(within(editor).queryByLabelText('Quotation reference')).not.toBeInTheDocument();
+  fireEvent.change(within(editor).getByLabelText('LPO number'), { target: { value: 'PO112_112353' } });
+  fireEvent.submit(editor);
+  await waitFor(() => expect(quotationAPI.deliveryNotes.updateReferences).toHaveBeenCalledWith(20, { lpo_number: 'PO112_112353', invoice_number: '' }));
+  expect(await screen.findByText(/References updated/)).toBeInTheDocument();
+  expect(screen.getByLabelText('LPO number')).toHaveValue('PO112_112353');
+  expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled();
+  expect(screen.getByLabelText('Received by')).toHaveValue('Receiver in progress');
+  expect(quotationAPI.deliveryNotes.update).not.toHaveBeenCalled();
+});
+
+test('failed reference update preserves edits and discarding restores saved values', async () => {
+  quotationAPI.deliveryNotes.updateReferences.mockRejectedValue(new Error('Failed'));
+  render(<DeliveryNoteManager initialNote={{ ...note, quotation: null, quotation_number: null }} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit references / add LPO' }));
+  fireEvent.change(screen.getByLabelText('LPO number'), { target: { value: 'UNSAVED_123' } });
+  fireEvent.change(screen.getByLabelText('Quotation reference'), { target: { value: 'QT_123' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save references' }));
+  await screen.findByRole('alert');
+  expect(screen.getByLabelText('LPO number')).toHaveValue('UNSAVED_123');
+  fireEvent.click(screen.getByRole('button', { name: 'Discard reference changes' }));
+  expect(screen.getByLabelText('LPO number')).toHaveValue('LPO-123');
+});
+
+test('cancelled notes keep the reference editor unavailable', async () => {
+  render(<DeliveryNoteManager initialNote={{ ...note, status: 'cancelled' }} />);
+  await screen.findByRole('heading', { name: 'DN-EXAMPLE' });
+  expect(screen.queryByRole('button', { name: 'Edit references / add LPO' })).not.toBeInTheDocument();
+});
+
+test('deliver later persists on draft rows and all-deferred notes cannot be issued', async () => {
+  const draft = { ...note, status: 'draft' };
+  quotationAPI.deliveryNotes.update.mockImplementation(async (id, payload) => ({ data: { ...draft, ...payload } }));
+  render(<DeliveryNoteManager initialNote={draft} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Deliver later: Gloves' }));
+  expect(screen.getByText('Saved for next delivery')).toBeInTheDocument();
+  expect(screen.getByLabelText('Quantity 1')).toHaveValue(4);
+  expect(screen.getByRole('button', { name: 'Save & issue delivery note' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Download draft PDF' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft', exact: true }));
+  await waitFor(() => expect(quotationAPI.deliveryNotes.update).toHaveBeenCalledWith(20, expect.objectContaining({
+    lines: [expect.objectContaining({ deliver_later: true, quantity: '4' })],
+  })));
+  await screen.findByText('Delivery note saved as a draft.');
+  fireEvent.click(screen.getByRole('button', { name: 'Deliver now: Gloves' }));
+  expect(screen.getByRole('button', { name: 'Save & issue delivery note' })).toBeEnabled();
+});
+
+test('issuing shows the linked next-delivery draft returned by the server', async () => {
+  const draft = { ...note, status: 'draft' };
+  quotationAPI.deliveryNotes.update.mockResolvedValue({ data: draft });
+  quotationAPI.deliveryNotes.issue.mockResolvedValue({ data: { ...note,
+    later_deliveries: [{ id: 21, delivery_number: 'DN-LATER', status: 'draft' }],
+  } });
+  quotationAPI.deliveryNotes.retrieve.mockResolvedValue({ data: { ...draft, id: 21, delivery_number: 'DN-LATER', continued_from_number: 'DN-EXAMPLE' } });
+  render(<DeliveryNoteManager initialNote={draft} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Save & issue delivery note' }));
+  const panel = await screen.findByRole('region', { name: 'Items saved for later' });
+  expect(within(panel).getByText('DN-LATER')).toBeInTheDocument();
+  fireEvent.click(within(panel).getByRole('button', { name: 'Open next delivery' }));
+  await screen.findByRole('heading', { name: 'DN-LATER' });
+  expect(screen.getByText(/Items saved for later from DN-EXAMPLE/)).toBeInTheDocument();
+});
+
 const parsedLpo = {
   company: 2, import_token: 'signed-source', source_filename: 'purchase-order.pdf',
   details: { customer_name: 'Warehouse customer', lpo_number: 'NEW-PO-123', delivery_address: 'Site warehouse',
@@ -138,6 +213,22 @@ const parsedLpo = {
   lines: [{ item_name: 'Gauze 7.5cm', quantity: '10', unit: 'BOX', description: 'Product code: GI123', quotation_line: null }],
   warnings: [],
 };
+
+test('an item marked deliver later in the parser preview keeps that choice when filling the note', async () => {
+  quotationAPI.deliveryNotes.parseDocument.mockResolvedValue({ data: parsedLpo });
+  render(<DeliveryNoteManager />);
+  await screen.findByRole('button', { name: 'View order' });
+  fireEvent.click(screen.getByRole('button', { name: 'New standalone delivery note' }));
+  fireEvent.change(screen.getByLabelText('Or paste document text'), { target: { value: 'PO No: PO112_112353' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Read document' }));
+  const preview = await screen.findByRole('region', { name: 'Detected document details' });
+  fireEvent.click(within(preview).getByRole('button', { name: 'Deliver later: Gauze 7.5cm' }));
+  expect(within(preview).getByText('Saved for next delivery')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Fill delivery note' }));
+  expect(screen.getByRole('button', { name: 'Deliver now: Gauze 7.5cm' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save & issue delivery note' })).toBeDisabled();
+  expect(screen.getByLabelText('Quantity 1')).toHaveValue(10);
+});
 
 test('reads an LPO, stages it for review, then fills editable fields without creating or issuing a note', async () => {
   quotationAPI.deliveryNotes.parseDocument.mockResolvedValue({ data: parsedLpo });

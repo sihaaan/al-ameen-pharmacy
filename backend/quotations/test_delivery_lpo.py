@@ -48,6 +48,40 @@ class DeliveryLPOTests(TestCase):
             return self.client.post(reverse("quotation-delivery-note-parse-lpo"),
                 data or {"text": "PO", "use_ai": False}, format="json")
 
+    def test_lpo_references_keep_underscores_dashes_and_pdf_separator_spacing(self):
+        for text, expected in [
+            ("PO No: PO112_112353", "PO112_112353"),
+            ("Purchase Order: PO112-112353", "PO112-112353"),
+            ("LPO Number: LPO_A12_000123-4/26", "LPO_A12_000123-4/26"),
+            ("PO No: PO112 _ 112353\nDate: 11/09/2026", "PO112_112353"),
+            ("Purchase Order: AB_12345 / 26\nCustomer: Example", "AB_12345/26"),
+        ]:
+            with self.subTest(text=text):
+                source = preview()
+                source["original_text"] = text
+                response = self.parse(source=source)
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["details"]["lpo_number"], expected)
+
+    def test_full_document_reference_repairs_truncated_ai_value_but_not_conflicting_values(self):
+        for metadata, text, expected in [
+            ("PO112", "PO No: PO112_112353", "PO112_112353"),
+            ("OTHER-123", "PO No: PO112_112353", "OTHER-123"),
+            ("PO112", "PO No: PO112_112353\nPO No: PO112_998877", "PO112"),
+        ]:
+            source = preview()
+            source["original_text"] = text
+            source["meta"]["delivery_details"]["lpo_number"] = metadata
+            response = self.parse(source=source)
+            self.assertEqual(response.data["details"]["lpo_number"], expected)
+
+    def test_intermass_filename_can_complete_reference_without_including_attachment_revision(self):
+        source = preview()
+        source["original_text"] = ""
+        source["source_filename"] = "PO_PO112_112353_0.pdf"
+        source["meta"]["delivery_details"]["lpo_number"] = "PO112"
+        self.assertEqual(self.parse(source=source).data["details"]["lpo_number"], "PO112_112353")
+
     def test_parse_then_save_reviewed_standalone_note_does_not_create_a_quotation_or_issue(self):
         response = self.parse()
         self.assertEqual(response.status_code, 200, response.data)

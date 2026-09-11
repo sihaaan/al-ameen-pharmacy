@@ -74,7 +74,7 @@ def _get_saved_settings():
         return None
 
 
-def get_quotation_pdf_config(quotation=None):
+def get_quotation_pdf_config(quotation=None, *, include_hidden_trn=False):
     settings_obj = _get_saved_settings()
     if settings_obj:
         user_signature_path = _user_signature_image_source(getattr(quotation, "created_by", None))
@@ -84,7 +84,8 @@ def get_quotation_pdf_config(quotation=None):
             address=settings_obj.address,
             phone=settings_obj.phone,
             email=settings_obj.email,
-            trn=settings_obj.trn if settings_obj.show_trn else "",
+            trn=(settings_obj.trn or getattr(settings, "QUOTATION_COMPANY_TRN", "")) if include_hidden_trn
+                else settings_obj.trn if settings_obj.show_trn else "",
             logo_path=_settings_image_source(settings_obj.logo) or _default_logo_path(),
             signature_image_path=user_signature_path,
             stamp_image_path=_settings_image_source(settings_obj.stamp_image),

@@ -22,6 +22,16 @@
 .dn-manager .qm-table td:first-child { min-width: 200px; }
 .dn-manager .qm-table textarea { margin-top: 5px; font-size: 12px; min-height: 42px; }
 .dn-quantity { min-width: 105px; }
+.dn-delivery-summary { margin: 16px 0 10px; padding: 12px 14px; background: #f0fdfa; border-radius: 7px; color: #115e59; }
+.dn-delivery-summary p { margin: 5px 0 0; font-size: 13px; line-height: 1.5; }
+.dn-row-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 140px; }
+.dn-manager button.dn-defer-button { border-color: #b45309; color: #92400e; background: #fffbeb; }
+.dn-manager button.dn-defer-button[aria-pressed="true"] { border-color: #0f766e; color: #0f766e; background: #f0fdfa; }
+.dn-manager .qm-table tr.dn-deferred-row td { background: #fffbeb; }
+.dn-later-label { color: #92400e; font-size: 12px; font-weight: 600; margin-top: 7px; }
+.dn-later-panel, .dn-reference-editor { padding: 16px; border: 1px solid #5eead4; background: #f0fdfa; border-radius: 8px; display: grid; gap: 12px; }
+.dn-reference-editor h4, .dn-reference-editor p { margin: 0; }
+.dn-reference-editor p { color: #475569; font-size: 13px; line-height: 1.5; }
 .dn-pagination { justify-content: flex-end; }
 .dn-pagination span { margin-right: auto; color: #64748b; font-size: 13px; }
 .dn-badge { display: inline-block; padding: 5px 9px; border-radius: 20px; background: #f1f5f9; color: #475569; font-size: 12px; font-weight: 700; white-space: nowrap; }

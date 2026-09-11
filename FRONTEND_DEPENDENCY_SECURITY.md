@@ -5,7 +5,7 @@
 | Status | Temporary, reviewed release exceptions; not a permanent acceptance |
 | Owner | Al Ameen platform maintainers |
 | Decision date | 2026-08-01 |
-| Mandatory review/expiry | 2026-09-01 |
+| Mandatory review/expiry | 2026-09-18; delivery-note release review below |
 | Scope | `frontend/package.json` and `frontend/package-lock.json` |
 
 This document records the release decision for dependencies that cannot be
@@ -14,6 +14,64 @@ It does not authorize that modernization work. A new Critical advisory, a new
 unlisted High advisory, or an expired exception blocks release until reviewed.
 
 ## Audit outcome
+
+### Delivery-note release review — 2026-09-11
+
+The previously expired exceptions were re-reviewed for this release against
+the unchanged lockfile, installed dependency paths, current npm audit JSON,
+application imports, and the static server's configuration loader. Review owner:
+Al Ameen platform maintainers, performed by Codex for the requested release.
+FE-EX-001 through FE-EX-005 are renewed through 2026-09-18. Their original
+review dates below remain historical. This is a temporary reachability decision,
+not a claim that the affected packages are patched.
+
+Current audit: **0 Critical, 15 High, 12 Moderate, 10 Low** (37 total).
+The 11 previously mapped High package entries remain; the four additional High
+entries are `browserslist`, `fast-uri`, `js-yaml`, and `nanoid`. All 15 High entries
+are covered by FE-EX-002 through FE-EX-007. A future new path still requires a
+fresh review. No dependency versions or production runtime are changed here.
+
+Verified controls: production serves static compiled assets; no application
+source imports SVG, Sass, service workers, Browserslist, YAML, Nano ID, PostCSS,
+or fast-uri. BrowserRouter still uses the tested internal redirect validator.
+The 461 frontend tests, route/cache tests, dependency-tree validation, and
+production build passed locally; CI repeats clean installation and checks.
+
+#### FE-EX-006 — additional compiler and test dependency findings
+
+- Paths: CRA/Babel/autoprefixer/webpack to `browserslist@4.28.6`;
+  CRA/SVGO/Jest to `js-yaml@3.15.0`, and ESLint to its YAML 4.x copies;
+  CRA to `postcss@8.5.19` to `nanoid@3.3.16`; CSS minimizer to
+  `postcss-svgo` to SVGO 2.x. The original SVGO 1.x path remains FE-EX-002.
+- Current advisory additions: Browserslist GHSA-c83g-rgw3-j3cx and
+  GHSA-73wf-gq98-2v4g; YAML GHSA-5p4m-2wfm-xmqj and
+  GHSA-2883-xcg3-v3hh; Nano ID GHSA-2v37-7h3g-55p8; SVGO
+  GHSA-w27v-7q3p-w38r and GHSA-4vpr-x523-8j87; PostCSS
+  GHSA-fxqj-rqcc-2cmp supplements the original source-map findings.
+- Reachability: these packages process repository-controlled compiler, lint,
+  and test inputs, not customer documents or browser requests. Browser queries
+  are fixed in package.json; no customer-supplied stats or YAML are compiled.
+  Nano ID is transitive through PostCSS, not used by the application. SVG
+  optimization is not a sanitization boundary for uploads. CSS minification
+  runs, but its inputs and source maps come from the trusted repository.
+- Decision: temporarily accept these paths through 2026-09-18 for this delivery
+  release. Schedule compatible patch updates separately; no major tooling
+  migration or permanent exception is authorized by this decision.
+
+#### FE-EX-007 — fast-uri in static-server configuration validation
+
+- Paths: `serve@14.2.6 -> ajv@8.18.0 -> fast-uri@3.1.5`, plus CRA schema-utils
+  and Workbox AJV paths. New advisories: GHSA-5jgf-p345-68v8,
+  GHSA-f65p-4m7j-42xc, GHSA-fph4-wmhf-6fwf, GHSA-jqff-g426-hqxp.
+- Reachability: inspected `serve/build/main.js` reads local configuration,
+  compiles the bundled `@zeit/schemas` schema synchronously with AJV, and then
+  validates that local configuration. It does not compile request-controlled
+  schemas or use fast-uri as a network destination allowlist. Client URLs and
+  customer uploads are not supplied as schema `$ref` inputs. Build AJV paths
+  likewise consume repository configuration.
+- Decision: retain the current override for this release through 2026-09-18,
+  with the same no-untrusted-schema condition. A compatible fast-uri patch
+  should replace this temporary exception in the dependency maintenance work.
 
 The production dependency audit is intentionally run with
 `npm audit --omit=dev` because `react-scripts` is a direct dependency used in
@@ -181,7 +239,7 @@ the remaining package-version finding and the separately scoped major upgrade.
 
 - Every release reruns `npm audit --omit=dev` from a clean `npm ci` install.
 - Zero Critical is mandatory. Every High must map to FE-EX-002 through
-  FE-EX-005 until those exceptions expire; any new path blocks release.
+  FE-EX-007 until the current review expires; any new path blocks release.
 - FE-EX-001 remains mandatory to review even though npm currently rates the
   router advisories Moderate because the package is direct and browser-runtime.
 - A rollback of the override commit requires a matching package-lock rollback

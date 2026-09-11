@@ -1,18 +1,22 @@
 from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest import skipUnless
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db.models.deletion import ProtectedError
-from django.test import TestCase
+from django.db import connection, connections
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 from pypdf import PdfReader
 from rest_framework.test import APIClient
 
-from .delivery import order_progress
-from .models import Company, DeliveryNote, DeliveryNoteLine, Quotation, QuotationAuditLog, QuotationLine
+from .delivery import order_progress, issue_delivery_note
+from .models import Company, DeliveryNote, DeliveryNoteLine, Quotation, QuotationAuditLog, QuotationLine, QuotationSettings
 from .services import transition_quotation_status, update_quotation_outcome
 
 
@@ -210,3 +214,141 @@ class DeliveryNoteWorkflowTests(TestCase):
         self.assertIn("Received", text)
         self.assertIn("Warehouse receiver", text)
         self.assertNotIn("DRAFT", text)
+
+    def test_issued_and_received_references_can_be_corrected_without_changing_delivery(self):
+        note = self.issue(self.draft(lpo_number="PO112"))
+        line_ids = [line["id"] for line in note["lines"]]
+        issued_at = note["issued_at"]
+        for status in ("issued", "delivered"):
+            if status == "delivered":
+                self.receive(note)
+            corrected = self.client.post(self.url("update-references", note["id"]), {
+                "lpo_number": "PO112_112353" if status == "issued" else "PO112_112353-A",
+                "invoice_number": "INV_001-2",
+            }, format="json")
+            self.assertEqual(corrected.status_code, 200, corrected.data)
+            self.assertEqual(corrected.data["status"], status)
+            self.assertEqual(corrected.data["issued_at"], issued_at)
+            self.assertEqual([line["id"] for line in corrected.data["lines"]], line_ids)
+            text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(
+                self.client.get(self.url("pdf", note["id"])).content)).pages)
+            self.assertIn(corrected.data["lpo_number"], text)
+        log = QuotationAuditLog.objects.filter(message__startswith="Corrected references").order_by("id").first()
+        self.assertEqual(log.changes["lpo_number"], {"before": "PO112", "after": "PO112_112353"})
+
+    def test_reference_correction_rejects_quantity_customer_source_and_cancelled_changes(self):
+        note = self.issue(self.draft())
+        endpoint = self.url("update-references", note["id"])
+        for payload in ({"lines": []}, {"company": self.company.pk}, {"delivery_date": "2026-09-01"},
+                        {"quotation_reference": "WRONG"}, {"status": "draft"}, {}, {"lpo_number": "x" * 121}):
+            self.assertEqual(self.client.post(endpoint, payload, format="json").status_code, 400, payload)
+        self.client.post(self.url("cancel", note["id"]), {"reason": "Incorrect note"}, format="json")
+        self.assertEqual(self.client.post(endpoint, {"lpo_number": "NEW"}, format="json").status_code, 400)
+        self.client.force_authenticate(get_user_model().objects.create_user("reference-customer"))
+        self.assertEqual(self.client.post(endpoint, {"lpo_number": "NEW"}, format="json").status_code, 403)
+
+    def test_reference_retry_is_idempotent_and_standalone_quote_reference_is_editable(self):
+        note = self.issue(self.draft(quotation=None, company=self.company.pk,
+            lines=[{"item_name": "Bandage", "quantity": "2"}]))
+        endpoint = self.url("update-references", note["id"])
+        response = self.client.post(endpoint, {"quotation_reference": "QT_123-2"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["quotation_reference"], "QT_123-2")
+        before = QuotationAuditLog.objects.count()
+        self.client.post(endpoint, {"quotation_reference": "QT_123-2"}, format="json")
+        self.assertEqual(QuotationAuditLog.objects.count(), before)
+
+    def test_deferred_standalone_items_are_saved_in_one_linked_draft_on_issue(self):
+        rows = [{"item_name": "Available bandage", "quantity": "2", "unit": "Box"},
+                {"item_name": "Later cold packs", "quantity": "5", "unit": "Packet", "deliver_later": True}]
+        note = self.draft(quotation=None, company=self.company.pk, lpo_number="PO112_112353", lines=rows)
+        self.assertTrue(note["lines"][1]["deliver_later"])
+        text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(
+            self.client.get(self.url("pdf", note["id"])).content)).pages)
+        self.assertIn("Available bandage", text)
+        self.assertNotIn("Later cold packs", text)
+        issued = self.issue(note)
+        self.assertEqual(len(issued["lines"]), 1)
+        self.assertEqual(len(issued["later_deliveries"]), 1)
+        later = DeliveryNote.objects.get(pk=issued["later_deliveries"][0]["id"])
+        self.assertEqual(later.status, "draft")
+        self.assertEqual(later.continued_from_id, note["id"])
+        self.assertEqual(later.lpo_number, "PO112_112353")
+        self.assertEqual(later.lines.get().quantity, Decimal("5"))
+        self.assertFalse(later.lines.get().deliver_later)
+        self.issue(note)
+        self.assertEqual(DeliveryNote.objects.count(), 2)
+        self.assertEqual(DeliveryNoteLine.objects.count(), 2)
+        self.receive(issued)
+        later_data = self.client.get(self.url("detail", later.pk)).data
+        self.assertEqual(later_data["continued_from_number"], issued["delivery_number"])
+        self.receive(self.issue(later_data))
+
+    def test_deferred_quotation_items_remain_outstanding_until_the_next_delivery(self):
+        second = QuotationLine.objects.create(quotation=self.quote, item_name_snapshot="Deferred bandage",
+            quantity=3, unit_price=1, match_status="confirmed", outcome_status="accepted", accepted_quantity=3)
+        note = self.draft(lines=[{"quotation_line": self.line.pk, "quantity": "10"},
+            {"quotation_line": second.pk, "quantity": "3", "deliver_later": True}])
+        issued = self.issue(note)
+        self.receive(issued)
+        progress = order_progress(self.quote)
+        self.assertEqual(progress["delivery_status"], "partially_delivered")
+        remaining = next(row for row in progress["lines"] if row["id"] == second.pk)
+        self.assertEqual(Decimal(remaining["available_quantity"]), 3)
+        later = self.client.get(self.url("detail", issued["later_deliveries"][0]["id"])).data
+        self.receive(self.issue(later))
+        self.assertEqual(order_progress(self.quote)["delivery_status"], "completed")
+
+    def test_all_deferred_can_be_saved_but_not_issued_or_printed(self):
+        note = self.draft(lines=[{"quotation_line": self.line.pk, "quantity": "10", "deliver_later": True}])
+        self.assertEqual(self.client.post(self.url("issue", note["id"]), {}, format="json").status_code, 400)
+        self.assertEqual(self.client.get(self.url("pdf", note["id"])).status_code, 400)
+        self.assertEqual(DeliveryNote.objects.count(), 1)
+        self.assertTrue(DeliveryNoteLine.objects.get().deliver_later)
+
+    def test_failed_issue_does_not_split_off_deferred_rows(self):
+        second = QuotationLine.objects.create(quotation=self.quote, item_name_snapshot="Later item",
+            quantity=1, unit_price=1, match_status="confirmed", outcome_status="accepted", accepted_quantity=1)
+        note = self.draft(lines=[{"quotation_line": self.line.pk, "quantity": "11"},
+            {"quotation_line": second.pk, "quantity": "1", "deliver_later": True}])
+        self.assertEqual(self.client.post(self.url("issue", note["id"]), {}, format="json").status_code, 400)
+        self.assertEqual(DeliveryNote.objects.count(), 1)
+        self.assertEqual(DeliveryNoteLine.objects.filter(delivery_note_id=note["id"]).count(), 2)
+
+    def test_pdf_includes_pharmacy_trn_even_when_hidden_on_quotations(self):
+        settings = QuotationSettings.objects.create(pk=1, trn="100000000000017", show_trn=False)
+        note = self.draft(lpo_number="PO112_112353")
+        text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(
+            self.client.get(self.url("pdf", note["id"])).content)).pages)
+        self.assertIn("Pharmacy TRN", text)
+        self.assertEqual(text.count(settings.trn), 1)
+        self.assertIn(self.company.trn, text)
+        self.assertIn("PO112_112353", text)
+        settings.refresh_from_db()
+        self.assertFalse(settings.show_trn)
+
+
+@skipUnless(connection.vendor == "postgresql", "Row locking requires PostgreSQL")
+class DeliveryNoteConcurrencyTests(TransactionTestCase):
+    def test_simultaneous_issue_retries_create_only_one_later_draft(self):
+        actor = get_user_model().objects.create_user("concurrent-delivery", is_staff=True)
+        company = Company.objects.create(name="Concurrent delivery customer")
+        note = DeliveryNote.objects.create(company=company, customer_name=company.name, created_by=actor)
+        DeliveryNoteLine.objects.create(delivery_note=note, item_name="Now", quantity=1)
+        DeliveryNoteLine.objects.create(delivery_note=note, item_name="Later", quantity=2, deliver_later=True)
+        barrier = Barrier(2)
+
+        def issue():
+            try:
+                stale = DeliveryNote.objects.get(pk=note.pk)
+                barrier.wait(timeout=10)
+                return issue_delivery_note(stale, actor).status
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(issue) for _ in range(2)]
+            self.assertEqual([future.result(timeout=20) for future in futures], ["issued", "issued"])
+        self.assertEqual(note.later_deliveries.count(), 1)
+        self.assertEqual(note.lines.count(), 1)
+        self.assertEqual(note.later_deliveries.get().lines.get().quantity, Decimal("2"))

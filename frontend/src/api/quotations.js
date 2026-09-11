@@ -286,6 +286,7 @@ const quotationAPI = {
     retrieve: (id) => axiosInstance.get(`/quotations/delivery-notes/${id}/`),
     create: (data) => axiosInstance.post('/quotations/delivery-notes/', data),
     update: (id, data) => axiosInstance.patch(`/quotations/delivery-notes/${id}/`, data),
+    updateReferences: (id, data) => axiosInstance.post(`/quotations/delivery-notes/${id}/update-references/`, data),
     issue: (id) => axiosInstance.post(`/quotations/delivery-notes/${id}/issue/`),
     confirmReceipt: (id, data) => axiosInstance.post(`/quotations/delivery-notes/${id}/confirm-receipt/`, data),
     cancel: (id, data) => axiosInstance.post(`/quotations/delivery-notes/${id}/cancel/`, data),

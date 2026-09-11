@@ -3114,6 +3114,9 @@ class DeliveryNote(models.Model):
     quotation = models.ForeignKey(
         Quotation, on_delete=models.PROTECT, null=True, blank=True, related_name="delivery_notes",
     )
+    continued_from = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True, related_name="later_deliveries",
+    )
     # The primary key supplies a unique sequence; the number is set in the same transaction.
     delivery_number = models.CharField(max_length=50, unique=True, null=True, blank=True, editable=False)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT, db_index=True)
@@ -3167,6 +3170,7 @@ class DeliveryNoteLine(models.Model):
     description = models.TextField(blank=True)
     unit = models.CharField(max_length=50, blank=True)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0.001"))])
+    deliver_later = models.BooleanField(default=False)
     received_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True, validators=[MinValueValidator(Decimal("0"))])
     sort_order = models.PositiveIntegerField(default=0)
 
