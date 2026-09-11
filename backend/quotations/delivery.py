@@ -106,9 +106,9 @@ def issue_delivery_note(note, actor):
         return note
     if note.status != DeliveryNote.STATUS_DRAFT:
         raise ValidationError("Only a draft delivery note can be issued.")
-    lines = list(note.lines.select_related("quotation_line"))
+    lines = list(note.lines.filter(deliver_later=False).select_related("quotation_line"))
     if not lines:
-        raise ValidationError("Add at least one delivery item before issuing the note.")
+        raise ValidationError("Choose at least one item to deliver now before issuing the note. Items marked Deliver later can stay in a draft.")
     if note.quotation_id:
         if note.quotation.status not in {Quotation.STATUS_FINALIZED, Quotation.STATUS_SENT}:
             raise ValidationError("Deliveries require a finalized or sent quotation with reviewed accepted quantities.")
@@ -121,6 +121,28 @@ def issue_delivery_note(note, actor):
             available = accepted_quantity(source) - counts.get("issued", 0) - counts.get("delivered", 0)
             if line.quantity > available:
                 raise ValidationError(f"{line.item_name}: only {max(available, 0)} {line.unit} remains available to issue. Refresh the order.")
+    later_lines = list(note.lines.filter(deliver_later=True))
+    if later_lines:
+        later = DeliveryNote.objects.create(
+            continued_from=note, created_by=actor,
+            **{field: getattr(note, field) for field in (
+                "company", "quotation", "delivery_date", "lpo_number", "invoice_number", "quotation_reference",
+                "customer_name", "customer_address", "customer_trn", "delivery_address", "attention",
+                "contact_phone", "notes", "lpo_import",
+            )},
+        )
+        # Move the saved rows into a linked draft in the same transaction as issue.
+        # They cannot count as issued quantities or disappear when the page closes.
+        note.lines.filter(pk__in=[line.pk for line in later_lines]).update(
+            delivery_note=later, deliver_later=False,
+        )
+        _audit(note, actor, f"Saved deferred items in {later.delivery_number}.", {
+            "later_delivery_id": later.pk,
+            "lines": [{"id": line.pk, "item_name": line.item_name, "quantity": str(line.quantity)} for line in later_lines],
+        })
+        from .services import audit_log
+        audit_log(actor, QuotationAuditLog.ACTION_CREATED, later,
+                  message=f"Created {later.delivery_number} for items deferred from {note.delivery_number}.")
     note.status = DeliveryNote.STATUS_ISSUED
     note.issued_at = timezone.now()
     note.issued_by = actor

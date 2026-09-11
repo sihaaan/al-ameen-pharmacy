@@ -397,15 +397,30 @@ def _extract_lpo_details(preview):
             if lpo_number:
                 break
 
-    if not lpo_number:
-        number_patterns = [
-            r"\bPURCHASE\s+ORDER\s*[:#]\s*([A-Z0-9][A-Z0-9\/\-.]{2,})",
-            r"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
-            r"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?([A-Z0-9][A-Z0-9\/\-.]{2,})",
-            r"\b(LPO[-\/.]?[A-Z0-9][A-Z0-9\/\-.]{2,})\b",
+    # An underscore is part of the reference, not an end marker. PDF extraction
+    # can also insert spaces around separators in references such as PO112 _ 112353.
+    reference = r"([A-Z0-9][A-Z0-9\/_.-]*(?:[ \t]*[\/_-][ \t]*[A-Z0-9][A-Z0-9\/_.-]*)*)"
+    number_patterns = [
+            rf"\bPURCHASE\s+ORDER\s*[:#]\s*{reference}",
+            rf"\b(?:LPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*(?:NO\.?|NUMBER|#)\s*[:\-]?\s*(?:\r?\n\s*)?{reference}",
+            rf"\bPURCHASE\s+ORDER\s*#\s*[:\-]?\s*(?:\r?\n\s*)?{reference}",
+            r"\b(LPO[-\/._]?[A-Z0-9][A-Z0-9\/_.-]{2,})\b",
             r"\b(?:PO[_-])?(PO\d{3}_\d{5,})(?!\d)",
             r"\b(?:LPO|MPO|PO|P\.O\.|PURCHASE\s+ORDER)\s*[-#:]?\s*(\d[A-Z0-9\/_.-]{2,})",
-        ]
+    ]
+    if lpo_number:
+        # Recover a truncated AI/header value only when the document contains a
+        # unique continuation of that same reference. Do not override a conflict.
+        complete = {
+            _clean_lpo_number_candidate(match.group(1))
+            for pattern in number_patterns for match in re.finditer(pattern, text, re.IGNORECASE)
+        }
+        continuations = {candidate for candidate in complete
+                         if candidate.startswith(lpo_number) and len(candidate) > len(lpo_number)
+                         and candidate[len(lpo_number)] in "_/-"}
+        if len(continuations) == 1:
+            lpo_number = continuations.pop()
+    else:
         for pattern in number_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:

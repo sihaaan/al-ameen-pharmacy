@@ -36,7 +36,7 @@ class DeliveryLineSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DeliveryNoteLine
-        fields = ["id", "quotation_line", "item_name", "description", "unit", "quantity", "received_quantity", "sort_order"]
+        fields = ["id", "quotation_line", "item_name", "description", "unit", "quantity", "deliver_later", "received_quantity", "sort_order"]
         read_only_fields = ["id", "received_quantity"]
         validators = []  # The parent validates membership and duplicates together.
 
@@ -44,6 +44,8 @@ class DeliveryLineSerializer(serializers.ModelSerializer):
 class DeliveryNoteSerializer(serializers.ModelSerializer):
     lpo_import_token = serializers.CharField(write_only=True, required=False, max_length=500000)
     lpo_source = serializers.SerializerMethodField()
+    later_deliveries = serializers.SerializerMethodField()
+    continued_from_number = serializers.CharField(source="continued_from.delivery_number", read_only=True, default=None)
     lines = DeliveryLineSerializer(many=True, required=False)
     company_name = serializers.CharField(source="company.name", read_only=True)
     quotation_number = serializers.CharField(source="quotation.quotation_number", read_only=True, default=None)
@@ -63,11 +65,13 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
             "receipt_notes", "cancellation_reason", "created_by_username", "issued_at", "confirmed_at",
             "cancelled_at", "created_at", "updated_at",
             "lpo_import_token", "lpo_source",
+            "continued_from", "continued_from_number", "later_deliveries",
         ]
         read_only_fields = [
             "delivery_number", "status", "customer_name", "customer_address", "customer_trn",
             "received_by", "received_date", "receipt_reference", "receipt_notes", "cancellation_reason",
             "issued_at", "confirmed_at", "cancelled_at", "created_at", "updated_at",
+            "continued_from",
         ]
 
     def validate(self, attrs):
@@ -117,6 +121,10 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
     def get_lpo_source(self, note):
         source = note.lpo_import or {}
         return {key: source.get(key) for key in ("source_filename", "document_type", "parse_method", "parsed_at", "details", "warnings")} if source else None
+
+    def get_later_deliveries(self, note):
+        return [{"id": later.pk, "delivery_number": later.delivery_number, "status": later.status}
+                for later in note.later_deliveries.all()]
 
     @staticmethod
     def _customer_snapshot(company, source):
@@ -206,12 +214,26 @@ class CancellationSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=4000)
 
 
+class DeliveryReferencesSerializer(serializers.Serializer):
+    lpo_number = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    invoice_number = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    quotation_reference = serializers.CharField(max_length=120, required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        unknown = set(self.initial_data) - set(self.fields)
+        if unknown:
+            raise serializers.ValidationError("Only LPO, invoice and standalone quotation references can be corrected here.")
+        if not attrs:
+            raise serializers.ValidationError("Enter a reference to update.")
+        return attrs
+
+
 class DeliveryNoteViewSet(viewsets.ModelViewSet):
     permission_classes = [IsQuotationStaff]
     serializer_class = DeliveryNoteSerializer
     pagination_class = DeliveryPagination
     http_method_names = ["get", "post", "patch", "head", "options"]
-    queryset = DeliveryNote.objects.select_related("company", "quotation", "created_by").prefetch_related("lines")
+    queryset = DeliveryNote.objects.select_related("company", "quotation", "created_by", "continued_from").prefetch_related("lines", "later_deliveries")
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -282,6 +304,29 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
         note = issue_delivery_note(self.get_object(), request.user)
         return Response(self.get_serializer(note).data)
 
+    @action(detail=True, methods=["post"], url_path="update-references")
+    @transaction.atomic
+    def update_references(self, request, pk=None):
+        serializer = DeliveryReferencesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = lock_note(self.get_object())
+        if note.status == DeliveryNote.STATUS_CANCELLED:
+            raise serializers.ValidationError("Cancelled notes keep their original references.")
+        if note.quotation_id and "quotation_reference" in serializer.validated_data:
+            if serializer.validated_data["quotation_reference"] != note.quotation.quotation_number:
+                raise serializers.ValidationError("The linked quotation reference cannot be changed.")
+        changes = {}
+        for field, value in serializer.validated_data.items():
+            previous = getattr(note, field)
+            if previous != value:
+                changes[field] = {"before": previous, "after": value}
+                setattr(note, field, value)
+        if changes:
+            note.save(update_fields=[*changes, "updated_at"])
+            audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, note,
+                      message=f"Corrected references on {note.delivery_number}.", changes=changes)
+        return Response(self.get_serializer(note).data)
+
     @action(detail=True, methods=["post"], url_path="confirm-receipt")
     def confirm_receipt(self, request, pk=None):
         serializer = ReceiptSerializer(data=request.data)
@@ -300,8 +345,8 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
     def pdf(self, request, pk=None):
         from .delivery_pdf import build_delivery_note_pdf
         note = self.get_object()
-        if not note.lines.all():
-            raise serializers.ValidationError("Add at least one delivery item before downloading the PDF.")
+        if not any(not line.deliver_later for line in note.lines.all()):
+            raise serializers.ValidationError("Choose at least one item to deliver now before downloading the PDF.")
         response = HttpResponse(build_delivery_note_pdf(note), content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{note.delivery_number}.pdf"'
         response["Cache-Control"] = "private, no-store"

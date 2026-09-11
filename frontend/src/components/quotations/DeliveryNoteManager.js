@@ -44,6 +44,9 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const [lpoInput, setLpoInput] = useState({ file: null, text: '', useAI: true, documentType: 'auto' });
   const [lpoPreview, setLpoPreview] = useState(null);
   const [lpoImportToken, setLpoImportToken] = useState('');
+  const [referenceEditOpen, setReferenceEditOpen] = useState(false);
+  const [referenceForm, setReferenceForm] = useState({ lpo_number: '', invoice_number: '', quotation_reference: '' });
+  const referenceEditor = useRef(null);
   const detailRequest = useRef(0);
   const editorForm = useRef(null);
   const editorHeading = useRef(null);
@@ -81,6 +84,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     setLpoPreview(null); setLpoImportToken('');
     setLpoInput({ file: null, text: '', useAI: true, documentType: 'auto' });
     setNote(data);
+    setReferenceEditOpen(false);
     setForm({
       ...blankForm(), ...data,
       lines: (data.lines || []).map((line) => ({ ...line })),
@@ -135,6 +139,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const newNote = () => {
     detailRequest.current += 1;
     setNote(null); setForm(blankForm()); setOrder(null); setEditorOpen(true);
+    setReferenceEditOpen(false);
     setErrorInfo(null); setFeedback(''); setCancelOpen(false);
     setLpoPreview(null); setLpoImportToken('');
     setLpoInput({ file: null, text: '', useAI: true, documentType: 'auto' });
@@ -194,6 +199,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       lines: form.lines.map((line) => ({
         quotation_line: line.quotation_line || null, item_name: line.item_name,
         description: line.description || '', unit: line.unit || '', quantity: line.quantity,
+        ...(line.deliver_later ? { deliver_later: true } : {}),
       })),
     };
     const response = note?.id
@@ -208,12 +214,16 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     if (lpoPreview || busy) return;
     run(issue ? 'Issue delivery note' : 'Save delivery note', async () => {
       const saved = await saveDraft();
+      let issued = null;
       if (issue) {
         const { data } = await quotationAPI.deliveryNotes.issue(saved.id);
+        issued = data;
         showNote(data);
         setRevision((value) => value + 1);
       }
-      setFeedback(issue ? 'Delivery note issued. Confirm receipt when the customer receives the goods.' : 'Delivery note saved as a draft.');
+      setFeedback(issue ? 'Delivery note issued. Confirm receipt when the customer receives the goods.'
+        + (issued?.later_deliveries?.length ? ' Items marked Deliver later are saved in the linked draft below.' : '')
+        : 'Delivery note saved as a draft.');
     });
   };
   const download = () => run('Download delivery note', async () => {
@@ -241,7 +251,32 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       setFeedback('Note cancelled. Its history is retained and the order quantities have been recalculated.');
     });
   };
+  const editReferences = () => {
+    setReferenceForm({ lpo_number: note.lpo_number || '', invoice_number: note.invoice_number || '',
+      quotation_reference: note.quotation_reference || '' });
+    setReferenceEditOpen(true);
+    window.requestAnimationFrame(() => {
+      referenceEditor.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+      referenceEditor.current?.querySelector('input')?.focus({ preventScroll: true });
+    });
+  };
+  const saveReferences = (event) => {
+    event.preventDefault();
+    run('Save delivery note references', async () => {
+      const payload = { lpo_number: referenceForm.lpo_number, invoice_number: referenceForm.invoice_number,
+        ...(!note.quotation ? { quotation_reference: referenceForm.quotation_reference } : {}) };
+      const { data } = await quotationAPI.deliveryNotes.updateReferences(note.id, payload);
+      setNote(data);
+      setForm((current) => ({ ...current, lpo_number: data.lpo_number, invoice_number: data.invoice_number,
+        quotation_reference: data.quotation_reference }));
+      setReferenceEditOpen(false);
+      setRevision((value) => value + 1);
+      setFeedback('References updated. Download the PDF again to use the corrected copy.');
+    });
+  };
   const editable = !note || note.status === 'draft';
+  const laterCount = form.lines.filter((line) => line.deliver_later).length;
+  const nowCount = form.lines.length - laterCount;
   const draftChanged = note?.status === 'draft' && (
     Boolean(lpoImportToken) ||
     ['delivery_date', 'lpo_number', 'quotation_reference', 'invoice_number', 'delivery_address', 'attention', 'contact_phone', 'notes']
@@ -279,7 +314,9 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     {loading ? <p role="status">Loading {view === 'orders' ? 'orders' : 'delivery notes'}…</p> : <div className="qm-table-wrap">
       <table className="qm-table"><thead><tr><th>{view === 'orders' ? 'Quotation / order' : 'Delivery note'}</th><th>Customer</th><th>Status</th><th>{view === 'orders' ? 'Delivered lines' : 'References'}</th><th>Action</th></tr></thead>
         <tbody>{rows.map((row) => <tr key={row.id}>
-          <td>{view === 'orders' ? row.quotation_number : row.delivery_number}</td><td>{row.company_name}</td>
+          <td>{view === 'orders' ? row.quotation_number : row.delivery_number}
+            {view === 'notes' && row.continued_from_number && <div className="dn-help">Remaining items from {row.continued_from_number}</div>}
+          </td><td>{row.company_name}</td>
           <td>{badge(view === 'orders' ? row.delivery_status : row.status)}</td>
           <td>{view === 'orders' ? `${row.completed_line_count} / ${row.line_count}` : [row.lpo_number, row.quotation_number || row.quotation_reference, row.invoice_number].filter(Boolean).join(' / ') || '—'}</td>
           <td><button disabled={busy} onClick={() => view === 'orders' ? openOrder(row.id) : openNote(row.id)}>{view === 'orders' ? 'View order' : 'Open note'}</button></td>
@@ -302,7 +339,27 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     </section>}
 
     {editorOpen && <section className="qm-panel dn-detail" aria-label="Delivery note editor">
-      <div className="qm-panel-heading"><div><h3 ref={editorHeading} className="dn-editor-title" tabIndex={-1}>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>{badge(note?.status || 'draft')}</div>
+      <div className="qm-panel-heading"><div><h3 ref={editorHeading} className="dn-editor-title" tabIndex={-1}>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>
+        <div className="dn-actions">{badge(note?.status || 'draft')}
+          {note && !editable && note.status !== 'cancelled' && !referenceEditOpen && <button type="button" className="qm-primary" disabled={busy} onClick={editReferences}>Edit references / add LPO</button>}
+        </div>
+      </div>
+      {note?.continued_from_number && <p className="dn-help">Items saved for later from {note.continued_from_number}. Review the delivery date and quantities before issuing.</p>}
+      {!!note?.later_deliveries?.length && <div className="dn-later-panel" role="region" aria-label="Items saved for later">
+        <strong>Items saved for the next delivery</strong>
+        {note.later_deliveries.map((later) => <div className="dn-actions" key={later.id}><span>{later.delivery_number}</span>{badge(later.status)}
+          <button type="button" disabled={busy || referenceEditOpen || draftChanged} onClick={() => openNote(later.id)}>Open next delivery</button></div>)}
+      </div>}
+      {referenceEditOpen && <form ref={referenceEditor} className="dn-reference-editor" aria-label="Edit delivery note references" onSubmit={saveReferences}>
+        <h4>Edit references</h4><p>Correct the reference details, then download an updated PDF. The change is recorded in the note’s history.</p>
+        <fieldset disabled={busy}><div className="dn-form-grid">
+          <label>LPO number<input maxLength={120} value={referenceForm.lpo_number} onChange={(event) => setReferenceForm({ ...referenceForm, lpo_number: event.target.value })} /></label>
+          <label>Invoice reference<input maxLength={120} value={referenceForm.invoice_number} onChange={(event) => setReferenceForm({ ...referenceForm, invoice_number: event.target.value })} /></label>
+          {!note.quotation && <label>Quotation reference<input maxLength={120} value={referenceForm.quotation_reference} onChange={(event) => setReferenceForm({ ...referenceForm, quotation_reference: event.target.value })} /></label>}
+        </div></fieldset>
+        <div className="dn-actions"><button className="qm-primary" type="submit" disabled={busy}>Save references</button>
+          <button type="button" disabled={busy} onClick={() => setReferenceEditOpen(false)}>Discard reference changes</button></div>
+      </form>}
       {editable && !form.quotation && <section className="dn-lpo-import" aria-label="Import delivery items from LPO or quotation">
         <div><h4>Fill from an LPO or quotation</h4><p>Upload either document, review the detected items, then fill the delivery note. A quotation does not need an LPO.</p></div>
         {!lpoPreview ? <>
@@ -335,9 +392,14 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
           </div>
           {lpoPreview.details.requested_delivery_date && <p>Requested delivery date on document: {lpoPreview.details.requested_delivery_date}. Set the actual delivery date below.</p>}
           {!!lpoPreview.warnings?.length && <ul className="dn-lpo-warnings">{lpoPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
-          <div className="qm-table-wrap dn-lpo-items"><table className="qm-table"><thead><tr><th>Detected item</th><th>Quantity</th><th>Unit</th></tr></thead><tbody>
-            {lpoPreview.lines.map((line, index) => <tr key={index}><td>{line.item_name}</td><td>{line.quantity || 'Check quantity'}</td><td>{line.unit}</td></tr>)}
+          <div className="qm-table-wrap dn-lpo-items"><table className="qm-table"><thead><tr><th>Detected item</th><th>Quantity</th><th>Unit</th><th>Delivery</th></tr></thead><tbody>
+            {lpoPreview.lines.map((line, index) => <tr key={index} className={line.deliver_later ? 'dn-deferred-row' : ''}><td>{line.item_name}</td><td>{line.quantity || 'Check quantity'}</td><td>{line.unit}</td>
+              <td><button type="button" className="dn-defer-button" aria-label={`${line.deliver_later ? 'Deliver now' : 'Deliver later'}: ${line.item_name}`} aria-pressed={Boolean(line.deliver_later)}
+                onClick={() => setLpoPreview((current) => ({ ...current, lines: current.lines.map((row, i) => i === index ? { ...row, deliver_later: !row.deliver_later } : row) }))}>
+                {line.deliver_later ? 'Deliver now' : 'Deliver later'}</button>{line.deliver_later && <div className="dn-later-label">Saved for next delivery</div>}</td>
+            </tr>)}
           </tbody></table></div>
+          <p className="dn-help">Mark unavailable items Deliver later. They will be kept for the next delivery and left off this delivery note.</p>
           <div className="dn-actions"><button type="button" className="qm-primary" onClick={applyLpo}>{form.lines.some((line) => line.item_name.trim()) ? 'Replace items with this document' : 'Fill delivery note'}</button>
             <button type="button" onClick={() => setLpoPreview(null)}>Discard preview</button></div>
         </div>}
@@ -353,31 +415,38 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
               setForm((current) => ({ ...current, company: event.target.value, delivery_address: current.delivery_address || company?.billing_address || '' }));
             }}><option value="">Select customer</option>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
             <label>Delivery date<input type="date" required value={form.delivery_date} onChange={(event) => update('delivery_date', event.target.value)} /></label>
-            <label>LPO number<input maxLength={120} value={form.lpo_number} onChange={(event) => update('lpo_number', event.target.value)} /></label>
-            <label>Quotation reference<input maxLength={120} value={form.quotation ? form.quotation_number || form.quotation_reference : form.quotation_reference} readOnly={Boolean(form.quotation)} onChange={(event) => update('quotation_reference', event.target.value)} /></label>
-            <label>Invoice reference<input maxLength={120} value={form.invoice_number} onChange={(event) => update('invoice_number', event.target.value)} /></label>
+            {!referenceEditOpen && <>
+              <label>LPO number<input maxLength={120} value={form.lpo_number} onChange={(event) => update('lpo_number', event.target.value)} /></label>
+              <label>Quotation reference<input maxLength={120} value={form.quotation ? form.quotation_number || form.quotation_reference : form.quotation_reference} readOnly={Boolean(form.quotation)} onChange={(event) => update('quotation_reference', event.target.value)} /></label>
+              <label>Invoice reference<input maxLength={120} value={form.invoice_number} onChange={(event) => update('invoice_number', event.target.value)} /></label>
+            </>}
             <label>Attention<input maxLength={255} value={form.attention} onChange={(event) => update('attention', event.target.value)} /></label>
             <label>Contact phone<input maxLength={100} value={form.contact_phone} onChange={(event) => update('contact_phone', event.target.value)} /></label>
             <label className="dn-wide">Delivery address<textarea maxLength={2000} value={form.delivery_address} onChange={(event) => update('delivery_address', event.target.value)} /></label>
           </div>
-          <div className="qm-table-wrap"><table className="qm-table"><thead><tr><th>Item / description</th><th>Quantity</th><th>Unit</th>{editable && <th>Action</th>}</tr></thead><tbody>
-            {form.lines.map((line, index) => <tr key={line.id || index}>
+          {editable && <div className="dn-delivery-summary"><strong>{nowCount} item(s) to deliver now · {laterCount} for later</strong>
+            <p>Only items for this delivery appear in the PDF. Issuing the note saves deferred items in a linked draft for the next delivery.</p>
+          </div>}
+          <div className="qm-table-wrap"><table className="qm-table"><thead><tr><th>Item / description</th><th>Quantity</th><th>Unit</th>{editable && <th>Delivery / action</th>}</tr></thead><tbody>
+            {form.lines.map((line, index) => <tr key={line.id || index} className={line.deliver_later ? 'dn-deferred-row' : ''}>
               <td><input aria-label={`Item ${index + 1}`} required maxLength={255} value={line.item_name} readOnly={Boolean(form.quotation)} onChange={(event) => updateLine(index, 'item_name', event.target.value)} /><textarea aria-label={`Description ${index + 1}`} maxLength={2000} value={line.description || ''} readOnly={Boolean(form.quotation)} onChange={(event) => updateLine(index, 'description', event.target.value)} /></td>
-              <td><input aria-label={`Quantity ${index + 1}`} className="dn-quantity" type="number" min="0.001" max="999999999.999" step="0.001" required value={line.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLine(index, 'quantity', event.target.value)} /></td>
+              <td><input aria-label={`Quantity ${index + 1}`} className="dn-quantity" type="number" min="0.001" max="999999999.999" step="0.001" required value={line.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLine(index, 'quantity', event.target.value)} />
+                {line.deliver_later && <div className="dn-later-label">Saved for next delivery</div>}</td>
               <td><input aria-label={`Unit ${index + 1}`} maxLength={50} value={line.unit} readOnly={Boolean(form.quotation)} onChange={(event) => updateLine(index, 'unit', event.target.value)} /></td>
-              {editable && <td><button type="button" onClick={() => update('lines', form.lines.filter((_, i) => i !== index))} aria-label={`Remove item ${index + 1}`}>Remove</button></td>}
+              {editable && <td><div className="dn-row-actions"><button type="button" className="dn-defer-button" aria-label={`${line.deliver_later ? 'Deliver now' : 'Deliver later'}: ${line.item_name || `item ${index + 1}`}`} aria-pressed={Boolean(line.deliver_later)} onClick={() => updateLine(index, 'deliver_later', !line.deliver_later)}>{line.deliver_later ? 'Deliver now' : 'Deliver later'}</button>
+                <button type="button" onClick={() => update('lines', form.lines.filter((_, i) => i !== index))} aria-label={`Remove item ${index + 1}`}>Remove</button></div></td>}
             </tr>)}
           </tbody></table></div>
           {!form.quotation && <button type="button" disabled={form.lines.length >= 300} onClick={() => update('lines', [...form.lines, blankLine()])}>Add item</button>}
           <label className="dn-notes">Delivery instructions<textarea maxLength={4000} value={form.notes} onChange={(event) => update('notes', event.target.value)} /></label>
         </fieldset>
-        {editable && <div className="dn-actions"><button type="submit" disabled={busy || Boolean(lpoPreview) || !form.lines.length}>Save draft</button><button className="qm-primary" type="button" disabled={busy || Boolean(lpoPreview) || !form.lines.length} onClick={(event) => {
+        {editable && <div className="dn-actions"><button type="submit" disabled={busy || Boolean(lpoPreview) || !form.lines.length}>Save draft</button><button className="qm-primary" type="button" disabled={busy || Boolean(lpoPreview) || !nowCount} onClick={(event) => {
           if (event.currentTarget.form.reportValidity()) submitDraft(event, true);
         }}>Save & issue delivery note</button></div>}
       </form>
       <div className="dn-actions">
-        {note && <button disabled={busy || draftChanged || Boolean(lpoPreview)} onClick={download}>Download {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
-        {note && note.status !== 'cancelled' && <button disabled={busy} onClick={() => setCancelOpen(!cancelOpen)}>Cancel note</button>}
+        {note && <button disabled={busy || draftChanged || referenceEditOpen || Boolean(lpoPreview) || !nowCount} onClick={download}>Download {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
+        {note && note.status !== 'cancelled' && <button disabled={busy || referenceEditOpen} onClick={() => setCancelOpen(!cancelOpen)}>Cancel note</button>}
         <button disabled={busy} onClick={() => setEditorOpen(false)}>Close note</button>
       </div>
       {draftChanged && <p className="dn-help">Save your changes before downloading the PDF.</p>}
@@ -390,7 +459,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
         </div>
         <div className="qm-table-wrap"><table className="qm-table"><thead><tr><th>Item</th><th>Issued</th><th>Received quantity</th></tr></thead><tbody>{note.lines.map((line, index) => <tr key={line.id}><td>{line.item_name}</td><td>{qty(line.quantity)} {line.unit}</td><td><input aria-label={`Received quantity ${index + 1}`} type="number" min="0" max={line.quantity} step="0.001" required value={receipt.lines[index].received_quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => setReceipt({ ...receipt, lines: receipt.lines.map((row, i) => i === index ? { ...row, received_quantity: event.target.value } : row) })} /></td></tr>)}</tbody></table></div>
         <label>Receipt notes<textarea maxLength={4000} value={receipt.receipt_notes} onChange={(event) => setReceipt({ ...receipt, receipt_notes: event.target.value })} /></label>
-        <button className="qm-primary" disabled={busy} type="submit">Confirm received quantities</button>
+        <button className="qm-primary" disabled={busy || referenceEditOpen} type="submit">Confirm received quantities</button>
       </form>}
       {note?.status === 'delivered' && <div className="dn-receipt"><h4>Receipt recorded</h4><p>{note.received_by} · {note.received_date}{note.receipt_reference ? ` · ${note.receipt_reference}` : ''}</p>
         <ul>{note.lines.map((line) => <li key={line.id}>{line.item_name}: {qty(line.received_quantity)} of {qty(line.quantity)} {line.unit} received</li>)}</ul><p>{note.receipt_notes}</p></div>}

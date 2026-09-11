@@ -1,4 +1,5 @@
 from io import BytesIO
+from dataclasses import replace
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -15,7 +16,7 @@ from .pdf_config import get_quotation_pdf_config
 
 def build_delivery_note_pdf(note):
     """Use the quotation's branding, without commercial prices or invoice totals."""
-    config = get_quotation_pdf_config(quotation=note.quotation)
+    config = get_quotation_pdf_config(quotation=note.quotation, include_hidden_trn=True)
     primary = colors.HexColor(config.primary_color or "#0F766E")
     styles = _pdf_styles(primary)
     buffer = BytesIO()
@@ -24,13 +25,14 @@ def build_delivery_note_pdf(note):
         topMargin=14 * mm, bottomMargin=18 * mm, title=note.delivery_number,
     )
     elements = [_build_header(
-        config, note, note.delivery_date.strftime("%d/%m/%Y"), styles,
+        replace(config, trn=""), note, note.delivery_date.strftime("%d/%m/%Y"), styles,
         document_title="DELIVERY NOTE", reference_label="DN No", reference_number=note.delivery_number,
     )]
     metadata = [
         ("Customer", note.customer_name), ("Status", note.get_status_display()),
+        ("Pharmacy TRN", config.trn), ("LPO No.", note.lpo_number),
         ("Customer address", note.customer_address), ("Customer TRN", note.customer_trn),
-        ("Deliver to", note.delivery_address), ("LPO No.", note.lpo_number),
+        ("Deliver to", note.delivery_address),
         ("Attention", note.attention), ("Invoice Ref.", note.invoice_number),
         ("Contact No.", note.contact_phone),
         ("Quotation Ref.", note.quotation.quotation_number if note.quotation else note.quotation_reference),
@@ -56,7 +58,7 @@ def build_delivery_note_pdf(note):
     received = note.status == DeliveryNote.STATUS_DELIVERED
     headings = ["No.", "Item description", "Quantity", "UOM"] + (["Received"] if received else [])
     rows = [[Paragraph(label, styles["TableHeader"]) for label in headings]]
-    for index, line in enumerate(note.lines.all(), 1):
+    for index, line in enumerate((line for line in note.lines.all() if not line.deliver_later), 1):
         description = f"<b>{_text(line.item_name)}</b>"
         if line.description and line.description.strip() != line.item_name.strip():
             description += f"<br/>{_text(line.description).replace(chr(10), '<br/>')}"
