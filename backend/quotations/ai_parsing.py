@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from .attachment_inspection import inspect_pdf_attachment
 from .import_rules import (
-    is_obvious_po_metadata_item,
+    is_obvious_document_metadata_row,
     preserve_specific_item_details,
     standardize_item_display_name,
     summarize_lines,
@@ -323,6 +323,7 @@ AI_DOCUMENT_REFERENCE_SCHEMA = {
 LPO_DELIVERY_FIELDS = (
     "customer_name", "customer_address", "customer_trn", "delivery_address",
     "attention", "contact_phone", "lpo_number", "lpo_date", "requested_delivery_date",
+    "quotation_number", "quotation_date",
 )
 LPO_DELIVERY_JSON_SCHEMA = {
     **AI_PARSE_JSON_SCHEMA,
@@ -695,7 +696,7 @@ def _guard_item_tokens(row):
 
 
 def _guard_row_is_obvious_metadata(row):
-    return is_obvious_po_metadata_item(_guard_item_name(row))
+    return is_obvious_document_metadata_row(row)
 
 
 def _guard_decimal(value):
@@ -1439,13 +1440,19 @@ def _run_ai_cleanup(
     )
     if schema_name == "lpo_delivery_parse":
         instructions += (
-            "\nExtract delivery_details from the LPO itself. The customer is the purchaser/Bill To, "
+            "\nExtract delivery_details from the uploaded LPO OR quotation. Both are valid sources "
+            "for a delivery note; a quotation does not require an LPO. Put quotation references "
+            "in quotation_number/quotation_date, separately from lpo_number/lpo_date. "
+            "The customer is the purchaser/Bill To/Customer/To recipient of the quotation, "
             "never the supplier (our pharmacy). Use Ship To for delivery_address and the requestor "
             "or delivery contact for attention/contact_phone; never copy the supplier phone. "
             "Keep legal company names and explicit addresses intact. Return ISO dates when explicit, "
             "and empty strings for missing fields. Do not invent an invoice number, address, phone, "
             "or delivery date. Requested delivery dates are document evidence, not proof of dispatch. "
-            "Item rows exclude page footers, totals, terms and header fields. Keep product codes/BPA "
+            "Return only actual product/item-table rows. Exclude customer details, TRN, document "
+            "references, dates, validity, status, currency, signatures, page footers, totals and terms. "
+            "Deterministic rows can contain misclassified header fields; do not preserve these as items. "
+            "Never turn digits in a quotation reference or date into item quantities. Keep product codes/BPA "
             "references in notes rather than item_name; preserve sizes, strengths, brands and packs."
         )
     effective_schema = json_schema or AI_PARSE_JSON_SCHEMA

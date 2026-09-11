@@ -57,7 +57,7 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
         model = DeliveryNote
         fields = [
             "id", "delivery_number", "status", "status_display", "company", "company_name",
-            "quotation", "quotation_number", "delivery_date", "lpo_number", "invoice_number",
+            "quotation", "quotation_number", "quotation_reference", "delivery_date", "lpo_number", "invoice_number",
             "customer_name", "customer_address", "customer_trn", "delivery_address", "attention",
             "contact_phone", "notes", "lines", "received_by", "received_date", "receipt_reference",
             "receipt_notes", "cancellation_reason", "created_by_username", "issued_at", "confirmed_at",
@@ -85,12 +85,13 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
             if company and company.pk != quote.company_id:
                 raise serializers.ValidationError("The customer must match the quotation.")
             attrs["company"] = quote.company
+            attrs["quotation_reference"] = quote.quotation_number
         elif not company:
             raise serializers.ValidationError({"company": "Select a customer."})
         token = attrs.pop("lpo_import_token", None)
         if token:
             if quote:
-                raise serializers.ValidationError("Review this LPO through the quotation's Manage order workflow.")
+                raise serializers.ValidationError("Review this source document through the quotation's Manage order workflow.")
             attrs["lpo_import"] = read_delivery_import_token(token, self.context["request"].user)
             if instance:
                 attrs.update(self._customer_snapshot(company, attrs["lpo_import"]))
@@ -115,7 +116,7 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
 
     def get_lpo_source(self, note):
         source = note.lpo_import or {}
-        return {key: source.get(key) for key in ("source_filename", "parse_method", "parsed_at", "details", "warnings")} if source else None
+        return {key: source.get(key) for key in ("source_filename", "document_type", "parse_method", "parsed_at", "details", "warnings")} if source else None
 
     @staticmethod
     def _customer_snapshot(company, source):
@@ -225,7 +226,7 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(status=params["status"])
         if params.get("search"):
             term = params["search"][:200]
-            queryset = queryset.filter(Q(delivery_number__icontains=term) | Q(customer_name__icontains=term) | Q(lpo_number__icontains=term) | Q(invoice_number__icontains=term))
+            queryset = queryset.filter(Q(delivery_number__icontains=term) | Q(customer_name__icontains=term) | Q(lpo_number__icontains=term) | Q(invoice_number__icontains=term) | Q(quotation_reference__icontains=term) | Q(quotation__quotation_number__icontains=term))
         return queryset
 
     def handle_exception(self, exc):
@@ -235,27 +236,45 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser, JSONParser])
     def parse_lpo(self, request):
+        # Keep the original URL working for previously loaded clients.
+        return self._parse_document(request)
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def parse_document(self, request):
+        return self._parse_document(request)
+
+    def _parse_document(self, request):
         uploaded = request.FILES.get("file")
         text = str(request.data.get("text") or "")
+        document_type = str(request.data.get("document_type") or "auto").lower()
+        if document_type not in {"auto", "lpo", "quotation"}:
+            raise serializers.ValidationError("Select LPO, quotation, or automatic document detection.")
         if not uploaded and not text.strip():
-            raise serializers.ValidationError("Upload an LPO or paste its text.")
+            raise serializers.ValidationError("Upload an LPO or quotation, or paste its text.")
         if len(text) > 200000:
-            raise serializers.ValidationError("The pasted LPO is too large. Upload the file instead.")
+            raise serializers.ValidationError("The pasted document is too large. Upload the file instead.")
         preview = normalize_lpo_preview(parse_file_preview(uploaded) if uploaded else parse_text_preview(text))
         original = preview
         warnings = list(preview.get("warnings") or [])
         if str(request.data.get("use_ai", "true")).lower() not in {"0", "false", "no"}:
             try:
                 cleaned = clean_preview_with_ai(preview, actor=request.user, delivery_details=True)
+                # Removing header rows must not discard the fields already read
+                # from those rows when AI leaves a header value blank.
+                source_details = (original.get("meta") or {}).get("delivery_details") or {}
+                ai_details = (cleaned.get("meta") or {}).get("delivery_details") or {}
+                cleaned = {**cleaned, "meta": {**(cleaned.get("meta") or {}), "delivery_details": {
+                    key: ai_details.get(key) or value for key, value in source_details.items()
+                }}}
                 cleaned = normalize_lpo_preview(cleaned, read_pdf=False)
                 preview = prefer_safe_ai_preview(original, cleaned, max_guard_rows=300, check_units=True)
             except AIParseError as exc:
                 warnings.append(str(exc))
         preview["warnings"] = list(dict.fromkeys([*warnings, *(preview.get("warnings") or [])]))
-        result = delivery_lpo_preview(preview, request.user)
+        result = delivery_lpo_preview(preview, request.user, document_type=document_type)
         audit_log(request.user, QuotationAuditLog.ACTION_LPO_UPLOADED, None,
-                  message="Parsed an LPO for standalone delivery note review.",
-                  changes={"source_filename": result["source_filename"], "line_count": len(result["lines"])})
+                  message="Parsed a source document for standalone delivery note review.",
+                  changes={"source_filename": result["source_filename"], "document_type": result["document_type"], "line_count": len(result["lines"])})
         return Response(result)
 
     @action(detail=True, methods=["post"])

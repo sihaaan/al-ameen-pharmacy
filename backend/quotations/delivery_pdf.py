@@ -33,7 +33,7 @@ def build_delivery_note_pdf(note):
         ("Deliver to", note.delivery_address), ("LPO No.", note.lpo_number),
         ("Attention", note.attention), ("Invoice Ref.", note.invoice_number),
         ("Contact No.", note.contact_phone),
-        ("Quotation Ref.", note.quotation.quotation_number if note.quotation else ""),
+        ("Quotation Ref.", note.quotation.quotation_number if note.quotation else note.quotation_reference),
     ]
     metadata = [(label, value) for label, value in metadata if value]
     rows = []

@@ -3120,6 +3120,7 @@ class DeliveryNote(models.Model):
     delivery_date = models.DateField(default=timezone.localdate)
     lpo_number = models.CharField(max_length=120, blank=True, db_index=True)
     invoice_number = models.CharField(max_length=120, blank=True, db_index=True)
+    quotation_reference = models.CharField(max_length=120, blank=True)
     customer_name = models.CharField(max_length=255)
     customer_address = models.TextField(blank=True)
     customer_trn = models.CharField(max_length=100, blank=True)

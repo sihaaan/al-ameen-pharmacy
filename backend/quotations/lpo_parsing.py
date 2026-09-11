@@ -1,4 +1,4 @@
-"""Shared LPO cleanup and delivery fields for quotation and standalone workflows."""
+"""Shared source-document cleanup and delivery fields for LPOs and quotations."""
 import re
 from decimal import Decimal, InvalidOperation
 
@@ -11,7 +11,8 @@ from .models import Company
 
 IMPORT_SALT = "delivery-note-lpo-v1"
 DELIVERY_FIELDS = ("customer_name", "customer_address", "customer_trn", "delivery_address",
-                   "attention", "contact_phone", "lpo_number", "lpo_date", "requested_delivery_date")
+                   "attention", "contact_phone", "lpo_number", "lpo_date", "requested_delivery_date",
+                   "quotation_number", "quotation_date")
 
 
 def _field(text, labels):
@@ -87,11 +88,31 @@ def extract_delivery_details(preview, *, read_pdf=True):
     details["contact_phone"] = _field(header, r"Requestor Phone(?: Number)?|Requester Phone(?: Number)?|Contact Phone|Contact Number")
     if not details["customer_name"]:
         details["customer_name"] = _field(text, r"Customer(?: Name)?|Purchaser(?: Name)?")
+    # Our quotation PDFs contain side-by-side label/value header cells. Read
+    # these before normalization removes them from the delivery item rows.
+    labels = {"customer": "customer_name", "customername": "customer_name",
+              "customertrn": "customer_trn", "customeraddress": "customer_address",
+              "quotation": "quotation_number", "quotationno": "quotation_number",
+              "quotationnumber": "quotation_number", "quoteno": "quotation_number",
+              "attention": "attention", "contactphone": "contact_phone"}
+    for row in preview.get("lines") or []:
+        cells = str(row.get("raw_line") or "").split("|")
+        for index in range(0, len(cells) - 1, 2):
+            key = labels.get(re.sub(r"[^a-z0-9]", "", cells[index].lower()))
+            if key and not details[key]:
+                details[key] = cells[index + 1].strip()[:2000]
+    if not details["quotation_number"]:
+        match = re.search(r"(?im)^\s*(?:quotation|quote)\s*(?:no\.?|number|ref(?:erence)?\.?)?\s*[:#]\s*([^\n|]+)", text)
+        if match:
+            details["quotation_number"] = match.group(1).strip()[:100]
     # Explicit labels also support pasted text and spreadsheets.
     details["delivery_address"] = details["delivery_address"] or _field(text, r"Delivery Address|Shipping Address")
     from .views import _parse_lpo_business_date
+    from .import_rules import is_obvious_document_metadata_row
     dates = set()
     for row in preview.get("lines") or []:
+        if is_obvious_document_metadata_row(row):
+            continue
         candidates = [row.get("requested_delivery_date"), row.get("delivery_date"),
                       *str(row.get("raw_line") or "").split("|")]
         for candidate in candidates:
@@ -112,15 +133,17 @@ def extract_delivery_details(preview, *, read_pdf=True):
 
 
 def normalize_lpo_preview(preview, *, read_pdf=True):
-    from .import_rules import summarize_lines
+    from .import_rules import summarize_lines, is_obvious_document_metadata_row
     result = {**preview, "meta": dict(preview.get("meta") or {})}
+    details = extract_delivery_details(preview, read_pdf=read_pdf)
     rows = []
     skipped = 0
     for original in preview.get("lines") or []:
         row = dict(original)
         name = str(row.get("requested_item_name") or row.get("raw_name") or row.get("item_name") or "").strip()
         flat = re.sub(r"[^a-z0-9]", "", name.lower())
-        if (re.fullmatch(r"page\d+(?:of\d+)?", flat)
+        if (is_obvious_document_metadata_row(row)
+                or re.fullmatch(r"page\d+(?:of\d+)?", flat)
                 or flat in {"tableofparticulars", "scheduleofdetails"}
                 or re.match(r"^(?:pototal|taxtotal|grandtotal)(?:aed|usd|eur|gbp|\d|inwords)", flat)):
             skipped += 1
@@ -147,22 +170,31 @@ def normalize_lpo_preview(preview, *, read_pdf=True):
         rows.append(row)
     result["lines"] = rows
     result["meta"]["line_count"] = len(rows)
-    result["meta"]["delivery_details"] = extract_delivery_details(result, read_pdf=read_pdf)
+    result["meta"]["delivery_details"] = details
     result["meta"]["lpo_metadata_rows_removed"] = skipped + int(result["meta"].get("lpo_metadata_rows_removed") or 0)
     result["summary"] = summarize_lines(rows, skipped_count=result["meta"]["lpo_metadata_rows_removed"])
     return result
 
 
-def delivery_lpo_preview(preview, actor):
+def delivery_lpo_preview(preview, actor, *, document_type="auto"):
     from .views import _extract_lpo_details
     details = extract_delivery_details(preview, read_pdf=False)
     identifiers = _extract_lpo_details(preview)
     details["lpo_number"] = identifiers["lpo_number"] or details["lpo_number"]
     details["lpo_date"] = identifiers["lpo_date"].isoformat() if identifiers["lpo_date"] else details["lpo_date"]
+    if document_type == "auto":
+        is_quotation = details["quotation_number"] or re.search(
+            r"(?im)^\s*quotation\s*$", str(preview.get("original_text") or ""))
+        document_type = "quotation" if is_quotation and not details["lpo_number"] else "lpo"
+    if document_type == "quotation":
+        # A quote's ordinary date is not an LPO date. Keep separate evidence.
+        if not details["lpo_number"]:
+            details["quotation_date"] = details["quotation_date"] or details["lpo_date"]
+            details["lpo_date"] = ""
     warnings = list(preview.get("warnings") or [])
     rows = []
     if len(preview.get("lines") or []) > 300:
-        raise ValidationError("This LPO contains more than 300 rows. Split it before creating delivery notes.")
+        raise ValidationError("This document contains more than 300 rows. Split it before creating delivery notes.")
     for row in preview.get("lines") or []:
         if row.get("parse_status") == "ignored":
             continue
@@ -177,25 +209,26 @@ def delivery_lpo_preview(preview, actor):
             valid = False
         if not valid:
             quantity = ""
-            warnings.append(f"{name}: check the quantity against the LPO.")
+            warnings.append(f"{name}: check the quantity against the source document.")
         rows.append({"item_name": name[:255], "description": str(row.get("description") or "")[:2000],
                      "quantity": quantity, "unit": str(row.get("unit") or "")[:50], "quotation_line": None})
     if not rows:
-        raise ValidationError("No delivery items were found. Try a clearer LPO or paste its item table.")
+        raise ValidationError("No delivery items were found. Try a clearer LPO or quotation, or paste its item table.")
     candidates = find_similar_companies(details["customer_name"], queryset=Company.objects.filter(is_active=True)) if details["customer_name"] else []
     exact = [entry for entry in candidates if entry["score"] >= 96]
     company = exact[0]["id"] if len(exact) == 1 else None
     if not company:
         warnings.append("Confirm the customer before saving this delivery note.")
-    if not details["lpo_number"]:
+    if document_type == "lpo" and not details["lpo_number"]:
         warnings.append("The LPO number was not found. Enter it from the document.")
     source = {
-        "source_filename": preview.get("source_filename") or "Pasted LPO",
+        "source_filename": preview.get("source_filename") or "Pasted document",
+        "document_type": document_type,
         "source_sha256": preview.get("source_sha256", ""), "source_file_ref": preview.get("source_file_ref", ""),
         "parse_method": preview.get("parse_method", ""), "details": details, "rows": rows,
         "warnings": list(dict.fromkeys(warnings)), "parsed_by": actor.pk, "parsed_at": timezone.now().isoformat(),
     }
-    return {"details": details, "lines": rows, "company": company, "company_candidates": candidates,
+    return {"details": details, "document_type": document_type, "lines": rows, "company": company, "company_candidates": candidates,
             "warnings": source["warnings"], "source_filename": source["source_filename"],
             "parse_method": source["parse_method"],
             "import_token": signing.dumps(source, salt=IMPORT_SALT, compress=True)}

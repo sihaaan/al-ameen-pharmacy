@@ -39,11 +39,13 @@ Past orders become reliable delivery data only after their acceptance and receip
 
 **New standalone delivery note** supports customers whose order was handled outside the quotation workflow. These documents have their own draft/issued/receipt status, but do not invent an accepted quotation or appear in quotation-order completion totals.
 
-### Fill a standalone DO from an LPO
+### Fill a standalone DO from an LPO or quotation
 
-Choose **New standalone delivery note → Fill from an LPO**, upload a PDF/Excel file or image, or paste the purchase order text, then choose **Read LPO**. AI reads item rows and purchaser/shipping/contact fields when enabled. The shared LPO parser removes page footers and totals from item rows, separates product codes from item names, and retains size, strength, pack, quantity and unit information. If AI is unavailable or changes reliable extracted quantities, the original extraction remains available with a warning.
+Choose **New standalone delivery note → Fill from an LPO or quotation**, upload a PDF/Excel file or image, or paste the document text, then choose **Read document**. Leave document type on automatic detection or select LPO or Quotation. A quotation upload does not require an LPO. Its quotation reference is editable and appears separately from the LPO number on the saved note and PDF.
 
-Review the detected customer, address, requested date and items, then choose **Fill delivery note** (or **Replace items with this LPO** for an existing draft). Only an unambiguous company name selects the customer automatically. All delivery fields and standalone item rows remain editable. Missing quantities stay blank for staff to correct, and the requested date does not replace the actual delivery date. A staged preview never creates or issues a note; discarding it preserves existing edits.
+This uses the same core AI item parser as inquiry imports, with delivery-specific purchaser/shipping/contact fields. Cleanup excludes customer headers, TRNs, references, dates, status, terms, page footers and totals from item rows, and separates product codes from item names. Size, strength, pack, quantity and unit information remain intact. The guard allows AI to remove these document fields while continuing to reject lost reliable products or changed quantities/prices/units. If AI is unavailable, the cleaned deterministic extraction remains available with a warning.
+
+Review the detected customer, address, requested date and items, then choose **Fill delivery note** (or **Replace items with this document** for an existing draft). Only an unambiguous company name selects the customer automatically. All delivery fields and standalone item rows remain editable. Missing quantities stay blank for staff to correct, and the requested date does not replace the actual delivery date. A staged preview never creates or issues a note; discarding it preserves existing edits. Applying a replacement source replaces both source references so an old LPO number cannot remain attached to a new quotation import.
 
 Save the reviewed draft or issue it when ready. Its source filename, private evidence reference, original parsed rows and staff attribution are retained separately from edited delivery values. Linked quotation DOs continue through **Manage order → Read LPO & review items → Approve & prepare DO** so the approved quantities and existing deliveries remain authoritative.
 
@@ -58,6 +60,8 @@ The backend checks quantities again when issuing, under the same quotation lock 
 Apply migration **quotations.0044_delivery_notes** to the intended deployment database and deploy the matching backend and frontend together. This change does not backfill historical acceptance or delivery data and does not send any email.
 
 The LPO autofill workflow additionally requires **quotations.0048_deliverynote_lpo_import**. POST file or text, optionally use_ai, to **/api/quotations/delivery-notes/parse_lpo/**. It returns a signed, staff-bound preview valid for 24 hours without creating a note. Save its import_token as lpo_import_token with reviewed standalone fields/lines; invalid or expired tokens are rejected. The private source reference is not included in the note's public serializer.
+
+Quotation source references require **quotations.0049_deliverynote_quotation_reference**. The current endpoint is **/api/quotations/delivery-notes/parse_document/** with optional `document_type` (`auto`, `lpo`, or `quotation`). The original `parse_lpo/` URL remains compatible. Save `details.quotation_number` as `quotation_reference` for a standalone note; this reference does not establish a link to an existing quotation or change acceptance. Linked notes use their actual quotation number. Search includes quotation references. The source token and stored source metadata retain the detected document type.
 
 | Endpoint under `/api/quotations/` | Purpose |
 | --- | --- |

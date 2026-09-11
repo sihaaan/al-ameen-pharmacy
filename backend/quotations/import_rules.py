@@ -184,6 +184,45 @@ def is_obvious_po_metadata_item(value):
     return bool(phone_match and len(re.sub(r"\D", "", phone_match.group("number"))) >= 5)
 
 
+DOCUMENT_FIELD_LABELS = frozenset({
+    "customer", "customername", "customertrn", "customeraddress", "customeraccount",
+    "quotation", "quotationno", "quotationnumber", "quotationref", "quotationreference",
+    "quote", "quoteno", "quotenumber", "quoteref", "date", "validuntil", "validity",
+    "preparedby", "approvedby", "status", "currency", "paymentterms", "deliveryterms",
+    "supplier", "suppliername", "supplieraddress", "suppliertrn", "supplieremail",
+    "supplierphone", "billto", "shipto", "deliverto", "attention", "attn",
+    "contact", "contactperson", "contactphone", "contactnumber", "requestor", "requester",
+    "trn", "vatregno", "taxregistrationnumber", "purchaseorder", "ponumber", "pono",
+    "lpo", "lponumber", "lpono", "subtotal", "taxtotal", "vattotal",
+    "grandtotal", "pototal", "total", "totalamount", "totalinaed",
+})
+
+
+def is_obvious_document_metadata_row(row):
+    """Recognize document fields before a number in a reference becomes a quantity.
+
+    PDF header tables often arrive as ``Customer | Name | Quotation # | QT-0008``.
+    Only exact field labels in the first cell count; names such as 'Customer Care
+    Kit' or 'Status Monitor' remain products.
+    """
+    row = row or {}
+    name = str(row.get("requested_item_name") or row.get("raw_name") or row.get("item_name") or "").strip()
+    if is_obvious_po_metadata_item(name):
+        return True
+    raw = str(row.get("raw_line") or row.get("raw_source_text") or name).strip()
+    if "|" in raw:
+        first = re.sub(r"[^a-z0-9]", "", raw.split("|", 1)[0].lower())
+        if first in DOCUMENT_FIELD_LABELS:
+            return True
+    if ":" in raw:
+        label = re.sub(r"[^a-z0-9]", "", raw.split(":", 1)[0].lower())
+        if label in DOCUMENT_FIELD_LABELS:
+            return True
+    if re.match(r"^(?:terms\s+(?:and|&)\s+conditions|prepared\s*/\s*approved\s+by)\b", name, re.I):
+        return True
+    return False
+
+
 NOISE_PATTERNS = [
     re.compile(r"^\s*$"),
     re.compile(r"^\s*(page|p\.)\s*\d+(\s+of\s+\d+)?\s*$", re.IGNORECASE),

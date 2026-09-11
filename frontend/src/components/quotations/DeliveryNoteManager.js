@@ -14,7 +14,7 @@ const today = () => new Intl.DateTimeFormat('en-CA', {
 }).format(new Date());
 const blankLine = () => ({ item_name: '', description: '', unit: '', quantity: '1', quotation_line: null });
 const blankForm = () => ({
-  company: '', quotation: null, delivery_date: today(), lpo_number: '', invoice_number: '',
+  company: '', quotation: null, delivery_date: today(), lpo_number: '', quotation_reference: '', invoice_number: '',
   delivery_address: '', attention: '', contact_phone: '', notes: '', lines: [blankLine()],
 });
 const badge = (state) => <span className={`dn-badge dn-badge-${state}`}>{labels[state] || state}</span>;
@@ -41,7 +41,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const [receipt, setReceipt] = useState(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
-  const [lpoInput, setLpoInput] = useState({ file: null, text: '', useAI: true });
+  const [lpoInput, setLpoInput] = useState({ file: null, text: '', useAI: true, documentType: 'auto' });
   const [lpoPreview, setLpoPreview] = useState(null);
   const [lpoImportToken, setLpoImportToken] = useState('');
   const detailRequest = useRef(0);
@@ -79,7 +79,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const showNote = useCallback((data) => {
     detailRequest.current += 1;
     setLpoPreview(null); setLpoImportToken('');
-    setLpoInput({ file: null, text: '', useAI: true });
+    setLpoInput({ file: null, text: '', useAI: true, documentType: 'auto' });
     setNote(data);
     setForm({
       ...blankForm(), ...data,
@@ -137,7 +137,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     setNote(null); setForm(blankForm()); setOrder(null); setEditorOpen(true);
     setErrorInfo(null); setFeedback(''); setCancelOpen(false);
     setLpoPreview(null); setLpoImportToken('');
-    setLpoInput({ file: null, text: '', useAI: true });
+    setLpoInput({ file: null, text: '', useAI: true, documentType: 'auto' });
     window.requestAnimationFrame(() => {
       editorHeading.current?.focus({ preventScroll: true });
       editorHeading.current?.scrollIntoView?.({
@@ -146,13 +146,14 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       });
     });
   };
-  const parseLpo = () => run('Read LPO for delivery note', async () => {
+  const parseDocument = () => run('Read source document for delivery note', async () => {
     const requestId = detailRequest.current;
     const payload = new FormData();
     if (lpoInput.file) payload.append('file', lpoInput.file);
     else payload.append('text', lpoInput.text);
     payload.append('use_ai', String(lpoInput.useAI));
-    const { data } = await quotationAPI.deliveryNotes.parseLpo(payload, true);
+    payload.append('document_type', lpoInput.documentType);
+    const { data } = await quotationAPI.deliveryNotes.parseDocument(payload, true);
     if (requestId !== detailRequest.current) return;
     setLpoPreview(data);
   });
@@ -161,12 +162,14 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     setForm((current) => ({
       ...current,
       company: current.company || String(lpoPreview.company || ''),
-      ...Object.fromEntries(['lpo_number', 'delivery_address', 'attention', 'contact_phone']
+      lpo_number: details.lpo_number || '',
+      quotation_reference: details.quotation_number || '',
+      ...Object.fromEntries(['delivery_address', 'attention', 'contact_phone']
         .filter((key) => details[key]).map((key) => [key, details[key]])),
       lines: lpoPreview.lines.map((line) => ({ ...line })),
     }));
     setLpoImportToken(lpoPreview.import_token);
-    setFeedback(lpoPreview.lines.length + ' LPO items filled in. Review the customer, delivery date and quantities before saving.');
+    setFeedback(lpoPreview.lines.length + ' document items filled in. Review the customer, delivery date and quantities before saving.');
     setLpoPreview(null);
     window.requestAnimationFrame(() => editorForm.current?.querySelector('input, select')?.focus());
   };
@@ -184,6 +187,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     const payload = {
       company: form.company, quotation: form.quotation || null,
       delivery_date: form.delivery_date, lpo_number: form.lpo_number, invoice_number: form.invoice_number,
+      quotation_reference: form.quotation_reference,
       delivery_address: form.delivery_address, attention: form.attention, contact_phone: form.contact_phone,
       notes: form.notes,
       ...(lpoImportToken ? { lpo_import_token: lpoImportToken } : {}),
@@ -240,7 +244,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const editable = !note || note.status === 'draft';
   const draftChanged = note?.status === 'draft' && (
     Boolean(lpoImportToken) ||
-    ['delivery_date', 'lpo_number', 'invoice_number', 'delivery_address', 'attention', 'contact_phone', 'notes']
+    ['delivery_date', 'lpo_number', 'quotation_reference', 'invoice_number', 'delivery_address', 'attention', 'contact_phone', 'notes']
       .some((key) => (form[key] || '') !== (note[key] || ''))
     || JSON.stringify(form.lines) !== JSON.stringify(note.lines)
   );
@@ -273,11 +277,11 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       <button onClick={() => setRevision((value) => value + 1)} disabled={loading}>Refresh</button>
     </div>
     {loading ? <p role="status">Loading {view === 'orders' ? 'orders' : 'delivery notes'}…</p> : <div className="qm-table-wrap">
-      <table className="qm-table"><thead><tr><th>{view === 'orders' ? 'Quotation / order' : 'Delivery note'}</th><th>Customer</th><th>Status</th><th>{view === 'orders' ? 'Delivered lines' : 'LPO / invoice'}</th><th>Action</th></tr></thead>
+      <table className="qm-table"><thead><tr><th>{view === 'orders' ? 'Quotation / order' : 'Delivery note'}</th><th>Customer</th><th>Status</th><th>{view === 'orders' ? 'Delivered lines' : 'References'}</th><th>Action</th></tr></thead>
         <tbody>{rows.map((row) => <tr key={row.id}>
           <td>{view === 'orders' ? row.quotation_number : row.delivery_number}</td><td>{row.company_name}</td>
           <td>{badge(view === 'orders' ? row.delivery_status : row.status)}</td>
-          <td>{view === 'orders' ? `${row.completed_line_count} / ${row.line_count}` : [row.lpo_number, row.invoice_number].filter(Boolean).join(' / ') || '—'}</td>
+          <td>{view === 'orders' ? `${row.completed_line_count} / ${row.line_count}` : [row.lpo_number, row.quotation_number || row.quotation_reference, row.invoice_number].filter(Boolean).join(' / ') || '—'}</td>
           <td><button disabled={busy} onClick={() => view === 'orders' ? openOrder(row.id) : openNote(row.id)}>{view === 'orders' ? 'View order' : 'Open note'}</button></td>
         </tr>)}{!rows.length && <tr><td colSpan="5">No {view === 'orders' ? 'accepted orders' : 'delivery notes'} match these filters.</td></tr>}</tbody>
       </table>
@@ -299,40 +303,48 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
 
     {editorOpen && <section className="qm-panel dn-detail" aria-label="Delivery note editor">
       <div className="qm-panel-heading"><div><h3 ref={editorHeading} className="dn-editor-title" tabIndex={-1}>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>{badge(note?.status || 'draft')}</div>
-      {editable && !form.quotation && <section className="dn-lpo-import" aria-label="Import delivery items from LPO">
-        <div><h4>Fill from an LPO</h4><p>Upload the customer's purchase order. Review the detected details, then fill the delivery note.</p></div>
+      {editable && !form.quotation && <section className="dn-lpo-import" aria-label="Import delivery items from LPO or quotation">
+        <div><h4>Fill from an LPO or quotation</h4><p>Upload either document, review the detected items, then fill the delivery note. A quotation does not need an LPO.</p></div>
         {!lpoPreview ? <>
           <div className="dn-form-grid">
-            <label>LPO file<input ref={lpoFileInput} type="file" accept=".pdf,.xlsx,.xls,.xlsb,.png,.jpg,.jpeg,.webp" disabled={busy}
+            <label>Source file<input ref={lpoFileInput} type="file" accept=".pdf,.xlsx,.xls,.xlsb,.png,.jpg,.jpeg,.webp" disabled={busy}
               onChange={(event) => setLpoInput((current) => ({ ...current, file: event.target.files?.[0] || null, text: '' }))} /></label>
-            <label>Or paste LPO text<textarea value={lpoInput.text} disabled={busy || Boolean(lpoInput.file)}
-              placeholder="Paste the purchase order or item table"
+            <label>Or paste document text<textarea value={lpoInput.text} disabled={busy || Boolean(lpoInput.file)}
+              placeholder="Paste the LPO, quotation or item table"
               onChange={(event) => setLpoInput((current) => ({ ...current, text: event.target.value }))} /></label>
           </div>
           {lpoInput.file && <p>Selected: {lpoInput.file.name}</p>}
           <div className="dn-actions">
+            <label>Document type<select value={lpoInput.documentType} disabled={busy}
+              onChange={(event) => setLpoInput((current) => ({ ...current, documentType: event.target.value }))}>
+              <option value="auto">Detect automatically</option><option value="lpo">LPO / purchase order</option><option value="quotation">Quotation</option>
+            </select></label>
             <label className="dn-ai-toggle"><input type="checkbox" checked={lpoInput.useAI} disabled={busy}
-              onChange={(event) => setLpoInput((current) => ({ ...current, useAI: event.target.checked }))} />Use AI to read and clean up the LPO</label>
-            <button type="button" className="qm-primary" disabled={busy || (!lpoInput.file && !lpoInput.text.trim())} onClick={parseLpo}>{busy ? 'Reading LPO…' : 'Read LPO'}</button>
-            {lpoInput.file && <button type="button" disabled={busy} onClick={() => setLpoInput({ file: null, text: '', useAI: lpoInput.useAI })}>Use pasted text instead</button>}
+              onChange={(event) => setLpoInput((current) => ({ ...current, useAI: event.target.checked }))} />Use AI to read and clean up the document</label>
+            <button type="button" className="qm-primary" disabled={busy || (!lpoInput.file && !lpoInput.text.trim())} onClick={parseDocument}>{busy ? 'Reading document…' : 'Read document'}</button>
+            {lpoInput.file && <button type="button" disabled={busy} onClick={() => setLpoInput({ ...lpoInput, file: null, text: '' })}>Use pasted text instead</button>}
           </div>
-        </> : <div className="dn-lpo-preview" role="region" aria-label="Detected LPO details">
+        </> : <div className="dn-lpo-preview" role="region" aria-label="Detected document details">
           <div className="dn-form-grid">
-            <div><strong>{lpoPreview.details.customer_name || 'Customer needs selection'}</strong><p>{lpoPreview.details.lpo_number || 'LPO number not found'} · {lpoPreview.lines.length} items</p></div>
+            <div><strong>{lpoPreview.details.customer_name || 'Customer needs selection'}</strong>
+              <p>{lpoPreview.document_type === 'quotation' ? 'Quotation' : 'LPO'} · {lpoPreview.lines.length} items</p>
+              {lpoPreview.details.lpo_number && <p>LPO: {lpoPreview.details.lpo_number}</p>}
+              {lpoPreview.details.quotation_number && <p>Quotation: {lpoPreview.details.quotation_number}</p>}
+            </div>
             <div><strong>Deliver to</strong><p className="dn-preserve-lines">{lpoPreview.details.delivery_address || 'Address needs review'}</p><p>{lpoPreview.details.attention}</p></div>
           </div>
-          {lpoPreview.details.requested_delivery_date && <p>Requested delivery date on LPO: {lpoPreview.details.requested_delivery_date}. Set the actual delivery date below.</p>}
+          {lpoPreview.details.requested_delivery_date && <p>Requested delivery date on document: {lpoPreview.details.requested_delivery_date}. Set the actual delivery date below.</p>}
           {!!lpoPreview.warnings?.length && <ul className="dn-lpo-warnings">{lpoPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
           <div className="qm-table-wrap dn-lpo-items"><table className="qm-table"><thead><tr><th>Detected item</th><th>Quantity</th><th>Unit</th></tr></thead><tbody>
             {lpoPreview.lines.map((line, index) => <tr key={index}><td>{line.item_name}</td><td>{line.quantity || 'Check quantity'}</td><td>{line.unit}</td></tr>)}
           </tbody></table></div>
-          <div className="dn-actions"><button type="button" className="qm-primary" onClick={applyLpo}>{form.lines.some((line) => line.item_name.trim()) ? 'Replace items with this LPO' : 'Fill delivery note'}</button>
+          <div className="dn-actions"><button type="button" className="qm-primary" onClick={applyLpo}>{form.lines.some((line) => line.item_name.trim()) ? 'Replace items with this document' : 'Fill delivery note'}</button>
             <button type="button" onClick={() => setLpoPreview(null)}>Discard preview</button></div>
         </div>}
       </section>}
       {form.quotation && editable && <p className="dn-help">Items and quantities are filled from the approved order. To upload or change an LPO, use Manage order on the quotation.
         {onReviewOutcome && <button type="button" disabled={busy} onClick={() => onReviewOutcome(form.quotation)}>Manage order / upload LPO</button>}</p>}
-      {note?.lpo_source?.source_filename && <p className="dn-help">Source LPO: {note.lpo_source.source_filename}</p>}
+      {note?.lpo_source?.source_filename && <p className="dn-help">Source document: {note.lpo_source.source_filename}</p>}
       <form onSubmit={submitDraft} ref={editorForm}>
         <fieldset disabled={!editable || busy}>
           <div className="dn-form-grid">
@@ -342,6 +354,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
             }}><option value="">Select customer</option>{companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select></label>
             <label>Delivery date<input type="date" required value={form.delivery_date} onChange={(event) => update('delivery_date', event.target.value)} /></label>
             <label>LPO number<input maxLength={120} value={form.lpo_number} onChange={(event) => update('lpo_number', event.target.value)} /></label>
+            <label>Quotation reference<input maxLength={120} value={form.quotation ? form.quotation_number || form.quotation_reference : form.quotation_reference} readOnly={Boolean(form.quotation)} onChange={(event) => update('quotation_reference', event.target.value)} /></label>
             <label>Invoice reference<input maxLength={120} value={form.invoice_number} onChange={(event) => update('invoice_number', event.target.value)} /></label>
             <label>Attention<input maxLength={255} value={form.attention} onChange={(event) => update('attention', event.target.value)} /></label>
             <label>Contact phone<input maxLength={100} value={form.contact_phone} onChange={(event) => update('contact_phone', event.target.value)} /></label>

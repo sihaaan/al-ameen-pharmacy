@@ -8058,7 +8058,9 @@ def confirm_gmail_inquiry_import(
 
         if locked.gmail_thread_id:
             confirmed = (
-                GmailInquiryImport.objects.select_for_update()
+                # Related inquiry/quotation links are nullable. PostgreSQL can
+                # lock the import row, but cannot lock their outer-join sides.
+                GmailInquiryImport.objects.select_for_update(of=("self",))
                 .filter(
                     mailbox_email__iexact=locked.mailbox_email,
                     gmail_thread_id=locked.gmail_thread_id,
