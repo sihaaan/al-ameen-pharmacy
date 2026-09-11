@@ -278,6 +278,8 @@ const quotationAPI = {
     retrieve: (id) => axiosInstance.get(`/quotations/delivery-orders/${id}/`),
   },
   deliveryNotes: {
+    parseDocument: (data, isMultipart = false) => axiosInstance.post('/quotations/delivery-notes/parse_document/', data,
+      isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined),
     parseLpo: (data, isMultipart = false) => axiosInstance.post('/quotations/delivery-notes/parse_lpo/', data,
       isMultipart ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined),
     list: (params = {}) => axiosInstance.get('/quotations/delivery-notes/', { params }),

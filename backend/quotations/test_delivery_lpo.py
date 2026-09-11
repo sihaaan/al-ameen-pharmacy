@@ -10,11 +10,13 @@ from django.urls import reverse
 from reportlab.pdfgen import canvas
 from rest_framework.test import APIClient
 
-from .ai_parsing import AIParseError, _normalize_ai_result, LPO_DELIVERY_JSON_SCHEMA
+from .ai_parsing import AIParseError, _normalize_ai_result, LPO_DELIVERY_JSON_SCHEMA, prefer_safe_ai_preview
+from .delivery_pdf import build_delivery_note_pdf
 from .import_parsers import parse_file_preview
-from .import_rules import classify_header_cell
+from .import_rules import classify_header_cell, is_obvious_document_metadata_row
 from .lpo_parsing import normalize_lpo_preview, preserve_lpo_line_details
 from .models import Company, DeliveryNote, Quotation, QuotationLine
+from .pdf import build_quotation_pdf
 from .views import _extract_lpo_details
 
 
@@ -254,3 +256,87 @@ class DeliveryLPOTests(TestCase):
                                       schema_name="lpo_delivery_parse")
         self.assertEqual(result["meta"]["delivery_details"]["customer_name"], "Resort LLC")
         self.assertIn("delivery_details", LPO_DELIVERY_JSON_SCHEMA["required"])
+
+    def test_ai_can_remove_numeric_quotation_headers_without_restoring_them_as_products(self):
+        source = preview()
+        source["original_text"] = "QUOTATION"
+        source["meta"] = {}
+        headers = [
+            ("Customer Resort LLC Quotation 0008", "Customer | Resort LLC | Quotation # | QT-20260910-0008", "8"),
+            ("Customer TRN 100000000000003 Date 2026 09", "Customer TRN | 100000000000003 | Date | 2026-09-10", "10"),
+            ("Valid Until 2026 10 10 Prepared By Staff", "Valid Until | 2026-10-10 | Prepared By | Staff", None),
+            ("Status Sent Currency AED", "Status | Sent | Currency | AED", None),
+            ("Terms and Conditions Prices are subject to availability", "Terms and Conditions Prices are subject to availability | Prepared / Approved By Staff", None),
+        ]
+        source["lines"] += [{"requested_item_name": name, "raw_line": raw, "quantity": quantity,
+                             "parse_confidence": .82} for name, raw, quantity in headers]
+        cleaned = {**source, "meta": {}, "lines": source["lines"][:1]}
+        # The shared inquiry guard must also permit removal before normalization.
+        self.assertEqual(len(prefer_safe_ai_preview(source, cleaned, max_guard_rows=300, check_units=True)["lines"]), 1)
+        with patch("quotations.delivery_views.clean_preview_with_ai", return_value=cleaned):
+            response = self.parse({"text": "QUOTATION", "use_ai": True}, source=source)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(len(response.data["lines"]), 1)
+        self.assertEqual(response.data["document_type"], "quotation")
+        self.assertEqual(response.data["details"]["customer_name"], "Resort LLC")
+        self.assertEqual(response.data["details"]["customer_trn"], "100000000000003")
+        self.assertEqual(response.data["details"]["quotation_number"], "QT-20260910-0008")
+        self.assertEqual(response.data["details"]["requested_delivery_date"], "")
+        self.assertFalse(any("rejected" in warning for warning in response.data["warnings"]))
+        for name in ("Customer Care Kit", "Status Monitor", "Contact Lens Solution"):
+            self.assertFalse(is_obvious_document_metadata_row({"requested_item_name": name,
+                             "raw_line": name + " | 5 | BOX", "quantity": "5"}))
+
+    def test_uploaded_quotation_pdf_produces_only_items_and_saves_its_own_reference(self):
+        import fitz
+        quote = Quotation.objects.create(company=self.company, status="sent", valid_until="2026-10-10")
+        names = ["Gauze", "Gloves", "Syringe", "Bandage", "Cold Pack", "Cotton", "Thermometer", "Tape"]
+        for index, name in enumerate(names, 1):
+            QuotationLine.objects.create(quotation=quote, item_name_snapshot=name, quantity=index,
+                                         unit="BOX", unit_price=12.5, match_status="confirmed")
+        pdf = build_quotation_pdf(quote)
+        with TemporaryDirectory() as root, override_settings(QUOTATION_PRIVATE_STORAGE_ROOT=root):
+            response = self.client.post(reverse("quotation-delivery-note-parse-document"), {
+                "file": SimpleUploadedFile("quotation.pdf", pdf, content_type="application/pdf"),
+                "use_ai": "false", "document_type": "auto",
+            }, format="multipart")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["document_type"], "quotation")
+        self.assertEqual([row["item_name"] for row in response.data["lines"]], names)
+        self.assertEqual([Decimal(row["quantity"]) for row in response.data["lines"]], list(range(1, 9)))
+        self.assertEqual(response.data["company"], self.company.pk)
+        self.assertEqual(response.data["details"]["quotation_number"], quote.quotation_number)
+        self.assertEqual(response.data["details"]["lpo_number"], "")
+        self.assertEqual(response.data["details"]["requested_delivery_date"], "")
+        self.assertFalse(any("LPO number" in warning for warning in response.data["warnings"]))
+        self.assertFalse(DeliveryNote.objects.exists())
+        rows = response.data["lines"]
+        rows[1]["quantity"] = "1"
+        saved = self.client.post(reverse("quotation-delivery-note-list"), {
+            "company": self.company.pk, "quotation_reference": response.data["details"]["quotation_number"],
+            "lpo_import_token": response.data["import_token"], "lines": rows,
+        }, format="json")
+        self.assertEqual(saved.status_code, 201, saved.data)
+        self.assertEqual(saved.data["status"], "draft")
+        self.assertIsNone(saved.data["quotation"])
+        self.assertEqual(saved.data["lpo_number"], "")
+        self.assertEqual(saved.data["lpo_source"]["document_type"], "quotation")
+        note = DeliveryNote.objects.get(pk=saved.data["id"])
+        with fitz.open(stream=build_delivery_note_pdf(note), filetype="pdf") as document:
+            text = "\n".join(page.get_text() for page in document)
+        self.assertIn("Quotation Ref.", text)
+        self.assertIn(quote.quotation_number, text)
+        self.assertNotIn("LPO No.", text)
+        found = self.client.get(reverse("quotation-delivery-note-list"), {"search": quote.quotation_number})
+        self.assertEqual(found.data["count"], 1)
+
+    def test_pasted_quotation_without_a_reference_does_not_require_an_lpo(self):
+        response = self.client.post(reverse("quotation-delivery-note-parse-document"), {
+            "text": "Customer: Resort LLC\nGauze 5 BOX",
+            "use_ai": False, "document_type": "quotation",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["document_type"], "quotation")
+        self.assertEqual(len(response.data["lines"]), 1)
+        self.assertFalse(any("LPO number" in warning for warning in response.data["warnings"]))
+        self.assertFalse(DeliveryNote.objects.exists())

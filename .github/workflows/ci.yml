@@ -106,6 +106,13 @@ jobs:
           quotations.test_quotation_concurrency
           quotations.test_saved_matches.SavedMatchConcurrencyTests
           --noinput --verbosity 2
+      - name: Verify Gmail confirmation on PostgreSQL
+        run: >-
+          python manage.py test
+          quotations.test_gmail_inquiry_import.GmailInquiryImportTests.test_confirmation_requires_explicit_company_is_idempotent_and_never_learns_aliases
+          quotations.test_gmail_inquiry_import.GmailInquiryImportTests.test_two_distinct_import_sessions_for_one_thread_reuse_one_quotation
+          quotations.test_gmail_inquiry_import.GmailInquiryImportTests.test_confirmed_thread_handoff_reopens_same_quote_for_another_staff
+          --noinput --verbosity 2
 
   frontend:
     runs-on: ubuntu-latest
