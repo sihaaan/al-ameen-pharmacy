@@ -2,6 +2,19 @@
 
 The staff workspace is under **Admin Dashboard → Quotations → Orders & Delivery Notes**.
 
+**Created delivery notes** is the default view. Search by customer, delivery number,
+LPO, quotation or invoice reference; the list also shows delivery date and creator.
+**Open note** opens the saved document and scrolls to its heading. Use **View PDF**
+to preview the saved PDF in the workspace, **Download PDF** to save it, or **Back
+to list** to return to the list. Previewing does not issue a note or confirm receipt.
+Save draft edits before previewing or downloading; editing references closes any
+previous preview so it cannot display an outdated copy.
+
+Delivery PDFs show the pharmacy TRN from **Settings → Company Details → TRN**,
+even if TRN visibility is disabled for quotations. They omit the internal status
+field. Staff still see delivery progress in the workspace, and draft/cancelled
+PDF watermarks continue to identify documents that are not issued delivery notes.
+
 ## Record acceptance and delivery
 
 1. Review the quotation outcome or its LPO and record the accepted line quantities. An uploaded LPO alone is not proof of accepted quantities.

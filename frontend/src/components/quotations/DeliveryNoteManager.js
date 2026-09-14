@@ -21,7 +21,7 @@ const badge = (state) => <span className={`dn-badge dn-badge-${state}`}>{labels[
 const qty = (value) => Number(value || 0).toLocaleString('en-GB', { maximumFractionDigits: 3 });
 
 const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
-  const [view, setView] = useState('orders');
+  const [view, setView] = useState('notes');
   const [rows, setRows] = useState([]);
   const [summary, setSummary] = useState({});
   const [companies, setCompanies] = useState([]);
@@ -46,12 +46,32 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const [lpoImportToken, setLpoImportToken] = useState('');
   const [referenceEditOpen, setReferenceEditOpen] = useState(false);
   const [referenceForm, setReferenceForm] = useState({ lpo_number: '', invoice_number: '', quotation_reference: '' });
+  const [editorFocusRequest, setEditorFocusRequest] = useState(0);
+  const [pdfPreview, setPdfPreview] = useState(null);
+  const listHeading = useRef(null);
+  const pdfHeading = useRef(null);
   const referenceEditor = useRef(null);
   const detailRequest = useRef(0);
   const editorForm = useRef(null);
   const editorHeading = useRef(null);
   const lpoFileInput = useRef(null);
   useEffect(() => { if (!lpoInput.file && lpoFileInput.current) lpoFileInput.current.value = ''; }, [lpoInput.file]);
+
+  const focusSection = useCallback((target) => {
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView?.({ block: 'start',
+      behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+  }, []);
+  useEffect(() => {
+    if (!editorFocusRequest) return undefined;
+    const frame = window.requestAnimationFrame(() => focusSection(editorHeading.current));
+    return () => window.cancelAnimationFrame(frame);
+  }, [editorFocusRequest, focusSection]);
+  useEffect(() => {
+    if (!pdfPreview) return undefined;
+    const frame = window.requestAnimationFrame(() => focusSection(pdfHeading.current));
+    return () => { window.cancelAnimationFrame(frame); URL.revokeObjectURL(pdfPreview); };
+  }, [pdfPreview, focusSection]);
 
   const reportError = useCallback(async (error, operation) => {
     setErrorInfo(await describeQuotationError(error, operation, 'Orders & delivery notes'));
@@ -79,11 +99,13 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     return () => { current = false; };
   }, [view, search, status, page, revision, reportError]);
 
-  const showNote = useCallback((data) => {
+  const showNote = useCallback((data, focus = false) => {
     detailRequest.current += 1;
     setLpoPreview(null); setLpoImportToken('');
     setLpoInput({ file: null, text: '', useAI: true, documentType: 'auto' });
     setNote(data);
+    setPdfPreview(null);
+    if (focus) setEditorFocusRequest((value) => value + 1);
     setReferenceEditOpen(false);
     setForm({
       ...blankForm(), ...data,
@@ -101,7 +123,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
 
   useEffect(() => {
     if (!initialNote) return;
-    showNote(initialNote);
+    showNote(initialNote, true);
     setFeedback('Acceptance approved. Review the quantities for this delivery, then save and issue the DO.');
   }, [initialNote, showNote]);
 
@@ -117,7 +139,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
   const openNote = (id) => run('Open delivery note', async () => {
     const requestId = ++detailRequest.current;
     const { data } = await quotationAPI.deliveryNotes.retrieve(id);
-    if (requestId === detailRequest.current) showNote(data);
+    if (requestId === detailRequest.current) showNote(data, true);
   });
   const openOrder = (id) => run('Open accepted order', async () => {
     const requestId = ++detailRequest.current;
@@ -130,6 +152,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     detailRequest.current += 1;
     setView(next); setPage(1); setStatus(''); setSearch('');
     setOrder(null); setEditorOpen(false); setErrorInfo(null); setFeedback('');
+    setPdfPreview(null);
   };
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   const updateLine = (index, key, value) => setForm((current) => ({
@@ -140,16 +163,11 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     detailRequest.current += 1;
     setNote(null); setForm(blankForm()); setOrder(null); setEditorOpen(true);
     setReferenceEditOpen(false);
+    setPdfPreview(null);
     setErrorInfo(null); setFeedback(''); setCancelOpen(false);
     setLpoPreview(null); setLpoImportToken('');
     setLpoInput({ file: null, text: '', useAI: true, documentType: 'auto' });
-    window.requestAnimationFrame(() => {
-      editorHeading.current?.focus({ preventScroll: true });
-      editorHeading.current?.scrollIntoView?.({
-        block: 'start',
-        behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
-      });
-    });
+    setEditorFocusRequest((value) => value + 1);
   };
   const parseDocument = () => run('Read source document for delivery note', async () => {
     const requestId = detailRequest.current;
@@ -183,7 +201,7 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       quotation_line: line.id, quantity: line.available_quantity,
     }));
     const { data } = await quotationAPI.deliveryNotes.create({ quotation: order.id, lines });
-    showNote(data);
+    showNote(data, true);
     setFeedback('Draft created from the remaining accepted quantities. Review the quantities before issuing.');
     setRevision((value) => value + 1);
   });
@@ -234,6 +252,17 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     document.body.appendChild(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
+  const previewPdf = () => run('View delivery note PDF', async () => {
+    const requestId = detailRequest.current;
+    const { data } = await quotationAPI.deliveryNotes.pdf(note.id);
+    if (requestId !== detailRequest.current) return;
+    setPdfPreview(URL.createObjectURL(new Blob([data], { type: 'application/pdf' })));
+  });
+  const closeNote = () => {
+    detailRequest.current += 1;
+    setEditorOpen(false); setPdfPreview(null);
+    focusSection(listHeading.current);
+  };
   const confirmReceipt = (event) => {
     event.preventDefault();
     run('Confirm received quantities', async () => {
@@ -283,20 +312,22 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       .some((key) => (form[key] || '') !== (note[key] || ''))
     || JSON.stringify(form.lines) !== JSON.stringify(note.lines)
   );
+  useEffect(() => { if (draftChanged || referenceEditOpen) setPdfPreview(null); }, [draftChanged, referenceEditOpen]);
+  const pdfDisabled = busy || draftChanged || referenceEditOpen || Boolean(lpoPreview) || !nowCount;
   const states = view === 'orders'
     ? ['accepted', 'in_progress', 'partially_delivered', 'completed', 'needs_review', 'cancelled']
     : ['draft', 'issued', 'delivered', 'cancelled'];
 
   return <div className="dn-manager">
     <div className="qm-panel-heading">
-      <div><h3>Orders & delivery notes</h3><p>Track accepted quantities through dispatch and confirmed receipt.</p></div>
+      <div><h3 ref={listHeading} className="dn-editor-title" tabIndex={-1}>Orders & delivery notes</h3><p>Find created delivery notes, view their PDFs, or prepare a new delivery.</p></div>
       <button className="qm-primary" onClick={newNote} disabled={busy}>New standalone delivery note</button>
     </div>
     <QuotationErrorNotice error={errorInfo} onDismiss={() => setErrorInfo(null)} />
     {feedback && <p className="dn-feedback" role="status">{feedback}</p>}
     <div className="dn-view-switch" role="group" aria-label="Delivery workspace">
+      <button aria-pressed={view === 'notes'} onClick={() => switchView('notes')} disabled={busy}>Created delivery notes</button>
       <button aria-pressed={view === 'orders'} onClick={() => switchView('orders')} disabled={busy}>Accepted orders</button>
-      <button aria-pressed={view === 'notes'} onClick={() => switchView('notes')} disabled={busy}>Delivery notes</button>
     </div>
     {view === 'orders' && <>
       <div className="dn-stats">
@@ -312,15 +343,17 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
       <button onClick={() => setRevision((value) => value + 1)} disabled={loading}>Refresh</button>
     </div>
     {loading ? <p role="status">Loading {view === 'orders' ? 'orders' : 'delivery notes'}…</p> : <div className="qm-table-wrap">
-      <table className="qm-table"><thead><tr><th>{view === 'orders' ? 'Quotation / order' : 'Delivery note'}</th><th>Customer</th><th>Status</th><th>{view === 'orders' ? 'Delivered lines' : 'References'}</th><th>Action</th></tr></thead>
+      <table className="qm-table"><thead><tr><th>{view === 'orders' ? 'Quotation / order' : 'Delivery note'}</th><th>Customer</th>{view === 'notes' && <th>Delivery date</th>}<th>Status</th><th>{view === 'orders' ? 'Delivered lines' : 'References'}</th><th>Action</th></tr></thead>
         <tbody>{rows.map((row) => <tr key={row.id}>
           <td>{view === 'orders' ? row.quotation_number : row.delivery_number}
+            {view === 'notes' && row.created_by_username && <div className="dn-help">Created by {row.created_by_username}</div>}
             {view === 'notes' && row.continued_from_number && <div className="dn-help">Remaining items from {row.continued_from_number}</div>}
           </td><td>{row.company_name}</td>
+          {view === 'notes' && <td>{row.delivery_date ? row.delivery_date.split('-').reverse().join('/') : '—'}</td>}
           <td>{badge(view === 'orders' ? row.delivery_status : row.status)}</td>
           <td>{view === 'orders' ? `${row.completed_line_count} / ${row.line_count}` : [row.lpo_number, row.quotation_number || row.quotation_reference, row.invoice_number].filter(Boolean).join(' / ') || '—'}</td>
-          <td><button disabled={busy} onClick={() => view === 'orders' ? openOrder(row.id) : openNote(row.id)}>{view === 'orders' ? 'View order' : 'Open note'}</button></td>
-        </tr>)}{!rows.length && <tr><td colSpan="5">No {view === 'orders' ? 'accepted orders' : 'delivery notes'} match these filters.</td></tr>}</tbody>
+          <td><button className="dn-open-note" disabled={busy} onClick={() => view === 'orders' ? openOrder(row.id) : openNote(row.id)}>{view === 'orders' ? 'View order' : 'Open note'}</button></td>
+        </tr>)}{!rows.length && <tr><td colSpan={view === 'orders' ? 5 : 6}>No {view === 'orders' ? 'accepted orders' : 'delivery notes'} match these filters.</td></tr>}</tbody>
       </table>
     </div>}
     <div className="dn-pagination"><span>{pagination.count || 0} records · Page {page}</span><button disabled={!pagination.previous || loading} onClick={() => setPage((value) => value - 1)}>Previous</button><button disabled={!pagination.next || loading} onClick={() => setPage((value) => value + 1)}>Next</button></div>
@@ -341,9 +374,18 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
     {editorOpen && <section className="qm-panel dn-detail" aria-label="Delivery note editor">
       <div className="qm-panel-heading"><div><h3 ref={editorHeading} className="dn-editor-title" tabIndex={-1}>{note?.delivery_number || 'New delivery note'}</h3><p>{note?.quotation_number ? `Linked to ${note.quotation_number}` : 'Standalone delivery document'}</p></div>
         <div className="dn-actions">{badge(note?.status || 'draft')}
+          {note && <button type="button" className="qm-primary" disabled={pdfDisabled} onClick={previewPdf}>View {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
           {note && !editable && note.status !== 'cancelled' && !referenceEditOpen && <button type="button" className="qm-primary" disabled={busy} onClick={editReferences}>Edit references / add LPO</button>}
+          <button type="button" disabled={busy} onClick={closeNote}>Back to list</button>
         </div>
       </div>
+      {pdfPreview && <section className="dn-pdf-preview" aria-label="Delivery note PDF preview">
+        <div className="dn-actions"><h4 ref={pdfHeading} className="dn-editor-title" tabIndex={-1}>{note.delivery_number} · PDF preview</h4>
+          <button type="button" onClick={() => { setPdfPreview(null); focusSection(editorHeading.current); }}>Close preview</button>
+          <a href={pdfPreview} target="_blank" rel="noreferrer">Open PDF in new tab</a>
+        </div>
+        <iframe title={`Delivery note PDF ${note.delivery_number}`} src={pdfPreview} />
+      </section>}
       {note?.continued_from_number && <p className="dn-help">Items saved for later from {note.continued_from_number}. Review the delivery date and quantities before issuing.</p>}
       {!!note?.later_deliveries?.length && <div className="dn-later-panel" role="region" aria-label="Items saved for later">
         <strong>Items saved for the next delivery</strong>
@@ -445,9 +487,9 @@ const DeliveryNoteManager = ({ onReviewOutcome, initialNote = null }) => {
         }}>Save & issue delivery note</button></div>}
       </form>
       <div className="dn-actions">
-        {note && <button disabled={busy || draftChanged || referenceEditOpen || Boolean(lpoPreview) || !nowCount} onClick={download}>Download {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
+        {note && <button disabled={pdfDisabled} onClick={download}>Download {note.status === 'draft' ? 'draft ' : ''}PDF</button>}
         {note && note.status !== 'cancelled' && <button disabled={busy || referenceEditOpen} onClick={() => setCancelOpen(!cancelOpen)}>Cancel note</button>}
-        <button disabled={busy} onClick={() => setEditorOpen(false)}>Close note</button>
+        <button disabled={busy} onClick={closeNote}>Close note</button>
       </div>
       {draftChanged && <p className="dn-help">Save your changes before downloading the PDF.</p>}
       {note?.status === 'issued' && receipt && <form className="dn-receipt" onSubmit={confirmReceipt} aria-label="Confirm delivery receipt">

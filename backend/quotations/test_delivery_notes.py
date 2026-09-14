@@ -321,11 +321,22 @@ class DeliveryNoteWorkflowTests(TestCase):
         text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(
             self.client.get(self.url("pdf", note["id"])).content)).pages)
         self.assertIn("Pharmacy TRN", text)
+        self.assertNotIn("Status", text)
         self.assertEqual(text.count(settings.trn), 1)
         self.assertIn(self.company.trn, text)
         self.assertIn("PO112_112353", text)
         settings.refresh_from_db()
         self.assertFalse(settings.show_trn)
+
+    def test_issued_pdf_omits_internal_status_but_preserves_pharmacy_trn(self):
+        settings = QuotationSettings.objects.create(pk=1, trn="100000000000017")
+        note = self.issue(self.draft())
+        response = self.client.get(self.url("pdf", note["id"]))
+        text = "\n".join(page.extract_text() for page in PdfReader(BytesIO(response.content)).pages)
+        self.assertIn(settings.trn, text)
+        self.assertNotIn("Status", text)
+        self.assertNotIn("awaiting receipt", text)
+        self.assertIn("Acknowledgement of receipt", text)
 
 
 @skipUnless(connection.vendor == "postgresql", "Row locking requires PostgreSQL")
