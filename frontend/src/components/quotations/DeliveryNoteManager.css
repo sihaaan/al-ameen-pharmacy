@@ -5,6 +5,12 @@
 .dn-manager button:focus-visible, .dn-manager input:focus-visible, .dn-manager textarea:focus-visible, .dn-manager select:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
 .dn-view-switch, .dn-actions, .dn-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .dn-view-switch button[aria-pressed="true"] { color: #0f766e; background: #f0fdfa; border-color: #0f766e; }
+.dn-manager button.dn-open-note { color: #0f766e; background: #f0fdfa; border-color: #5eead4; white-space: nowrap; }
+.dn-pdf-preview { padding: 14px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+.dn-pdf-preview > .dn-actions { position: sticky; top: 80px; z-index: 2; padding: 8px 0; background: #f8fafc; }
+.dn-pdf-preview h4 { margin: 0 auto 0 0; }
+.dn-pdf-preview a { color: #0f766e; font-weight: 600; }
+.dn-pdf-preview iframe { display: block; width: 100%; height: 75vh; min-height: 420px; margin-top: 12px; border: 0; background: white; }
 .dn-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .dn-stats button { text-align: left; padding: 18px; display: grid; gap: 8px; }
 .dn-stats strong { font-size: 28px; color: #0f766e; }

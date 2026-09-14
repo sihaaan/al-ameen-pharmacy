@@ -29,8 +29,8 @@ def build_delivery_note_pdf(note):
         document_title="DELIVERY NOTE", reference_label="DN No", reference_number=note.delivery_number,
     )]
     metadata = [
-        ("Customer", note.customer_name), ("Status", note.get_status_display()),
-        ("Pharmacy TRN", config.trn), ("LPO No.", note.lpo_number),
+        ("Customer", note.customer_name), ("Pharmacy TRN", config.trn),
+        ("LPO No.", note.lpo_number),
         ("Customer address", note.customer_address), ("Customer TRN", note.customer_trn),
         ("Deliver to", note.delivery_address),
         ("Attention", note.attention), ("Invoice Ref.", note.invoice_number),
