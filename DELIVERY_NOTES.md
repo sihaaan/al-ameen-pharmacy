@@ -70,6 +70,10 @@ The backend checks quantities again when issuing, under the same quotation lock 
 
 ## API and rollout
 
+Delivery PDFs use 11-point item text, taller rows and white backgrounds to avoid halftone dots from alternating shading on printed copies. In a draft, select **Show expiry column in PDF** above the items, then enter each item's packaging expiry (for example `09/2028` or `30/09/2028`). Empty entries print as a dash. Unchecking the option hides the entire PDF column but preserves entered values. Expiry is entered by staff; source-document parsing does not infer it. Deferred items retain their expiry and column choice in the next delivery draft.
+
+Issued and received notes offer **Edit expiry column**, with audited corrections that leave delivered quantities and receipt records intact. Cancelled notes cannot be changed. The API action `POST delivery-notes/{id}/update-expiry/` accepts only `show_expiry_column` and `lines: [{id, expiry}, ...]`, covering every current line exactly once. Apply **quotations.0051_delivery_expiry** before deploying this frontend. Existing notes default to no expiry column and blank expiry entries. Re-download existing PDFs for the updated layout.
+
 Apply migration **quotations.0044_delivery_notes** to the intended deployment database and deploy the matching backend and frontend together. This change does not backfill historical acceptance or delivery data and does not send any email.
 
 The LPO autofill workflow additionally requires **quotations.0048_deliverynote_lpo_import**. POST file or text, optionally use_ai, to **/api/quotations/delivery-notes/parse_lpo/**. It returns a signed, staff-bound preview valid for 24 hours without creating a note. Save its import_token as lpo_import_token with reviewed standalone fields/lines; invalid or expired tokens are rejected. The private source reference is not included in the note's public serializer.

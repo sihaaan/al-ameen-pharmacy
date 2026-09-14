@@ -128,7 +128,7 @@ def issue_delivery_note(note, actor):
             **{field: getattr(note, field) for field in (
                 "company", "quotation", "delivery_date", "lpo_number", "invoice_number", "quotation_reference",
                 "customer_name", "customer_address", "customer_trn", "delivery_address", "attention",
-                "contact_phone", "notes", "lpo_import",
+                "contact_phone", "notes", "lpo_import", "show_expiry_column",
             )},
         )
         # Move the saved rows into a linked draft in the same transaction as issue.

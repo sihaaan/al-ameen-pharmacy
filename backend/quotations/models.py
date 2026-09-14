@@ -3132,6 +3132,7 @@ class DeliveryNote(models.Model):
     contact_phone = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
     lpo_import = models.JSONField(default=dict, blank=True, editable=False)
+    show_expiry_column = models.BooleanField(default=False)
     received_by = models.CharField(max_length=255, blank=True)
     received_date = models.DateField(null=True, blank=True)
     receipt_reference = models.CharField(max_length=255, blank=True)
@@ -3169,6 +3170,8 @@ class DeliveryNoteLine(models.Model):
     item_name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     unit = models.CharField(max_length=50, blank=True)
+    # Preserve the precision printed on the packaging (month/year or a full date).
+    expiry = models.CharField(max_length=40, blank=True)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0.001"))])
     deliver_later = models.BooleanField(default=False)
     received_quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True, validators=[MinValueValidator(Decimal("0"))])

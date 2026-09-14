@@ -36,7 +36,7 @@ class DeliveryLineSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DeliveryNoteLine
-        fields = ["id", "quotation_line", "item_name", "description", "unit", "quantity", "deliver_later", "received_quantity", "sort_order"]
+        fields = ["id", "quotation_line", "item_name", "description", "unit", "quantity", "expiry", "deliver_later", "received_quantity", "sort_order"]
         read_only_fields = ["id", "received_quantity"]
         validators = []  # The parent validates membership and duplicates together.
 
@@ -61,7 +61,7 @@ class DeliveryNoteSerializer(serializers.ModelSerializer):
             "id", "delivery_number", "status", "status_display", "company", "company_name",
             "quotation", "quotation_number", "quotation_reference", "delivery_date", "lpo_number", "invoice_number",
             "customer_name", "customer_address", "customer_trn", "delivery_address", "attention",
-            "contact_phone", "notes", "lines", "received_by", "received_date", "receipt_reference",
+            "contact_phone", "notes", "show_expiry_column", "lines", "received_by", "received_date", "receipt_reference",
             "receipt_notes", "cancellation_reason", "created_by_username", "issued_at", "confirmed_at",
             "cancelled_at", "created_at", "updated_at",
             "lpo_import_token", "lpo_source",
@@ -228,6 +228,26 @@ class DeliveryReferencesSerializer(serializers.Serializer):
         return attrs
 
 
+class ExpiryLineSerializer(serializers.Serializer):
+    id = serializers.IntegerField(min_value=1)
+    expiry = serializers.CharField(max_length=40, allow_blank=True)
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and set(data) - set(self.fields):
+            raise serializers.ValidationError("Only expiry can be edited here.")
+        return super().to_internal_value(data)
+
+
+class DeliveryExpirySerializer(serializers.Serializer):
+    show_expiry_column = serializers.BooleanField()
+    lines = ExpiryLineSerializer(many=True, max_length=300)
+
+    def validate(self, attrs):
+        if set(self.initial_data) - set(self.fields):
+            raise serializers.ValidationError("Only the expiry column and item expiry entries can be edited here.")
+        return attrs
+
+
 class DeliveryNoteViewSet(viewsets.ModelViewSet):
     permission_classes = [IsQuotationStaff]
     serializer_class = DeliveryNoteSerializer
@@ -325,6 +345,36 @@ class DeliveryNoteViewSet(viewsets.ModelViewSet):
             note.save(update_fields=[*changes, "updated_at"])
             audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, note,
                       message=f"Corrected references on {note.delivery_number}.", changes=changes)
+        return Response(self.get_serializer(note).data)
+
+    @action(detail=True, methods=["post"], url_path="update-expiry")
+    @transaction.atomic
+    def update_expiry(self, request, pk=None):
+        serializer = DeliveryExpirySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        note = lock_note(self.get_object())
+        if note.status == DeliveryNote.STATUS_CANCELLED:
+            raise serializers.ValidationError("Cancelled notes keep their original expiry details.")
+        lines = {line.pk: line for line in note.lines.all()}
+        rows = serializer.validated_data["lines"]
+        ids = [row["id"] for row in rows]
+        if len(ids) != len(set(ids)) or set(ids) != set(lines):
+            raise serializers.ValidationError("Include every item on this note exactly once. Refresh before editing expiry.")
+        changes = {}
+        show_expiry = serializer.validated_data["show_expiry_column"]
+        if note.show_expiry_column != show_expiry:
+            changes["show_expiry_column"] = {"before": note.show_expiry_column, "after": show_expiry}
+            note.show_expiry_column = show_expiry
+        for row in rows:
+            line = lines[row["id"]]
+            if line.expiry != row["expiry"]:
+                changes[f"line_{line.pk}_expiry"] = {"before": line.expiry, "after": row["expiry"]}
+                line.expiry = row["expiry"]
+                line.save(update_fields=["expiry"])
+        if changes:
+            note.save(update_fields=["show_expiry_column", "updated_at"])
+            audit_log(request.user, QuotationAuditLog.ACTION_UPDATED, note,
+                      message=f"Updated expiry details on {note.delivery_number}.", changes=changes)
         return Response(self.get_serializer(note).data)
 
     @action(detail=True, methods=["post"], url_path="confirm-receipt")

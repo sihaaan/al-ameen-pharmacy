@@ -339,6 +339,107 @@ class DeliveryNoteWorkflowTests(TestCase):
         self.assertIn("Acknowledgement of receipt", text)
 
 
+    def test_expiry_is_optional_persists_and_is_only_printed_when_selected(self):
+        note = self.draft(lines=[{"quotation_line": self.line.pk, "quantity": "10", "expiry": "09/2028"}])
+        self.assertFalse(note["show_expiry_column"])
+        self.assertEqual(note["lines"][0]["expiry"], "09/2028")
+        def pdf_text():
+            return "\n".join(page.extract_text() for page in PdfReader(BytesIO(
+                self.client.get(self.url("pdf", note["id"])).content)).pages)
+        self.assertNotIn("Expiry", pdf_text())
+        self.assertNotIn("09/2028", pdf_text())
+        response = self.client.patch(self.url("detail", note["id"]), {"show_expiry_column": True}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn("Expiry", pdf_text())
+        self.assertIn("09/2028", pdf_text())
+        self.client.patch(self.url("detail", note["id"]), {"show_expiry_column": False}, format="json")
+        self.assertNotIn("09/2028", pdf_text())
+        self.assertEqual(DeliveryNoteLine.objects.get(delivery_note_id=note["id"]).expiry, "09/2028")
+
+    def test_issued_and_received_expiry_edits_are_audited_without_changing_delivery(self):
+        note = self.issue(self.draft())
+        line_id = note["lines"][0]["id"]
+        endpoint = self.url("update-expiry", note["id"])
+        for expiry in ("09/2028", "30/09/2028"):
+            before_progress = order_progress(self.quote)
+            response = self.client.post(endpoint, {"show_expiry_column": True,
+                "lines": [{"id": line_id, "expiry": expiry}]}, format="json")
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data["status"], note["status"])
+            self.assertEqual(response.data["lines"][0]["id"], line_id)
+            self.assertEqual(response.data["lines"][0]["expiry"], expiry)
+            self.assertEqual(order_progress(self.quote), before_progress)
+            reader = PdfReader(BytesIO(self.client.get(self.url("pdf", note["id"])).content))
+            self.assertIn(expiry, "\n".join(page.extract_text() for page in reader.pages))
+            if note["status"] == "issued":
+                note = self.receive(note, "6")
+        self.assertEqual(QuotationAuditLog.objects.filter(message__startswith="Updated expiry details").count(), 2)
+        log = QuotationAuditLog.objects.filter(message__startswith="Updated expiry details").last()
+        self.assertIn(f"line_{line_id}_expiry", log.changes)
+
+    def test_expiry_endpoint_rejects_foreign_duplicate_missing_and_non_expiry_updates(self):
+        note = self.issue(self.draft())
+        other = self.draft()
+        valid_line = {"id": note["lines"][0]["id"], "expiry": "09/2028"}
+        endpoint = self.url("update-expiry", note["id"])
+        invalid = [
+            {"lines": [{"id": other["lines"][0]["id"], "expiry": "09/2028"}]},
+            {"lines": [valid_line, valid_line]}, {"lines": []},
+            {"lines": [{**valid_line, "quantity": "100"}]},
+            {"lines": [{**valid_line, "expiry": "x" * 41}]}, {"company": self.company.pk},
+        ]
+        for changes in invalid:
+            response = self.client.post(endpoint, {"show_expiry_column": True, "lines": [valid_line], **changes}, format="json")
+            self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(DeliveryNote.objects.get(pk=note["id"]).show_expiry_column)
+        self.assertEqual(DeliveryNoteLine.objects.get(pk=valid_line["id"]).expiry, "")
+        self.client.post(self.url("cancel", note["id"]), {"reason": "Test"}, format="json")
+        payload = {"show_expiry_column": True, "lines": [valid_line]}
+        self.assertEqual(self.client.post(endpoint, payload, format="json").status_code, 400)
+        self.client.force_authenticate(get_user_model().objects.create_user(username="expiry-customer"))
+        self.assertEqual(self.client.post(endpoint, payload, format="json").status_code, 403)
+
+    def test_deferred_items_keep_expiry_and_column_choice(self):
+        note = self.draft(quotation=None, company=self.company.pk, show_expiry_column=True, lines=[
+            {"item_name": "Now", "quantity": "1", "expiry": "09/2028"},
+            {"item_name": "Later", "quantity": "2", "expiry": "10/2028", "deliver_later": True},
+        ])
+        issued = self.issue(note)
+        later = self.client.get(self.url("detail", issued["later_deliveries"][0]["id"])).data
+        self.assertTrue(later["show_expiry_column"])
+        self.assertEqual(later["lines"][0]["expiry"], "10/2028")
+        self.assertEqual(issued["lines"][0]["expiry"], "09/2028")
+
+    def test_large_received_pdf_repeats_expiry_header_and_keeps_all_items_readable(self):
+        note = self.receive(self.issue(self.draft(quotation=None, company=self.company.pk,
+            show_expiry_column=True, lines=[{"item_name": f"Delivery item {i:03d} with a long description for wrapping",
+                "quantity": "1", "unit": "Box", "expiry": "30/09/2028" if i % 2 else ""} for i in range(48)])))
+        reader = PdfReader(BytesIO(self.client.get(self.url("pdf", note["id"])).content))
+        self.assertGreater(len(reader.pages), 1)
+        text = "\n".join(page.extract_text() for page in reader.pages)
+        for i in range(48):
+            self.assertIn(f"Delivery item {i:03d}", text)
+        self.assertEqual(text.count("30/09/2028"), 24)
+        for page in reader.pages:
+            if "Delivery item" in page.extract_text():
+                self.assertIn("Expiry", page.extract_text())
+                self.assertIn("Received", page.extract_text())
+        fonts = []
+        reader.pages[0].extract_text(visitor_text=lambda text, cm, tm, font, size:
+            fonts.append(size) if "Delivery item" in text else None)
+        self.assertTrue(fonts)
+        self.assertTrue(all(size >= 11 for size in fonts))
+        quantity_positions = []
+        def collect_quantity_positions(text, cm, tm, font, size):
+            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            if text.strip() == "1" and x > 100:
+                quantity_positions.append(round(x, 2))
+        for page in reader.pages:
+            page.extract_text(visitor_text=collect_quantity_positions)
+        self.assertEqual(len(quantity_positions), 96)  # Issued and received for each item.
+        self.assertEqual(len(set(quantity_positions)), 2)  # Both columns stay aligned across page splits.
+
+
 @skipUnless(connection.vendor == "postgresql", "Row locking requires PostgreSQL")
 class DeliveryNoteConcurrencyTests(TransactionTestCase):
     def test_simultaneous_issue_retries_create_only_one_later_draft(self):

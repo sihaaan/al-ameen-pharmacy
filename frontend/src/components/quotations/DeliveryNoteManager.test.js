@@ -11,7 +11,7 @@ jest.mock('../../api/quotations', () => ({
     deliveryNotes: {
       parseDocument: jest.fn(),
       list: jest.fn(), retrieve: jest.fn(), create: jest.fn(), update: jest.fn(),
-      issue: jest.fn(), confirmReceipt: jest.fn(), cancel: jest.fn(), pdf: jest.fn(), updateReferences: jest.fn(),
+      issue: jest.fn(), confirmReceipt: jest.fn(), cancel: jest.fn(), pdf: jest.fn(), updateReferences: jest.fn(), updateExpiry: jest.fn(),
     },
   },
   describeQuotationError: jest.fn(),
@@ -40,6 +40,52 @@ beforeEach(() => {
   quotationAPI.deliveryNotes.list.mockResolvedValue(page([note]));
   quotationAPI.deliveryNotes.retrieve.mockResolvedValue({ data: note });
   describeQuotationError.mockResolvedValue({ action: 'Delivery', detail: 'Not enough quantity available', status: 400, endpoint: 'Delivery notes' });
+});
+
+test('expiry column is optional and hiding it preserves draft entries when saved', async () => {
+  const draft = { ...note, status: 'draft', show_expiry_column: false };
+  quotationAPI.deliveryNotes.update.mockImplementation((id, payload) => Promise.resolve({ data: { ...draft, ...payload } }));
+  render(<DeliveryNoteManager initialNote={draft} />);
+  const toggle = await screen.findByRole('checkbox', { name: 'Show expiry column in PDF' });
+  expect(toggle).not.toBeChecked();
+  expect(screen.queryByLabelText('Expiry 1')).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(screen.getByRole('button', { name: 'View draft PDF' })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Expiry 1'), { target: { value: '09/2028' } });
+  fireEvent.click(toggle);
+  fireEvent.click(toggle);
+  expect(screen.getByLabelText('Expiry 1')).toHaveValue('09/2028');
+  fireEvent.click(toggle);
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  await waitFor(() => expect(quotationAPI.deliveryNotes.update).toHaveBeenCalledWith(20, expect.objectContaining({
+    show_expiry_column: false, lines: [expect.objectContaining({ expiry: '09/2028' })],
+  })));
+});
+
+test('issued expiry can be added without unlocking quantities, and cancelling edits preserves saved data', async () => {
+  quotationAPI.deliveryNotes.updateExpiry.mockImplementation((id, payload) => Promise.resolve({ data: {
+    ...note, show_expiry_column: payload.show_expiry_column,
+    lines: note.lines.map((line) => ({ ...line, expiry: payload.lines.find((row) => row.id === line.id).expiry })),
+  } }));
+  render(<DeliveryNoteManager initialNote={note} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit expiry column' }));
+  let panel = screen.getByRole('form', { name: 'Edit delivery note expiry' });
+  fireEvent.click(within(panel).getByRole('checkbox', { name: 'Show expiry column in PDF' }));
+  fireEvent.change(within(panel).getByLabelText('Expiry for Gloves'), { target: { value: '30/09/2028' } });
+  expect(screen.getByLabelText('Quantity 1')).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'View PDF' })).toBeDisabled();
+  fireEvent.click(within(panel).getByRole('button', { name: 'Save expiry details' }));
+  await waitFor(() => expect(quotationAPI.deliveryNotes.updateExpiry).toHaveBeenCalledWith(20, {
+    show_expiry_column: true, lines: [{ id: 30, expiry: '30/09/2028' }],
+  }));
+  await waitFor(() => expect(screen.getByLabelText('Expiry 1')).toHaveValue('30/09/2028'));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit expiry column' }));
+  panel = screen.getByRole('form', { name: 'Edit delivery note expiry' });
+  fireEvent.change(within(panel).getByLabelText('Expiry for Gloves'), { target: { value: '10/2028' } });
+  fireEvent.click(within(panel).getByRole('button', { name: 'Cancel expiry edits' }));
+  expect(screen.getByLabelText('Expiry 1')).toHaveValue('30/09/2028');
+  expect(quotationAPI.deliveryNotes.update).not.toHaveBeenCalled();
+  expect(quotationAPI.deliveryNotes.issue).not.toHaveBeenCalled();
 });
 
 test('opens on created notes and brings a retrieved note into view, including when reopened', async () => {
@@ -153,7 +199,7 @@ test('saves a standalone delivery note with LPO and invoice references', async (
   await waitFor(() => expect(quotationAPI.deliveryNotes.create).toHaveBeenCalled());
   expect(quotationAPI.deliveryNotes.create).toHaveBeenCalledWith(expect.objectContaining({
     company: '2', quotation: null, lpo_number: 'LPO111370', invoice_number: '594173',
-    lines: [{ quotation_line: null, item_name: 'Cold packs', description: '', unit: 'Packet', quantity: '5' }],
+    lines: [{ quotation_line: null, item_name: 'Cold packs', description: '', unit: 'Packet', quantity: '5', expiry: '' }],
   }));
 });
 
