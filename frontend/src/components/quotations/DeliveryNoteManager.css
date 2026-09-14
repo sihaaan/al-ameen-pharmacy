@@ -28,6 +28,9 @@
 .dn-manager .qm-table td:first-child { min-width: 200px; }
 .dn-manager .qm-table textarea { margin-top: 5px; font-size: 12px; min-height: 42px; }
 .dn-quantity { min-width: 105px; }
+.dn-expiry-input { min-width: 135px; }
+.dn-column-options { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid #cbd5e1; border-radius: 7px; }
+.dn-expiry-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
 .dn-delivery-summary { margin: 16px 0 10px; padding: 12px 14px; background: #f0fdfa; border-radius: 7px; color: #115e59; }
 .dn-delivery-summary p { margin: 5px 0 0; font-size: 13px; line-height: 1.5; }
 .dn-row-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 140px; }

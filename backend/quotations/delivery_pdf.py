@@ -4,12 +4,13 @@ from dataclasses import replace
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .models import DeliveryNote
 from .pdf import (
-    LIGHT_BORDER, MUTED, SOFT, _build_header, _footer, _number, _pdf_styles,
-    _single_line_table_cell, _text,
+    LIGHT_BORDER, MUTED, _build_header, _footer, _number, _pdf_styles,
+    _text,
 )
 from .pdf_config import get_quotation_pdf_config
 
@@ -19,6 +20,10 @@ def build_delivery_note_pdf(note):
     config = get_quotation_pdf_config(quotation=note.quotation, include_hidden_trn=True)
     primary = colors.HexColor(config.primary_color or "#0F766E")
     styles = _pdf_styles(primary)
+    # Delivery notes are read and checked on paper; keep quotation styling separate.
+    for name in ("TableHeader", "TableCell", "TableCellCenter", "TableCellQuantity", "TableCellUnit"):
+        styles[name].fontSize = 11
+        styles[name].leading = 14
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4, invariant=1, leftMargin=16 * mm, rightMargin=16 * mm,
@@ -50,13 +55,22 @@ def build_delivery_note_pdf(note):
     meta = Table(rows, colWidths=[25 * mm, 64 * mm, 25 * mm, 64 * mm])
     meta.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.3, LIGHT_BORDER),
-        ("BACKGROUND", (0, 0), (0, -1), SOFT), ("BACKGROUND", (2, 0), (2, -1), SOFT),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("TOPPADDING", (0, 0), (-1, -1), 4.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
     ]))
     elements.extend([meta, Spacer(1, 8)])
     received = note.status == DeliveryNote.STATUS_DELIVERED
-    headings = ["No.", "Item description", "Quantity", "UOM"] + (["Received"] if received else [])
+    show_expiry = note.show_expiry_column
+
+    def quantity_cell(value, width_mm):
+        text = _number(value)
+        style = styles["TableCellQuantity"].clone("DeliveryQuantity")
+        natural_width = stringWidth(text, style.fontName, style.fontSize)
+        style.fontSize *= min(1, (width_mm * mm - 12) / max(natural_width, 1))
+        return Paragraph(_text(text), style)
+
+    styles["TableCellUnit"].splitLongWords = True
+    headings = ["No.", "Item description", "Quantity", "UOM"] + (["Expiry"] if show_expiry else []) + (["Received"] if received else [])
     rows = [[Paragraph(label, styles["TableHeader"]) for label in headings]]
     for index, line in enumerate((line for line in note.lines.all() if not line.deliver_later), 1):
         description = f"<b>{_text(line.item_name)}</b>"
@@ -64,20 +78,27 @@ def build_delivery_note_pdf(note):
             description += f"<br/>{_text(line.description).replace(chr(10), '<br/>')}"
         row = [
             Paragraph(str(index), styles["TableCellCenter"]), Paragraph(description, styles["TableCell"]),
-            _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
-            _single_line_table_cell(line.unit or "-", styles["TableCellUnit"], h_align="CENTER"),
+            quantity_cell(line.quantity, 26),
+            Paragraph(_text(line.unit or "-"), styles["TableCellUnit"]),
         ]
+        if show_expiry:
+            row.append(Paragraph(_text(line.expiry or "-"), styles["TableCellCenter"]))
         if received:
-            row.append(_single_line_table_cell(_number(line.received_quantity), styles["TableCellQuantity"], h_align="RIGHT"))
+            row.append(quantity_cell(line.received_quantity, 24))
         rows.append(row)
-    widths = [10, 105, 23, 20, 20] if received else [10, 120, 25, 23]
+    widths = [10, 119 - (28 if show_expiry else 0) - (24 if received else 0), 26, 23]
+    if show_expiry:
+        widths.append(28)
+    if received:
+        widths.append(24)
     table = Table(rows, colWidths=[width * mm for width in widths], repeatRows=1, splitByRow=1, splitInRow=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), primary),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, SOFT]),
-        ("GRID", (0, 0), (-1, -1), 0.3, LIGHT_BORDER),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#9CA3AF")),
+        ("LEFTPADDING", (0, 0), (0, -1), 3), ("RIGHTPADDING", (0, 0), (0, -1), 3),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
     elements.append(table)
     for label, value in [("Delivery instructions", note.notes), ("Receipt notes", note.receipt_notes), ("Cancellation reason", note.cancellation_reason)]:
