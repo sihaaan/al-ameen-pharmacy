@@ -24,6 +24,7 @@ def build_delivery_note_pdf(note):
     for name in ("TableHeader", "TableCell", "TableCellCenter", "TableCellQuantity", "TableCellUnit"):
         styles[name].fontSize = 11
         styles[name].leading = 14
+    styles["TableHeader"].textColor = colors.black
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4, invariant=1, leftMargin=16 * mm, rightMargin=16 * mm,
@@ -93,8 +94,7 @@ def build_delivery_note_pdf(note):
         widths.append(24)
     table = Table(rows, colWidths=[width * mm for width in widths], repeatRows=1, splitByRow=1, splitInRow=1)
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), primary),
-        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#9CA3AF")),
         ("LEFTPADDING", (0, 0), (0, -1), 3), ("RIGHTPADDING", (0, 0), (0, -1), 3),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
