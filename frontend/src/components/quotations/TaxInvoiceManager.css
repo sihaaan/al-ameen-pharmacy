@@ -1,0 +1,43 @@
+.ti-manager { display: grid; gap: 18px; }
+.ti-manager .qm-panel-heading { align-items: center; flex-wrap: wrap; }
+.ti-filters { display: flex; gap: 12px; margin-bottom: 16px; }
+.ti-filters input { flex: 1; }
+.ti-filters select { width: 170px; }
+.ti-editor { scroll-margin-top: 90px; }
+.ti-editor:focus { outline: 2px solid #0d9488; outline-offset: 3px; }
+.ti-scan { padding: 16px; border: 1px solid #99d8d1; border-radius: 8px; margin-bottom: 20px; background: #f7fcfb; }
+.ti-scan summary { cursor: pointer; font-weight: 700; color: #0f766e; font-size: 15px; }
+.ti-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: #334155; min-width: 0; }
+.ti-scan .ti-field { margin: 12px 0; }
+.ti-preview { border-top: 1px solid #99d8d1; margin-top: 16px; padding-top: 16px; }
+.ti-preview ul { font-size: 13px; color: #7c4a03; }
+.ti-fields { border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; min-width: 0; }
+.ti-fields legend { font-weight: 700; padding: 0 6px; }
+.ti-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+.ti-address { grid-column: span 2; }
+.ti-items-heading { margin-top: 24px; }
+.ti-lines { min-width: 1020px; table-layout: fixed; }
+.ti-lines th:first-child { width: 32%; }
+.ti-lines th:nth-child(2) { width: 9%; }
+.ti-lines th:nth-child(3) { width: 10%; }
+.ti-lines th:nth-child(4) { width: 14%; }
+.ti-lines th:nth-child(5) { width: 12%; }
+.ti-lines th:nth-child(6) { width: 11%; }
+.ti-lines th:nth-child(7) { width: 12%; }
+.ti-lines td { vertical-align: top; padding: 10px 7px; }
+.ti-lines .qm-input { box-sizing: border-box; width: 100%; min-width: 0; }
+.ti-description { margin-top: 7px; font-size: 12px; }
+.ti-notes { margin-top: 18px; }
+.ti-totals { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 20px; padding: 20px 0; }
+.ti-review { padding: 12px 0; font-size: 14px; }
+.ti-review label { display: flex; gap: 8px; align-items: flex-start; }
+.ti-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.ti-sticky { position: sticky; bottom: 12px; background: #fff; border: 1px solid #a7d9d2; border-radius: 8px; padding: 14px; box-shadow: 0 4px 18px #0f766e1a; z-index: 5; }
+.ti-sticky > span { margin-right: auto; font-size: 13px; font-weight: 600; }
+.ti-action-messages { flex-basis: 100%; }
+.ti-action-messages:empty { display: none; }
+.ti-action-messages .qm-error, .ti-action-messages .qm-feedback { margin: 0; max-height: 170px; overflow-y: auto; }
+.ti-source { font-size: 13px; overflow-wrap: anywhere; }
+.ti-manager input:disabled, .ti-manager select:disabled, .ti-manager textarea:disabled { color: #475569; opacity: 1; background: #f8fafc; }
+@media (max-width: 950px) { .ti-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .ti-grid { grid-template-columns: 1fr; } .ti-address { grid-column: auto; } .ti-filters { flex-direction: column; } .ti-filters select { width: 100%; } }
