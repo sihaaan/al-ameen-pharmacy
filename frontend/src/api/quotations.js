@@ -293,6 +293,16 @@ const quotationAPI = {
     cancel: (id, data) => axiosInstance.post(`/quotations/delivery-notes/${id}/cancel/`, data),
     pdf: (id) => axiosInstance.get(`/quotations/delivery-notes/${id}/pdf/`, { responseType: 'blob' }),
   },
+  taxInvoices: {
+    list: (params = {}) => axiosInstance.get('/quotations/tax-invoices/', { params }),
+    retrieve: (id) => axiosInstance.get(`/quotations/tax-invoices/${id}/`),
+    create: (data) => axiosInstance.post('/quotations/tax-invoices/', data),
+    update: (id, data) => axiosInstance.put(`/quotations/tax-invoices/${id}/`, data),
+    issue: (id, revision) => axiosInstance.post(`/quotations/tax-invoices/${id}/issue/`, { expected_revision: revision }),
+    pdf: (id) => axiosInstance.get(`/quotations/tax-invoices/${id}/pdf/`, { responseType: 'blob' }),
+    parseDocument: (data) => axiosInstance.post('/quotations/tax-invoices/parse-document/', data,
+      data instanceof FormData ? { headers: { 'Content-Type': 'multipart/form-data' } } : undefined),
+  },
   proformas: {
     list: (params = {}) => axiosInstance.get('/quotations/proformas/', { params }),
     retrieve: (id) => axiosInstance.get(`/quotations/proformas/${id}/`),

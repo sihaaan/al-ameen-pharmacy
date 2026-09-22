@@ -13,6 +13,7 @@ const QuotationEditor = lazyWorkspace(() => import('./QuotationEditor'));
 const QuotationOutcomeReview = lazyWorkspace(() => import('./QuotationOutcomeReview'));
 const QuotationDashboard = lazyWorkspace(() => import('./QuotationDashboard'));
 const ProformaInvoiceManager = lazyWorkspace(() => import('./ProformaInvoiceManager'));
+const TaxInvoiceManager = lazyWorkspace(() => import('./TaxInvoiceManager'));
 const DeliveryNoteManager = lazyWorkspace(() => import('./DeliveryNoteManager'));
 const PriceHistoryPanel = lazyWorkspace(() => import('./PriceHistoryPanel'));
 const AuditLogPanel = lazyWorkspace(() => import('./AuditLogPanel'));
@@ -27,6 +28,7 @@ const tabs = [
   { id: 'inquiries', label: 'Inquiries' },
   { id: 'quotes', label: 'Quotations' },
   { id: 'proformas', label: 'Proforma Tax Invoices' },
+  { id: 'tax-invoices', label: 'Tax Invoices' },
   { id: 'deliveries', label: 'Orders & Delivery Notes' },
   { id: 'history', label: 'Price History' },
   { id: 'historical-imports', label: 'Historical Imports' },
@@ -331,6 +333,7 @@ const QuotationModule = ({ canManageMailboxAudit }) => {
           )
         )}
         {activeTab === 'proformas' && <ProformaInvoiceManager />}
+        {activeTab === 'tax-invoices' && <TaxInvoiceManager />}
         {activeTab === 'deliveries' && <DeliveryNoteManager onReviewOutcome={openOutcome} initialNote={preparedDeliveryNote} />}
         {activeTab === 'history' && <PriceHistoryPanel />}
         {activeTab === 'historical-imports' && <HistoricalImportManager />}

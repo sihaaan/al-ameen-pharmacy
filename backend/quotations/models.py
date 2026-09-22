@@ -51,6 +51,61 @@ def quotation_delivery_message_id():
     return f"<quotation-{uuid.uuid4().hex}@ameenpharmacy.ae>"
 
 
+class TaxInvoiceSequence(models.Model):
+    year = models.PositiveIntegerField(unique=True)
+    last_number = models.PositiveIntegerField(default=0)
+
+
+class TaxInvoice(models.Model):
+    company = models.ForeignKey("Company", on_delete=models.PROTECT, related_name="tax_invoices")
+    invoice_number = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    status = models.CharField(max_length=12, default="draft", choices=[("draft", "Draft"), ("issued", "Issued")])
+    invoice_date = models.DateField(default=timezone.localdate)
+    supply_date = models.DateField(default=timezone.localdate)
+    currency = models.CharField(max_length=3, default="AED")
+    customer_name = models.CharField(max_length=255)
+    customer_address = models.TextField(blank=True)
+    customer_trn = models.CharField(max_length=15, blank=True)
+    attention = models.CharField(max_length=255, blank=True)
+    quotation_reference = models.CharField(max_length=120, blank=True)
+    lpo_number = models.CharField(max_length=120, blank=True)
+    notes = models.TextField(blank=True)
+    source = models.JSONField(default=dict, blank=True)
+    supplier_snapshot = models.JSONField(default=dict, blank=True)
+    subtotal = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    discount_total = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    vat_total = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    revision = models.PositiveIntegerField(default=1)
+    issued_pdf = models.BinaryField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="created_tax_invoices")
+    issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="issued_tax_invoices")
+    issued_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
+class TaxInvoiceLine(models.Model):
+    invoice = models.ForeignKey(TaxInvoice, on_delete=models.CASCADE, related_name="lines")
+    item_name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    quantity = models.DecimalField(max_digits=12, decimal_places=3)
+    unit = models.CharField(max_length=50, blank=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    discount = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    line_subtotal = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    vat_amount = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    line_total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+
 class Company(models.Model):
     name = models.CharField(max_length=255, unique=True)
     normalized_name = models.CharField(max_length=255, unique=True, editable=False)
