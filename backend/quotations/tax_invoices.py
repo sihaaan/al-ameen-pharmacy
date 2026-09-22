@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from .ai_parsing import AIParseError, clean_preview_with_ai, prefer_safe_ai_preview
 from .import_parsers import parse_file_preview, parse_text_preview
 from .lpo_parsing import delivery_lpo_preview, normalize_lpo_preview
-from .models import QuotationAuditLog, TaxInvoice, TaxInvoiceLine, TaxInvoiceSequence
+from .models import QuotationAuditLog, TaxInvoice, TaxInvoiceLine
 from .pdf_config import get_quotation_pdf_config
 from .permissions import IsQuotationStaff
 from .services import audit_log
@@ -64,6 +64,7 @@ class TaxInvoiceLineSerializer(serializers.ModelSerializer):
 
 
 class TaxInvoiceSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(max_length=50, required=False, allow_blank=True, allow_null=True)
     lines = TaxInvoiceLineSerializer(many=True, allow_empty=False)
     company_name = serializers.CharField(source="company.name", read_only=True)
     source_filename = serializers.SerializerMethodField()
@@ -76,12 +77,25 @@ class TaxInvoiceSerializer(serializers.ModelSerializer):
                   "currency", "customer_name", "customer_address", "customer_trn", "attention", "quotation_reference",
                   "lpo_number", "notes", "source_filename", "subtotal", "discount_total", "vat_total", "total", "revision",
                   "issued_at", "created_at", "updated_at", "lines", "import_token", "expected_revision"]
-        read_only_fields = ["invoice_number", "status", "subtotal", "discount_total", "vat_total", "total", "revision",
+        read_only_fields = ["status", "subtotal", "discount_total", "vat_total", "total", "revision",
                             "issued_at", "created_at", "updated_at"]
         extra_kwargs = {"customer_address": {"max_length": 2000}, "notes": {"max_length": 5000}}
 
     def get_source_filename(self, obj):
         return obj.source.get("source_filename", "")
+
+    def validate_invoice_number(self, value):
+        value = (value or "").strip()
+        if not value:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ./_-]*", value):
+            raise ValidationError("Use letters, numbers, spaces, hyphens, underscores, dots or slashes.")
+        query = TaxInvoice.objects.filter(invoice_number__iexact=value)
+        if self.instance:
+            query = query.exclude(pk=self.instance.pk)
+        if query.exists():
+            raise ValidationError("This invoice number is already used. Enter a different number.")
+        return value
 
     def validate_currency(self, value):
         if value != "AED":
@@ -89,8 +103,8 @@ class TaxInvoiceSerializer(serializers.ModelSerializer):
         return value
 
     def validate_customer_trn(self, value):
-        if value and not re.fullmatch(r"\d{15}", value):
-            raise ValidationError("Enter a 15-digit customer TRN, or leave blank if unregistered.")
+        if value and not re.fullmatch(r"[0-9]{15}", value):
+            raise ValidationError("Enter a 15-digit customer TRN. Incomplete details can be saved as a draft.")
         return value
 
     def validate_lines(self, value):
@@ -185,7 +199,7 @@ class TaxInvoiceViewSet(viewsets.ModelViewSet):
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        obj = serializer.save()
+        obj = self._save_draft(serializer)
         audit_log(self.request.user, QuotationAuditLog.ACTION_CREATED, obj, message="Created tax invoice draft.")
 
     @transaction.atomic
@@ -193,8 +207,24 @@ class TaxInvoiceViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
-        obj = serializer.save()
+        obj = self._save_draft(serializer)
         audit_log(self.request.user, QuotationAuditLog.ACTION_UPDATED, obj, message="Updated tax invoice draft.", changes={"revision": obj.revision})
+
+    @staticmethod
+    def _save_draft(serializer):
+        try:
+            # A savepoint makes a simultaneous reservation of the same manual
+            # number a validation error, without leaving partial header/line edits.
+            with transaction.atomic():
+                return serializer.save()
+        except IntegrityError:
+            number = serializer.validated_data.get("invoice_number")
+            query = TaxInvoice.objects.filter(invoice_number__iexact=number) if number else TaxInvoice.objects.none()
+            if serializer.instance:
+                query = query.exclude(pk=serializer.instance.pk)
+            if query.exists():
+                raise ValidationError({"invoice_number": "This invoice number is already used. Enter a different number."})
+            raise
 
     @action(detail=True, methods=["post"])
     @transaction.atomic
@@ -204,25 +234,27 @@ class TaxInvoiceViewSet(viewsets.ModelViewSet):
             return Response(self.get_serializer(invoice).data)
         if request.data.get("expected_revision") != invoice.revision:
             raise ValidationError("Save and review the latest draft before issuing it.")
+        if not invoice.invoice_number:
+            raise ValidationError({"invoice_number": "Enter the invoice number before issuing."})
+        if not invoice.customer_name.strip():
+            raise ValidationError({"customer_name": "Enter the customer's full legal name before issuing."})
         if not invoice.customer_address.strip():
             raise ValidationError("Enter the customer billing address before issuing.")
+        if not re.fullmatch(r"[0-9]{15}", invoice.customer_trn):
+            raise ValidationError({"customer_trn": "Enter the customer's 15-digit TRN before issuing."})
         rows = list(invoice.lines.all())
         if not rows or any(row.unit_price is None or row.vat_rate is None for row in rows):
             raise ValidationError("Every item needs a unit price and a confirmed VAT rate before issuing.")
         config = get_quotation_pdf_config(include_hidden_trn=True)
         if not re.fullmatch(r"\d{15}", config.trn or "") or not config.company_name or not config.address:
             raise ValidationError("Add the pharmacy name, address and 15-digit TRN in quotation Settings before issuing.")
-        year = invoice.invoice_date.year
-        sequence, _ = TaxInvoiceSequence.objects.get_or_create(year=year)
-        sequence = TaxInvoiceSequence.objects.select_for_update().get(pk=sequence.pk)
-        sequence.last_number += 1
-        sequence.save(update_fields=["last_number"])
-        invoice.invoice_number = f"TI-{year}-{sequence.last_number:06d}"
         invoice.status = "issued"
         invoice.issued_by = request.user
         invoice.issued_at = timezone.now()
         invoice.revision += 1
         invoice.supplier_snapshot = {key: getattr(config, key) for key in ("company_name", "address", "trn", "phone", "email")}
+        from .tax_invoice_pdf import BANK_DETAILS
+        invoice.supplier_snapshot["bank_details"] = dict(BANK_DETAILS)
         from .tax_invoice_pdf import build_tax_invoice_pdf
         invoice.issued_pdf = build_tax_invoice_pdf(invoice, config=config)
         invoice.save()
@@ -235,7 +267,8 @@ class TaxInvoiceViewSet(viewsets.ModelViewSet):
         from .tax_invoice_pdf import build_tax_invoice_pdf
         data = bytes(invoice.issued_pdf) if invoice.status == "issued" else build_tax_invoice_pdf(invoice)
         response = HttpResponse(data, content_type="application/pdf")
-        response["Content-Disposition"] = f'attachment; filename="{invoice.invoice_number or f"DRAFT-{invoice.pk}"}.pdf"'
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", invoice.invoice_number or f"DRAFT-{invoice.pk}")
+        response["Content-Disposition"] = f'attachment; filename="{filename}.pdf"'
         response["Cache-Control"] = "private, no-store"
         return response
 
