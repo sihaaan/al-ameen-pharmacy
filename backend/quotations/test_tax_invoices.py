@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from pypdf import PdfReader
@@ -24,7 +25,9 @@ class TaxInvoiceTests(TestCase):
         QuotationSettings.objects.create(pk=1, company_name="Al Ameen Pharmacy LLC", address="Dubai, UAE", trn="100064879800003", show_trn=False)
         self.client = APIClient()
         self.client.force_authenticate(self.actor)
+        self.next_number = 604670
         self.payload = {"company": self.company.pk, "customer_name": self.company.name,
+                        "customer_trn": "105416477500003",
                         "customer_address": "Dubai, UAE", "invoice_date": "2026-09-22", "supply_date": "2026-09-21",
                         "quotation_reference": "QT-123", "lpo_number": "PO112_112353", "currency": "AED",
                         "lines": [{"item_name": "Gauze", "quantity": "3", "unit": "Box", "unit_price": "12.555", "vat_rate": "5", "discount": "2"}]}
@@ -33,7 +36,9 @@ class TaxInvoiceTests(TestCase):
         return reverse(f"quotation-tax-invoice-{action}", kwargs={"pk": pk} if pk else None)
 
     def draft(self, payload=None):
-        response = self.client.post(self.url("list"), payload or self.payload, format="json")
+        payload = {"invoice_number": str(self.next_number), **(payload or self.payload)}
+        self.next_number += 1
+        response = self.client.post(self.url("list"), payload, format="json")
         self.assertEqual(response.status_code, 201, response.data)
         return response.data
 
@@ -47,29 +52,32 @@ class TaxInvoiceTests(TestCase):
         self.assertEqual(draft["vat_total"], "1.78")
         self.assertEqual(draft["total"], "37.45")
         self.assertEqual(draft["status"], "draft")
-        self.assertIsNone(draft["invoice_number"])
+        self.assertEqual(draft["invoice_number"], "604670")
 
     def test_preview_does_not_issue_and_issued_pdf_preserves_supplier_and_customer(self):
         draft = self.draft()
         draft_pdf = self.client.get(self.url("pdf", draft["id"]))
         self.assertEqual(draft_pdf.status_code, 200)
         self.assertEqual(TaxInvoice.objects.get(pk=draft["id"]).status, "draft")
-        self.assertIn("DRAFT TAX INVOICE", " ".join(PdfReader(BytesIO(draft_pdf.content)).pages[0].extract_text().split()))
+        self.assertIn("DRAFT - NOT ISSUED", " ".join(PdfReader(BytesIO(draft_pdf.content)).pages[0].extract_text().split()))
         issued = self.issue(draft)
         self.assertEqual(issued.status_code, 200, issued.data)
-        self.assertEqual(issued.data["invoice_number"], "TI-2026-000001")
+        self.assertEqual(issued.data["invoice_number"], "604670")
         pdf = self.client.get(self.url("pdf", draft["id"]))
         text = " ".join("\n".join(page.extract_text() for page in PdfReader(BytesIO(pdf.content)).pages).split())
-        for value in ["TAX INVOICE", "100064879800003", "PO112_112353", "12.555", "37.45", "21/09/2026", "Resort LLC"]:
+        for value in ["TAX INVOICE", "100064879800003", "105416477500003", "604670", "PO112_112353", "12.555", "37.45", "21/09/2026", "Resort LLC",
+                      "RAK Bank", "AL AMEEN PHARMACY LLC", "0025346405061", "AE440400000025346405061", 'Cheques payable to "AL AMEEN PHARMACY LLC".']:
             self.assertIn(value, text)
         self.assertNotIn("DRAFT", text)
         self.company.name = "Changed customer"
         self.company.save()
         QuotationSettings.objects.filter(pk=1).update(trn="999999999999999")
-        self.assertEqual(self.client.get(self.url("pdf", draft["id"])).content, pdf.content)
+        with patch("quotations.tax_invoice_pdf.BANK_DETAILS", {}):
+            self.assertEqual(self.client.get(self.url("pdf", draft["id"])).content, pdf.content)
+        self.assertEqual(TaxInvoice.objects.get(pk=draft["id"]).supplier_snapshot["bank_details"]["account_number"], "0025346405061")
         repeat = self.issue(draft)
         self.assertEqual(repeat.data["invoice_number"], issued.data["invoice_number"])
-        self.assertEqual(TaxInvoiceSequence.objects.get(year=2026).last_number, 1)
+        self.assertFalse(TaxInvoiceSequence.objects.exists())
 
     def test_issued_invoice_cannot_be_edited_deleted_or_status_spoofed(self):
         payload = {**self.payload, "status": "issued", "invoice_number": "FAKE", "total": "1"}
@@ -173,5 +181,69 @@ class TaxInvoiceTests(TestCase):
             self.assertEqual(self.issue(first).status_code, 500)
         self.assertEqual(TaxInvoice.objects.get(pk=first["id"]).status, "draft")
         self.assertFalse(TaxInvoiceSequence.objects.exists())
-        self.assertEqual(self.issue(second).data["invoice_number"], "TI-2026-000001")
-        self.assertEqual(self.issue(first).data["invoice_number"], "TI-2026-000002")
+        self.assertEqual(self.issue(second).data["invoice_number"], "604671")
+        self.assertEqual(self.issue(first).data["invoice_number"], "604670")
+
+    def test_manual_number_preserves_leading_zeroes_and_safe_download_filename(self):
+        draft = self.draft({**self.payload, "invoice_number": "  00604670/26-A_1  "})
+        self.assertEqual(draft["invoice_number"], "00604670/26-A_1")
+        self.assertEqual(self.issue(draft).data["invoice_number"], "00604670/26-A_1")
+        pdf = self.client.get(self.url("pdf", draft["id"]))
+        self.assertEqual(pdf["Content-Disposition"], 'attachment; filename="00604670_26-A_1.pdf"')
+
+    def test_duplicate_numbers_are_blocked_on_create_and_update_including_case_and_spaces(self):
+        first = self.draft({**self.payload, "invoice_number": "Inv-006"})
+        duplicate = self.client.post(self.url("list"), {**self.payload, "invoice_number": "  INV-006  "}, format="json")
+        self.assertEqual(duplicate.status_code, 400, duplicate.data)
+        self.assertIn("already used", str(duplicate.data["invoice_number"]))
+        second = self.draft()
+        duplicate = self.client.patch(self.url("detail", second["id"]), {"invoice_number": "inv-006", "expected_revision": 1}, format="json")
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertEqual(TaxInvoice.objects.get(pk=second["id"]).revision, 1)
+        own_number = self.client.patch(self.url("detail", first["id"]), {"invoice_number": "Inv-006", "expected_revision": 1}, format="json")
+        self.assertEqual(own_number.status_code, 200, own_number.data)
+        # The database constraint also protects simultaneous requests that both
+        # pass serializer validation before either request commits its number.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            TaxInvoice.objects.filter(pk=second["id"]).update(invoice_number=" inv-006 ")
+
+    def test_duplicate_race_returns_validation_error_and_rolls_back_edits(self):
+        self.draft({**self.payload, "invoice_number": "Inv-006"})
+        second = self.draft()
+        with patch("quotations.tax_invoices.TaxInvoiceSerializer.validate_invoice_number", return_value="inv-006"):
+            response = self.client.patch(self.url("detail", second["id"]),
+                                         {"invoice_number": "inv-006", "notes": "must roll back", "expected_revision": 1}, format="json")
+        self.assertEqual(response.status_code, 400, response.data)
+        unchanged = TaxInvoice.objects.get(pk=second["id"])
+        self.assertEqual(unchanged.invoice_number, second["invoice_number"])
+        self.assertEqual(unchanged.revision, 1)
+        self.assertEqual(unchanged.notes, "")
+
+    def test_blank_number_and_billing_details_can_remain_draft_but_cannot_issue(self):
+        for field in ["invoice_number", "customer_address", "customer_trn"]:
+            with self.subTest(field=field):
+                draft = self.draft({**self.payload, field: ""})
+                self.assertEqual(self.issue(draft).status_code, 400)
+                self.assertEqual(TaxInvoice.objects.get(pk=draft["id"]).status, "draft")
+        self.assertEqual(TaxInvoice.objects.filter(invoice_number=None).count(), 1)
+        self.draft({**self.payload, "invoice_number": ""})  # Multiple unnumbered drafts remain valid.
+
+    def test_full_customer_details_print_without_altering_company_record(self):
+        name = "JUSTLIFE HOME HEALTH CARE CENTER L.L.C"
+        address = "Office 216, Al Attar Business Centre\nAl Barsha First, Dubai, UAE"
+        draft = self.draft({**self.payload, "customer_name": name, "customer_address": address})
+        self.assertEqual(self.issue(draft).status_code, 200)
+        pdf = self.client.get(self.url("pdf", draft["id"]))
+        document = PdfReader(BytesIO(pdf.content))
+        text = " ".join("\n".join(page.extract_text() for page in document.pages).split())
+        self.assertIn(name, text)
+        self.assertIn(" ".join(address.split()), text)
+        self.assertTrue(document.pages[0].images)
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.name, "Resort LLC")
+
+    def test_legacy_issued_pdf_remains_accessible_without_new_required_fields(self):
+        draft = self.draft()
+        TaxInvoice.objects.filter(pk=draft["id"]).update(status="issued", invoice_number="TI-2026-000001", customer_trn="", issued_pdf=b"original issued PDF")
+        self.assertEqual(self.client.get(self.url("pdf", draft["id"])).content, b"original issued PDF")
+        self.assertEqual(self.issue(draft).status_code, 200)

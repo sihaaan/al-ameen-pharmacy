@@ -6,6 +6,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import IntegrityError, models, transaction
+from django.db.models.functions import Lower, Trim
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -86,6 +87,9 @@ class TaxInvoice(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
+        constraints = [models.UniqueConstraint(
+            Lower(Trim("invoice_number")), name="unique_tax_invoice_number_normalized",
+        )]
 
 
 class TaxInvoiceLine(models.Model):

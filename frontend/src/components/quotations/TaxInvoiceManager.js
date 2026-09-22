@@ -8,7 +8,7 @@ import './TaxInvoiceManager.css';
 const api = quotationAPI.taxInvoices;
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Dubai' });
 const newLine = () => ({ item_name: '', description: '', quantity: '1', unit: '', unit_price: '', vat_rate: '', discount: '0' });
-const newInvoice = () => ({ company: '', customer_name: '', customer_address: '', customer_trn: '', attention: '',
+const newInvoice = () => ({ invoice_number: '', company: '', customer_name: '', customer_address: '', customer_trn: '', attention: '',
   invoice_date: today(), supply_date: today(), quotation_reference: '', lpo_number: '', notes: '', currency: 'AED', lines: [newLine()] });
 const amount = (value) => `AED ${Number(value || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const toForm = (data) => ({ ...data, lines: data.lines.map((line) => ({ ...line, unit_price: line.unit_price ?? '', vat_rate: line.vat_rate ?? '' })) });
@@ -136,7 +136,7 @@ export default function TaxInvoiceManager() {
 
   const save = async (event) => {
     event.preventDefault(); setBusy('save'); setError(null);
-    const keys = ['company', 'customer_name', 'customer_address', 'customer_trn', 'attention', 'invoice_date', 'supply_date',
+    const keys = ['invoice_number', 'company', 'customer_name', 'customer_address', 'customer_trn', 'attention', 'invoice_date', 'supply_date',
       'quotation_reference', 'lpo_number', 'notes', 'currency', 'import_token'];
     const payload = Object.fromEntries(keys.filter((key) => form[key] !== undefined).map((key) => [key, form[key]]));
     payload.lines = form.lines.map((line) => ({ item_name: line.item_name, description: line.description || '', quantity: line.quantity,
@@ -164,12 +164,18 @@ export default function TaxInvoiceManager() {
     try {
       const { data } = await api.pdf(saved.id);
       const url = URL.createObjectURL(data);
-      const link = document.createElement('a'); link.href = url; link.download = `${saved.invoice_number || `DRAFT-${saved.id}`}.pdf`;
+      const link = document.createElement('a'); link.href = url; link.download = `${(saved.invoice_number || `DRAFT-${saved.id}`).replace(/[^A-Za-z0-9._-]/g, '_')}.pdf`;
       document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
     } catch (err) { await reportError(err, 'Download invoice PDF'); }
     finally { setBusy(''); }
   };
   const missing = form?.lines.filter((line) => line.unit_price === '' || line.vat_rate === '').length || 0;
+  const missingDetails = form ? [
+    !form.invoice_number?.trim() && 'invoice number',
+    !form.customer_name?.trim() && 'full customer name',
+    !form.customer_address?.trim() && 'billing address',
+    !/^[0-9]{15}$/.test(form.customer_trn || '') && '15-digit customer TRN',
+  ].filter(Boolean) : [];
   const input = (label, key, options = {}) => <label className="ti-field">{label}
     <input className="qm-input" value={form[key] || ''} onChange={(event) => change(key, event.target.value)} disabled={fieldDisabled} {...options} />
   </label>;
@@ -214,18 +220,24 @@ export default function TaxInvoiceManager() {
       {form.source_filename && <p className="ti-source">Source: {form.source_filename}</p>}
       <form onSubmit={save}>
         <fieldset disabled={fieldDisabled} className="ti-fields"><legend>Customer & invoice details</legend>
-          <CompanySelectWithCreate companies={companies} value={form.company} required disabled={fieldDisabled} onChange={selectCompany}
-            onCreated={(company) => { setCompanies((current) => [...current.filter((entry) => entry.id !== company.id), company]); selectCompany(company.id, company); }} />
-          <div className="ti-grid">
-            {input('Customer name', 'customer_name', { required: true, maxLength: 255 })}
-            {input('Customer TRN (if registered)', 'customer_trn', { pattern: '[0-9]{15}', maxLength: 15 })}
+          <div className="ti-grid ti-invoice-details">
+            {input('Invoice number', 'invoice_number', { maxLength: 50, placeholder: 'Enter invoice number, e.g. 604670' })}
             {input('Invoice date', 'invoice_date', { type: 'date', required: true })}
             {input('Date of supply', 'supply_date', { type: 'date', required: true })}
             {input('Quotation reference', 'quotation_reference', { maxLength: 120 })}
+          </div>
+          {!locked && <p className="ti-field-help">Enter the invoice number manually. Duplicate numbers are blocked.</p>}
+          <CompanySelectWithCreate companies={companies} value={form.company} required disabled={fieldDisabled} onChange={selectCompany}
+            onCreated={(company) => { setCompanies((current) => [...current.filter((entry) => entry.id !== company.id), company]); selectCompany(company.id, company); }} />
+          {!locked && <p className="ti-field-help">Enter the full legal customer name, TRN and billing address below. These details print on the invoice exactly as saved.</p>}
+          <div className="ti-grid ti-billing-details">
+            <label className="ti-field ti-legal-name">Full customer name<textarea className="qm-input" rows={2} required maxLength={255} value={form.customer_name}
+              onChange={(event) => change('customer_name', event.target.value)} /></label>
+            {input('Customer TRN', 'customer_trn', { pattern: '[0-9]{15}', maxLength: 15, inputMode: 'numeric', placeholder: '15-digit TRN' })}
+            <label className="ti-field ti-address">Full customer billing address<textarea className="qm-input" rows={3} maxLength={2000} value={form.customer_address}
+              onChange={(event) => change('customer_address', event.target.value)} /></label>
             {input('LPO number (optional)', 'lpo_number', { maxLength: 120 })}
             {input('Attention (optional)', 'attention', { maxLength: 255 })}
-            <label className="ti-field ti-address">Customer billing address<textarea className="qm-input" rows={2} maxLength={2000} value={form.customer_address}
-              onChange={(event) => change('customer_address', event.target.value)} /></label>
           </div>
         </fieldset>
         <div className="qm-panel-heading ti-items-heading"><div><h3>Invoice items</h3><p>Prices exclude VAT · Currency: AED · Discount is the amount for the whole line.</p></div>
@@ -246,7 +258,8 @@ export default function TaxInvoiceManager() {
         {saved && <div className="ti-totals"><span>{dirty ? 'Last saved totals' : 'Totals'}</span><span>Subtotal {amount(saved.subtotal)}</span><span>VAT {amount(saved.vat_total)}</span><strong>Total {amount(saved.total)}</strong></div>}
         {!locked && <div className="ti-review">
           {missing > 0 && <p>{missing} item(s) need a price or VAT rate. You can save a draft while these are incomplete.</p>}
-          {saved && !dirty && !missing && <label><input type="checkbox" checked={reviewed} disabled={Boolean(busy)} onChange={(event) => setReviewed(event.target.checked)} /> I checked the customer, dates, items, discounts and VAT. Issuing locks this invoice.</label>}
+          {missingDetails.length > 0 && <p>Before issuing, complete: {missingDetails.join(', ')}. You can still save a draft.</p>}
+          {saved && !dirty && !missing && !missingDetails.length && <label><input type="checkbox" checked={reviewed} disabled={Boolean(busy)} onChange={(event) => setReviewed(event.target.checked)} /> I checked the invoice number, full customer name, TRN, address, dates and item totals. Issuing locks this invoice.</label>}
         </div>}
         <div className="ti-actions ti-sticky">
           <div className="ti-action-messages">
@@ -257,7 +270,7 @@ export default function TaxInvoiceManager() {
           <button className="qm-secondary" type="button" disabled={Boolean(busy)} onClick={() => { if (canLeave()) { setForm(null); setDirty(false); } }}>Back to list</button>
           {!locked && <button className="qm-secondary" type="submit" disabled={Boolean(busy) || (saved && !dirty)}>{busy === 'save' ? 'Saving…' : 'Save draft'}</button>}
           {saved && <button className="qm-secondary" type="button" disabled={Boolean(busy) || dirty} onClick={download}>{busy === 'pdf' ? 'Preparing PDF…' : locked ? 'Download tax invoice' : 'Preview draft PDF'}</button>}
-          {!locked && <button className="qm-primary" type="button" disabled={Boolean(busy) || !saved || dirty || !reviewed || missing > 0} onClick={issue}>{busy === 'issue' ? 'Issuing…' : 'Issue tax invoice'}</button>}
+          {!locked && <button className="qm-primary" type="button" disabled={Boolean(busy) || !saved || dirty || !reviewed || missing > 0 || missingDetails.length > 0} onClick={issue}>{busy === 'issue' ? 'Issuing…' : 'Issue tax invoice'}</button>}
         </div>
       </form>
     </section>}
