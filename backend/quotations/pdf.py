@@ -425,14 +425,16 @@ def _build_header(
     document_title="QUOTATION",
     reference_label="Quote No",
     reference_number=None,
+    title_column_width=45 * mm,
 ):
     logo_layout = config.logo_layout or "full_logo_only"
+    centered_logo_width = 178 * mm - 2 * title_column_width
     logo_flowable = (
         ""
         if logo_layout == "no_logo"
         else _brand_image(
             config.logo_path,
-            max_width=78 * mm if logo_layout == "full_logo_only" else 60 * mm,
+            max_width=min(78 * mm, centered_logo_width) if logo_layout == "full_logo_only" else 60 * mm,
             max_height=28 * mm if logo_layout == "full_logo_only" else 26 * mm,
         )
     )
@@ -447,12 +449,15 @@ def _build_header(
 
     if logo_layout == "full_logo_only" and logo_flowable:
         contact = _contact_block(config, styles, inline=True)
-        top_row = Table([["", logo_flowable, title_block]], colWidths=[45 * mm, 88 * mm, 45 * mm])
+        top_row = Table([["", logo_flowable, title_block]],
+                        colWidths=[title_column_width, centered_logo_width, title_column_width])
         top_row.setStyle(
             TableStyle(
                 [
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("ALIGN", (1, 0), (1, 0), "CENTER"),
+                    ("LEFTPADDING", (1, 0), (1, 0), 0),
+                    ("RIGHTPADDING", (1, 0), (1, 0), 0),
                     ("ALIGN", (2, 0), (2, 0), "RIGHT"),
                     ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
                 ]

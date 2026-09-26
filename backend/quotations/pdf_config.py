@@ -112,7 +112,7 @@ def get_quotation_pdf_config(quotation=None, *, include_hidden_trn=False):
     return QuotationPDFConfig(
         company_name=getattr(settings, "QUOTATION_COMPANY_NAME", "Al Ameen Pharmacy"),
         company_name_ar=getattr(settings, "QUOTATION_COMPANY_NAME_AR", ""),
-        address=getattr(settings, "QUOTATION_COMPANY_ADDRESS", "Dubai, United Arab Emirates"),
+        address=getattr(settings, "QUOTATION_COMPANY_ADDRESS", "P.O. Box 39547, Frij Murar, Somali Street, Diera, Dubai"),
         phone=getattr(settings, "QUOTATION_COMPANY_PHONE", "+971 50 545 6388"),
         email=getattr(settings, "QUOTATION_COMPANY_EMAIL", "alameenpharmacyllc@gmail.com"),
         trn=getattr(settings, "QUOTATION_COMPANY_TRN", ""),

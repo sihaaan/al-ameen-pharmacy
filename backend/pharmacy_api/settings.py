@@ -212,7 +212,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'  # Where collectstatic puts files
 # Override these in Railway/local env when the final business details are confirmed.
 QUOTATION_COMPANY_NAME = os.environ.get("QUOTATION_COMPANY_NAME", "Al Ameen Pharmacy")
 QUOTATION_COMPANY_NAME_AR = os.environ.get("QUOTATION_COMPANY_NAME_AR", "")
-QUOTATION_COMPANY_ADDRESS = os.environ.get("QUOTATION_COMPANY_ADDRESS", "Dubai, United Arab Emirates")
+QUOTATION_COMPANY_ADDRESS = os.environ.get("QUOTATION_COMPANY_ADDRESS", "P.O. Box 39547, Frij Murar, Somali Street, Diera, Dubai")
 QUOTATION_COMPANY_PHONE = os.environ.get("QUOTATION_COMPANY_PHONE", "+971 50 545 6388")
 QUOTATION_COMPANY_EMAIL = os.environ.get("QUOTATION_COMPANY_EMAIL", "alameenpharmacyllc@gmail.com")
 QUOTATION_COMPANY_TRN = os.environ.get("QUOTATION_COMPANY_TRN", "")
