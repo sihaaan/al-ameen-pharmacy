@@ -25,6 +25,16 @@ def build_delivery_note_pdf(note):
         styles[name].fontSize = 11
         styles[name].leading = 14
     styles["TableHeader"].textColor = colors.black
+    styles["SmallMutedRight"].fontSize = 10.5
+    styles["SmallMutedRight"].leading = 14
+    styles["SmallMutedRight"].fontName = "Helvetica-Bold"
+    styles["MetaLabel"].fontSize = 9.5
+    styles["MetaLabel"].leading = 13
+    styles["MetaValue"].fontSize = 10.5
+    styles["MetaValue"].leading = 14
+    important_value = styles["MetaValue"].clone("DeliveryImportantValue")
+    important_value.fontName = "Helvetica-Bold"
+    important_fields = {"Customer", "LPO No.", "Pharmacy TRN", "Customer TRN"}
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4, invariant=1, leftMargin=16 * mm, rightMargin=16 * mm,
@@ -33,6 +43,7 @@ def build_delivery_note_pdf(note):
     elements = [_build_header(
         replace(config, trn=""), note, note.delivery_date.strftime("%d/%m/%Y"), styles,
         document_title="DELIVERY NOTE", reference_label="DN No", reference_number=note.delivery_number,
+        title_column_width=54 * mm,
     )]
     metadata = [
         ("Customer", note.customer_name), ("Pharmacy TRN", config.trn),
@@ -51,9 +62,10 @@ def build_delivery_note_pdf(note):
             pair.append(("", ""))
         rows.append([cell for label, value in pair for cell in (
             Paragraph(_text(label, ""), styles["MetaLabel"]),
-            Paragraph(_text(value, "").replace("\n", "<br/>"), styles["MetaValue"]),
+            Paragraph(_text(value, "").replace("\n", "<br/>"),
+                      important_value if label in important_fields else styles["MetaValue"]),
         )])
-    meta = Table(rows, colWidths=[25 * mm, 64 * mm, 25 * mm, 64 * mm])
+    meta = Table(rows, colWidths=[29 * mm, 60 * mm, 29 * mm, 60 * mm])
     meta.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.3, LIGHT_BORDER),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),

@@ -4,7 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -45,6 +45,8 @@ def build_tax_invoice_pdf(invoice, *, config=None):
     styles.add(ParagraphStyle(name="InvoiceStrong", parent=styles["TableCell"], fontName="Helvetica-Bold"))
     styles.add(ParagraphStyle(name="InvoiceTotal", parent=styles["InvoiceStrong"], fontSize=11, leading=14, alignment=TA_RIGHT))
     styles.add(ParagraphStyle(name="InvoiceSmall", parent=styles["SmallMuted"], fontSize=8.2, leading=11))
+    styles.add(ParagraphStyle(name="InvoiceSupplier", parent=styles["InvoiceSmall"], alignment=TA_CENTER))
+    styles.add(ParagraphStyle(name="InvoiceBrand", parent=styles["InvoiceCustomer"], alignment=TA_CENTER))
     buffer = BytesIO()
     number = invoice.invoice_number or "Not entered"
     draft = invoice.status != "issued"
@@ -77,16 +79,21 @@ def build_tax_invoice_pdf(invoice, *, config=None):
 
     # Ship the actual website artwork with the backend, so a backend-only
     # deployment does not need a frontend folder or a remote logo download.
-    logo = _image(str(LOGO_PATH), max_width=84 * mm, max_height=27 * mm)
-    brand = logo or cell(config.company_name, "InvoiceCustomer")
+    logo = _image(str(LOGO_PATH), max_width=74 * mm, max_height=27 * mm)
+    if logo:
+        logo.hAlign = "CENTER"
+    brand = logo or cell(config.company_name, "InvoiceBrand")
+    supplier = [config.address,
+                f"Tel: {config.phone}" if config.phone else "", config.email,
+                f"TRN: {config.trn or 'Not configured'}"]
     title = [cell("TAX INVOICE", "InvoiceTitle")]
     if draft:
         title += [Spacer(1, 4), cell("DRAFT - NOT ISSUED", "SmallMutedRight")]
-    header = grid([[brand, title]], [105 * mm, 77 * mm], padding=0)
-    supplier = [config.company_name, config.address,
-                " | ".join(part for part in (f"Tel: {config.phone}" if config.phone else "", config.email) if part),
-                f"TRN: {config.trn or 'Not configured'}"]
-    elements = [header, Spacer(1, 8), cell("\n".join(filter(None, supplier)), "InvoiceSmall"), Spacer(1, 10),
+    header_row = grid([["", brand, title]], [54 * mm, 74 * mm, 54 * mm], padding=0)
+    header_row.setStyle(TableStyle([("ALIGN", (1, 0), (1, 0), "CENTER")]))
+    supplier_line = " | ".join(" ".join(str(part).split()) for part in supplier if part)
+    header = [header_row, Spacer(1, 8), cell(supplier_line, "InvoiceSupplier")]
+    elements = [KeepTogether(header), Spacer(1, 10),
                 HRFlowable(width=width, thickness=1.2, color=GOLD), Spacer(1, 12)]
 
     customer = [cell("BILL TO", "InvoiceSection"), cell(invoice.customer_name, "InvoiceCustomer"), Spacer(1, 5),

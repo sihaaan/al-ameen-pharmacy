@@ -335,7 +335,7 @@ class QuotationSettings(models.Model):
 
     company_name = models.CharField(max_length=255, default="Al Ameen Pharmacy")
     company_name_ar = models.CharField(max_length=255, blank=True)
-    address = models.TextField(default="Dubai, United Arab Emirates", blank=True)
+    address = models.TextField(default="P.O. Box 39547, Frij Murar, Somali Street, Diera, Dubai", blank=True)
     phone = models.CharField(max_length=80, default="+971 50 545 6388", blank=True)
     email = models.EmailField(default="alameenpharmacyllc@gmail.com", blank=True)
     trn = models.CharField(max_length=80, blank=True)
