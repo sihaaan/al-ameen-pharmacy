@@ -3442,7 +3442,6 @@ const QuotationEditor = ({
                           value={draft.product}
                           fallbackName={line.product_name || line.matched_product_name || draft.item_name_snapshot}
                           label={`Product for ${lineLabel(line, draft)}`}
-                          searchLabel={`Search products for ${lineLabel(line, draft)}`}
                           loading={productCatalogueLoading}
                           disabled={productCatalogueBlocked}
                           allowCreate
@@ -3559,7 +3558,6 @@ const QuotationEditor = ({
               value={lineForm.product}
               fallbackName={lineForm.item_name_snapshot}
               label="Product for new line"
-              searchLabel="Search products for new line"
               placeholder="Select item"
               disabled={productCatalogueBlocked}
               loading={productCatalogueLoading}

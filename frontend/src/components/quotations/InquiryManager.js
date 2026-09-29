@@ -1619,7 +1619,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                           <ProductSelect
                             catalogue={productCatalogue}
                             label={`Matched product row ${index + 1}`}
-                            searchLabel={`Search products for inquiry row ${index + 1}`}
+                            disabled={importWorkflowBusy}
                             value={line.matched_product || ''}
                             onChange={(productId) => updateImportLine(index, {
                               matched_product: productId || null,
@@ -1932,8 +1932,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                 <ProductSelect
                   catalogue={productCatalogue}
                   label="Matched product"
-                  searchLabel={`Search products for manual inquiry row ${index + 1}`}
-                  placeholder="Match status: Unmatched"
+                  disabled={saving || manualContactSaving}
                   value={line.matched_product}
                   onChange={(matched) => updateLine(index, {
                     matched_product: matched,
