@@ -162,3 +162,16 @@ test('a disabled parent fieldset also prevents selection from an already-open po
   fireEvent.click(screen.getByRole('option', { name: /Nitrile gloves/ }));
   expect(onChange).not.toHaveBeenCalled();
 });
+
+test('Escape dismisses suggestions first and then remains available to the parent dialog', () => {
+  const dismiss = jest.fn();
+  render(<div role="dialog" onKeyDown={(event) => { if (event.key === 'Escape') dismiss(); }}><ControlledPicker /></div>);
+  const input = screen.getByRole('combobox');
+  fireEvent.focus(input);
+  fireEvent.change(input, { target: { value: 'gloves' } });
+  fireEvent.keyDown(input, { key: 'Escape' });
+  expect(dismiss).not.toHaveBeenCalled();
+  expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  fireEvent.keyDown(input, { key: 'Escape' });
+  expect(dismiss).toHaveBeenCalledTimes(1);
+});

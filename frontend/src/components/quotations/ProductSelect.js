@@ -174,7 +174,7 @@ const ProductSelect = ({
             event.preventDefault();
             if (activeChoice) choose(activeChoice.id);
           }
-          if (event.key === 'Escape') {
+          if (event.key === 'Escape' && expanded) {
             event.preventDefault();
             event.stopPropagation();
             close();
