@@ -49,7 +49,7 @@ export default function SavedCompanyMatchDialog({ review, catalogue, selectedPro
           <section className="qm-saved-match-correction">
             <h4>Correct the company match</h4>
             <ProductSelect catalogue={catalogue} value={replacement} label="Correct product for this company"
-              searchLabel="Search for the correct product" placeholder="Choose a different product"
+              placeholder="Choose a different product"
               disabled={saving} onChange={setReplacement} />
             <button type="button" className="qm-secondary" disabled={saving || !replacement}
               onClick={() => onResolve(Number(replacement), 'correct')}>Save corrected company match</button>

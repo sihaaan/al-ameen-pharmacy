@@ -45,6 +45,20 @@ const products = [
   { id: 12, name: 'Gloves B', brand_name: 'Ansell', unit: 'box', primary_image_url: '' },
 ];
 
+const chooseProduct = (input, id, name = products.find((product) => String(product.id) === id)?.name) => {
+  if (!id) {
+    fireEvent.click(screen.getByLabelText(`Clear ${input.getAttribute('aria-label')}`));
+    return;
+  }
+  fireEvent.focus(input);
+  if (id !== '__create__') {
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.change(input, { target: { value: name } });
+  }
+  const suggestions = screen.getByRole('listbox', { name: `${input.getAttribute('aria-label')} suggestions` });
+  fireEvent.click(within(suggestions).getByText(id === '__create__' ? '+ Create a new product…' : name, { exact: true }));
+};
+
 const quote = {
   id: 21,
   quotation_number: 'Q-0021',
@@ -245,16 +259,14 @@ describe('QuotationEditor Product price context', () => {
     const { container } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
     const select = await screen.findByLabelText('Product for Imported item 1');
     await waitFor(() => expect(select).toBeEnabled());
-    expect(container.querySelectorAll('.qm-line-product-cell option')).toHaveLength(9 * 22);
-    fireEvent.change(screen.getByLabelText('Search products for Imported item 1'), { target: { value: 'nitrile' } });
-    expect(within(select).getAllByRole('option')).toHaveLength(3);
-    fireEvent.change(select, { target: { value: '6000' } });
+    expect(container.querySelectorAll('.qm-line-product-cell option')).toHaveLength(0);
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    chooseProduct(select, '6000', target.name);
     await waitFor(() => expect(quotationAPI.quotes.productPrice).toHaveBeenCalledWith(21, { product: '6000' }));
-    expect(select).toHaveValue('6000');
+    expect(select).toHaveValue(target.name);
     expect(screen.getByLabelText('Unit price for Imported item 1')).toHaveValue(null);
 
-    fireEvent.change(screen.getByLabelText('Search products for new line'), { target: { value: 'nitrile' } });
-    fireEvent.change(screen.getByLabelText('Product for new line'), { target: { value: '6000' } });
+    chooseProduct(screen.getByLabelText('Product for new line'), '6000', target.name);
     expect(screen.getByPlaceholderText('Snapshot name')).toHaveValue('Nitrile gloves');
   });
 
@@ -915,7 +927,7 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
 
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '11');
 
     await waitFor(() => expect(screen.getByLabelText('Brand for Imported gloves')).toHaveValue('Medline'));
     expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
@@ -2570,10 +2582,12 @@ describe('QuotationEditor Product price context', () => {
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
     const productSelect = await screen.findByLabelText('Product for Imported gloves');
-    expect(within(productSelect).getByRole('option', { name: 'Gloves B' })).toBeInTheDocument();
+    fireEvent.focus(productSelect);
+    fireEvent.change(productSelect, { target: { value: 'Gloves' } });
+    expect(screen.getByRole('option', { name: /Gloves B/ })).toBeInTheDocument();
 
-    fireEvent.change(productSelect, { target: { value: '11' } });
-    fireEvent.change(productSelect, { target: { value: '12' } });
+    chooseProduct(productSelect, '11');
+    chooseProduct(productSelect, '12');
     expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
 
     await act(async () => second.resolve({ data: priceContext(12, 'Gloves B', 22) }));
@@ -2651,7 +2665,7 @@ describe('QuotationEditor Product price context', () => {
     quotationAPI.quotes.productPrice.mockImplementationOnce(() => request.promise);
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '11');
     expect(screen.getByDisplayValue('Imported gloves')).toBeInTheDocument();
     const priceInput = await screen.findByLabelText('Unit price for Imported gloves');
     fireEvent.change(priceInput, { target: { value: '73' } });
@@ -2698,7 +2712,7 @@ describe('QuotationEditor Product price context', () => {
       product: products[0], message: 'Reused existing product.',
     } });
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '__create__');
     await waitFor(() => expect(quotationAPI.lines.createProduct).toHaveBeenCalledWith(31, {
       product_name: 'Gloves A', quotation_review_fingerprint: 'quotation-review-fingerprint-1',
     }));
@@ -2735,7 +2749,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '__create__');
 
     expect(await screen.findByText('Likely existing Product found')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Use Gloves A/i })).toBeInTheDocument();
@@ -2788,7 +2802,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '__create__');
     fireEvent.click(await screen.findByRole('button', { name: /Use Gloves A/i }));
 
     await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, {
@@ -2845,7 +2859,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '__create__' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '__create__');
     fireEvent.click(await screen.findByRole('button', { name: /Use Gloves A/i }));
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /create products/i })).not.toBeInTheDocument());
@@ -2984,7 +2998,8 @@ describe('QuotationEditor Product price context', () => {
     let complete;
     quotationAPI.quotes.resolveSavedMatch.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     const correct = within(savedDialog).getByRole('button', { name: 'Save corrected company match' });
-    expect(within(savedDialog).getByLabelText('Correct product for this company')).toHaveValue('12');
+    expect(within(savedDialog).getByLabelText('Correct product for this company')).toHaveValue('Gloves B');
+    chooseProduct(within(savedDialog).getByLabelText('Correct product for this company'), '12');
     fireEvent.click(correct);
     expect(correct).toBeDisabled();
     expect(within(savedDialog).getByRole('button', { name: 'Confirm this saved product' })).toBeDisabled();
@@ -3330,7 +3345,7 @@ describe('QuotationEditor Product price context', () => {
     expect(productSelect).toBeDisabled();
     expect(companySelect).toBeDisabled();
     expect(contactSelect).toBeDisabled();
-    expect(within(productSelect).getByRole('option', { name: 'Gloves A' })).toBeInTheDocument();
+    expect(productSelect).toHaveValue('Gloves A');
     expect(screen.getByText('Product catalogue and images: Loading')).toBeInTheDocument();
     expect(screen.getByText('Company directory: Loading')).toBeInTheDocument();
     expect(screen.getByText('Company contacts: Loading')).toBeInTheDocument();
@@ -3372,15 +3387,15 @@ describe('QuotationEditor Product price context', () => {
 
     const { container } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
     const existingProduct = await screen.findByLabelText('Product for Imported gloves');
-    fireEvent.change(existingProduct, { target: { value: '11' } });
+    chooseProduct(existingProduct, '11');
 
     const existingPrice = screen.getByLabelText('Unit price for Imported gloves');
     await waitFor(() => expect(screen.getByText(/Last quoted AED 10/)).toBeInTheDocument());
     expect(existingPrice).toHaveValue(null);
     expect(screen.queryByRole('dialog', { name: /price history/i })).not.toBeInTheDocument();
 
-    const newLineProduct = container.querySelector('.qm-add-line select');
-    fireEvent.change(newLineProduct, { target: { value: '12' } });
+    const newLineProduct = screen.getByLabelText('Product for new line');
+    chooseProduct(newLineProduct, '12');
     expect(screen.getByPlaceholderText('Price')).toHaveValue(null);
     expect(quotationAPI.quotes.productPrice).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('dialog', { name: /price history/i })).not.toBeInTheDocument();
@@ -3414,7 +3429,7 @@ describe('QuotationEditor Product price context', () => {
     await act(async () => catalogueRequest.resolve({ data: products }));
     await waitFor(() => expect(productSelect).toBeEnabled());
 
-    fireEvent.change(productSelect, { target: { value: '12' } });
+    chooseProduct(productSelect, '12');
     expect(await screen.findByText(/Last quoted AED 22/)).toBeInTheDocument();
 
     await act(async () => initialHistoryRequest.resolve({
@@ -3455,12 +3470,12 @@ describe('QuotationEditor Product price context', () => {
     ));
 
     const { rerender } = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '11');
 
     rerender(<QuotationEditor quoteId={22} onClose={jest.fn()} />);
     expect(await screen.findByText('Q-0022')).toBeInTheDocument();
     const quoteBProduct = await screen.findByLabelText('Product for Imported masks');
-    fireEvent.change(quoteBProduct, { target: { value: '11' } });
+    chooseProduct(quoteBProduct, '11');
 
     const quoteBPrice = screen.getByLabelText('Unit price for Imported masks');
     await waitFor(() => expect(quoteBPrice).toHaveValue(30));
@@ -3474,9 +3489,9 @@ describe('QuotationEditor Product price context', () => {
     expect(within(dialog).queryByText(/Company A Gloves/)).not.toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
-    fireEvent.change(quoteBProduct, { target: { value: '' } });
+    chooseProduct(quoteBProduct, '');
     fireEvent.change(quoteBPrice, { target: { value: '' } });
-    fireEvent.change(quoteBProduct, { target: { value: '11' } });
+    chooseProduct(quoteBProduct, '11');
 
     await waitFor(() => expect(quoteBPrice).toHaveValue(30));
     dialog = await screen.findByRole('dialog', { name: /price history/i });
@@ -3497,7 +3512,7 @@ describe('QuotationEditor Product price context', () => {
     });
 
     render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '11');
 
     await waitFor(() => expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(10));
     expect(screen.getByRole('dialog', { name: /price history/i })).toBeInTheDocument();
@@ -3778,7 +3793,7 @@ describe('QuotationEditor Product price context', () => {
     quotationAPI.quotes.retrieve.mockResolvedValue({ data: current });
     quotationAPI.quotes.productPrice.mockResolvedValue({ data: { product: 11, recommendation: acceptedRecommendation } });
     render(<QuotationEditor quoteId={21} />);
-    fireEvent.change(await screen.findByLabelText('Product for Imported gloves'), { target: { value: '11' } });
+    chooseProduct(await screen.findByLabelText('Product for Imported gloves'), '11');
     await waitFor(() => expect(quotationAPI.quotes.productPrice).toHaveBeenCalled());
     expect(screen.getByLabelText('Unit price for Imported gloves')).toHaveValue(22);
     expect(screen.getByLabelText('Manually entered price')).toBeInTheDocument();

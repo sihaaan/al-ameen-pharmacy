@@ -1,27 +1,95 @@
 .qm-product-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  position: relative;
   min-width: 0;
 }
 
-.qm-product-picker input,
-.qm-product-picker select {
+.qm-product-picker input {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+  padding-right: 32px;
 }
 
-.qm-product-picker-help {
+.qm-product-picker .qm-product-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: #64748b;
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: normal;
+  font-size: 20px;
+  cursor: pointer;
 }
 
-.qm-product-picker-help:empty {
+.qm-product-clear:hover:not(:disabled),
+.qm-product-clear:focus-visible {
+  background: #e2e8f0;
+  color: #0f172a;
+  outline: 2px solid #0f766e;
+}
+
+.qm-product-suggestions {
+  position: fixed;
+  z-index: 60;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  border: 1px solid #94a3b8;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px #172b4526;
+  background: #fff;
+  color: #0f172a;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.qm-product-search-help {
+  padding: 9px 12px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.qm-product-suggestions ul {
+  margin: 0;
+  padding: 0 4px 4px;
+  list-style: none;
+}
+
+.qm-product-suggestions li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.qm-product-suggestions li[aria-selected="true"] {
+  background: #e6f7f4;
+  outline: 1px solid #0f766e;
+  outline-offset: -1px;
+}
+
+.qm-product-suggestions li > span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.qm-product-suggestions li > span:empty {
   display: none;
 }
+
+.qm-product-suggestions small { color: #0f766e; }
+.qm-product-suggestions .qm-product-provisional { color: #92400e; }
+.qm-product-suggestions .qm-product-create { border-top: 1px solid #e2e8f0; color: #0f766e; }
 
 .qm-line-product-name {
   display: block;

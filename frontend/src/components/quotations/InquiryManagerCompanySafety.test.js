@@ -137,21 +137,22 @@ describe('InquiryManager company-scoped async safety', () => {
     }
 
     await screen.findByLabelText('Requested item name row 150');
-    const pickers = container.querySelectorAll('select[aria-label^="Matched product row "]');
+    const pickers = container.querySelectorAll('input[aria-label^="Matched product row "]');
     expect(pickers).toHaveLength(150);
-    // Bound live DOM size, while keeping a detected match outside the first 20 results.
-    pickers.forEach((picker) => expect(picker.options.length).toBeLessThanOrEqual(22));
-    expect(pickers[0]).toHaveValue(String(lastProduct.id));
-    expect(pickers[0].selectedOptions[0]).toHaveTextContent(lastProduct.name);
+    // No product suggestions are rendered until one row is searched.
+    expect(container.querySelectorAll('.qm-product-picker option')).toHaveLength(0);
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(pickers[0]).toHaveValue(lastProduct.name);
 
-    fireEvent.change(screen.getByLabelText('Search products for inquiry row 150'), {
+    fireEvent.focus(pickers[149]);
+    fireEvent.change(pickers[149], {
       target: { value: lastProduct.sku },
     });
-    expect(pickers[149].options).toHaveLength(2);
-    fireEvent.change(pickers[149], { target: { value: String(lastProduct.id) } });
+    fireEvent.click(screen.getByRole('option', { name: new RegExp(lastProduct.name) }));
+    expect(pickers[149]).toHaveValue(lastProduct.name);
     fireEvent.change(screen.getByLabelText('Quantity row 150'), { target: { value: '7' } });
     fireEvent.change(screen.getByLabelText('Unit price row 150'), { target: { value: '12.50' } });
-    fireEvent.change(pickers[0], { target: { value: '' } });
+    fireEvent.click(screen.getByLabelText('Clear Matched product row 1'));
     fireEvent.click(screen.getByText('Save & Open Quotation', { selector: 'button' }));
 
     await waitFor(() => expect(onOpenQuote).toHaveBeenCalledWith(901));
@@ -181,10 +182,10 @@ describe('InquiryManager company-scoped async safety', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Choose Company 7' })[1]);
     fireEvent.change(screen.getByLabelText('Requested item name'), { target: { value: 'Requested product' } });
     const picker = screen.getByLabelText('Matched product');
-    expect(picker.options).toHaveLength(21);
-    fireEvent.change(screen.getByLabelText('Search products for manual inquiry row 1'), { target: { value: 'Product 5400' } });
-    expect(picker.options).toHaveLength(2);
-    fireEvent.change(picker, { target: { value: '5400' } });
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    fireEvent.focus(picker);
+    fireEvent.change(picker, { target: { value: 'Product 5400' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Product 5400' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save & Open Quotation' }));
     await waitFor(() => expect(onOpenQuote).toHaveBeenCalledWith(901));
     expect(quotationAPI.inquiries.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -204,7 +205,7 @@ describe('InquiryManager company-scoped async safety', () => {
 
     expect(await screen.findByDisplayValue('Old company AI item')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Apply AI Cleaned Rows/i })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Matched product row 1')).toHaveValue('11');
+    expect(screen.getByLabelText('Matched product row 1')).toHaveValue('Matched Product');
     fireEvent.click(screen.getAllByRole('button', { name: 'Choose Company 8' })[0]);
 
     await waitFor(() => expect(screen.getByLabelText('Matched product row 1')).toHaveValue(''));
@@ -633,7 +634,7 @@ describe('InquiryManager company-scoped async safety', () => {
     render(<InquiryManager />);
 
     fireEvent.click(screen.getByRole('button', { name: /Manual inquiry entry/i }));
-    await screen.findByRole('option', { name: 'Matched Product' });
+    await screen.findAllByText('Companies ready:');
     const quantity = screen.getByRole('spinbutton', { name: 'Qty' });
     fireEvent.change(quantity, { target: { value: '7.5' } });
     quantity.focus();
