@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import quotationAPI, { describeQuotationError, formatQuotationError } from '../../api/quotations';
 import { releaseNumberWheelFocus } from '../../utils/numberInput';
 import CompanySelectWithCreate from './CompanySelectWithCreate';
+import ProductSelect, { buildProductCatalogue } from './ProductSelect';
 import QuotationErrorNotice from './QuotationErrorNotice';
 
 let clientRowSequence = 0;
@@ -373,6 +374,7 @@ const InquiryManager = ({ onOpenQuote }) => {
   const [companies, setCompanies] = useState([]);
   const [contacts, setContacts] = useState([]);
   const [items, setItems] = useState([]);
+  const productCatalogue = useMemo(() => buildProductCatalogue(items, []), [items]);
   const [inquiries, setInquiries] = useState([]);
   const [selectedInquiry, setSelectedInquiry] = useState(null);
   const [form, setForm] = useState({
@@ -1614,14 +1616,17 @@ const InquiryManager = ({ onOpenQuote }) => {
                         </td>
                         <td className="qm-import-item-cell"><input aria-label={`Requested item name row ${index + 1}`} value={line.raw_name} onChange={(event) => updateImportLine(index, importedLineNameEditPatch(event.target.value))} /></td>
                         <td className="qm-import-match-cell">
-                          <select aria-label={`Matched product row ${index + 1}`} value={line.matched_product || ''} onChange={(event) => updateImportLine(index, {
-                            matched_product: event.target.value || null,
-                            match_status: event.target.value ? 'confirmed' : 'unresolved',
-                            match_confirmed_by_user: Boolean(event.target.value),
-                          })}>
-                            <option value="">Unmatched</option>
-                            {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                          </select>
+                          <ProductSelect
+                            catalogue={productCatalogue}
+                            label={`Matched product row ${index + 1}`}
+                            searchLabel={`Search products for inquiry row ${index + 1}`}
+                            value={line.matched_product || ''}
+                            onChange={(productId) => updateImportLine(index, {
+                              matched_product: productId || null,
+                              match_status: productId ? 'confirmed' : 'unresolved',
+                              match_confirmed_by_user: Boolean(productId),
+                            })}
+                          />
                           {shouldShowMatchReason(line.match_reason) && <small className="qm-muted-text">{line.match_reason}</small>}
                         </td>
                         <td className="qm-import-qty-cell"><input aria-label={`Quantity row ${index + 1}`} type="number" min="0" step="0.001" value={line.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
@@ -1924,13 +1929,17 @@ const InquiryManager = ({ onOpenQuote }) => {
                 <input aria-label="Requested item name" placeholder="Requested item name" required value={line.raw_name} onChange={(event) => updateLine(index, { raw_name: event.target.value })} />
                 <input aria-label="Qty" type="number" min="0" step="0.001" placeholder="Qty" value={line.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => updateLine(index, { quantity: event.target.value })} />
                 <input aria-label="Unit" placeholder="Unit" value={line.unit} onChange={(event) => updateLine(index, { unit: event.target.value })} />
-                <select aria-label="Matched product" value={line.matched_product} onChange={(event) => {
-                  const matched = event.target.value;
-                  updateLine(index, { matched_product: matched, match_status: matched ? 'confirmed' : 'unresolved' });
-                }}>
-                  <option value="">Match status: Unmatched</option>
-                  {items.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
+                <ProductSelect
+                  catalogue={productCatalogue}
+                  label="Matched product"
+                  searchLabel={`Search products for manual inquiry row ${index + 1}`}
+                  placeholder="Match status: Unmatched"
+                  value={line.matched_product}
+                  onChange={(matched) => updateLine(index, {
+                    matched_product: matched,
+                    match_status: matched ? 'confirmed' : 'unresolved',
+                  })}
+                />
                 <div className="qm-line-order-actions">
                   <button type="button" className="qm-secondary small" onClick={() => insertManualLine(index)}>+ Above</button>
                   <button type="button" className="qm-secondary small" disabled={index === 0} onClick={() => moveManualLine(index, index - 1)} aria-label={`Move manual row ${index + 1} up`}>↑</button>

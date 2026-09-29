@@ -96,6 +96,102 @@ describe('InquiryManager company-scoped async safety', () => {
     expect(screen.getByPlaceholderText("Paste the customer's requested items here...")).toBeInTheDocument();
   });
 
+  test.each([
+    ['paste', 5400],
+    ['upload', 34000],
+  ])('reviews and saves all 150 %s rows with a %i-product catalogue without oversized dropdowns', async (source, productCount) => {
+    const products = Array.from({ length: productCount }, (_, index) => ({
+      id: index + 1,
+      name: `Product ${String(index + 1).padStart(5, '0')}`,
+      sku: `ITEM-${index + 1}`,
+    }));
+    const lastProduct = products[products.length - 1];
+    const lines = Array.from({ length: 150 }, (_, index) => ({
+      raw_name: `Requested item ${index + 1}`,
+      quantity: '1.000',
+      unit: 'PCS',
+      parse_status: 'parsed',
+      matched_product: index === 0 ? lastProduct.id : null,
+      match_status: index === 0 ? 'confirmed' : 'unresolved',
+    }));
+    quotationAPI.items.list.mockResolvedValue({ data: products });
+    const preview = { data: { lines, summary: {}, warnings: [] } };
+    quotationAPI.inquiries.parseText.mockResolvedValue(preview);
+    quotationAPI.inquiries.parseFile.mockResolvedValue(preview);
+    quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
+    const onOpenQuote = jest.fn();
+    const { container } = render(<InquiryManager onOpenQuote={onOpenQuote} />);
+    await screen.findByText('Companies ready:');
+    fireEvent.click(screen.getByRole('button', { name: 'Choose Company 7' }));
+
+    if (source === 'paste') {
+      fireEvent.click(screen.getByRole('button', { name: 'Paste Text' }));
+      fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), {
+        target: { value: lines.map((line) => `${line.raw_name}\t1\tPCS`).join('\n') },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
+    } else {
+      const file = new File(['test document'], 'inquiry.pdf', { type: 'application/pdf' });
+      fireEvent.change(screen.getByLabelText('Inquiry file'), { target: { files: [file] } });
+      fireEvent.click(screen.getByRole('button', { name: 'Parse File' }));
+    }
+
+    await screen.findByLabelText('Requested item name row 150');
+    const pickers = container.querySelectorAll('select[aria-label^="Matched product row "]');
+    expect(pickers).toHaveLength(150);
+    // Bound live DOM size, while keeping a detected match outside the first 20 results.
+    pickers.forEach((picker) => expect(picker.options.length).toBeLessThanOrEqual(22));
+    expect(pickers[0]).toHaveValue(String(lastProduct.id));
+    expect(pickers[0].selectedOptions[0]).toHaveTextContent(lastProduct.name);
+
+    fireEvent.change(screen.getByLabelText('Search products for inquiry row 150'), {
+      target: { value: lastProduct.sku },
+    });
+    expect(pickers[149].options).toHaveLength(2);
+    fireEvent.change(pickers[149], { target: { value: String(lastProduct.id) } });
+    fireEvent.change(screen.getByLabelText('Quantity row 150'), { target: { value: '7' } });
+    fireEvent.change(screen.getByLabelText('Unit price row 150'), { target: { value: '12.50' } });
+    fireEvent.change(pickers[0], { target: { value: '' } });
+    fireEvent.click(screen.getByText('Save & Open Quotation', { selector: 'button' }));
+
+    await waitFor(() => expect(onOpenQuote).toHaveBeenCalledWith(901));
+    const savedLines = quotationAPI.inquiries.createImported.mock.calls[0][0].lines;
+    expect(savedLines).toHaveLength(150);
+    expect(savedLines.map((line) => line.raw_name)).toEqual(lines.map((line) => line.raw_name));
+    expect(savedLines[0]).toEqual(expect.objectContaining({
+      matched_product: null, match_status: 'unresolved', match_confirmed_by_user: false,
+    }));
+    expect(savedLines[149]).toEqual(expect.objectContaining({
+      matched_product: String(lastProduct.id), match_status: 'confirmed', match_confirmed_by_user: true,
+      quantity: '7', unit_price: '12.50',
+    }));
+    expect(quotationAPI.items.list).toHaveBeenCalledTimes(1);
+  }, 60000);
+
+  test('manual entry can find and save a product beyond its short list', async () => {
+    const products = Array.from({ length: 5400 }, (_, index) => ({
+      id: index + 1, name: `Product ${String(index + 1).padStart(4, '0')}`,
+    }));
+    quotationAPI.items.list.mockResolvedValue({ data: products });
+    quotationAPI.inquiries.create.mockResolvedValue({ data: { id: 601, company: 7 } });
+    const onOpenQuote = jest.fn();
+    render(<InquiryManager onOpenQuote={onOpenQuote} />);
+    await screen.findByText('Companies ready:');
+    fireEvent.click(screen.getByRole('button', { name: /Manual inquiry entry/i }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Choose Company 7' })[1]);
+    fireEvent.change(screen.getByLabelText('Requested item name'), { target: { value: 'Requested product' } });
+    const picker = screen.getByLabelText('Matched product');
+    expect(picker.options).toHaveLength(21);
+    fireEvent.change(screen.getByLabelText('Search products for manual inquiry row 1'), { target: { value: 'Product 5400' } });
+    expect(picker.options).toHaveLength(2);
+    fireEvent.change(picker, { target: { value: '5400' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Open Quotation' }));
+    await waitFor(() => expect(onOpenQuote).toHaveBeenCalledWith(901));
+    expect(quotationAPI.inquiries.create).toHaveBeenCalledWith(expect.objectContaining({
+      lines: [expect.objectContaining({ matched_product: '5400', match_status: 'confirmed' })],
+    }));
+  });
+
   test('applies AI cleanup once and clears company-scoped matches after company changes', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({ data: parsedPreview });
     renderPasteInquiryManager();
