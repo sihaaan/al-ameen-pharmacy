@@ -3712,19 +3712,20 @@ fieldset.qm-gmail-locked-editor,
   min-width: 0;
 }
 
-.qm-line-form input:first-child {
+.qm-line-form > input:first-child {
   flex: 2 1 220px;
 }
 
-.qm-line-form input[type="number"] {
+.qm-line-form > input[type="number"] {
   flex: 0 1 92px;
 }
 
-.qm-line-form input:not(:first-child):not([type="number"]) {
+.qm-line-form > input:not(:first-child):not([type="number"]) {
   flex: 0 1 96px;
 }
 
-.qm-line-form select {
+.qm-line-form > select,
+.qm-line-form > .qm-product-picker {
   flex: 1 1 190px;
 }
 

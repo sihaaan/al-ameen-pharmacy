@@ -36,6 +36,9 @@ const ProductSelect = ({
   const selectedProduct = catalogue.byId.get(selectedId);
   const { matches, count } = useMemo(() => {
     const terms = search.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    // Most inquiry rows are not being searched. Avoid scanning/copying the
+    // entire catalogue once per row just to show the same first few options.
+    if (!terms.length) return { matches: catalogue.options.slice(0, MAX_RESULTS), count: catalogue.options.length };
     const filtered = catalogue.options.filter((item) => terms.every((term) => item.searchText.includes(term)));
     return { matches: filtered.slice(0, MAX_RESULTS), count: filtered.length };
   }, [catalogue, search]);
