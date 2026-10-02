@@ -565,18 +565,26 @@ def _pdf_styles(primary):
     return styles
 
 
-def _quotation_line_column_widths(show_brand_column):
+def _quotation_line_column_widths(show_brand_column, show_expiry_column=False):
+    if show_expiry_column:
+        # Keep both optional columns within the same 178 mm A4 content area.
+        widths = ([8, 36, 22, 22, 12, 14, 22, 20, 22] if show_brand_column
+                  else [8, 55, 24, 13, 14, 22, 20, 22])
+        return [width * mm for width in widths]
     if show_brand_column:
         # A4 content width is 178 mm after the 16 mm document margins.
         return [8 * mm, 42 * mm, 25 * mm, 15 * mm, 16 * mm, 24 * mm, 24 * mm, 24 * mm]
     return [10 * mm, 68 * mm, 16 * mm, 18 * mm, 26 * mm, 25 * mm, 25 * mm]
 
 
-def _build_quotation_line_table(quotation, styles, primary, lines=None):
+def _build_quotation_line_table(quotation, styles, primary, lines=None, *, include_expiry=False):
     show_brand_column = bool(getattr(quotation, "show_brand_column", False))
+    show_expiry_column = include_expiry and bool(getattr(quotation, "show_expiry_column", False))
     headers = ["#", "Item Description"]
     if show_brand_column:
         headers.append("Brand")
+    if show_expiry_column:
+        headers.append("Expiry date")
     headers.extend(["Qty", "Unit", "Unit Price", "VAT", "Total"])
     table_data = [[Paragraph(header, styles["TableHeader"]) for header in headers]]
 
@@ -609,6 +617,8 @@ def _build_quotation_line_table(quotation, styles, primary, lines=None):
                     styles["TableCell"],
                 )
             )
+        if show_expiry_column:
+            row.append(Paragraph(_text(line.expiry_date, fallback="-"), styles["TableCell"]))
         row.extend(
             [
                 _single_line_table_cell(_number(line.quantity), styles["TableCellQuantity"], h_align="RIGHT"),
@@ -620,10 +630,10 @@ def _build_quotation_line_table(quotation, styles, primary, lines=None):
         )
         table_data.append(row)
 
-    money_start_column = 5 if show_brand_column else 4
+    money_start_column = 4 + int(show_brand_column) + int(show_expiry_column)
     line_table = Table(
         table_data,
-        colWidths=_quotation_line_column_widths(show_brand_column),
+        colWidths=_quotation_line_column_widths(show_brand_column, show_expiry_column),
         repeatRows=1,
     )
     line_table.setStyle(
@@ -727,7 +737,7 @@ def build_quotation_pdf(quotation, *, config=None):
     elements.append(meta_table)
     elements.append(Spacer(1, 8))
 
-    line_table, lines = _build_quotation_line_table(quotation, styles, primary)
+    line_table, lines = _build_quotation_line_table(quotation, styles, primary, include_expiry=True)
     elements.append(line_table)
     line_count = max(lines.count(), 1)
 

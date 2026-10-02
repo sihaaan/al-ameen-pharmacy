@@ -4,6 +4,7 @@ from io import BytesIO
 from django.utils import timezone
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from .models import QuotationLine
 from .pdf_config import get_quotation_pdf_config
@@ -51,6 +52,7 @@ def build_quotation_excel(quotation):
     quote_date = _local_date(quotation.created_at)
     valid_until = _valid_until(quotation, config)
     show_brand_column = bool(getattr(quotation, "show_brand_column", False))
+    show_expiry_column = bool(getattr(quotation, "show_expiry_column", False))
 
     workbook = Workbook()
     sheet = workbook.active
@@ -100,6 +102,8 @@ def build_quotation_excel(quotation):
     ]
     if show_brand_column:
         columns.append(("brand", "Brand"))
+    if show_expiry_column:
+        columns.append(("expiry_date", "Expiry date"))
     columns.extend(
         [
             ("quantity", "Qty"),
@@ -131,6 +135,7 @@ def build_quotation_excel(quotation):
             "serial": index,
             "item": line.item_name_snapshot,
             "brand": str(getattr(line, "brand_name_snapshot", "") or "").strip() or "-",
+            "expiry_date": line.expiry_date.strip() or "-",
             "quantity": _safe_number(line.quantity),
             "unit": line.unit or "-",
             "unit_price": _safe_number(line.unit_price),
@@ -141,7 +146,11 @@ def build_quotation_excel(quotation):
         for column, (key, _header) in enumerate(columns, start=1):
             value = values_by_key[key]
             cell = sheet.cell(row=row, column=column, value=value)
-            cell.alignment = Alignment(vertical="top", wrap_text=(key in {"item", "brand"}))
+            cell.alignment = Alignment(vertical="top", wrap_text=(key in {"item", "brand", "expiry_date"}))
+            if key == "expiry_date":
+                # Preserve month-only expiry text and never interpret it as a formula.
+                cell.data_type = "s"
+                cell.number_format = "@"
             if key == "serial":
                 cell.alignment = Alignment(horizontal="center", vertical="top")
             elif key in {"quantity", "unit_price", "vat_rate", "vat_amount", "line_total"}:
@@ -183,31 +192,13 @@ def build_quotation_excel(quotation):
     sheet.cell(row=footer_start + 1, column=1, value="Payment Terms").font = Font(bold=True, color=MUTED)
     sheet.cell(row=footer_start + 1, column=2, value=_payment_terms(quotation, config) or "-")
 
-    if show_brand_column:
-        widths = {
-            "A": 11,
-            "B": 38,
-            "C": 24,
-            "D": 12,
-            "E": 16,
-            "F": 14,
-            "G": 10,
-            "H": 14,
-            "I": 14,
-        }
-    else:
-        widths = {
-            "A": 11,
-            "B": 48,
-            "C": 12,
-            "D": 16,
-            "E": 14,
-            "F": 10,
-            "G": 14,
-            "H": 14,
-        }
-    for column, width in widths.items():
-        sheet.column_dimensions[column].width = width
+    widths = {
+        "serial": 11, "item": 38 if show_brand_column else 48, "brand": 24,
+        "expiry_date": 18, "quantity": 12, "unit": 16, "unit_price": 14,
+        "vat_rate": 10, "vat_amount": 14, "line_total": 14,
+    }
+    for key, column in column_numbers.items():
+        sheet.column_dimensions[get_column_letter(column)].width = widths[key]
     sheet.page_setup.orientation = "landscape"
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 0
