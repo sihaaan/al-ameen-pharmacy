@@ -512,6 +512,58 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.getByRole('textbox', { name: 'Brand' })).toBeInTheDocument();
   });
 
+  test('keeps expiry edits when hiding the optional column and saves the line and layout', async () => {
+    const withExpiry = { ...readyQuote, show_expiry_column: true };
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: readyQuote });
+    quotationAPI.quotes.update.mockResolvedValueOnce({ data: withExpiry });
+    quotationAPI.quotes.bulkUpdateLines.mockResolvedValueOnce({ data: { quotation: {
+      ...withExpiry, lines: [{ ...readyQuote.lines[0], expiry_date: '09/2028' }],
+    } } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit terms & layout/i }));
+    const toggle = screen.getByRole('checkbox', { name: 'Show Expiry date column' });
+    expect(toggle).not.toBeChecked();
+    expect(screen.queryByRole('columnheader', { name: 'Expiry date' })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByLabelText('Expiry date for Imported gloves'), { target: { value: '09/2028' } });
+    fireEvent.click(toggle);
+    expect(screen.queryByLabelText('Expiry date for Imported gloves')).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText('Expiry date for Imported gloves')).toHaveValue('09/2028');
+    fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
+    await waitFor(() => expect(quotationAPI.quotes.update).toHaveBeenCalledWith(21, expect.objectContaining({ show_expiry_column: true })));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled());
+    const input = screen.getByLabelText('Expiry date for Imported gloves');
+    expect(input).toHaveValue('09/2028');
+    fireEvent.click(within(input.closest('tr')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(quotationAPI.quotes.bulkUpdateLines).toHaveBeenCalledWith(21, expect.objectContaining({
+      lines: [expect.objectContaining({ id: 31, expiry_date: '09/2028' })],
+    })));
+    await waitFor(() => expect(within(screen.getByLabelText('Expiry date for Imported gloves').closest('tr')).getByText('Saved')).toBeInTheDocument());
+  });
+
+  test('includes expiry on a manually added line and displays saved dates on locked quotations', async () => {
+    const withExpiry = { ...readyQuote, show_expiry_column: true };
+    quotationAPI.quotes.retrieve.mockResolvedValue({ data: withExpiry });
+    quotationAPI.lines.create.mockResolvedValueOnce({ data: { id: 32 } });
+    const view = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.change(await screen.findByPlaceholderText('Snapshot name'), { target: { value: 'New gloves' } });
+    fireEvent.change(screen.getByLabelText('Expiry date for new line'), { target: { value: '30/09/2028' } });
+    fireEvent.submit(screen.getByLabelText('Expiry date for new line').closest('form'));
+    await waitFor(() => expect(quotationAPI.lines.create).toHaveBeenCalledWith(expect.objectContaining({
+      quotation: 21, expiry_date: '30/09/2028',
+    })));
+    view.unmount();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: {
+      ...withExpiry, status: 'finalized', lines: [{ ...readyQuote.lines[0], expiry_date: '09/2028' }],
+    } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    const savedExpiry = await screen.findByLabelText('Expiry date for Imported gloves');
+    expect(savedExpiry).toHaveValue('09/2028');
+    expect(savedExpiry).toBeDisabled();
+    expect(screen.queryByLabelText('Expiry date for new line')).not.toBeInTheDocument();
+  });
+
   test('saves the Brand toggle with quotation terms and layout', async () => {
     quotationAPI.quotes.update.mockResolvedValueOnce({
       data: { ...quote, show_brand_column: true },
@@ -527,6 +579,7 @@ describe('QuotationEditor Product price context', () => {
       payment_terms: 'as_per_agreement',
       valid_until: '2026-08-01',
       show_brand_column: true,
+      show_expiry_column: false,
       quotation_review_fingerprint: 'quotation-review-fingerprint-1',
     }));
     expect(await screen.findByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled();

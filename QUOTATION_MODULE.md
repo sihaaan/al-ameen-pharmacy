@@ -252,6 +252,13 @@ Create a quotation directly:
 - Click `Create Quotation`
 - Add lines manually in the quotation editor
 
+Show expiry dates on a quotation:
+- Open `Terms & Layout`, enable `Show Expiry date column`, and save the layout.
+- Enter each item's packaging expiry, such as `09/2028` or `30/09/2028`, then save the lines. Unknown dates can remain blank.
+- The column is off by default and appears in quotation PDF and Excel exports only when enabled. Hiding it keeps the saved values; revisions copy them.
+- This option applies to quotations only. Proforma and tax invoice layouts are unchanged; delivery notes retain their separate expiry option.
+- Deploy the additive `0055_quotation_expiry_column` migration before running the updated backend.
+
 Finalize a quotation:
 - In the quotation editor, confirm every non-ignored line has:
   - matched Product

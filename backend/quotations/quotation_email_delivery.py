@@ -224,6 +224,7 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
                     effective_brand if project_for_send else line.brand_name_snapshot
                 ),
                 "effective_finalized_brand": effective_brand,
+                "expiry_date": line.expiry_date,
                 "description": line.description,
                 "quantity": line.quantity,
                 "unit": line.unit,
@@ -265,6 +266,7 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
             "currency": quotation.currency,
             "payment_terms": quotation.payment_terms,
             "show_brand_column": quotation.show_brand_column,
+            "show_expiry_column": quotation.show_expiry_column,
             "subtotal": projected_subtotal if project_for_send else quotation.subtotal,
             "vat_total": projected_vat_total if project_for_send else quotation.vat_total,
             "discount_amount": discount_amount,

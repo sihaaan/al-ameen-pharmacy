@@ -1569,6 +1569,7 @@ def build_quotation_delete_snapshot(quotation):
             "currency": quotation.currency,
             "payment_terms": quotation.payment_terms,
             "show_brand_column": quotation.show_brand_column,
+            "show_expiry_column": quotation.show_expiry_column,
             "subtotal": _snapshot_decimal(quotation.subtotal),
             "vat_total": _snapshot_decimal(quotation.vat_total),
             "discount_amount": _snapshot_decimal(quotation.discount_amount),
@@ -1580,6 +1581,7 @@ def build_quotation_delete_snapshot(quotation):
                 "sort_order": line.sort_order,
                 "item_name_snapshot": line.item_name_snapshot,
                 "brand_name_snapshot": line.brand_name_snapshot,
+                "expiry_date": line.expiry_date,
                 "product_id": line.product_id,
                 "product_name": line.product.name if line.product_id else "",
                 "quote_item_id": line.quote_item_id,
@@ -2798,6 +2800,7 @@ def bulk_update_quotation_lines(
         "include_product_image",
         "item_name_snapshot",
         "brand_name_snapshot",
+        "expiry_date",
         "description",
         "quantity",
         "unit",
@@ -2896,6 +2899,11 @@ def bulk_update_quotation_lines(
                 if len(brand_name) > 200:
                     raise ValidationError("Brand must be 200 characters or fewer.")
                 line.brand_name_snapshot = brand_name
+            elif field == "expiry_date":
+                expiry_date = str(value or "").strip()
+                if len(expiry_date) > 40:
+                    raise ValidationError("Expiry date must be 40 characters or fewer.")
+                line.expiry_date = expiry_date
             else:
                 setattr(line, field, value if value != "" else "")
         if line.product_image_id:
@@ -3150,6 +3158,7 @@ def revise_quotation(quotation, actor):
         currency=source.currency,
         payment_terms=source.payment_terms,
         show_brand_column=source.show_brand_column,
+        show_expiry_column=source.show_expiry_column,
         discount_amount=source.discount_amount,
         notes=source.notes,
         internal_notes=source.internal_notes,
@@ -3164,6 +3173,7 @@ def revise_quotation(quotation, actor):
             match_reason=line.match_reason,
             item_name_snapshot=line.item_name_snapshot,
             brand_name_snapshot=line.brand_name_snapshot,
+            expiry_date=line.expiry_date,
             description=line.description,
             quantity=line.quantity,
             unit=line.unit,

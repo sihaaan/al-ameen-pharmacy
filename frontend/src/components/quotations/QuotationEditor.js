@@ -98,6 +98,7 @@ const emptyLine = {
   product: '',
   item_name_snapshot: '',
   brand_name_snapshot: '',
+  expiry_date: '',
   description: '',
   quantity: '1',
   unit: '',
@@ -122,6 +123,7 @@ const normalizeDraft = (draft = {}) => ({
   product: String(draft.product || ''),
   item_name_snapshot: String(draft.item_name_snapshot || ''),
   brand_name_snapshot: String(draft.brand_name_snapshot || ''),
+  expiry_date: String(draft.expiry_date || ''),
   description: String(draft.description || ''),
   quantity: String(draft.quantity || ''),
   unit: String(draft.unit || ''),
@@ -165,6 +167,7 @@ const draftFromLine = (line) => ({
   product: line.product || '',
   item_name_snapshot: line.item_name_snapshot || '',
   brand_name_snapshot: line.brand_name_snapshot || '',
+  expiry_date: line.expiry_date || '',
   description: line.description || '',
   quantity: line.quantity || '1',
   unit: line.unit || '',
@@ -184,6 +187,7 @@ const termsDraftFromQuote = (quote = {}) => ({
   payment_terms: quote.payment_terms || 'as_per_agreement',
   valid_until: quote.valid_until || '',
   show_brand_column: !!quote.show_brand_column,
+  show_expiry_column: !!quote.show_expiry_column,
 });
 
 const discountDraftFromQuote = (quote = {}) => String(quote.discount_amount ?? '0.00');
@@ -287,7 +291,8 @@ const quotationReviewDisplaySignature = (quote = {}) => {
 const termsDraftsMatch = (left = {}, right = {}) => (
   String(left.payment_terms || '') === String(right.payment_terms || '') &&
   String(left.valid_until || '') === String(right.valid_until || '') &&
-  !!left.show_brand_column === !!right.show_brand_column
+  !!left.show_brand_column === !!right.show_brand_column &&
+  !!left.show_expiry_column === !!right.show_expiry_column
 );
 
 const partyDraftsMatch = (left = {}, right = {}) => (
@@ -474,6 +479,9 @@ const QuotationEditor = ({
         show_brand_column: !!currentTermsDraft.show_brand_column !== !!previousSavedTermsDraft.show_brand_column
           ? currentTermsDraft.show_brand_column
           : nextTermsDraft.show_brand_column,
+        show_expiry_column: !!currentTermsDraft.show_expiry_column !== !!previousSavedTermsDraft.show_expiry_column
+          ? currentTermsDraft.show_expiry_column
+          : nextTermsDraft.show_expiry_column,
       }
       : nextTermsDraft;
     quoteTermsDraftRef.current = displayedTermsDraft;
@@ -1743,6 +1751,7 @@ const QuotationEditor = ({
         payment_terms: termsAtSaveStart.payment_terms || 'as_per_agreement',
         valid_until: termsAtSaveStart.valid_until || null,
         show_brand_column: !!termsAtSaveStart.show_brand_column,
+        show_expiry_column: !!termsAtSaveStart.show_expiry_column,
         quotation_review_fingerprint: currentQuote?.quotation_review_fingerprint || '',
       });
       const newerTermsRemain = !termsDraftsMatch(
@@ -3203,7 +3212,7 @@ const QuotationEditor = ({
         </button>
         <button type="button" ref={termsDetailsButtonRef} className="qm-details-toggle" aria-expanded={openDetailsSection === 'terms'} aria-controls={`terms-details-${quote.id}`} onClick={() => toggleDetailsSection('terms')}>
           <span className="qm-details-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
-          <span className="qm-details-copy"><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'}</span>{hasUnsavedQuoteTerms && <small>Unsaved changes</small>}</span>
+          <span className="qm-details-copy"><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'} · Expiry date {quoteTermsDraft.show_expiry_column ? 'on' : 'off'}</span>{hasUnsavedQuoteTerms && <small>Unsaved changes</small>}</span>
           <span className="qm-details-action">{openDetailsSection === 'terms' ? 'Terms & layout open' : isEditable ? 'Edit terms & layout' : 'View terms & layout'}<span aria-hidden="true">{openDetailsSection === 'terms' ? '−' : '+'}</span></span>
         </button>
       <section className="qm-panel qm-party-panel qm-details-panel" id={`customer-details-${quote.id}`} aria-labelledby={`customer-details-title-${quote.id}`} hidden={openDetailsSection !== 'customer'}>
@@ -3290,9 +3299,9 @@ const QuotationEditor = ({
             <span className="qm-label-text">Valid until</span>
             <input disabled={!isEditable || saving || Boolean(actionInFlight)} type="date" value={quoteTermsDraft.valid_until || ''} onChange={(event) => updateQuoteTermDraft({ valid_until: event.target.value })} />
           </label>
-          <label className="qm-terms-field qm-terms-toggle">
+          <div className="qm-terms-field qm-terms-toggle">
             <span className="qm-label-text">Optional columns</span>
-            <span
+            <label
               className="qm-terms-toggle-control"
               aria-disabled={!isEditable || saving || Boolean(actionInFlight)}
             >
@@ -3304,8 +3313,18 @@ const QuotationEditor = ({
                 onChange={(event) => updateQuoteTermDraft({ show_brand_column: event.target.checked })}
               />
               <span>Show Brand column</span>
-            </span>
-          </label>
+            </label>
+            <label className="qm-terms-toggle-control" aria-disabled={!isEditable || saving || Boolean(actionInFlight)}>
+              <input
+                type="checkbox"
+                aria-label="Show Expiry date column"
+                disabled={!isEditable || saving || Boolean(actionInFlight)}
+                checked={!!quoteTermsDraft.show_expiry_column}
+                onChange={(event) => updateQuoteTermDraft({ show_expiry_column: event.target.checked })}
+              />
+              <span>Show Expiry date column</span>
+            </label>
+          </div>
         </div>
       </section>
       </div>
@@ -3395,7 +3414,8 @@ const QuotationEditor = ({
           </datalist>
           {companyPricingVisible && <div className="qm-price-legend"><span className="history">◷ Historical price</span><span>✎ Manual price</span><span className="review">△ Needs review</span><span>Click the icon for details</span></div>}
           {isEditable && <p className="qm-entry-shortcuts">Tab: Price → VAT → next price · Shift+Tab: back{companyPricingVisible ? ' · Alt+↓: price details' : ''}</p>}
-          <table className={`qm-table line-table${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
+          {quoteTermsDraft.show_expiry_column && <p className="qm-entry-shortcuts">Expiry date: enter the date shown on the packaging, e.g. 09/2028 or 30/09/2028. Leave blank if unknown.</p>}
+          <table className={`qm-table line-table${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}${quoteTermsDraft.show_expiry_column ? ' with-expiry' : ''}`}>
             <thead>
               <tr>
                 <th className="qm-check-cell"><input type="checkbox" checked={filteredLines.length > 0 && filteredLines.every((line) => selectedLineIds.includes(line.id))} onChange={() => {
@@ -3406,6 +3426,7 @@ const QuotationEditor = ({
                 <th className="qm-line-product-cell">Matched Item <span className="qm-required">*</span></th>
                 <th className="qm-line-snapshot-cell">Snapshot Name <span className="qm-required">*</span></th>
                 {quoteTermsDraft.show_brand_column && <th className="qm-line-brand-cell">Brand</th>}
+                {quoteTermsDraft.show_expiry_column && <th className="qm-line-expiry-cell">Expiry date</th>}
                 <th className="qm-line-quantity-cell">Qty <span className="qm-required">*</span></th>
                 <th className="qm-line-unit-cell">Unit</th>
                 <th className="qm-price-cell">Unit Price <span className="qm-required">*</span></th>
@@ -3466,6 +3487,18 @@ const QuotationEditor = ({
                           placeholder="Brand"
                           value={draft.brand_name_snapshot || ''}
                           onChange={(event) => updateLineDraft(line.id, { brand_name_snapshot: event.target.value })}
+                        />
+                      </td>
+                    )}
+                    {quoteTermsDraft.show_expiry_column && (
+                      <td className="qm-line-expiry-cell">
+                        <input
+                          aria-label={`Expiry date for ${lineLabel(line, draft)}`}
+                          disabled={!isEditable}
+                          maxLength={40}
+                          placeholder="MM/YYYY"
+                          value={draft.expiry_date || ''}
+                          onChange={(event) => updateLineDraft(line.id, { expiry_date: event.target.value })}
                         />
                       </td>
                     )}
@@ -3551,7 +3584,7 @@ const QuotationEditor = ({
         </div>
 
         {isEditable && (
-          <form onSubmit={addLine} className={`qm-add-line${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}`}>
+          <form onSubmit={addLine} className={`qm-add-line${quoteTermsDraft.show_brand_column ? ' with-brand' : ''}${quoteTermsDraft.show_expiry_column ? ' with-expiry' : ''}`}>
             <ProductSelect
               key={quote.id}
               catalogue={productCatalogue}
@@ -3571,6 +3604,15 @@ const QuotationEditor = ({
                 placeholder="Brand"
                 value={lineForm.brand_name_snapshot}
                 onChange={(event) => setLineForm({ ...lineForm, brand_name_snapshot: event.target.value })}
+              />
+            )}
+            {quoteTermsDraft.show_expiry_column && (
+              <input
+                aria-label="Expiry date for new line"
+                maxLength={40}
+                placeholder="Expiry (MM/YYYY)"
+                value={lineForm.expiry_date}
+                onChange={(event) => setLineForm({ ...lineForm, expiry_date: event.target.value })}
               />
             )}
             <input aria-label="Qty" type="number" min="0" step="0.001" value={lineForm.quantity} onWheel={releaseNumberWheelFocus} onChange={(event) => setLineForm({ ...lineForm, quantity: event.target.value })} />

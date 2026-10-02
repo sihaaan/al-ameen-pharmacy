@@ -3263,6 +3263,14 @@ fieldset.qm-gmail-locked-editor,
   min-width: 1530px;
 }
 
+.line-table.with-expiry {
+  min-width: 1530px;
+}
+
+.line-table.with-brand.with-expiry {
+  min-width: 1680px;
+}
+
 .line-table .qm-serial-cell {
   width: 52px;
   min-width: 52px;
@@ -3278,7 +3286,8 @@ fieldset.qm-gmail-locked-editor,
   min-width: 360px;
 }
 
-.line-table .qm-line-brand-cell {
+.line-table .qm-line-brand-cell,
+.line-table .qm-line-expiry-cell {
   width: 150px;
   min-width: 150px;
 }
@@ -3745,8 +3754,13 @@ fieldset.qm-gmail-locked-editor,
   margin-top: 14px;
 }
 
-.qm-add-line.with-brand {
+.qm-add-line.with-brand,
+.qm-add-line.with-expiry {
   grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1.2fr) minmax(130px, 0.8fr) 80px 90px 100px auto;
+}
+
+.qm-add-line.with-brand.with-expiry {
+  grid-template-columns: minmax(180px, 1.2fr) minmax(180px, 1.2fr) repeat(2, minmax(130px, 0.8fr)) 80px 90px 100px auto;
 }
 
 .qm-success,
@@ -6124,7 +6138,9 @@ fieldset.qm-gmail-locked-editor,
   }
 
   .qm-add-line,
-  .qm-add-line.with-brand {
+  .qm-add-line.with-brand,
+  .qm-add-line.with-expiry,
+  .qm-add-line.with-brand.with-expiry {
     grid-template-columns: 1fr;
   }
 
