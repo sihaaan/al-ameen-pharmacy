@@ -257,7 +257,9 @@ Show expiry dates on a quotation:
 - Enter each item's packaging expiry, such as `09/2028` or `30/09/2028`, then save the lines. Unknown dates can remain blank.
 - The column is off by default and appears in quotation PDF and Excel exports only when enabled. Hiding it keeps the saved values; revisions copy them.
 - This option applies to quotations only. Proforma and tax invoice layouts are unchanged; delivery notes retain their separate expiry option.
-- Deploy the additive `0055_quotation_expiry_column` migration before running the updated backend.
+- Uploaded Excel/PDF tables and pasted tables recognize expiry headers including `available expiry`, `Expiry date` and `EXP`. AI text/vision extraction also carries visible item expiries. Month/year text is preserved; missing expiry stays blank.
+- When expiry dates are detected, the inquiry preview shows an editable expiry column. Saving and opening its quotation copies those dates and automatically enables the quotation's expiry column. Clearing every date before saving keeps the column off. Dates belong to the inquiry/quotation lines, not the shared product catalog.
+- Deploy the additive `0055_quotation_expiry_column` and `0056_inquiry_line_expiry` migrations before running the updated backend (`python manage.py migrate quotations`). Existing inquiries keep blank expiry values; reparse the source to import dates that were previously discarded.
 
 Finalize a quotation:
 - In the quotation editor, confirm every non-ignored line has:

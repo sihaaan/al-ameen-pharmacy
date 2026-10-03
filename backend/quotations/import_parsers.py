@@ -568,6 +568,17 @@ def _fallback_parse_sheet_text(sheet_name, rows):
     return lines, skipped
 
 
+def _excel_cell_value(cell):
+    value = cell.value
+    # Excel stores a day even when the sheet displays only a month/year.
+    # Preserve that displayed precision instead of inventing an expiry day.
+    if getattr(cell, "is_date", False) and hasattr(value, "strftime"):
+        date_format = re.sub(r'"[^\"]*"|\[[^\]]*\]|\\.', "", cell.number_format or "").lower()
+        if "m" in date_format and "y" in date_format and "d" not in date_format:
+            return value.strftime("%m/%Y")
+    return value
+
+
 def _openpyxl_rows(data):
     workbook = load_openpyxl_workbook(BytesIO(data), read_only=True, data_only=True)
     try:
@@ -587,13 +598,13 @@ def _openpyxl_rows(data):
                 min(max_excel_columns(), sheet_max_column or max_excel_columns()),
             )
             for row_index, row in enumerate(
-                sheet.iter_rows(values_only=True, max_col=effective_max_column),
+                sheet.iter_rows(max_col=effective_max_column),
                 start=1,
             ):
                 if len(rows) >= max_excel_rows():
                     row_limit_reached = True
                     break
-                rows.append((row_index, tuple(row)))
+                rows.append((row_index, tuple(_excel_cell_value(cell) for cell in row)))
             yield sheet.title, rows, "openpyxl_structured_v2", {
                 "row_limit_reached": row_limit_reached,
                 "column_limit_reached": column_limit_reached,

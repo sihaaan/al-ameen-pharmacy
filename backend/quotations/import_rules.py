@@ -1,6 +1,7 @@
 import re
 import string
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 
@@ -63,6 +64,8 @@ HEADER_ALIASES = {
         "no",
         "s no",
         "s/no",
+        "sn#",
+        "sn",
         "sl no",
         "sr no",
         "serial",
@@ -77,6 +80,9 @@ HEADER_ALIASES = {
         "material",
         "material description",
         "medicine",
+        "medication",
+        "medication / description",
+        "medication/description",
         "particulars",
         "product",
         "product name",
@@ -105,6 +111,11 @@ HEADER_ALIASES = {
         "u price",
         "u/p",
         "unit price",
+    },
+    "expiry_date": {
+        "expiry", "expiry date", "expiration", "expiration date",
+        "exp", "exp date", "available expiry", "available expiry date",
+        "date of expiry", "exp dt", "expiry dt",
     },
     "amount": {
         "amount",
@@ -143,6 +154,7 @@ HEADER_ROLE_LABELS = {
     "quantity": "Quantity",
     "unit": "Unit",
     "unit_price": "Unit Price",
+    "expiry_date": "Expiry date",
     "amount": "Amount",
     "vat_rate": "VAT %",
     "vat_amount": "VAT Amount",
@@ -331,6 +343,8 @@ def normalize_unit(value):
 def _cell_text(value):
     if value is None:
         return ""
+    if isinstance(value, (date, datetime)):
+        return value.strftime("%d/%m/%Y")
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return normalize_import_line(value)
@@ -906,7 +920,7 @@ def make_preview_line(
         "parse_confidence": confidence,
     }
     for key, value in source_meta.items():
-        if value not in (None, ""):
+        if value not in (None, "") or key == "expiry_date":
             payload[key] = value
     return payload
 
@@ -1080,6 +1094,7 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         source_page=source_page,
         page_number=source_page,
         serial_no=serial_no,
+        **({"expiry_date": _cell_by_role(row, columns, "expiry_date")} if "expiry_date" in columns else {}),
     ), None
 
 

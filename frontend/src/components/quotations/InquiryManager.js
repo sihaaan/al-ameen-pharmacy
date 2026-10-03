@@ -291,6 +291,7 @@ export const importedInquiryLinePayload = (line) => ({
   raw_line: line.raw_line || line.raw_name,
   quantity: line.quantity || null,
   unit: line.unit || '',
+  expiry_date: String(line.expiry_date || '').trim(),
   unit_price: line.unit_price || null,
   vat_rate: normalizeVatRate(line.vat_rate),
   notes: line.notes || '',
@@ -357,6 +358,7 @@ const mergePriceReferenceLines = (currentLines, responseLines) => {
       _client_row_id: currentLine._client_row_id || line._client_row_id,
       quantity: preserveParsedField(currentLine, line, 'quantity'),
       unit: useReferenceWhenBlank(currentLine, line, 'unit'),
+      expiry_date: preserveParsedField(currentLine, line, 'expiry_date'),
     };
   });
 };
@@ -445,6 +447,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     importRevisionRef.current
   );
   const importWorkflowBusy = importParsing || aiCleaning || priceReferenceApplying || importSaving || importContactSaving;
+  const showImportExpiry = Boolean(importPreview?._show_expiry_column);
   const importSourceMode = importMode === 'paste' ? 'paste' : 'upload';
   const detectedImportType = {
     excel: 'Excel',
@@ -766,6 +769,7 @@ const InquiryManager = ({ onOpenQuote }) => {
     return {
       ...preview,
       ai_candidate: null,
+      _show_expiry_column: Boolean(preview._show_expiry_column || editableLines.some((line) => String(line.expiry_date || '').trim())),
       result_source: preview.result_source || 'deterministic_parse',
       lines: preview?._source_pricing_suppressed_by_user
         ? editableLines
@@ -1561,7 +1565,7 @@ const InquiryManager = ({ onOpenQuote }) => {
               </div>
             )}
             <div className="qm-table-wrap">
-              <table className="qm-table import-table">
+              <table className={`qm-table import-table${showImportExpiry ? ' with-expiry' : ''}`}>
                 <thead>
                   <tr>
                     <th className="qm-check-cell"><input type="checkbox" checked={importPreview.lines.length > 0 && selectedImportRowIds.length === importPreview.lines.length} onChange={toggleAllImportRows} /></th>
@@ -1570,6 +1574,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                     <th>Matched Product</th>
                     <th>Qty</th>
                     <th>Unit</th>
+                    {showImportExpiry && <th>Expiry date</th>}
                     <th>Our Unit Price</th>
                     <th>Our VAT</th>
                     <th>Status</th>
@@ -1631,6 +1636,11 @@ const InquiryManager = ({ onOpenQuote }) => {
                         </td>
                         <td className="qm-import-qty-cell"><input aria-label={`Quantity row ${index + 1}`} type="number" min="0" step="0.001" value={line.quantity || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, { quantity: event.target.value })} /></td>
                         <td className="qm-import-unit-cell"><input value={line.unit || ''} onChange={(event) => updateImportLine(index, { unit: event.target.value })} /></td>
+                        {showImportExpiry && (
+                          <td className="qm-import-expiry-cell">
+                            <input aria-label={`Expiry date row ${index + 1}`} maxLength={40} placeholder="MM/YYYY" value={line.expiry_date || ''} onChange={(event) => updateImportLine(index, { expiry_date: event.target.value })} />
+                          </td>
+                        )}
                         <td className="qm-import-price-cell">
                           <input aria-label={`Unit price row ${index + 1}`} type="number" min="0" step="0.001" value={line.unit_price || ''} onWheel={releaseNumberWheelFocus} onChange={(event) => updateImportLine(index, {
                             unit_price: event.target.value,
@@ -1688,7 +1698,7 @@ const InquiryManager = ({ onOpenQuote }) => {
                         <tr className="qm-raw-row">
                           <td />
                           <td />
-                          <td colSpan="9">
+                          <td colSpan={showImportExpiry ? 10 : 9}>
                             <label>
                               <span className="qm-label-text">Raw source line</span>
                               <textarea rows="2" value={line.raw_line || ''} onChange={(event) => updateImportLine(index, { raw_line: event.target.value })} />

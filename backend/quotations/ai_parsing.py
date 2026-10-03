@@ -269,6 +269,7 @@ AI_PARSE_JSON_SCHEMA = {
                     "item_name": {"type": "string"},
                     "quantity": {"type": "string"},
                     "unit": {"type": "string"},
+                    "expiry_date": {"type": "string"},
                     "unit_price": {"type": "string"},
                     "vat_rate": {"type": "string"},
                     "vat_amount": {"type": "string"},
@@ -285,6 +286,7 @@ AI_PARSE_JSON_SCHEMA = {
                     "item_name",
                     "quantity",
                     "unit",
+                    "expiry_date",
                     "unit_price",
                     "vat_rate",
                     "vat_amount",
@@ -1335,6 +1337,31 @@ def _restore_customer_evidence(preview, result):
     return True
 
 
+def _restore_expiry_evidence(preview, result):
+    """Keep expiry cells attached to their source rows through AI cleanup."""
+    candidates = result.get("lines") or []
+    used = set()
+    for source in (preview.get("lines") or []):
+        if "expiry_date" not in source:
+            continue
+        matches = [
+            i for i, row in enumerate(candidates)
+            if i not in used and _row_evidence_match(source, row)
+        ]
+        raw = _evidence_identity(source.get("raw_line") or source.get("raw_source_line"))
+        exact = [
+            i for i in matches
+            if raw and raw == _evidence_identity(candidates[i].get("raw_line"))
+        ]
+        matches = exact or matches
+        if len(matches) != 1:
+            return False
+        index = matches[0]
+        used.add(index)
+        candidates[index]["expiry_date"] = source["expiry_date"]
+    return True
+
+
 def _bind_result_source(result, preview):
     """Bind reusable AI output to the current upload's provenance."""
 
@@ -1347,7 +1374,7 @@ def _bind_result_source(result, preview):
         "source_file_size",
         "original_text",
     )
-    rebound = {**result}
+    rebound = {**result, "lines": [dict(row) for row in result.get("lines", [])]}
     for field in source_fields:
         rebound[field] = preview.get(field, "" if field != "source_file_size" else None)
     result_source = str(result.get("result_source") or "")
@@ -1370,25 +1397,28 @@ def _bind_result_source(result, preview):
             if _clean_text(warning)
         )
     )
-    if not _restore_customer_evidence(preview, rebound):
+    expiry_preserved = _restore_expiry_evidence(preview, rebound)
+    if not expiry_preserved or not _restore_customer_evidence(preview, rebound):
         fallback = {**(preview or {})}
         fallback["warnings"] = list(
             dict.fromkeys(
                 [
                     *rebound["warnings"],
-                    AI_CUSTOMER_EVIDENCE_GUARD_WARNING,
+                    AI_CUSTOMER_EVIDENCE_GUARD_WARNING if expiry_preserved else "AI cleanup could not safely map expiry dates to items; original rows kept for review.",
                 ]
             )
         )
         fallback["meta"] = {
             **_current_source_meta(preview),
             "ai_cleanup_rejected": True,
-            "ai_cleanup_rejection_reason": "customer_price_evidence_unmapped",
+            "ai_cleanup_rejection_reason": "customer_price_evidence_unmapped" if expiry_preserved else "expiry_evidence_unmapped",
         }
         fallback["result_source"] = AI_SOURCE_DETERMINISTIC
         fallback["ai_status"] = AI_STATUS_FAILED
         fallback["ai_status_label"] = (
             "AI cleanup rejected; deterministic customer evidence kept."
+            if expiry_preserved
+            else "AI cleanup rejected; original expiry dates kept."
         )
         return fallback
     # Preview metadata belongs to this upload. AI identity and usage fields are
@@ -1846,6 +1876,7 @@ def _normalize_ai_result(
         common = {
             "quantity": _clean_quantity(row.get("quantity")),
             "unit": _clean_text(row.get("unit"))[:50],
+            "expiry_date": _clean_text(row.get("expiry_date"))[:40],
             "unit_price": _clean_money(row.get("unit_price")),
             "vat_rate": _clean_money(row.get("vat_rate")),
             "vat_amount": _clean_money(row.get("vat_amount")),
@@ -1969,6 +2000,7 @@ def _build_preview_text_context(preview):
                         "item_name": line.get("raw_name") or line.get("item_name"),
                         "quantity": line.get("quantity"),
                         "unit": line.get("unit"),
+                        "expiry_date": line.get("expiry_date", ""),
                         "unit_price": line.get("unit_price"),
                         "vat_rate": line.get("vat_rate"),
                         "vat_amount": line.get("vat_amount"),
@@ -2167,6 +2199,7 @@ def _ai_instructions(*, output_style, mode, include_mailbox_metadata=False):
         "Do not match products, do not create items, do not invent prices or quantities, and do not commit anything. "
         "Only extract what is visible or clearly present. Preserve product-identifying sizes, dimensions, strengths, variants, and pack counts in item_name, for example Adhesive Tape 1/2\" x 10 yds, Gauze Bandage - 2\", Gauze Pads - 3\" x 3\", or Ammonia Inhalant - pack of 5. Put order quantities, units, unit prices, and totals in their own fields. "
         "Preserve VAT percentage/rate in vat_rate and VAT money amount in vat_amount when visible. Do not convert a visible VAT rate such as 5% into a VAT amount. "
+        "Extract each item's explicitly stated expiry into expiry_date, including columns headed available expiry, expiry date, expiration date or EXP. Preserve the source precision and wording: 9/27 stays 9/27, 08/2028 stays 08/2028. Never invent a day for a month/year expiry. Keep expiry separate from item_name, quantity, unit, price and VAT. Leave expiry_date blank when absent or unreadable; never substitute a manufacturing date, document date, quotation validity or infer it from shelf life. "
         "For structured Excel rows, keep every real item row unless it is clearly a header, footer, subtotal, metadata, or duplicate noise row. "
         "Skip obvious document metadata such as dates, seller/buyer addresses, tender numbers, quotation headings, table headers, totals, footers, contact/signature text, and email addresses by setting parse_status='ignored'. "
         "When visible, copy PO/LPO numbers, quotation references, and the document grand total into document_notes; never infer or invent them. "
