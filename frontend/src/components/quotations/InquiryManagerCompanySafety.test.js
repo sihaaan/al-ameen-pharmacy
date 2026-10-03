@@ -82,6 +82,39 @@ describe('InquiryManager company-scoped async safety', () => {
     });
   });
 
+  test('shows detected expiry, allows correction or clearing, and submits it to the quotation flow', async () => {
+    quotationAPI.inquiries.parseFile.mockResolvedValue({ data: {
+      ...parsedPreview,
+      ai_candidate: null,
+      lines: [{ ...parsedPreview.lines[0], expiry_date: '9/27' }],
+    } });
+    quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
+    render(<InquiryManager onOpenQuote={jest.fn()} />);
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
+    fireEvent.change(screen.getByLabelText('Inquiry file'), {
+      target: { files: [new File(['fixture'], 'expiry.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Parse File' }));
+    const expiry = await screen.findByLabelText('Expiry date row 1');
+    expect(expiry).toHaveValue('9/27');
+    fireEvent.change(expiry, { target: { value: '' } });
+    expect(screen.getByLabelText('Expiry date row 1')).toBeInTheDocument();
+    fireEvent.change(expiry, { target: { value: '09/2028' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Open Quotation' }));
+    await waitFor(() => expect(quotationAPI.inquiries.createImported).toHaveBeenCalledWith(expect.objectContaining({
+      lines: [expect.objectContaining({ expiry_date: '09/2028' })],
+    })));
+  });
+
+  test('keeps the expiry column hidden for an inquiry without expiry dates', async () => {
+    quotationAPI.inquiries.parseText.mockResolvedValue({ data: { ...parsedPreview, ai_candidate: null } });
+    renderPasteInquiryManager();
+    fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), { target: { value: 'Gauze 2 boxes' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
+    await screen.findByLabelText('Quantity row 1');
+    expect(screen.queryByRole('columnheader', { name: 'Expiry date' })).not.toBeInTheDocument();
+  });
+
   test('opens on file upload by default and keeps paste text available', async () => {
     render(<InquiryManager />);
 

@@ -1454,6 +1454,7 @@ class InquiryLine(models.Model):
     normalized_name = models.CharField(max_length=255, db_index=True, editable=False)
     quantity = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     unit = models.CharField(max_length=50, blank=True)
+    expiry_date = models.CharField(max_length=40, blank=True)
     unit_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
     vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
     notes = models.TextField(blank=True)

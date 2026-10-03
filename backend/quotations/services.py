@@ -2532,6 +2532,7 @@ def create_imported_inquiry(validated_data, actor, *, learn_aliases=True):
             raw_name=line_data["raw_name"],
             quantity=line_data.get("quantity"),
             unit=line_data.get("unit", ""),
+            expiry_date=line_data.get("expiry_date", ""),
             unit_price=line_data.get("unit_price"),
             vat_rate=line_data.get("vat_rate") or Decimal("0.00"),
             notes=line_data.get("notes", ""),
@@ -2993,6 +2994,7 @@ def create_quotation_from_inquiry(inquiry, actor, *, learn_aliases=True):
         company=inquiry.company,
         contact=inquiry.contact,
         inquiry=inquiry,
+        show_expiry_column=inquiry.lines.exclude(expiry_date="").exclude(match_status=InquiryLine.MATCH_IGNORED).exists(),
         created_by=actor if getattr(actor, "is_authenticated", False) else None,
     )
 
@@ -3017,6 +3019,7 @@ def create_quotation_from_inquiry(inquiry, actor, *, learn_aliases=True):
             ),
             quantity=line.quantity or Decimal("1.000"),
             unit=line.unit,
+            expiry_date=line.expiry_date,
             unit_price=line.unit_price,
             vat_rate=line.vat_rate,
             match_status=line.match_status,

@@ -1744,6 +1744,7 @@ class InquiryLineSerializer(serializers.ModelSerializer):
             "normalized_name",
             "quantity",
             "unit",
+            "expiry_date",
             "unit_price",
             "vat_rate",
             "notes",
@@ -1879,6 +1880,7 @@ class ImportedInquiryLineSerializer(serializers.Serializer):
     raw_line = serializers.CharField(required=False, allow_blank=True)
     quantity = serializers.DecimalField(max_digits=12, decimal_places=3, required=False, allow_null=True)
     unit = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    expiry_date = serializers.CharField(max_length=40, required=False, allow_blank=True, default="")
     unit_price = UnitPriceDecimalField(required=False, allow_null=True)
     vat_rate = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, default=Decimal("0.00"))
     notes = serializers.CharField(required=False, allow_blank=True)

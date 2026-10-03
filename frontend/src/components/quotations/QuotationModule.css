@@ -3416,6 +3416,15 @@ fieldset.qm-gmail-locked-editor,
   table-layout: fixed;
 }
 
+.import-table.with-expiry {
+  min-width: 1640px;
+}
+
+.import-table .qm-import-expiry-cell {
+  width: 130px;
+  min-width: 130px;
+}
+
 .import-table .qm-import-item-cell {
   min-width: 360px;
   width: 38%;
