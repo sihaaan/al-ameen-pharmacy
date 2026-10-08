@@ -82,11 +82,11 @@ describe('InquiryManager company-scoped async safety', () => {
     });
   });
 
-  test('shows detected expiry, allows correction or clearing, and submits it to the quotation flow', async () => {
+  test('shows detected expiry and brand, allows correction or clearing, and submits both to the quotation flow', async () => {
     quotationAPI.inquiries.parseFile.mockResolvedValue({ data: {
       ...parsedPreview,
       ai_candidate: null,
-      lines: [{ ...parsedPreview.lines[0], expiry_date: '9/27' }],
+      lines: [{ ...parsedPreview.lines[0], expiry_date: '9/27', brand_name: '3M' }],
     } });
     quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
     render(<InquiryManager onOpenQuote={jest.fn()} />);
@@ -97,22 +97,49 @@ describe('InquiryManager company-scoped async safety', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Parse File' }));
     const expiry = await screen.findByLabelText('Expiry date row 1');
     expect(expiry).toHaveValue('9/27');
+    const brand = screen.getByLabelText('Brand row 1');
+    expect(brand).toHaveValue('3M');
+    fireEvent.change(brand, { target: { value: '' } });
+    expect(screen.getByLabelText('Brand row 1')).toBeInTheDocument();
+    fireEvent.change(brand, { target: { value: 'Reviewed Brand' } });
     fireEvent.change(expiry, { target: { value: '' } });
     expect(screen.getByLabelText('Expiry date row 1')).toBeInTheDocument();
     fireEvent.change(expiry, { target: { value: '09/2028' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save & Open Quotation' }));
     await waitFor(() => expect(quotationAPI.inquiries.createImported).toHaveBeenCalledWith(expect.objectContaining({
-      lines: [expect.objectContaining({ expiry_date: '09/2028' })],
+      lines: [expect.objectContaining({ expiry_date: '09/2028', brand_name: 'Reviewed Brand' })],
     })));
   });
 
-  test('keeps the expiry column hidden for an inquiry without expiry dates', async () => {
+  test('keeps optional columns hidden when expiry and brand are absent', async () => {
     quotationAPI.inquiries.parseText.mockResolvedValue({ data: { ...parsedPreview, ai_candidate: null } });
     renderPasteInquiryManager();
     fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), { target: { value: 'Gauze 2 boxes' } });
     fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
     await screen.findByLabelText('Quantity row 1');
     expect(screen.queryByRole('columnheader', { name: 'Expiry date' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Brand' })).not.toBeInTheDocument();
+  });
+
+  test('reveals brands extracted by AI cleanup and submits them when opening the quotation', async () => {
+    quotationAPI.inquiries.parseText.mockResolvedValue({ data: { ...parsedPreview, ai_candidate: null } });
+    quotationAPI.inquiries.aiCleanParse.mockResolvedValue({ data: {
+      ...parsedPreview.ai_candidate,
+      lines: [{ ...parsedPreview.ai_candidate.lines[0], brand_name: '3M' }],
+    } });
+    quotationAPI.inquiries.createImported.mockResolvedValue({ data: { id: 501, company: 7 } });
+    renderPasteInquiryManager({ onOpenQuote: jest.fn() });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Choose Company 7' }))[0]);
+    fireEvent.change(screen.getByPlaceholderText("Paste the customer's requested items here..."), { target: { value: 'Item Brand Qty\nAdhesive tape 3M 2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Extract Lines' }));
+    await screen.findByLabelText('Quantity row 1');
+    expect(screen.queryByRole('columnheader', { name: 'Brand' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'AI Clean & Apply' }));
+    expect(await screen.findByLabelText('Brand row 1')).toHaveValue('3M');
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Open Quotation' }));
+    await waitFor(() => expect(quotationAPI.inquiries.createImported).toHaveBeenCalledWith(expect.objectContaining({
+      lines: [expect.objectContaining({ brand_name: '3M' })],
+    })));
   });
 
   test('opens on file upload by default and keeps paste text available', async () => {
