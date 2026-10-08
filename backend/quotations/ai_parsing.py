@@ -270,6 +270,7 @@ AI_PARSE_JSON_SCHEMA = {
                     "quantity": {"type": "string"},
                     "unit": {"type": "string"},
                     "expiry_date": {"type": "string"},
+                    "brand_name": {"type": "string"},
                     "unit_price": {"type": "string"},
                     "vat_rate": {"type": "string"},
                     "vat_amount": {"type": "string"},
@@ -287,6 +288,7 @@ AI_PARSE_JSON_SCHEMA = {
                     "quantity",
                     "unit",
                     "expiry_date",
+                    "brand_name",
                     "unit_price",
                     "vat_rate",
                     "vat_amount",
@@ -1337,12 +1339,12 @@ def _restore_customer_evidence(preview, result):
     return True
 
 
-def _restore_expiry_evidence(preview, result):
-    """Keep expiry cells attached to their source rows through AI cleanup."""
+def _restore_row_field_evidence(preview, result, field):
+    """Keep explicit source cells, including blanks, on their rows during cleanup."""
     candidates = result.get("lines") or []
     used = set()
     for source in (preview.get("lines") or []):
-        if "expiry_date" not in source:
+        if field not in source:
             continue
         matches = [
             i for i, row in enumerate(candidates)
@@ -1358,7 +1360,7 @@ def _restore_expiry_evidence(preview, result):
             return False
         index = matches[0]
         used.add(index)
-        candidates[index]["expiry_date"] = source["expiry_date"]
+        candidates[index][field] = source[field]
     return True
 
 
@@ -1397,28 +1399,36 @@ def _bind_result_source(result, preview):
             if _clean_text(warning)
         )
     )
-    expiry_preserved = _restore_expiry_evidence(preview, rebound)
-    if not expiry_preserved or not _restore_customer_evidence(preview, rebound):
+    unmapped_field = next((
+        field for field in ("expiry_date", "brand_name")
+        if not _restore_row_field_evidence(preview, rebound, field)
+    ), None)
+    field_label = {"expiry_date": "expiry dates", "brand_name": "brands"}.get(unmapped_field)
+    if unmapped_field or not _restore_customer_evidence(preview, rebound):
         fallback = {**(preview or {})}
         fallback["warnings"] = list(
             dict.fromkeys(
                 [
                     *rebound["warnings"],
-                    AI_CUSTOMER_EVIDENCE_GUARD_WARNING if expiry_preserved else "AI cleanup could not safely map expiry dates to items; original rows kept for review.",
+                    f"AI cleanup could not safely map {field_label} to items; original rows kept for review."
+                    if unmapped_field else AI_CUSTOMER_EVIDENCE_GUARD_WARNING,
                 ]
             )
         )
         fallback["meta"] = {
             **_current_source_meta(preview),
             "ai_cleanup_rejected": True,
-            "ai_cleanup_rejection_reason": "customer_price_evidence_unmapped" if expiry_preserved else "expiry_evidence_unmapped",
+            "ai_cleanup_rejection_reason": {
+                "expiry_date": "expiry_evidence_unmapped",
+                "brand_name": "brand_evidence_unmapped",
+            }.get(unmapped_field, "customer_price_evidence_unmapped"),
         }
         fallback["result_source"] = AI_SOURCE_DETERMINISTIC
         fallback["ai_status"] = AI_STATUS_FAILED
         fallback["ai_status_label"] = (
-            "AI cleanup rejected; deterministic customer evidence kept."
-            if expiry_preserved
-            else "AI cleanup rejected; original expiry dates kept."
+            f"AI cleanup rejected; original {field_label} kept."
+            if unmapped_field
+            else "AI cleanup rejected; deterministic customer evidence kept."
         )
         return fallback
     # Preview metadata belongs to this upload. AI identity and usage fields are
@@ -1877,6 +1887,7 @@ def _normalize_ai_result(
             "quantity": _clean_quantity(row.get("quantity")),
             "unit": _clean_text(row.get("unit"))[:50],
             "expiry_date": _clean_text(row.get("expiry_date"))[:40],
+            "brand_name": _clean_text(row.get("brand_name"))[:200],
             "unit_price": _clean_money(row.get("unit_price")),
             "vat_rate": _clean_money(row.get("vat_rate")),
             "vat_amount": _clean_money(row.get("vat_amount")),
@@ -2001,6 +2012,7 @@ def _build_preview_text_context(preview):
                         "quantity": line.get("quantity"),
                         "unit": line.get("unit"),
                         "expiry_date": line.get("expiry_date", ""),
+                        "brand_name": line.get("brand_name", ""),
                         "unit_price": line.get("unit_price"),
                         "vat_rate": line.get("vat_rate"),
                         "vat_amount": line.get("vat_amount"),
@@ -2200,6 +2212,7 @@ def _ai_instructions(*, output_style, mode, include_mailbox_metadata=False):
         "Only extract what is visible or clearly present. Preserve product-identifying sizes, dimensions, strengths, variants, and pack counts in item_name, for example Adhesive Tape 1/2\" x 10 yds, Gauze Bandage - 2\", Gauze Pads - 3\" x 3\", or Ammonia Inhalant - pack of 5. Put order quantities, units, unit prices, and totals in their own fields. "
         "Preserve VAT percentage/rate in vat_rate and VAT money amount in vat_amount when visible. Do not convert a visible VAT rate such as 5% into a VAT amount. "
         "Extract each item's explicitly stated expiry into expiry_date, including columns headed available expiry, expiry date, expiration date or EXP. Preserve the source precision and wording: 9/27 stays 9/27, 08/2028 stays 08/2028. Never invent a day for a month/year expiry. Keep expiry separate from item_name, quantity, unit, price and VAT. Leave expiry_date blank when absent or unreadable; never substitute a manufacturing date, document date, quotation validity or infer it from shelf life. "
+        "Extract each item's explicitly stated brand into brand_name from a Brand, Brand name, Product brand or Make column, or an explicitly labelled brand for that item. Preserve spelling and capitalization; keep a separate brand cell separate from item_name and other columns. Do not remove brand wording already present in the description. Leave brand_name blank when absent, blank or unreadable. Never guess it from a supplier, customer, manufacturer address, logo, catalogue match or general product knowledge. Do not copy a neighbouring row's brand into an empty cell. "
         "For structured Excel rows, keep every real item row unless it is clearly a header, footer, subtotal, metadata, or duplicate noise row. "
         "Skip obvious document metadata such as dates, seller/buyer addresses, tender numbers, quotation headings, table headers, totals, footers, contact/signature text, and email addresses by setting parse_status='ignored'. "
         "When visible, copy PO/LPO numbers, quotation references, and the document grand total into document_notes; never infer or invent them. "

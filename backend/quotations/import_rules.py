@@ -117,6 +117,10 @@ HEADER_ALIASES = {
         "exp", "exp date", "available expiry", "available expiry date",
         "date of expiry", "exp dt", "expiry dt",
     },
+    "brand_name": {
+        "brand", "brand name", "product brand", "item brand", "make",
+        "brand / make", "brand/make", "make / brand", "make/brand",
+    },
     "amount": {
         "amount",
         "net price",
@@ -155,6 +159,7 @@ HEADER_ROLE_LABELS = {
     "unit": "Unit",
     "unit_price": "Unit Price",
     "expiry_date": "Expiry date",
+    "brand_name": "Brand",
     "amount": "Amount",
     "vat_rate": "VAT %",
     "vat_amount": "VAT Amount",
@@ -920,7 +925,7 @@ def make_preview_line(
         "parse_confidence": confidence,
     }
     for key, value in source_meta.items():
-        if value not in (None, "") or key == "expiry_date":
+        if value not in (None, "") or key in {"expiry_date", "brand_name"}:
             payload[key] = value
     return payload
 
@@ -1095,6 +1100,7 @@ def parse_structured_row(row, header, *, source_sheet="", source_row=None, sourc
         page_number=source_page,
         serial_no=serial_no,
         **({"expiry_date": _cell_by_role(row, columns, "expiry_date")} if "expiry_date" in columns else {}),
+        **({"brand_name": _cell_by_role(row, columns, "brand_name")} if "brand_name" in columns else {}),
     ), None
 
 

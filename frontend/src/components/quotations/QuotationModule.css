@@ -3420,6 +3420,19 @@ fieldset.qm-gmail-locked-editor,
   min-width: 1640px;
 }
 
+.import-table.with-brand {
+  min-width: 1680px;
+}
+
+.import-table.with-brand.with-expiry {
+  min-width: 1810px;
+}
+
+.import-table .qm-import-brand-cell {
+  width: 170px;
+  min-width: 170px;
+}
+
 .import-table .qm-import-expiry-cell {
   width: 130px;
   min-width: 130px;
