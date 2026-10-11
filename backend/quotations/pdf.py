@@ -2,7 +2,7 @@ import re
 from copy import copy
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from datetime import timedelta
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -239,7 +239,8 @@ def _local_date(value):
 
 def _valid_until(quotation, config):
     if quotation.valid_until:
-        return quotation.valid_until
+        # DateField values can still be ISO text immediately after model creation.
+        return date.fromisoformat(quotation.valid_until) if isinstance(quotation.valid_until, str) else quotation.valid_until
     return _local_date(quotation.created_at) + timedelta(days=config.validity_days)
 
 

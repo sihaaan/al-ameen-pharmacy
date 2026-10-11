@@ -40,6 +40,12 @@ class QuotationValidityTests(TestCase):
     def test_selected_validity_date_overrides_default_in_header_footer_and_excel(self):
         self.assert_validity(date(2026, 12, 31), 30, date(2026, 12, 31), "31 December 2026")
 
+    def test_fresh_model_with_iso_date_text_has_matching_pdf_validity(self):
+        quote = Quotation.objects.create(company=self.quote.company, valid_until="2026-12-31")
+        text = " ".join(page.extract_text() for page in PdfReader(BytesIO(build_quotation_pdf(quote))).pages)
+        self.assertRegex(text, r"Valid Until\s+2026-12-31")
+        self.assertIn("Validity: Valid until 31 December 2026.", text)
+
     def test_unspecified_validity_uses_default_days_from_local_quotation_date(self):
         self.assert_validity(None, 30, date(2026, 11, 10), "10 November 2026")
 
