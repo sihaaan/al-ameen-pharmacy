@@ -87,6 +87,7 @@ class QuotationDeliveryTimeTests(APITestCase):
                 if lead_time:
                     self.assertIn(lead_time, text)
                 sheet = load_workbook(BytesIO(build_quotation_excel(self.quote)))["Quotation"]
+                self.assertEqual(len(sheet.merged_cells.ranges), 0)
                 rows = [row for row in sheet.iter_rows() if row[0].value == "Supply lead time"]
                 self.assertEqual(len(rows), int(bool(lead_time)))
                 if rows:
