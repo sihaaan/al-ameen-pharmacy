@@ -72,6 +72,7 @@ const quote = {
   quotation_review_fingerprint: 'quotation-review-fingerprint-1',
   currency: 'AED',
   payment_terms: 'as_per_agreement',
+  delivery_time: '',
   valid_until: '2026-08-01',
   show_brand_column: false,
   subtotal: '0.00',
@@ -564,6 +565,66 @@ describe('QuotationEditor Product price context', () => {
     expect(screen.queryByLabelText('Expiry date for new line')).not.toBeInTheDocument();
   });
 
+  test('saves a supply lead time preset and prevents downloading unsaved terms', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: {
+      ...readyQuote, delivery_time: 'Immediate (subject to stock availability)',
+    } });
+    quotationAPI.quotes.update.mockResolvedValueOnce({ data: { ...readyQuote, delivery_time: '3-6 weeks' } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit terms & layout/i }));
+    const leadTime = screen.getByRole('combobox', { name: 'Supply lead time' });
+    expect(leadTime).toHaveValue('Immediate (subject to stock availability)');
+    expect(within(leadTime).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Not specified', 'Immediate (subject to stock availability)', 'As agreed',
+      '1-2 weeks', '3-6 weeks', '4-8 weeks', '6-10 weeks', 'Custom lead time...',
+    ]);
+    fireEvent.change(leadTime, { target: { value: '3-6 weeks' } });
+    expect(screen.getByRole('button', { name: 'Download Draft PDF' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
+    await waitFor(() => expect(quotationAPI.quotes.update).toHaveBeenCalledWith(21, expect.objectContaining({
+      delivery_time: '3-6 weeks', quotation_review_fingerprint: quote.quotation_review_fingerprint,
+    })));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Download Draft PDF' })).toBeEnabled();
+    expect(leadTime).toHaveValue('3-6 weeks');
+  });
+
+  test('preserves custom supply lead time through a line refresh and saves trimmed wording', async () => {
+    const custom = '2-3 working days after order confirmation';
+    quotationAPI.quotes.update.mockResolvedValueOnce({ data: { ...quote, delivery_time: custom } });
+    const view = render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit terms & layout/i }));
+    const leadTime = screen.getByRole('combobox', { name: 'Supply lead time' });
+    expect(leadTime).toHaveValue('');
+    fireEvent.change(leadTime, { target: { value: '__custom__' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Custom supply lead time' }), { target: { value: ` ${custom} ` } });
+    fireEvent.change(screen.getByPlaceholderText('Snapshot name'), { target: { value: 'New customer item' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add Line' }));
+    await waitFor(() => expect(quotationAPI.quotes.retrieve).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('textbox', { name: 'Custom supply lead time' })).toHaveValue(` ${custom} `);
+    fireEvent.click(screen.getByRole('button', { name: 'Save Terms & Layout' }));
+    await waitFor(() => expect(quotationAPI.quotes.update).toHaveBeenCalledWith(21, expect.objectContaining({ delivery_time: custom })));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Terms & Layout Saved' })).toBeDisabled());
+    view.unmount();
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: { ...quote, delivery_time: custom } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit terms & layout/i }));
+    expect(screen.getByRole('combobox', { name: 'Supply lead time' })).toHaveValue('__custom__');
+    expect(screen.getByRole('textbox', { name: 'Custom supply lead time' })).toHaveValue(custom);
+  });
+
+  test('shows saved lead time on a finalized quotation without allowing edits', async () => {
+    quotationAPI.quotes.retrieve.mockResolvedValueOnce({ data: {
+      ...readyQuote, status: 'finalized', delivery_time: 'On the agreed delivery date',
+    } });
+    render(<QuotationEditor quoteId={21} onClose={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /View terms & layout/i }));
+    expect(screen.getByRole('combobox', { name: 'Supply lead time' })).toBeDisabled();
+    const custom = screen.getByRole('textbox', { name: 'Custom supply lead time' });
+    expect(custom).toHaveValue('On the agreed delivery date');
+    expect(custom).toBeDisabled();
+  });
+
   test('saves the Brand toggle with quotation terms and layout', async () => {
     quotationAPI.quotes.update.mockResolvedValueOnce({
       data: { ...quote, show_brand_column: true },
@@ -577,6 +638,7 @@ describe('QuotationEditor Product price context', () => {
 
     await waitFor(() => expect(quotationAPI.quotes.update).toHaveBeenCalledWith(21, {
       payment_terms: 'as_per_agreement',
+      delivery_time: '',
       valid_until: '2026-08-01',
       show_brand_column: true,
       show_expiry_column: false,

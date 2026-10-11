@@ -1785,6 +1785,7 @@ class QuotationQuerySet(models.QuerySet):
 
 
 class Quotation(models.Model):
+    SUPPLY_LEAD_TIME_IMMEDIATE = "Immediate (subject to stock availability)"
     PAYMENT_CREDIT_30 = "credit_30_days"
     PAYMENT_CREDIT_60 = "credit_60_days"
     PAYMENT_ADVANCE_100 = "advance_100"
@@ -1899,6 +1900,9 @@ class Quotation(models.Model):
     )
     show_brand_column = models.BooleanField(default=False)
     show_expiry_column = models.BooleanField(default=False)
+    delivery_time = models.CharField(
+        max_length=200, blank=True, default=SUPPLY_LEAD_TIME_IMMEDIATE, db_default="",
+    )
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     discount_amount = models.DecimalField(

@@ -5317,6 +5317,7 @@ class HistoricalPriceImportTests(APITestCase):
         self.assertEqual(historical_import.status, HistoricalPriceImport.STATUS_COMMITTED)
         self.assertEqual(CompanyPriceHistory.objects.filter(company=self.company).count(), 2)
         self.assertTrue(historical_import.created_quotation.is_historical_import)
+        self.assertEqual(historical_import.created_quotation.delivery_time, "")
         self.assertEqual(historical_import.created_quotation.status, Quotation.STATUS_FINALIZED)
 
         default_quotes = self.client.get(reverse("quotation-list"))
