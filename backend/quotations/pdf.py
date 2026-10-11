@@ -679,6 +679,7 @@ def build_quotation_pdf(quotation, *, config=None):
     styles = _pdf_styles(primary)
     elements = []
     quote_date = _local_date(quotation.created_at)
+    valid_until = _valid_until(quotation, config)
 
     elements.append(_build_header(config, quotation, quote_date, styles))
 
@@ -700,7 +701,7 @@ def build_quotation_pdf(quotation, *, config=None):
         ("Contact No.", _optional_text(contact_phone)),
         ("Contact Email", _optional_text(contact_email)),
         ("Date", quote_date),
-        ("Valid Until", _valid_until(quotation, config)),
+        ("Valid Until", valid_until),
         ("Prepared By", quotation.created_by.username if quotation.created_by else ""),
         ("Status", quotation.get_status_display()),
         ("Currency", quotation.currency),
@@ -775,7 +776,7 @@ def build_quotation_pdf(quotation, *, config=None):
                 Paragraph("Terms and Conditions", styles["SectionTitle"]),
                 Paragraph(_text(config.default_terms), styles["Small"]),
                 Spacer(1, 4),
-                Paragraph(f"<b>Validity:</b> {config.validity_days} days from quotation date unless otherwise stated.", styles["Small"]),
+                Paragraph(f"<b>Validity:</b> Valid until {valid_until.strftime('%d %B %Y')}.", styles["Small"]),
                 Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
                 *([
                     Paragraph(f"<b>Supply lead time:</b> {_text(quotation.delivery_time)}", styles["Small"]),
