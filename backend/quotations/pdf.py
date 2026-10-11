@@ -777,6 +777,9 @@ def build_quotation_pdf(quotation, *, config=None):
                 Spacer(1, 4),
                 Paragraph(f"<b>Validity:</b> {config.validity_days} days from quotation date unless otherwise stated.", styles["Small"]),
                 Paragraph(f"<b>Payment Terms:</b> {_text(_payment_terms(quotation, config))}", styles["Small"]),
+                *([
+                    Paragraph(f"<b>Supply lead time:</b> {_text(quotation.delivery_time)}", styles["Small"]),
+                ] if quotation.delivery_time else []),
             ],
             _signature_flowables(config, styles, quotation),
         ]

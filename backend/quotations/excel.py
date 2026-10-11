@@ -1,5 +1,6 @@
 from datetime import timedelta
 from io import BytesIO
+from textwrap import wrap
 
 from django.utils import timezone
 from openpyxl import Workbook
@@ -191,6 +192,17 @@ def build_quotation_excel(quotation):
     sheet.cell(row=footer_start, column=2, value=config.default_terms or "")
     sheet.cell(row=footer_start + 1, column=1, value="Payment Terms").font = Font(bold=True, color=MUTED)
     sheet.cell(row=footer_start + 1, column=2, value=_payment_terms(quotation, config) or "-")
+    if quotation.delivery_time:
+        delivery_row = footer_start + 2
+        lead_time_label = sheet.cell(row=delivery_row, column=1, value="Supply lead time")
+        lead_time_label.font = Font(bold=True, color=MUTED)
+        lead_time_label.alignment = Alignment(wrap_text=True, vertical="top")
+        delivery_cell = sheet.cell(row=delivery_row, column=2, value=quotation.delivery_time)
+        delivery_cell.data_type = "s"
+        delivery_cell.alignment = Alignment(wrap_text=True, vertical="top")
+        # Keep the export unmerged and editable while allowing long custom terms to wrap.
+        wrapped_lines = wrap(quotation.delivery_time, width=32 if show_brand_column else 42)
+        sheet.row_dimensions[delivery_row].height = max(36, 15 * (len(wrapped_lines) + 1))
 
     widths = {
         "serial": 11, "item": 38 if show_brand_column else 48, "brand": 24,

@@ -42,6 +42,15 @@ const paymentTermOptions = [
   { value: 'as_per_agreement', label: 'As per agreement' },
 ];
 
+const supplyLeadTimeOptions = [
+  'Immediate (subject to stock availability)',
+  'As agreed',
+  '1-2 weeks',
+  '3-6 weeks',
+  '4-8 weeks',
+  '6-10 weeks',
+];
+
 const unitSuggestions = [
   'each',
   'pcs',
@@ -185,6 +194,7 @@ const draftFromLine = (line) => ({
 
 const termsDraftFromQuote = (quote = {}) => ({
   payment_terms: quote.payment_terms || 'as_per_agreement',
+  delivery_time: quote.delivery_time || '',
   valid_until: quote.valid_until || '',
   show_brand_column: !!quote.show_brand_column,
   show_expiry_column: !!quote.show_expiry_column,
@@ -290,6 +300,7 @@ const quotationReviewDisplaySignature = (quote = {}) => {
 
 const termsDraftsMatch = (left = {}, right = {}) => (
   String(left.payment_terms || '') === String(right.payment_terms || '') &&
+  String(left.delivery_time || '').trim() === String(right.delivery_time || '').trim() &&
   String(left.valid_until || '') === String(right.valid_until || '') &&
   !!left.show_brand_column === !!right.show_brand_column &&
   !!left.show_expiry_column === !!right.show_expiry_column
@@ -352,6 +363,9 @@ const QuotationEditor = ({
   const [savedQuotePartyDraft, setSavedQuotePartyDraft] = useState(partyDraftFromQuote());
   const [quoteTermsDraft, setQuoteTermsDraft] = useState(termsDraftFromQuote());
   const [savedQuoteTermsDraft, setSavedQuoteTermsDraft] = useState(termsDraftFromQuote());
+  const [customLeadTimeQuoteId, setCustomLeadTimeQuoteId] = useState(null);
+  const customLeadTimeSelected = customLeadTimeQuoteId === String(quoteId)
+    || Boolean(quoteTermsDraft.delivery_time && !supplyLeadTimeOptions.includes(quoteTermsDraft.delivery_time));
   const [detailsSelection, setDetailsSelection] = useState({ quoteId: '', section: null });
   const openDetailsSection = detailsSelection.quoteId === String(quoteId)
     ? detailsSelection.section : (!quotePartyDraft.company ? 'customer' : null);
@@ -476,6 +490,9 @@ const QuotationEditor = ({
         valid_until: String(currentTermsDraft.valid_until || '') !== String(previousSavedTermsDraft.valid_until || '')
           ? currentTermsDraft.valid_until
           : nextTermsDraft.valid_until,
+        delivery_time: String(currentTermsDraft.delivery_time || '').trim() !== String(previousSavedTermsDraft.delivery_time || '').trim()
+          ? currentTermsDraft.delivery_time
+          : nextTermsDraft.delivery_time,
         show_brand_column: !!currentTermsDraft.show_brand_column !== !!previousSavedTermsDraft.show_brand_column
           ? currentTermsDraft.show_brand_column
           : nextTermsDraft.show_brand_column,
@@ -1749,6 +1766,7 @@ const QuotationEditor = ({
     try {
       const response = await quotationAPI.quotes.update(quote.id, {
         payment_terms: termsAtSaveStart.payment_terms || 'as_per_agreement',
+        delivery_time: (termsAtSaveStart.delivery_time || '').trim(),
         valid_until: termsAtSaveStart.valid_until || null,
         show_brand_column: !!termsAtSaveStart.show_brand_column,
         show_expiry_column: !!termsAtSaveStart.show_expiry_column,
@@ -3212,7 +3230,7 @@ const QuotationEditor = ({
         </button>
         <button type="button" ref={termsDetailsButtonRef} className="qm-details-toggle" aria-expanded={openDetailsSection === 'terms'} aria-controls={`terms-details-${quote.id}`} onClick={() => toggleDetailsSection('terms')}>
           <span className="qm-details-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
-          <span className="qm-details-copy"><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'} · Expiry date {quoteTermsDraft.show_expiry_column ? 'on' : 'off'}</span>{hasUnsavedQuoteTerms && <small>Unsaved changes</small>}</span>
+          <span className="qm-details-copy"><strong>Terms &amp; Layout</strong><span>{paymentTermsLabel}{quoteTermsDraft.delivery_time ? ` · Supply lead time: ${quoteTermsDraft.delivery_time}` : ''}{quoteTermsDraft.valid_until ? ` · Valid until ${quoteTermsDraft.valid_until}` : ''} · Brand column {quoteTermsDraft.show_brand_column ? 'on' : 'off'} · Expiry date {quoteTermsDraft.show_expiry_column ? 'on' : 'off'}</span>{hasUnsavedQuoteTerms && <small>Unsaved changes</small>}</span>
           <span className="qm-details-action">{openDetailsSection === 'terms' ? 'Terms & layout open' : isEditable ? 'Edit terms & layout' : 'View terms & layout'}<span aria-hidden="true">{openDetailsSection === 'terms' ? '−' : '+'}</span></span>
         </button>
       <section className="qm-panel qm-party-panel qm-details-panel" id={`customer-details-${quote.id}`} aria-labelledby={`customer-details-title-${quote.id}`} hidden={openDetailsSection !== 'customer'}>
@@ -3299,6 +3317,26 @@ const QuotationEditor = ({
             <span className="qm-label-text">Valid until</span>
             <input disabled={!isEditable || saving || Boolean(actionInFlight)} type="date" value={quoteTermsDraft.valid_until || ''} onChange={(event) => updateQuoteTermDraft({ valid_until: event.target.value })} />
           </label>
+          <div className="qm-terms-field">
+            <label className="qm-label-text" htmlFor="quotation-supply-lead-time">Supply lead time</label>
+            <select
+              id="quotation-supply-lead-time"
+              disabled={!isEditable || saving || Boolean(actionInFlight)}
+              value={customLeadTimeSelected ? '__custom__' : (quoteTermsDraft.delivery_time || '')}
+              onChange={(event) => {
+                const custom = event.target.value === '__custom__';
+                setCustomLeadTimeQuoteId(custom ? String(quoteId) : null);
+                updateQuoteTermDraft({ delivery_time: custom ? '' : event.target.value });
+              }}
+            >
+              <option value="">Not specified</option>
+              {supplyLeadTimeOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+              <option value="__custom__">Custom lead time...</option>
+            </select>
+            {customLeadTimeSelected && (
+              <input type="text" aria-label="Custom supply lead time" disabled={!isEditable || saving || Boolean(actionInFlight)} maxLength={200} placeholder="e.g. 2-3 working days after order confirmation" value={quoteTermsDraft.delivery_time || ''} onChange={(event) => updateQuoteTermDraft({ delivery_time: event.target.value })} />
+            )}
+          </div>
           <div className="qm-terms-field qm-terms-toggle">
             <span className="qm-label-text">Optional columns</span>
             <label

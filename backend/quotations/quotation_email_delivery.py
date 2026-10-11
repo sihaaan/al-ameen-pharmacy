@@ -265,6 +265,7 @@ def _quotation_customer_state(quotation, *, pdf_config=None, project_for_send):
             "valid_until": quotation.valid_until,
             "currency": quotation.currency,
             "payment_terms": quotation.payment_terms,
+            "delivery_time": quotation.delivery_time,
             "show_brand_column": quotation.show_brand_column,
             "show_expiry_column": quotation.show_expiry_column,
             "subtotal": projected_subtotal if project_for_send else quotation.subtotal,
